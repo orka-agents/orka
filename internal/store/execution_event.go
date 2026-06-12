@@ -149,55 +149,63 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 	if event == nil {
 		return nil, ValidationErrorf("execution event is required")
 	}
-	copy := cloneExecutionEvent(*event)
-	copy.Namespace = strings.TrimSpace(copy.Namespace)
-	copy.StreamType = strings.TrimSpace(copy.StreamType)
-	if copy.StreamType == "" {
-		copy.StreamType = ExecutionEventStreamTypeTask
+	eventCopy := cloneExecutionEvent(*event)
+	eventCopy.Namespace = strings.TrimSpace(eventCopy.Namespace)
+	eventCopy.StreamType = strings.TrimSpace(eventCopy.StreamType)
+	if eventCopy.StreamType == "" {
+		eventCopy.StreamType = ExecutionEventStreamTypeTask
 	}
-	copy.StreamID = strings.TrimSpace(copy.StreamID)
-	copy.Type = strings.TrimSpace(copy.Type)
-	copy.Severity = events.NormalizeExecutionEventSeverity(copy.Severity)
-	copy.TaskName = strings.TrimSpace(copy.TaskName)
-	copy.SessionName = strings.TrimSpace(copy.SessionName)
-	copy.AgentName = strings.TrimSpace(copy.AgentName)
-	copy.ToolName = strings.TrimSpace(copy.ToolName)
-	copy.ToolCallID = strings.TrimSpace(copy.ToolCallID)
+	eventCopy.StreamID = strings.TrimSpace(eventCopy.StreamID)
+	eventCopy.Type = strings.TrimSpace(eventCopy.Type)
+	eventCopy.Severity = events.NormalizeExecutionEventSeverity(eventCopy.Severity)
+	eventCopy.TaskName = strings.TrimSpace(eventCopy.TaskName)
+	eventCopy.SessionName = strings.TrimSpace(eventCopy.SessionName)
+	eventCopy.AgentName = strings.TrimSpace(eventCopy.AgentName)
+	eventCopy.ToolName = strings.TrimSpace(eventCopy.ToolName)
+	eventCopy.ToolCallID = strings.TrimSpace(eventCopy.ToolCallID)
 
-	if copy.Namespace == "" {
+	if eventCopy.Namespace == "" {
 		return nil, ValidationErrorf("execution event namespace is required")
 	}
-	if !events.IsValidExecutionEventStreamType(copy.StreamType) {
-		return nil, ValidationErrorf("unsupported execution event stream type %q", copy.StreamType)
+	if !events.IsValidExecutionEventStreamType(eventCopy.StreamType) {
+		return nil, ValidationErrorf("unsupported execution event stream type %q", eventCopy.StreamType)
 	}
-	if copy.StreamID == "" {
+	if eventCopy.StreamID == "" {
 		return nil, ValidationErrorf("execution event stream id is required")
 	}
-	if !events.IsValidExecutionEventType(copy.Type) {
-		return nil, ValidationErrorf("unsupported execution event type %q", copy.Type)
+	if !events.IsValidExecutionEventType(eventCopy.Type) {
+		return nil, ValidationErrorf("unsupported execution event type %q", eventCopy.Type)
 	}
-	if copy.CreatedAt.IsZero() {
-		copy.CreatedAt = s.now().UTC()
+	payload, err := events.SanitizeExecutionEventPayload(eventCopy.Summary, eventCopy.Content, eventCopy.ContentText)
+	if err != nil {
+		return nil, ValidationErrorf("invalid execution event payload: %v", err)
+	}
+	eventCopy.Summary = payload.Summary
+	eventCopy.Content = payload.Content
+	eventCopy.ContentText = payload.ContentText
+	eventCopy.Truncation = mergeExecutionEventTruncation(eventCopy.Truncation, payload.Truncation)
+	if eventCopy.CreatedAt.IsZero() {
+		eventCopy.CreatedAt = s.now().UTC()
 	}
 
-	key := executionEventStreamKey{namespace: copy.Namespace, streamType: copy.StreamType, streamID: copy.StreamID}
+	key := executionEventStreamKey{namespace: eventCopy.Namespace, streamType: eventCopy.StreamType, streamID: eventCopy.StreamID}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	latest := s.latest[key]
-	if copy.Seq == 0 {
-		copy.Seq = latest + 1
-	} else if copy.Seq <= latest {
-		return nil, ValidationErrorf("execution event seq must increase for stream %s/%s/%s", copy.Namespace, copy.StreamType, copy.StreamID)
+	if eventCopy.Seq == 0 {
+		eventCopy.Seq = latest + 1
+	} else if eventCopy.Seq <= latest {
+		return nil, ValidationErrorf("execution event seq must increase for stream %s/%s/%s", eventCopy.Namespace, eventCopy.StreamType, eventCopy.StreamID)
 	}
-	copy.ID = strings.TrimSpace(copy.ID)
-	if copy.ID == "" {
-		copy.ID = fmt.Sprintf("%s/%s/%s/%d", copy.Namespace, copy.StreamType, copy.StreamID, copy.Seq)
+	eventCopy.ID = strings.TrimSpace(eventCopy.ID)
+	if eventCopy.ID == "" {
+		eventCopy.ID = fmt.Sprintf("%s/%s/%s/%d", eventCopy.Namespace, eventCopy.StreamType, eventCopy.StreamID, eventCopy.Seq)
 	}
-	s.latest[key] = copy.Seq
-	s.events = append(s.events, cloneExecutionEvent(copy))
-	return &copy, nil
+	s.latest[key] = eventCopy.Seq
+	s.events = append(s.events, cloneExecutionEvent(eventCopy))
+	return &eventCopy, nil
 }
 
 // ListExecutionEvents returns events matching filter in ascending sequence order per stream.
@@ -291,7 +299,7 @@ func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, nam
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	kept := s.events[:0]
+	kept := make([]ExecutionEvent, 0, len(s.events))
 	for _, event := range s.events {
 		if event.Namespace == filter.Namespace && event.StreamType == filter.StreamType && event.StreamID == filter.StreamID {
 			continue
@@ -301,6 +309,31 @@ func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, nam
 	s.events = kept
 	delete(s.latest, key)
 	return nil
+}
+
+func mergeExecutionEventTruncation(existing, sanitized *events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
+	if existing == nil {
+		return cloneExecutionEventTruncation(sanitized)
+	}
+	if sanitized == nil {
+		return cloneExecutionEventTruncation(existing)
+	}
+	merged := *existing
+	merged.SummaryTruncated = merged.SummaryTruncated || sanitized.SummaryTruncated
+	merged.SummaryOriginalChars = max(merged.SummaryOriginalChars, sanitized.SummaryOriginalChars)
+	merged.ContentTextTruncated = merged.ContentTextTruncated || sanitized.ContentTextTruncated
+	merged.ContentTextOriginalChars = max(merged.ContentTextOriginalChars, sanitized.ContentTextOriginalChars)
+	merged.ContentJSONTruncated = merged.ContentJSONTruncated || sanitized.ContentJSONTruncated
+	merged.ContentJSONOriginalBytes = max(merged.ContentJSONOriginalBytes, sanitized.ContentJSONOriginalBytes)
+	return &merged
+}
+
+func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
+	if value == nil {
+		return nil
+	}
+	truncationCopy := *value
+	return &truncationCopy
 }
 
 func cloneExecutionEvent(event ExecutionEvent) ExecutionEvent {

@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +116,71 @@ func TestExecutionEventStoreFakeAppendsMonotonicSeqPerStream(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].Seq != 2 || listed[0].Type != events.ExecutionEventTypeTaskSucceeded {
 		t.Fatalf("listed = %#v, want only seq 2 succeeded event", listed)
+	}
+}
+
+func TestExecutionEventStoreFakeSanitizesPayload(t *testing.T) {
+	ctx := context.Background()
+	store := NewFakeExecutionEventStore()
+	secretValue := strings.Join([]string{"bearer", "value", "for", "redaction"}, "-")
+	event, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+		Namespace:   "default",
+		StreamID:    "task",
+		Type:        events.ExecutionEventTypeModelMessage,
+		Summary:     "Authorization: Bearer " + secretValue,
+		ContentText: strings.Repeat("x", events.MaxExecutionEventContentTextChars+10),
+	})
+	if err != nil {
+		t.Fatalf("AppendExecutionEvent() error = %v", err)
+	}
+	if strings.Contains(event.Summary, secretValue) {
+		t.Fatalf("AppendExecutionEvent leaked summary secret: %#v", event)
+	}
+	if event.Truncation == nil || !event.Truncation.ContentTextTruncated {
+		t.Fatalf("Truncation = %#v, want contentText truncated", event.Truncation)
+	}
+
+	listed, err := store.ListExecutionEvents(ctx, ExecutionEventFilter{Namespace: "default", StreamID: "task"})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents() error = %v", err)
+	}
+	if len(listed) != 1 || strings.Contains(listed[0].Summary, secretValue) {
+		t.Fatalf("listed sanitized events = %#v", listed)
+	}
+}
+
+func TestExecutionEventStoreFakePreservesExistingTruncationMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := NewFakeExecutionEventStore()
+	stored, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+		Namespace:  "default",
+		StreamID:   "task",
+		Type:       events.ExecutionEventTypeModelMessage,
+		Content:    json.RawMessage(`{"truncated":true,"preview":"[truncated oversized JSON content]"}`),
+		Truncation: &events.ExecutionEventTruncation{ContentJSONTruncated: true},
+	})
+	if err != nil {
+		t.Fatalf("AppendExecutionEvent() error = %v", err)
+	}
+	if stored.Truncation == nil || !stored.Truncation.ContentJSONTruncated {
+		t.Fatalf("stored truncation = %#v, want existing content JSON truncation preserved", stored.Truncation)
+	}
+}
+
+func TestExecutionEventStoreFakeRejectsInvalidJSONPayload(t *testing.T) {
+	ctx := context.Background()
+	store := NewFakeExecutionEventStore()
+	_, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+		Namespace: "default",
+		StreamID:  "task",
+		Type:      events.ExecutionEventTypeModelMessage,
+		Content:   json.RawMessage(`{"unterminated"`),
+	})
+	if err == nil {
+		t.Fatalf("AppendExecutionEvent() accepted invalid JSON content")
+	}
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("AppendExecutionEvent() error = %v, want ErrValidation", err)
 	}
 }
 

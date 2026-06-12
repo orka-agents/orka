@@ -47,8 +47,8 @@ func TestEventRecorderNoopAllowsNilAndEmptyOptions(t *testing.T) {
 
 func TestEventRecorderFakeSanitizesPayloadOptions(t *testing.T) {
 	recorder := NewFakeEventRecorder()
-	bearerValue := testDashToken("bearer")
-	apiKey := testOpenAIKey()
+	bearerValue := fakeDashToken("bearer")
+	apiKey := fakeOpenAIKey()
 	recorder.Record(context.Background(), events.ExecutionEventTypeModelMessage,
 		WithEventSeverity("ERROR"),
 		WithEventSummary("Authorization: Bearer "+bearerValue),
@@ -89,10 +89,10 @@ func mustRawJSON(t *testing.T, value any) json.RawMessage {
 	return json.RawMessage(data)
 }
 
-func testDashToken(prefix string) string {
+func fakeDashToken(prefix string) string {
 	return strings.Join([]string{prefix, "value", "for", "redaction"}, "-")
 }
 
-func testOpenAIKey() string {
+func fakeOpenAIKey() string {
 	return strings.Join([]string{"sk", "test12345678901234567890"}, "-")
 }

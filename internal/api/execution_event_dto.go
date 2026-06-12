@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package api
 
 import (
@@ -142,6 +148,6 @@ func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *even
 	if value == nil {
 		return nil
 	}
-	copy := *value
-	return &copy
+	truncationCopy := *value
+	return &truncationCopy
 }

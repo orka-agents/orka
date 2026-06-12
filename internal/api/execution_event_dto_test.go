@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package api
 
 import (
@@ -116,8 +122,8 @@ func TestSubmitExecutionEventRequestJSONIgnoresUnknownFields(t *testing.T) {
 }
 
 func TestSubmitExecutionEventRequestToStoreEventSanitizesPayload(t *testing.T) {
-	bearerValue := testDashToken("bearer")
-	apiKey := testOpenAIKey()
+	bearerValue := fakeDashToken("bearer")
+	apiKey := fakeOpenAIKey()
 	request := SubmitExecutionEventRequest{
 		Type:        events.ExecutionEventTypeModelMessage,
 		Severity:    "ERROR",
@@ -208,10 +214,10 @@ func mustRawJSON(t *testing.T, value any) json.RawMessage {
 	return json.RawMessage(data)
 }
 
-func testDashToken(prefix string) string {
+func fakeDashToken(prefix string) string {
 	return strings.Join([]string{prefix, "value", "for", "redaction"}, "-")
 }
 
-func testOpenAIKey() string {
+func fakeOpenAIKey() string {
 	return strings.Join([]string{"sk", "test12345678901234567890"}, "-")
 }

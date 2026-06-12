@@ -20,8 +20,9 @@ const (
 )
 
 var (
-	executionEventTransactionHeaderRe = regexp.MustCompile(`(?i)\b((?:txn-token|transaction-token)\s*:\s*)[A-Za-z0-9._~+/=-]+`)
-	executionEventCookieHeaderRe      = regexp.MustCompile(`(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n]+`)
+	executionEventAuthorizationHeaderRe = regexp.MustCompile(`(?i)\b(authorization\s*:\s*)[^\r\n]+`)
+	executionEventTransactionHeaderRe   = regexp.MustCompile(`(?i)\b((?:txn-token|transaction-token)\s*:\s*)[A-Za-z0-9._~+/=-]+`)
+	executionEventCookieHeaderRe        = regexp.MustCompile(`(?i)\b((?:cookie|set-cookie)\s*:\s*)[^\r\n]+`)
 )
 
 // ExecutionEventTruncation records whether public event payload fields were truncated.
@@ -53,6 +54,7 @@ type SanitizedExecutionEventPayload struct {
 // RedactExecutionEventText redacts credential-shaped text using the shared Orka redaction rules.
 func RedactExecutionEventText(value string) string {
 	redacted := redact.SensitiveText(value)
+	redacted = executionEventAuthorizationHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	redacted = executionEventTransactionHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	redacted = executionEventCookieHeaderRe.ReplaceAllString(redacted, `${1}`+ExecutionEventRedactedValue)
 	return redacted
@@ -111,7 +113,7 @@ func SanitizeExecutionEventJSON(content json.RawMessage) (json.RawMessage, *Exec
 	}
 
 	if len(trimmed) > MaxExecutionEventContentJSONBytes {
-		return truncateExecutionEventJSON(trimmed)
+		return truncateExecutionEventJSON(trimmed, false)
 	}
 
 	var value any
@@ -134,22 +136,24 @@ func SanitizeExecutionEventJSON(content json.RawMessage) (json.RawMessage, *Exec
 		return json.RawMessage(encoded), nil, nil
 	}
 
-	return truncateExecutionEventJSON(encoded)
+	return truncateExecutionEventJSON(encoded, true)
 }
 
-func truncateExecutionEventJSON(content []byte) (json.RawMessage, *ExecutionEventTruncation, error) {
-	truncated, err := json.Marshal(map[string]any{
-		"truncated":     true,
-		"originalBytes": len(content),
-		"preview":       "[truncated oversized JSON content]",
-	})
+func truncateExecutionEventJSON(content []byte, includeSanitizedLength bool) (json.RawMessage, *ExecutionEventTruncation, error) {
+	body := map[string]any{
+		"truncated": true,
+		"preview":   "[truncated oversized JSON content]",
+	}
+	metadata := &ExecutionEventTruncation{ContentJSONTruncated: true}
+	if includeSanitizedLength {
+		body["originalBytes"] = len(content)
+		metadata.ContentJSONOriginalBytes = len(content)
+	}
+	truncated, err := json.Marshal(body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal truncated execution event content JSON: %w", err)
 	}
-	return json.RawMessage(truncated), &ExecutionEventTruncation{
-		ContentJSONTruncated:     true,
-		ContentJSONOriginalBytes: len(content),
-	}, nil
+	return json.RawMessage(truncated), metadata, nil
 }
 
 // IsSensitiveExecutionEventKey reports whether a JSON key should have its value replaced.

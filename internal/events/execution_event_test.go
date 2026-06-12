@@ -98,8 +98,12 @@ func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 	githubKey := fakeGitHubKey()
 	anthropicKey := fakeAnthropicKey()
 	jwt := fakeJWT()
+	githubAuthValue := fakeDashToken("github-auth")
+	apiKeyAuthValue := fakeDashToken("api-key-auth")
 	input := strings.Join([]string{
 		"Authorization: Bearer " + bearerValue,
+		"Authorization: token " + githubAuthValue,
+		"Authorization: ApiKey " + apiKeyAuthValue,
 		"Transaction-Token: " + txnValue,
 		"Co" + "okie: sessionid=" + cookieValue + "; theme=dark",
 		`api` + `_k` + `ey="` + openAIKey + `"`,
@@ -110,6 +114,8 @@ func TestRedactExecutionEventTextCoversSecrets(t *testing.T) {
 	got := RedactExecutionEventText(input)
 	for _, leaked := range []string{
 		bearerValue,
+		githubAuthValue,
+		apiKeyAuthValue,
 		txnValue,
 		cookieValue,
 		openAIKey,
@@ -186,6 +192,16 @@ func TestTruncateExecutionEventJSONPayloadBeforeDecode(t *testing.T) {
 	}
 	if payload.Truncation == nil || !payload.Truncation.ContentJSONTruncated {
 		t.Fatalf("Truncation metadata = %#v, want content JSON truncated", payload.Truncation)
+	}
+	if payload.Truncation.ContentJSONOriginalBytes != 0 {
+		t.Fatalf("ContentJSONOriginalBytes = %d, want omitted for raw oversized input", payload.Truncation.ContentJSONOriginalBytes)
+	}
+	var contentBody map[string]any
+	if err := json.Unmarshal(payload.Content, &contentBody); err != nil {
+		t.Fatalf("unmarshal truncated content: %v", err)
+	}
+	if _, ok := contentBody["originalBytes"]; ok {
+		t.Fatalf("truncated raw oversized content exposes originalBytes: %s", payload.Content)
 	}
 }
 

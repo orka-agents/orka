@@ -39,55 +39,43 @@ const (
 	ExecutionEventStreamTypeTask = "task"
 )
 
-var validExecutionEventTypes = map[string]struct{}{
-	ExecutionEventTypeTaskCreated:             {},
-	ExecutionEventTypeTaskPhaseChanged:        {},
-	ExecutionEventTypeTaskJobCreated:          {},
-	ExecutionEventTypeTaskStarted:             {},
-	ExecutionEventTypeTaskSucceeded:           {},
-	ExecutionEventTypeTaskFailed:              {},
-	ExecutionEventTypeTaskCancelled:           {},
-	ExecutionEventTypeWorkerStarted:           {},
-	ExecutionEventTypeWorkerCompleted:         {},
-	ExecutionEventTypeWorkerFailed:            {},
-	ExecutionEventTypeModelRequestStarted:     {},
-	ExecutionEventTypeModelRequestCompleted:   {},
-	ExecutionEventTypeModelRequestFailed:      {},
-	ExecutionEventTypeModelMessage:            {},
-	ExecutionEventTypeContextTruncated:        {},
-	ExecutionEventTypeToolCallStarted:         {},
-	ExecutionEventTypeToolCallCompleted:       {},
-	ExecutionEventTypeToolCallFailed:          {},
-	ExecutionEventTypeResultSubmitted:         {},
-	ExecutionEventTypeArtifactUploadCompleted: {},
-	ExecutionEventTypeArtifactUploadFailed:    {},
+var executionEventTypes = []string{
+	ExecutionEventTypeTaskCreated,
+	ExecutionEventTypeTaskPhaseChanged,
+	ExecutionEventTypeTaskJobCreated,
+	ExecutionEventTypeTaskStarted,
+	ExecutionEventTypeTaskSucceeded,
+	ExecutionEventTypeTaskFailed,
+	ExecutionEventTypeTaskCancelled,
+	ExecutionEventTypeWorkerStarted,
+	ExecutionEventTypeWorkerCompleted,
+	ExecutionEventTypeWorkerFailed,
+	ExecutionEventTypeModelRequestStarted,
+	ExecutionEventTypeModelRequestCompleted,
+	ExecutionEventTypeModelRequestFailed,
+	ExecutionEventTypeModelMessage,
+	ExecutionEventTypeContextTruncated,
+	ExecutionEventTypeToolCallStarted,
+	ExecutionEventTypeToolCallCompleted,
+	ExecutionEventTypeToolCallFailed,
+	ExecutionEventTypeResultSubmitted,
+	ExecutionEventTypeArtifactUploadCompleted,
+	ExecutionEventTypeArtifactUploadFailed,
+}
+
+var validExecutionEventTypes = newExecutionEventTypeSet(executionEventTypes)
+
+func newExecutionEventTypeSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
 }
 
 // ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
 func ExecutionEventTypes() []string {
-	return []string{
-		ExecutionEventTypeTaskCreated,
-		ExecutionEventTypeTaskPhaseChanged,
-		ExecutionEventTypeTaskJobCreated,
-		ExecutionEventTypeTaskStarted,
-		ExecutionEventTypeTaskSucceeded,
-		ExecutionEventTypeTaskFailed,
-		ExecutionEventTypeTaskCancelled,
-		ExecutionEventTypeWorkerStarted,
-		ExecutionEventTypeWorkerCompleted,
-		ExecutionEventTypeWorkerFailed,
-		ExecutionEventTypeModelRequestStarted,
-		ExecutionEventTypeModelRequestCompleted,
-		ExecutionEventTypeModelRequestFailed,
-		ExecutionEventTypeModelMessage,
-		ExecutionEventTypeContextTruncated,
-		ExecutionEventTypeToolCallStarted,
-		ExecutionEventTypeToolCallCompleted,
-		ExecutionEventTypeToolCallFailed,
-		ExecutionEventTypeResultSubmitted,
-		ExecutionEventTypeArtifactUploadCompleted,
-		ExecutionEventTypeArtifactUploadFailed,
-	}
+	return append([]string(nil), executionEventTypes...)
 }
 
 // IsValidExecutionEventType reports whether value is one of the Wave 0 event types.
@@ -107,7 +95,11 @@ func NormalizeExecutionEventType(value string) string {
 
 // IsValidExecutionEventSeverity reports whether value is a known severity after normalization.
 func IsValidExecutionEventSeverity(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
+	return isValidNormalizedExecutionEventSeverity(strings.ToLower(strings.TrimSpace(value)))
+}
+
+func isValidNormalizedExecutionEventSeverity(value string) bool {
+	switch value {
 	case ExecutionEventSeverityDebug, ExecutionEventSeverityInfo, ExecutionEventSeverityWarning, ExecutionEventSeverityError:
 		return true
 	default:
@@ -120,7 +112,7 @@ func IsValidExecutionEventSeverity(value string) bool {
 // while stores and APIs persist a stable severity value.
 func NormalizeExecutionEventSeverity(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if !IsValidExecutionEventSeverity(value) {
+	if !isValidNormalizedExecutionEventSeverity(value) {
 		return ExecutionEventSeverityInfo
 	}
 	return value
