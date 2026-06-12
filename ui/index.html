@@ -12,8 +12,10 @@
       (function () {
         try {
           var raw = localStorage.getItem('orka-ui')
-          var theme = raw && JSON.parse(raw).state && JSON.parse(raw).state.theme
-          if (theme === 'dark') document.documentElement.classList.add('dark')
+          var parsed = raw ? JSON.parse(raw) : null
+          if (parsed && parsed.state && parsed.state.theme === 'dark') {
+            document.documentElement.classList.add('dark')
+          }
         } catch (e) {
           /* ignore malformed storage; React syncs on mount */
         }

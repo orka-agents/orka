@@ -105,11 +105,16 @@ export function useSendMessage() {
             const lowerName = tr.name.toLowerCase()
             const isCreateTaskTool = lowerName.includes('create') && lowerName.includes('task')
             if (isCreateTaskTool && result && result.success === true) {
+              // The backend wraps payloads as ChatToolResult{success, data:{...}}
+              // (internal/tools/registry.go), and create-task tools put the task
+              // name in `data.name`. Read there first; fall back to top-level
+              // fields defensively for any tool that returns a flatter shape.
+              const data = (result.data ?? result) as Record<string, unknown>
               const name =
-                (typeof result.name === 'string' && result.name) ||
-                (typeof result.taskName === 'string' && result.taskName) ||
-                (typeof (result.task as Record<string, unknown>)?.name === 'string' &&
-                  ((result.task as Record<string, unknown>).name as string)) ||
+                (typeof data.name === 'string' && data.name) ||
+                (typeof data.taskName === 'string' && data.taskName) ||
+                (typeof (data.task as Record<string, unknown>)?.name === 'string' &&
+                  ((data.task as Record<string, unknown>).name as string)) ||
                 undefined
               if (name && !createdTaskNames.includes(name)) createdTaskNames.push(name)
             }

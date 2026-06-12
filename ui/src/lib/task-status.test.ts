@@ -18,10 +18,22 @@ describe('phaseStyle', () => {
 
   it('marks only Running as live', () => {
     expect(phaseStyle('Running').live).toBe(true)
-    for (const phase of ['Pending', 'Succeeded', 'Failed'] as const) {
+    for (const phase of ['Pending', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'] as const) {
       expect(phaseStyle(phase).live).toBe(false)
     }
   })
+
+  it.each(['Scheduled', 'Cancelled'] as const)(
+    'provides a distinct, non-pastel style for the %s phase',
+    (phase) => {
+      const s = phaseStyle(phase)
+      expect(s.label).toBe(phase)
+      expect(s.dotClass).toBeTruthy()
+      expect(s.textClass).toBeTruthy()
+      expect(s.bgClass).toBeTruthy()
+      expect(s.dotClass).not.toMatch(/-(100|200|800|900)\b/)
+    },
+  )
 
   it('falls back to Pending for unknown/undefined phases', () => {
     expect(phaseStyle(undefined).label).toBe('Pending')

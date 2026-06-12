@@ -5,11 +5,14 @@ import { useToolList } from '@/hooks/use-tools'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { PageHeader } from '@/components/layout/page-header'
 import { Distribution } from '@/components/ui/distribution'
-import type { TaskPhase } from '@/schemas/task'
+import { taskPhaseSchema } from '@/schemas/task'
 import { StatsCards } from './stats-cards'
 import { RecentTasks } from './recent-tasks'
 
-const PHASES: TaskPhase[] = ['Pending', 'Running', 'Succeeded', 'Failed']
+// Drive the distribution from the full phase enum (Pending/Running/Succeeded/
+// Failed/Scheduled/Cancelled) so every task the Total card counts is also
+// represented here — the segment counts always sum to the task total.
+const PHASES = taskPhaseSchema.options
 
 export function Overview() {
   const { data: tasksData, isLoading: tasksLoading } = useTaskList('100')
@@ -23,7 +26,7 @@ export function Overview() {
   const distribution = PHASES.map((phase) => ({
     phase,
     count: tasks.filter((t) => (t.status?.phase ?? 'Pending') === phase).length,
-  }))
+  })).filter((seg) => seg.count > 0)
 
   return (
     <div className="space-y-6">

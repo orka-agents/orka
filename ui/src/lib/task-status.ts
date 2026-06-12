@@ -65,6 +65,26 @@ const PHASE_STYLES: Record<TaskPhase, PhaseStyle> = {
     bgClass: 'bg-status-failed-bg',
     live: false,
   },
+  Scheduled: {
+    // A queued/future run — waiting like Pending, so it shares the pending
+    // (amber) family rather than the live cyan.
+    label: 'Scheduled',
+    dotClass: 'bg-status-pending',
+    railClass: 'border-status-pending',
+    textClass: 'text-status-pending',
+    bgClass: 'bg-status-pending-bg',
+    live: false,
+  },
+  Cancelled: {
+    // A terminal, user-stopped state — neutral/muted, deliberately off the
+    // success/failure hues.
+    label: 'Cancelled',
+    dotClass: 'bg-muted-foreground',
+    railClass: 'border-muted-foreground',
+    textClass: 'text-muted-foreground',
+    bgClass: 'bg-muted',
+    live: false,
+  },
 }
 
 /** Resolve the visual style for a task phase, defaulting to Pending. */
