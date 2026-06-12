@@ -38,6 +38,7 @@ type InternalHandlers struct {
 	planStore           store.PlanStore
 	messageStore        store.MessageStore
 	artifactStore       store.ArtifactStore
+	executionEventStore store.ExecutionEventStore
 	memoryStore         store.MemoryStore
 	memoryProposalStore store.MemoryProposalStore
 }
@@ -47,6 +48,7 @@ type InternalHandlersConfig struct {
 	Client              client.Client
 	MemoryStore         store.MemoryStore
 	MemoryProposalStore store.MemoryProposalStore
+	ExecutionEventStore store.ExecutionEventStore
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -62,6 +64,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.k8sClient = configs[0].Client
 		h.memoryStore = configs[0].MemoryStore
 		h.memoryProposalStore = configs[0].MemoryProposalStore
+		h.executionEventStore = configs[0].ExecutionEventStore
 	}
 	return h
 }

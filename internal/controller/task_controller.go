@@ -39,6 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	execevents "github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
@@ -99,6 +100,7 @@ type TaskReconciler struct {
 	PlanStore                          store.PlanStore
 	MessageStore                       store.MessageStore
 	ArtifactStore                      store.ArtifactStore
+	ExecutionEventStore                store.ExecutionEventStore
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
 	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
@@ -272,6 +274,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			span.SetStatus(codes.Error, err.Error())
 			return ctrl.Result{}, err
 		}
+		r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskCreated,
+			execevents.ExecutionEventSeverityInfo,
+			"Task status initialized to Pending",
+		)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -288,6 +297,122 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *TaskReconciler) recordTaskLifecycleEvent(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	eventType string,
+	severity string,
+	summary string,
+) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return
+	}
+	if strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
+		return
+	}
+	_, err := r.ExecutionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   task.Namespace,
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    task.Name,
+		TaskName:    task.Name,
+		SessionName: taskSessionName(task),
+		Type:        eventType,
+		Severity:    severity,
+		Summary:     summary,
+	})
+	if err != nil {
+		logf.FromContext(ctx).Error(
+			err,
+			"failed to record task lifecycle execution event",
+			"namespace", task.Namespace,
+			"task", task.Name,
+			"eventType", eventType,
+		)
+	}
+}
+
+func taskSessionName(task *corev1alpha1.Task) string {
+	if task == nil || task.Spec.SessionRef == nil {
+		return ""
+	}
+	return strings.TrimSpace(task.Spec.SessionRef.Name)
+}
+
+func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
+		return execevents.ExecutionEventSeverityError
+	case corev1alpha1.TaskPhaseCancelled:
+		return execevents.ExecutionEventSeverityWarning
+	default:
+		return execevents.ExecutionEventSeverityInfo
+	}
+}
+
+func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.Context, task *corev1alpha1.Task) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return
+	}
+	eventType := executionEventTypeForTaskPhase(task.Status.Phase)
+	if eventType == "" {
+		return
+	}
+	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		EventTypes: []string{eventType},
+		Limit:      1,
+	})
+	if err != nil {
+		logf.FromContext(ctx).Error(
+			err,
+			"failed to check existing terminal task lifecycle execution event",
+			"namespace", task.Namespace,
+			"task", task.Name,
+			"eventType", eventType,
+		)
+		return
+	}
+	if len(listed) > 0 {
+		return
+	}
+	r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		eventType,
+		executionEventSeverityForTaskPhase(task.Status.Phase),
+		task.Status.Message,
+	)
+}
+
+func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded:
+		return execevents.ExecutionEventTypeTaskSucceeded
+	case corev1alpha1.TaskPhaseFailed:
+		return execevents.ExecutionEventTypeTaskFailed
+	case corev1alpha1.TaskPhaseCancelled:
+		return execevents.ExecutionEventTypeTaskCancelled
+	default:
+		return ""
+	}
+}
+
+func (r *TaskReconciler) deleteTaskExecutionEvents(ctx context.Context, task *corev1alpha1.Task) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return
+	}
+	if err := r.ExecutionEventStore.DeleteExecutionEvents(
+		ctx,
+		task.Namespace,
+		store.ExecutionEventStreamTypeTask,
+		task.Name,
+	); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to delete execution events", "task", task.Name)
+	}
 }
 
 // handleDeletion handles Task cleanup when deleted
@@ -329,6 +454,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
+		// Clean up execution timeline events before allowing a future task with the
+		// same namespace/name to expose stale history.
+		if r.ExecutionEventStore != nil {
+			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
+				log.Error(err, "failed to delete execution events", "task", task.Name)
+				return ctrl.Result{}, err
+			}
+		}
+
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
@@ -353,6 +487,8 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+
+		r.deleteTaskExecutionEvents(ctx, task)
 
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
@@ -812,7 +948,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 
 	attempts := task.Status.Attempts
 	jobName := task.Status.JobName
+	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		transitionedToRunning = false
 		if !canStartTaskJob(t.Status.Phase) {
 			return
 		}
@@ -827,9 +965,26 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			Reason:             "JobCreated",
 			Message:            fmt.Sprintf("Job %s created", job.Name),
 		})
+		transitionedToRunning = true
 	}); err != nil {
 		log.Error(err, "failed to update status")
 		return ctrl.Result{}, err
+	}
+	if transitionedToRunning {
+		r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskJobCreated,
+			execevents.ExecutionEventSeverityInfo,
+			fmt.Sprintf("Job %s created", jobName),
+		)
+		r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskStarted,
+			execevents.ExecutionEventSeverityInfo,
+			fmt.Sprintf("Task started with Job %s", jobName),
+		)
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -1719,6 +1874,7 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
@@ -1914,6 +2070,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		log.Error(err, "failed to update completion status")
 		return ctrl.Result{}, err
 	}
+	r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		executionEventTypeForTaskPhase(phase),
+		executionEventSeverityForTaskPhase(phase),
+		message,
+	)
 
 	// Update the Agent's LastUsed timestamp so TTL tracking works
 	if task.Spec.AgentRef != nil {

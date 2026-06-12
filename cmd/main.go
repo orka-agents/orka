@@ -114,6 +114,7 @@ func main() {
 	var contextTokenTaskReadScopes string
 	var contextTokenTaskListScopes string
 	var contextTokenTaskDeleteScopes string
+	var contextTokenTaskUpdateScopes string
 	var contextTokenToolReadScopes string
 	var contextTokenToolUseScopes string
 	var contextTokenProviderUseScopes string
@@ -335,6 +336,9 @@ func main() {
 	flag.StringVar(&contextTokenTaskDeleteScopes, "context-token-task-delete-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_DELETE_SCOPES"),
 		"Comma-separated context-token scopes that authorize Task deletion. Defaults to orka:tasks:delete.")
+	flag.StringVar(&contextTokenTaskUpdateScopes, "context-token-task-update-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_UPDATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize Task-adjacent mutations. Defaults to orka:tasks:update.")
 	flag.StringVar(&contextTokenToolReadScopes, "context-token-tool-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Tool reads. Defaults to orka:tools:read.")
@@ -473,6 +477,7 @@ func main() {
 		TaskReadScopes:             contextTokenTaskReadScopes,
 		TaskListScopes:             contextTokenTaskListScopes,
 		TaskDeleteScopes:           contextTokenTaskDeleteScopes,
+		TaskUpdateScopes:           contextTokenTaskUpdateScopes,
 		ToolReadScopes:             contextTokenToolReadScopes,
 		ToolUseScopes:              contextTokenToolUseScopes,
 		ProviderUseScopes:          contextTokenProviderUseScopes,
@@ -704,6 +709,7 @@ func main() {
 		PlanStore:                          sqliteStore,
 		MessageStore:                       sqliteStore,
 		ArtifactStore:                      sqliteStore,
+		ExecutionEventStore:                sqliteStore,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
@@ -825,6 +831,7 @@ func main() {
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
+		ExecutionEventStore:       sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{
