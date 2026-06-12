@@ -2,9 +2,11 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,40 +109,15 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		lastSeq := query.afterSeq
 		writeAvailable := func() bool {
-			listed, err := streamStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-				Namespace:  namespace,
-				StreamType: events.ExecutionEventStreamTypeTask,
-				StreamID:   taskName,
-				EventTypes: query.eventTypes,
-				AfterSeq:   lastSeq,
-				Limit:      store.MaxExecutionEventLimit,
-			})
-			if err != nil {
-				log.Error(err, "failed to list execution events for stream", "namespace", namespace, "task", taskName)
-				return true
-			}
-			terminal := false
-			for _, event := range listed {
-				if event.Seq > lastSeq {
-					lastSeq = event.Seq
-				}
-				if !writeExecutionEventSSEFrame(w, event) {
-					return false
-				}
-				if isTerminalExecutionEventType(event.Type) {
-					terminal = true
-					if !writeExecutionEventStreamCompleteSSEFrame(w, event) {
-						return false
-					}
-					break
-				}
-			}
-			if len(listed) > 0 {
-				if err := w.Flush(); err != nil {
-					return false
-				}
-			}
-			return !terminal
+			return writeAvailableExecutionEventSSEFrames(
+				ctx,
+				w,
+				streamStore,
+				namespace,
+				taskName,
+				query,
+				&lastSeq,
+			)
 		}
 		if !writeAvailable() {
 			return
@@ -221,6 +198,74 @@ func (h *Handlers) ensureTaskReadable(c fiber.Ctx, namespace, taskName, action s
 	return h.authorizeContextTokenLoadedTask(c, action, task)
 }
 
+func writeAvailableExecutionEventSSEFrames(
+	ctx context.Context,
+	w *bufio.Writer,
+	eventStore store.ExecutionEventStore,
+	namespace string,
+	taskName string,
+	query executionEventListQuery,
+	lastSeq *int64,
+) bool {
+	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  namespace,
+		StreamType: events.ExecutionEventStreamTypeTask,
+		StreamID:   taskName,
+		EventTypes: query.eventTypes,
+		AfterSeq:   *lastSeq,
+		Limit:      store.MaxExecutionEventLimit,
+	})
+	if err != nil {
+		log.Error(err, "failed to list execution events for stream", "namespace", namespace, "task", taskName)
+		return true
+	}
+
+	var terminalEvent *store.ExecutionEvent
+	for _, event := range listed {
+		if event.Seq > *lastSeq {
+			*lastSeq = event.Seq
+		}
+		if !writeExecutionEventSSEFrame(w, event) {
+			return false
+		}
+		if isTerminalExecutionEventType(event.Type) {
+			eventCopy := event
+			terminalEvent = &eventCopy
+			break
+		}
+	}
+
+	if terminalEvent == nil && len(listed) < store.MaxExecutionEventLimit {
+		terminalCandidate := latestTerminalExecutionEvent(ctx, eventStore, namespace, taskName)
+		if terminalCandidate != nil && shouldCompleteForTerminalCandidate(
+			terminalCandidate,
+			*lastSeq,
+			query.eventTypes,
+		) {
+			terminalEvent = terminalCandidate
+		}
+	}
+	if terminalEvent != nil {
+		if !writeExecutionEventStreamCompleteSSEFrame(w, *terminalEvent) {
+			return false
+		}
+	}
+	if len(listed) > 0 || terminalEvent != nil {
+		if err := w.Flush(); err != nil {
+			return false
+		}
+	}
+	return terminalEvent == nil
+}
+
+func shouldCompleteForTerminalCandidate(
+	terminalCandidate *store.ExecutionEvent,
+	lastSeq int64,
+	eventTypes []string,
+) bool {
+	return terminalCandidate.Seq <= lastSeq || executionEventTypeFilterExcludes(eventTypes, terminalCandidate.Type)
+}
+
 func writeExecutionEventSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {
 	data, err := json.Marshal(NewExecutionEventResponse(event))
 	if err != nil {
@@ -231,6 +276,49 @@ func writeExecutionEventSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bo
 		return false
 	}
 	return true
+}
+
+func latestTerminalExecutionEvent(
+	ctx context.Context,
+	eventStore store.ExecutionEventStore,
+	namespace string,
+	taskName string,
+) *store.ExecutionEvent {
+	if eventStore == nil {
+		return nil
+	}
+	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  namespace,
+		StreamType: events.ExecutionEventStreamTypeTask,
+		StreamID:   taskName,
+		EventTypes: terminalExecutionEventTypes(),
+		AfterSeq:   0,
+		Limit:      store.MaxExecutionEventLimit,
+	})
+	if err != nil {
+		log.Error(err, "failed to list terminal execution events for stream", "namespace", namespace, "task", taskName)
+		return nil
+	}
+	if len(listed) == 0 {
+		return nil
+	}
+	terminal := listed[len(listed)-1]
+	return &terminal
+}
+
+func terminalExecutionEventTypes() []string {
+	return []string{
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventTypeTaskFailed,
+		events.ExecutionEventTypeTaskCancelled,
+	}
+}
+
+func executionEventTypeFilterExcludes(eventTypes []string, eventType string) bool {
+	if len(eventTypes) == 0 {
+		return false
+	}
+	return !slices.Contains(eventTypes, eventType)
 }
 
 func writeExecutionEventStreamCompleteSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {
@@ -253,7 +341,9 @@ func writeExecutionEventStreamCompleteSSEFrame(w *bufio.Writer, event store.Exec
 
 func isTerminalExecutionEventType(eventType string) bool {
 	switch eventType {
-	case events.ExecutionEventTypeTaskSucceeded, events.ExecutionEventTypeTaskFailed, events.ExecutionEventTypeTaskCancelled:
+	case events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventTypeTaskFailed,
+		events.ExecutionEventTypeTaskCancelled:
 		return true
 	default:
 		return false

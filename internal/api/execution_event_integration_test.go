@@ -191,6 +191,53 @@ func TestReconnectSkipsSeenExecutionEventsSQLite(t *testing.T) {
 	}
 }
 
+func TestReconnectAfterTerminalExecutionEventCompletesSQLite(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	appendIntegrationTaskEvent(t, eventStore, "task-terminal-reconnect", events.ExecutionEventTypeTaskStarted)
+	appendIntegrationTaskEvent(t, eventStore, "task-terminal-reconnect", events.ExecutionEventTypeTaskSucceeded)
+
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-terminal-reconnect"))
+	configureShortTaskEventStream(h)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+
+	body := doStreamRequest(
+		t,
+		app,
+		"/api/v1/tasks/task-terminal-reconnect/stream?namespace=default&after=2",
+	)
+	if strings.Contains(body, "event: execution_event") {
+		t.Fatalf("reconnect after terminal replayed event frames: %q", body)
+	}
+	if !strings.Contains(body, "id: 2") || !strings.Contains(body, "event: stream_complete") {
+		t.Fatalf("reconnect after terminal did not complete stream: %q", body)
+	}
+}
+
+func TestStreamTaskEventsFilteredSQLiteCompletesAfterTerminal(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered", events.ExecutionEventTypeToolCallCompleted)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered", events.ExecutionEventTypeTaskSucceeded)
+
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-filtered"))
+	configureShortTaskEventStream(h)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+
+	body := doStreamRequest(
+		t,
+		app,
+		"/api/v1/tasks/task-filtered/stream?namespace=default&type=ToolCallCompleted",
+	)
+	if !strings.Contains(body, events.ExecutionEventTypeToolCallCompleted) {
+		t.Fatalf("filtered stream missing matching event: %q", body)
+	}
+	if strings.Contains(body, `"type":"TaskSucceeded","severity"`) {
+		t.Fatalf("filtered stream included excluded terminal execution event: %q", body)
+	}
+	if !strings.Contains(body, "id: 2") || !strings.Contains(body, "event: stream_complete") {
+		t.Fatalf("filtered stream did not complete at terminal seq: %q", body)
+	}
+}
+
 func TestSSEExecutionEventFromInternalPostSQLite(t *testing.T) {
 	eventStore := newSQLiteExecutionEventStoreForTest(t)
 	app := setupExecutionEventIntegrationApp(
@@ -437,5 +484,75 @@ func testTaskWithSpec(namespace, name string) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+}
+
+type terminalAppearsBetweenStreamQueriesStore struct {
+	terminalReturned bool
+}
+
+func (s *terminalAppearsBetweenStreamQueriesStore) AppendExecutionEvent(
+	context.Context,
+	*store.ExecutionEvent,
+) (*store.ExecutionEvent, error) {
+	return nil, nil
+}
+
+func (s *terminalAppearsBetweenStreamQueriesStore) ListExecutionEvents(
+	ctx context.Context,
+	filter store.ExecutionEventFilter,
+) ([]store.ExecutionEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	terminal := store.ExecutionEvent{
+		ID:         "default/task/task-terminal-race/1",
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-terminal-race",
+		Seq:        1,
+		TaskName:   "task-terminal-race",
+		Type:       events.ExecutionEventTypeTaskSucceeded,
+		Severity:   events.ExecutionEventSeverityInfo,
+		Summary:    "terminal event",
+		CreatedAt:  time.Date(2026, 6, 12, 3, 0, 0, 0, time.UTC),
+	}
+	if len(filter.EventTypes) > 0 {
+		return []store.ExecutionEvent{terminal}, nil
+	}
+	if !s.terminalReturned {
+		s.terminalReturned = true
+		return nil, nil
+	}
+	return []store.ExecutionEvent{terminal}, nil
+}
+
+func (s *terminalAppearsBetweenStreamQueriesStore) GetLatestExecutionEventSeq(
+	context.Context,
+	string,
+	string,
+	string,
+) (int64, error) {
+	return 1, nil
+}
+
+func (s *terminalAppearsBetweenStreamQueriesStore) DeleteExecutionEvents(context.Context, string, string, string) error {
+	return nil
+}
+
+func TestSSEExecutionEventTerminalRaceDeliversTerminalFrame(t *testing.T) {
+	eventStore := &terminalAppearsBetweenStreamQueriesStore{}
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-terminal-race"))
+	configureShortTaskEventStream(h)
+	useCancelingContext(app, 50*time.Millisecond)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+
+	body := doStreamRequest(t, app, "/api/v1/tasks/task-terminal-race/stream?namespace=default")
+	if !strings.Contains(body, "event: execution_event") ||
+		!strings.Contains(body, events.ExecutionEventTypeTaskSucceeded) {
+		t.Fatalf("SSE body did not include terminal execution_event frame: %q", body)
+	}
+	if !strings.Contains(body, "event: stream_complete") {
+		t.Fatalf("SSE body missing stream_complete after terminal event: %q", body)
 	}
 }

@@ -371,6 +371,17 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
+		if r.ExecutionEventStore != nil {
+			if err := r.ExecutionEventStore.DeleteExecutionEvents(
+				ctx,
+				task.Namespace,
+				store.ExecutionEventStreamTypeTask,
+				task.Name,
+			); err != nil {
+				log.Error(err, "failed to delete execution events", "task", task.Name)
+			}
+		}
+
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")

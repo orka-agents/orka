@@ -2525,6 +2525,47 @@ func TestHandleDeletion_WithResultRef(t *testing.T) {
 	}
 }
 
+func TestHandleDeletion_DeletesExecutionEvents(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-events",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "del-events",
+		TaskName:   "del-events",
+		Type:       events.ExecutionEventTypeTaskCreated,
+		Severity:   events.ExecutionEventSeverityInfo,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "del-events",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("execution events after deletion = %#v, want none", listed)
+	}
+}
+
 func TestHandleDeletion_WithResultRefNilResultStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
