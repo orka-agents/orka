@@ -237,7 +237,7 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			if id != "" {
 				if found, ok := modelByID[id]; ok {
 					idx = found
-					openModelIDs = removeFirstString(openModelIDs, id)
+					openModelIDs = removeOpenTraceID(openModelIDs, id)
 				}
 			} else if len(openModelIDs) > 0 {
 				id = openModelIDs[0]
@@ -276,11 +276,11 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			if id != "" {
 				if found, ok := toolByID[id]; ok {
 					idx = found
-					name := event.ToolName
-					if name == "" {
-						name = trace.ToolCalls[idx].Name
+					toolName := event.ToolName
+					if toolName == "" {
+						toolName = trace.ToolCalls[idx].Name
 					}
-					openToolByName[name] = removeFirstString(openToolByName[name], id)
+					openToolByName[toolName] = removeOpenTraceID(openToolByName[toolName], id)
 				}
 			} else if ids := openToolByName[event.ToolName]; len(ids) > 0 {
 				id = ids[0]
@@ -352,15 +352,6 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 	return trace
 }
 
-func removeFirstString(values []string, target string) []string {
-	for i, value := range values {
-		if value == target {
-			return append(values[:i], values[i+1:]...)
-		}
-	}
-	return values
-}
-
 func cloneEvent(event store.ExecutionEvent) store.ExecutionEvent {
 	if event.Content != nil {
 		event.Content = append(json.RawMessage(nil), event.Content...)
@@ -414,6 +405,15 @@ func firstContentString(raw json.RawMessage, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func removeOpenTraceID(ids []string, target string) []string {
+	for i, id := range ids {
+		if id == target {
+			return append(ids[:i], ids[i+1:]...)
+		}
+	}
+	return ids
 }
 
 func prefer(existing, next string) string {

@@ -51,3 +51,37 @@ func TestBuildTaskTraceUnmatchedCompletionWarns(t *testing.T) {
 		t.Fatalf("warnings=%#v raw=%#v, want unmatched warning", trace.Warnings, trace.RawUnpaired)
 	}
 }
+
+func TestBuildTaskTraceExplicitToolCompletionDequeuesOpenCall(t *testing.T) {
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeToolCallStarted, ToolName: "web_search", ToolCallID: "tool-1"},
+		{Seq: 2, Type: events.ExecutionEventTypeToolCallStarted, ToolName: "web_search", ToolCallID: "tool-2"},
+		{Seq: 3, Type: events.ExecutionEventTypeToolCallCompleted, ToolName: "web_search", ToolCallID: "tool-1"},
+		{Seq: 4, Type: events.ExecutionEventTypeToolCallCompleted, ToolName: "web_search"},
+	}, time.Now())
+	if len(trace.ToolCalls) != 2 || trace.ToolCalls[0].EndSeq != 3 || trace.ToolCalls[1].EndSeq != 4 {
+		t.Fatalf("tool calls = %#v, want explicit completion removed from open queue", trace.ToolCalls)
+	}
+	if len(trace.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", trace.Warnings)
+	}
+}
+
+func TestBuildTaskTraceExplicitModelCompletionDequeuesOpenRequest(t *testing.T) {
+	content := func(id string) json.RawMessage {
+		data, _ := json.Marshal(map[string]string{"modelRequestID": id})
+		return data
+	}
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeModelRequestStarted, Content: content("model-1")},
+		{Seq: 2, Type: events.ExecutionEventTypeModelRequestStarted, Content: content("model-2")},
+		{Seq: 3, Type: events.ExecutionEventTypeModelRequestCompleted, Content: content("model-1")},
+		{Seq: 4, Type: events.ExecutionEventTypeModelRequestCompleted},
+	}, time.Now())
+	if len(trace.ModelRequests) != 2 || trace.ModelRequests[0].EndSeq != 3 || trace.ModelRequests[1].EndSeq != 4 {
+		t.Fatalf("model requests = %#v, want explicit completion removed from open queue", trace.ModelRequests)
+	}
+	if len(trace.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", trace.Warnings)
+	}
+}

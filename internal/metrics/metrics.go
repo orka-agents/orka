@@ -11,11 +11,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-const (
-	unknownMetricLabel = "unknown"
-	invalidMetricLabel = "invalid"
-)
-
 var (
 	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
@@ -239,8 +234,8 @@ func RecordContextTokenTTSExchange(result, reason string, durationSeconds float6
 
 // RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.
 func RecordExecutionEventAppend(streamType, eventType string, success bool, durationSeconds float64) {
-	streamType = normalizeExecutionEventStreamMetricLabel(streamType)
-	eventType = normalizeExecutionEventTypeMetricLabel(eventType)
+	streamType = normalizeMetricLabel(streamType)
+	eventType = normalizeMetricLabel(eventType)
 	result := "success"
 	if success {
 		ExecutionEventsAppendedTotal.WithLabelValues(streamType, eventType).Inc()
@@ -279,8 +274,8 @@ func RecordExecutionEventStreamError(scope, reason string) {
 
 // RecordExecutionEventPayloadSanitization records event-level redaction/truncation signals.
 func RecordExecutionEventPayloadSanitization(streamType, eventType string, redacted, truncated bool) {
-	streamType = normalizeExecutionEventStreamMetricLabel(streamType)
-	eventType = normalizeExecutionEventTypeMetricLabel(eventType)
+	streamType = normalizeMetricLabel(streamType)
+	eventType = normalizeMetricLabel(eventType)
 	if redacted {
 		ExecutionEventRedactionsTotal.WithLabelValues(streamType, eventType).Inc()
 	}
@@ -296,76 +291,12 @@ func RecordExecutionEventDerivedLatency(measurement, result string, durationSeco
 
 // RecordExecutionEventDerivedFailure records one event-derived failure category.
 func RecordExecutionEventDerivedFailure(category, eventType string) {
-	ExecutionEventDerivedFailuresTotal.WithLabelValues(normalizeMetricLabel(category), normalizeExecutionEventTypeMetricLabel(eventType)).Inc()
-}
-
-func normalizeExecutionEventStreamMetricLabel(value string) string {
-	value = normalizeMetricLabel(value)
-	switch value {
-	case "task", "session", unknownMetricLabel:
-		return value
-	default:
-		return invalidMetricLabel
-	}
-}
-
-func normalizeExecutionEventTypeMetricLabel(value string) string {
-	value = normalizeMetricLabel(value)
-	if value == unknownMetricLabel {
-		return value
-	}
-	if !isKnownExecutionEventTypeMetricLabel(value) {
-		return invalidMetricLabel
-	}
-	return value
-}
-
-func isKnownExecutionEventTypeMetricLabel(value string) bool {
-	switch value {
-	case "TaskCreated",
-		"TaskPhaseChanged",
-		"TaskJobCreated",
-		"TaskStarted",
-		"TaskSucceeded",
-		"TaskFailed",
-		"TaskCancelled",
-		"WorkerStarted",
-		"WorkerCompleted",
-		"WorkerFailed",
-		"ModelRequestStarted",
-		"ModelRequestCompleted",
-		"ModelRequestFailed",
-		"ModelMessage",
-		"ContextTruncated",
-		"ToolCallStarted",
-		"ToolCallCompleted",
-		"ToolCallFailed",
-		"WorkspacePreparationStarted",
-		"WorkspacePreparationCompleted",
-		"WorkspacePreparationFailed",
-		"AgentRuntimeStarted",
-		"AgentRuntimeCommandStarted",
-		"AgentRuntimeCompleted",
-		"AgentRuntimeFailed",
-		"ResultSubmitted",
-		"ArtifactUploadCompleted",
-		"ArtifactUploadFailed",
-		"TaskForkRequested",
-		"TaskForkCreated",
-		"ApprovalRequested",
-		"ApprovalApproved",
-		"ApprovalDeclined",
-		"ApprovalExpired",
-		"ApprovalCancelled":
-		return true
-	default:
-		return false
-	}
+	ExecutionEventDerivedFailuresTotal.WithLabelValues(normalizeMetricLabel(category), normalizeMetricLabel(eventType)).Inc()
 }
 
 func normalizeMetricLabel(value string) string {
 	if value == "" {
-		return unknownMetricLabel
+		return "unknown"
 	}
 	return value
 }

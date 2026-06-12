@@ -54,57 +54,83 @@ const (
 	ExecutionEventStreamTypeSession = "session"
 )
 
-var executionEventTypes = []string{
-	ExecutionEventTypeTaskCreated,
-	ExecutionEventTypeTaskPhaseChanged,
-	ExecutionEventTypeTaskJobCreated,
-	ExecutionEventTypeTaskStarted,
-	ExecutionEventTypeTaskSucceeded,
-	ExecutionEventTypeTaskFailed,
-	ExecutionEventTypeTaskCancelled,
-	ExecutionEventTypeWorkerStarted,
-	ExecutionEventTypeWorkerCompleted,
-	ExecutionEventTypeWorkerFailed,
-	ExecutionEventTypeModelRequestStarted,
-	ExecutionEventTypeModelRequestCompleted,
-	ExecutionEventTypeModelRequestFailed,
-	ExecutionEventTypeModelMessage,
-	ExecutionEventTypeContextTruncated,
-	ExecutionEventTypeToolCallStarted,
-	ExecutionEventTypeToolCallCompleted,
-	ExecutionEventTypeToolCallFailed,
-	ExecutionEventTypeWorkspacePreparationStarted,
-	ExecutionEventTypeWorkspacePreparationCompleted,
-	ExecutionEventTypeWorkspacePreparationFailed,
-	ExecutionEventTypeAgentRuntimeStarted,
-	ExecutionEventTypeAgentRuntimeCommandStarted,
-	ExecutionEventTypeAgentRuntimeCompleted,
-	ExecutionEventTypeAgentRuntimeFailed,
-	ExecutionEventTypeResultSubmitted,
-	ExecutionEventTypeArtifactUploadCompleted,
-	ExecutionEventTypeArtifactUploadFailed,
-	ExecutionEventTypeTaskForkRequested,
-	ExecutionEventTypeTaskForkCreated,
-	ExecutionEventTypeApprovalRequested,
-	ExecutionEventTypeApprovalApproved,
-	ExecutionEventTypeApprovalDeclined,
-	ExecutionEventTypeApprovalExpired,
-	ExecutionEventTypeApprovalCancelled,
-}
-
-var validExecutionEventTypes = newExecutionEventTypeSet(executionEventTypes)
-
-func newExecutionEventTypeSet(values []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		set[value] = struct{}{}
-	}
-	return set
+var validExecutionEventTypes = map[string]struct{}{
+	ExecutionEventTypeTaskCreated:                   {},
+	ExecutionEventTypeTaskPhaseChanged:              {},
+	ExecutionEventTypeTaskJobCreated:                {},
+	ExecutionEventTypeTaskStarted:                   {},
+	ExecutionEventTypeTaskSucceeded:                 {},
+	ExecutionEventTypeTaskFailed:                    {},
+	ExecutionEventTypeTaskCancelled:                 {},
+	ExecutionEventTypeWorkerStarted:                 {},
+	ExecutionEventTypeWorkerCompleted:               {},
+	ExecutionEventTypeWorkerFailed:                  {},
+	ExecutionEventTypeModelRequestStarted:           {},
+	ExecutionEventTypeModelRequestCompleted:         {},
+	ExecutionEventTypeModelRequestFailed:            {},
+	ExecutionEventTypeModelMessage:                  {},
+	ExecutionEventTypeContextTruncated:              {},
+	ExecutionEventTypeToolCallStarted:               {},
+	ExecutionEventTypeToolCallCompleted:             {},
+	ExecutionEventTypeToolCallFailed:                {},
+	ExecutionEventTypeWorkspacePreparationStarted:   {},
+	ExecutionEventTypeWorkspacePreparationCompleted: {},
+	ExecutionEventTypeWorkspacePreparationFailed:    {},
+	ExecutionEventTypeAgentRuntimeStarted:           {},
+	ExecutionEventTypeAgentRuntimeCommandStarted:    {},
+	ExecutionEventTypeAgentRuntimeCompleted:         {},
+	ExecutionEventTypeAgentRuntimeFailed:            {},
+	ExecutionEventTypeResultSubmitted:               {},
+	ExecutionEventTypeArtifactUploadCompleted:       {},
+	ExecutionEventTypeArtifactUploadFailed:          {},
+	ExecutionEventTypeTaskForkRequested:             {},
+	ExecutionEventTypeTaskForkCreated:               {},
+	ExecutionEventTypeApprovalRequested:             {},
+	ExecutionEventTypeApprovalApproved:              {},
+	ExecutionEventTypeApprovalDeclined:              {},
+	ExecutionEventTypeApprovalExpired:               {},
+	ExecutionEventTypeApprovalCancelled:             {},
 }
 
 // ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
 func ExecutionEventTypes() []string {
-	return append([]string(nil), executionEventTypes...)
+	return []string{
+		ExecutionEventTypeTaskCreated,
+		ExecutionEventTypeTaskPhaseChanged,
+		ExecutionEventTypeTaskJobCreated,
+		ExecutionEventTypeTaskStarted,
+		ExecutionEventTypeTaskSucceeded,
+		ExecutionEventTypeTaskFailed,
+		ExecutionEventTypeTaskCancelled,
+		ExecutionEventTypeWorkerStarted,
+		ExecutionEventTypeWorkerCompleted,
+		ExecutionEventTypeWorkerFailed,
+		ExecutionEventTypeModelRequestStarted,
+		ExecutionEventTypeModelRequestCompleted,
+		ExecutionEventTypeModelRequestFailed,
+		ExecutionEventTypeModelMessage,
+		ExecutionEventTypeContextTruncated,
+		ExecutionEventTypeToolCallStarted,
+		ExecutionEventTypeToolCallCompleted,
+		ExecutionEventTypeToolCallFailed,
+		ExecutionEventTypeWorkspacePreparationStarted,
+		ExecutionEventTypeWorkspacePreparationCompleted,
+		ExecutionEventTypeWorkspacePreparationFailed,
+		ExecutionEventTypeAgentRuntimeStarted,
+		ExecutionEventTypeAgentRuntimeCommandStarted,
+		ExecutionEventTypeAgentRuntimeCompleted,
+		ExecutionEventTypeAgentRuntimeFailed,
+		ExecutionEventTypeResultSubmitted,
+		ExecutionEventTypeArtifactUploadCompleted,
+		ExecutionEventTypeArtifactUploadFailed,
+		ExecutionEventTypeTaskForkRequested,
+		ExecutionEventTypeTaskForkCreated,
+		ExecutionEventTypeApprovalRequested,
+		ExecutionEventTypeApprovalApproved,
+		ExecutionEventTypeApprovalDeclined,
+		ExecutionEventTypeApprovalExpired,
+		ExecutionEventTypeApprovalCancelled,
+	}
 }
 
 // IsValidExecutionEventType reports whether value is one of the Wave 0 event types.
@@ -124,11 +150,7 @@ func NormalizeExecutionEventType(value string) string {
 
 // IsValidExecutionEventSeverity reports whether value is a known severity after normalization.
 func IsValidExecutionEventSeverity(value string) bool {
-	return isValidNormalizedExecutionEventSeverity(strings.ToLower(strings.TrimSpace(value)))
-}
-
-func isValidNormalizedExecutionEventSeverity(value string) bool {
-	switch value {
+	switch strings.ToLower(strings.TrimSpace(value)) {
 	case ExecutionEventSeverityDebug, ExecutionEventSeverityInfo, ExecutionEventSeverityWarning, ExecutionEventSeverityError:
 		return true
 	default:
@@ -141,7 +163,7 @@ func isValidNormalizedExecutionEventSeverity(value string) bool {
 // while stores and APIs persist a stable severity value.
 func NormalizeExecutionEventSeverity(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if !isValidNormalizedExecutionEventSeverity(value) {
+	if !IsValidExecutionEventSeverity(value) {
 		return ExecutionEventSeverityInfo
 	}
 	return value

@@ -155,36 +155,6 @@ func getGaugeValue(gauge *prometheus.GaugeVec, labels ...string) float64 {
 	return m.GetGauge().GetValue()
 }
 
-func TestExecutionEventMetricsNormalizeInvalidLabels(t *testing.T) {
-	ExecutionEventsAppendedTotal.Reset()
-	ExecutionEventAppendFailuresTotal.Reset()
-	ExecutionEventAppendDuration.Reset()
-	ExecutionEventRedactionsTotal.Reset()
-	ExecutionEventTruncationsTotal.Reset()
-	ExecutionEventDerivedFailuresTotal.Reset()
-
-	RecordExecutionEventAppend("m/e2", "WorkspacePreparationStarted", true, 0.01)
-	RecordExecutionEventAppend("task", "unexpected/event", false, 0.02)
-	RecordExecutionEventPayloadSanitization("custom/task", "not-real", true, true)
-	RecordExecutionEventDerivedFailure("tool_call", "not-real")
-
-	if got := getCounterValue(ExecutionEventsAppendedTotal, "invalid", "WorkspacePreparationStarted"); got != 1 {
-		t.Fatalf("appended invalid stream=%v, want 1", got)
-	}
-	if got := getCounterValue(ExecutionEventAppendFailuresTotal, "task", "invalid"); got != 1 {
-		t.Fatalf("append failures invalid event=%v, want 1", got)
-	}
-	if got := getCounterValue(ExecutionEventRedactionsTotal, "invalid", "invalid"); got != 1 {
-		t.Fatalf("redactions invalid labels=%v, want 1", got)
-	}
-	if got := getCounterValue(ExecutionEventTruncationsTotal, "invalid", "invalid"); got != 1 {
-		t.Fatalf("truncations invalid labels=%v, want 1", got)
-	}
-	if got := getCounterValue(ExecutionEventDerivedFailuresTotal, "tool_call", "invalid"); got != 1 {
-		t.Fatalf("derived failures invalid event=%v, want 1", got)
-	}
-}
-
 func TestRecordExecutionEventMetrics(t *testing.T) {
 	ExecutionEventsAppendedTotal.Reset()
 	ExecutionEventAppendFailuresTotal.Reset()

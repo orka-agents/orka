@@ -26,7 +26,9 @@ import (
 )
 
 type postP0FakeSessionStore struct {
-	records map[string]*store.SessionRecord
+	records          map[string]*store.SessionRecord
+	getCalls         int
+	deleteOnGetAfter int
 }
 
 func (f *postP0FakeSessionStore) key(namespace, name string) string { return namespace + "/" + name }
@@ -35,6 +37,10 @@ func (f *postP0FakeSessionStore) CreateSession(ctx context.Context, session *sto
 	return nil
 }
 func (f *postP0FakeSessionStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	f.getCalls++
+	if f.deleteOnGetAfter > 0 && f.getCalls >= f.deleteOnGetAfter {
+		delete(f.records, f.key(namespace, name))
+	}
 	if s := f.records[f.key(namespace, name)]; s != nil {
 		return s, nil
 	}
@@ -111,6 +117,23 @@ func TestStreamSessionEventsReconnect(t *testing.T) {
 	}
 }
 
+func TestStreamSessionEventsCompletesWhenSessionDeleted(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	sessionStore := &postP0FakeSessionStore{
+		records: map[string]*store.SessionRecord{
+			"default/session-delete": {Namespace: "default", Name: "session-delete"},
+		},
+		deleteOnGetAfter: 2,
+	}
+	h, app := setupPostP0Handlers(t, eventStore, sessionStore)
+	configureShortTaskEventStream(h)
+	app.Get("/api/v1/sessions/:id/stream", h.StreamSessionEvents)
+	body := doStreamRequest(t, app, "/api/v1/sessions/session-delete/stream?namespace=default")
+	if !strings.Contains(body, "event: stream_complete") || !strings.Contains(body, "SessionDeleted") {
+		t.Fatalf("session stream body = %q, want SessionDeleted completion", body)
+	}
+}
+
 func TestGetTaskTraceAPI(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	appendTestTaskEvent(t, eventStore, "trace-task", events.ExecutionEventTypeTaskStarted)
@@ -143,16 +166,10 @@ func TestGetTaskTraceAPI(t *testing.T) {
 func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr", "riskSummary": "opens a PR"})
-	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-task", TaskName: "approval-task", SessionName: "session-1", Type: events.ExecutionEventTypeApprovalRequested, Content: content}); err != nil {
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-task", TaskName: "approval-task", Type: events.ExecutionEventTypeApprovalRequested, Content: content}); err != nil {
 		t.Fatal(err)
 	}
-	task := testTask("default", "approval-task")
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-1"}
-	h, app := setupTaskEventHandlers(t, eventStore, task)
-	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{Username: "reviewer"})
-		return c.Next()
-	})
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-task"))
 	app.Get("/api/v1/tasks/:id/approvals", h.ListTaskApprovals)
 	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
 
@@ -182,87 +199,38 @@ func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	if err := json.NewDecoder(decisionResp.Body).Decode(&approved); err != nil {
 		t.Fatal(err)
 	}
-	if approved.Status != approvals.StatusApproved || approved.DecisionReason != "safe" || approved.DecisionActor != "reviewer" {
+	if approved.Status != approvals.StatusApproved || approved.DecisionReason != "safe" {
 		t.Fatalf("approved=%#v", approved)
-	}
-
-	declineReq := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-task/approvals/approval-1/decision?namespace=default", bytes.NewBufferString(`{"decision":"decline"}`))
-	declineReq.Header.Set("Content-Type", "application/json")
-	declineResp, err := app.Test(declineReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if declineResp.StatusCode != http.StatusConflict {
-		t.Fatalf("decline after approval status=%d, want conflict", declineResp.StatusCode)
-	}
-	sessionEvents, latest, err := eventStore.ListSessionExecutionEvents(context.Background(), store.SessionExecutionEventFilter{Namespace: "default", SessionName: "session-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if latest != 2 || len(sessionEvents) != 2 || sessionEvents[1].Type != events.ExecutionEventTypeApprovalApproved {
-		t.Fatalf("session approval events latest=%d events=%#v", latest, sessionEvents)
 	}
 }
 
-func TestTaskApprovalDecisionAPIRejectsPendingDecisionForCompletedTask(t *testing.T) {
+func TestTaskApprovalDecisionAPIRejectsTerminalTaskAndRecordsActor(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
-	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1"})
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",
 		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   "approval-complete-task",
-		TaskName:   "approval-complete-task",
+		StreamID:   "approval-task",
+		TaskName:   "approval-task",
 		Type:       events.ExecutionEventTypeApprovalRequested,
 		Content:    content,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	task := testTask("default", "approval-complete-task")
-	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task := testTask("default", "approval-task")
 	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "reviewer-a"})
+		return c.Next()
+	})
 	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-complete-task/approvals/approval-1/decision?namespace=default", bytes.NewBufferString(`{"decision":"approve"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/approval-task/approvals/approval-1/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve","reason":"safe"}`),
+	)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status=%d, want conflict", resp.StatusCode)
-	}
-	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
-		Namespace: "default", StreamID: "approval-complete-task", Limit: 10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeApprovalRequested {
-		t.Fatalf("events after rejected decision = %#v", listed)
-	}
-}
-
-func TestTaskApprovalsAPIPagesLifecycleEvents(t *testing.T) {
-	eventStore := store.NewFakeExecutionEventStore()
-	for i := range store.MaxExecutionEventLimit {
-		content, _ := json.Marshal(map[string]string{"approvalID": fmt.Sprintf("old-%d", i)})
-		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-			Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-page-task",
-			TaskName: "approval-page-task", Type: events.ExecutionEventTypeApprovalRequested, Content: content,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	content, _ := json.Marshal(map[string]string{"approvalID": "target"})
-	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-page-task",
-		TaskName: "approval-page-task", Type: events.ExecutionEventTypeApprovalRequested, Content: content,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-page-task"))
-	app.Get("/api/v1/tasks/:id/approvals", h.ListTaskApprovals)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/approval-page-task/approvals?namespace=default", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatal(err)
@@ -270,12 +238,134 @@ func TestTaskApprovalsAPIPagesLifecycleEvents(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
-	var listed ListTaskApprovalsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+	var approved approvals.Approval
+	if err := json.NewDecoder(resp.Body).Decode(&approved); err != nil {
 		t.Fatal(err)
 	}
-	if _, found := findApproval(listed.Approvals, "target"); !found {
-		t.Fatalf("target approval missing from paged response of %d approvals", len(listed.Approvals))
+	if approved.DecisionActor != "reviewer-a" {
+		t.Fatalf("decision actor = %q, want reviewer-a", approved.DecisionActor)
+	}
+
+	content2, _ := json.Marshal(map[string]string{"approvalID": "approval-2", "action": "create_pr"})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "approval-task",
+		TaskName:   "approval-task",
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		Content:    content2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if err := h.client.Update(context.Background(), task); err != nil {
+		t.Fatalf("status update: %v", err)
+	}
+	req = httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/approval-task/approvals/approval-2/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("terminal task decision status=%d, want conflict", resp.StatusCode)
+	}
+}
+
+func TestTaskApprovalDecisionAPIAppendsSessionEvent(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "approval-task",
+		TaskName:   "approval-task",
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		Content:    content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := testTask("default", "approval-task")
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-1"}
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/approval-task/approvals/approval-1/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	listed, latest, err := eventStore.ListSessionExecutionEvents(context.Background(), store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1",
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 1 || len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeApprovalApproved {
+		t.Fatalf("latest=%d listed=%#v, want approved decision in session timeline", latest, listed)
+	}
+}
+
+func TestTaskApprovalDecisionAPIPagesApprovalEvents(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	for i := range store.MaxExecutionEventLimit {
+		content, _ := json.Marshal(map[string]string{"approvalID": fmt.Sprintf("approval-%d", i), "action": "noop"})
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:  "default",
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   "approval-task",
+			TaskName:   "approval-task",
+			Type:       events.ExecutionEventTypeApprovalRequested,
+			Content:    content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	targetContent, _ := json.Marshal(map[string]string{"approvalID": "approval-target", "action": "create_pr"})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "approval-task",
+		TaskName:   "approval-task",
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		Content:    targetContent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-task"))
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/approval-task/approvals/approval-target/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var approved approvals.Approval
+	if err := json.NewDecoder(resp.Body).Decode(&approved); err != nil {
+		t.Fatal(err)
+	}
+	if approved.ID != "approval-target" || approved.Status != approvals.StatusApproved {
+		t.Fatalf("approved=%#v", approved)
 	}
 }
 
@@ -315,22 +405,30 @@ func TestForkTaskAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeTaskForkCreated || listed[0].SessionName != "session-1" {
+	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeTaskForkCreated {
 		t.Fatalf("fork events = %#v", listed)
+	}
+	sessionEvents, latest, err := eventStore.ListSessionExecutionEvents(context.Background(), store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != 3 || len(sessionEvents) != 3 {
+		t.Fatalf("latest=%d sessionEvents=%#v, want fork request and created events in session timeline", latest, sessionEvents)
 	}
 }
 
-func TestForkTaskAPIBoundsContextTail(t *testing.T) {
+func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	for range forkcontext.DefaultMaxEvents + 5 {
-		appendTestTaskEvent(t, eventStore, "long-source-task", events.ExecutionEventTypeModelMessage)
+		appendTestTaskEvent(t, eventStore, "long-source-task", events.ExecutionEventTypeWorkerStarted)
 	}
 	source := testTask("default", "long-source-task")
 	source.Spec.Type = corev1alpha1.TaskTypeAgent
 	h, app := setupTaskEventHandlers(t, eventStore, source)
 	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/long-source-task/fork?namespace=default", bytes.NewBufferString(`{"newTaskName":"long-fork"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/long-source-task/fork?namespace=default", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatal(err)
@@ -343,10 +441,10 @@ func TestForkTaskAPIBoundsContextTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !out.ForkContext.Truncated || len(out.ForkContext.Events) != forkcontext.DefaultMaxEvents {
-		t.Fatalf("fork context truncated=%v len=%d, want truncated tail of %d", out.ForkContext.Truncated, len(out.ForkContext.Events), forkcontext.DefaultMaxEvents)
+		t.Fatalf("fork context truncated=%v len=%d, want true and %d", out.ForkContext.Truncated, len(out.ForkContext.Events), forkcontext.DefaultMaxEvents)
 	}
-	if got := out.ForkContext.Events[0].Seq; got != 6 {
-		t.Fatalf("first retained seq=%d, want 6", got)
+	if out.ForkContext.Events[0].Seq != 6 {
+		t.Fatalf("first retained seq=%d, want 6", out.ForkContext.Events[0].Seq)
 	}
 }
 

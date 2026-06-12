@@ -286,6 +286,56 @@ func TestStreamTaskEventsFilteredSQLiteCompletesAfterTerminal(t *testing.T) {
 	}
 }
 
+func TestStreamTaskEventsFilteredSQLiteCompletesWhenMatchingEventFollowsTerminal(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered-post-terminal", events.ExecutionEventTypeToolCallCompleted)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered-post-terminal", events.ExecutionEventTypeTaskSucceeded)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered-post-terminal", events.ExecutionEventTypeToolCallCompleted)
+
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-filtered-post-terminal"))
+	configureShortTaskEventStream(h)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+	body := doStreamRequest(
+		t,
+		app,
+		"/api/v1/tasks/task-filtered-post-terminal/stream?namespace=default&type=ToolCallCompleted",
+	)
+	if !strings.Contains(body, "id: 1\nevent: execution_event") ||
+		!strings.Contains(body, "id: 3\nevent: execution_event") {
+		t.Fatalf("filtered stream body = %q, want both matching tool events", body)
+	}
+	if strings.Contains(body, `"type":"TaskSucceeded","severity"`) {
+		t.Fatalf("filtered stream included excluded terminal execution event: %q", body)
+	}
+	if !strings.Contains(body, "event: stream_complete") || !strings.Contains(body, `"type":"TaskSucceeded"`) {
+		t.Fatalf("filtered stream did not complete at excluded terminal event: %q", body)
+	}
+}
+
+func TestStreamTaskEventsFilteredSQLiteReconnectCompletesAfterPostTerminalMatch(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered-reconnect", events.ExecutionEventTypeToolCallCompleted)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered-reconnect", events.ExecutionEventTypeTaskSucceeded)
+	appendIntegrationTaskEvent(t, eventStore, "task-filtered-reconnect", events.ExecutionEventTypeToolCallCompleted)
+
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-filtered-reconnect"))
+	configureShortTaskEventStream(h)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+	body := doStreamRequest(
+		t,
+		app,
+		"/api/v1/tasks/task-filtered-reconnect/stream?namespace=default&type=ToolCallCompleted&after=3",
+	)
+	if strings.Contains(body, "event: execution_event") {
+		t.Fatalf("reconnect after post-terminal match replayed event frames: %q", body)
+	}
+	if !strings.Contains(body, "id: 3") ||
+		!strings.Contains(body, "event: stream_complete") ||
+		!strings.Contains(body, `"type":"TaskSucceeded"`) {
+		t.Fatalf("filtered reconnect did not complete at prior excluded terminal event: %q", body)
+	}
+}
+
 func TestStreamTaskEventsCompletesWhenTaskDeleted(t *testing.T) {
 	eventStore := newSQLiteExecutionEventStoreForTest(t)
 	task := testTask("default", "task-delete-stream")

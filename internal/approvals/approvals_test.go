@@ -14,21 +14,10 @@ func TestDeriveApprovalLifecycle(t *testing.T) {
 	content := func(v map[string]string) json.RawMessage { data, _ := json.Marshal(v); return data }
 	all := Derive([]store.ExecutionEvent{
 		{Seq: 1, Type: events.ExecutionEventTypeApprovalRequested, Summary: "create PR", Content: content(map[string]string{"approvalID": "a1", "action": "create_pr", "riskSummary": "opens PR"}), CreatedAt: now},
-		{Seq: 2, Type: events.ExecutionEventTypeApprovalApproved, Content: content(map[string]string{"approvalID": "a1", "reason": "ok", "actor": "alice"}), CreatedAt: now.Add(time.Second)},
+		{Seq: 2, Type: events.ExecutionEventTypeApprovalApproved, Content: content(map[string]string{"approvalID": "a1", "reason": "ok"}), CreatedAt: now.Add(time.Second)},
 	}, now)
 	if len(all) != 1 || all[0].Status != StatusApproved || all[0].DecisionSeq != 2 || all[0].DecisionReason != "ok" {
 		t.Fatalf("approval state = %#v", all)
-	}
-}
-
-func TestDeriveApprovalOmitsEmptyDecisionReason(t *testing.T) {
-	content := func(v map[string]string) json.RawMessage { data, _ := json.Marshal(v); return data }
-	all := Derive([]store.ExecutionEvent{
-		{Seq: 1, Type: events.ExecutionEventTypeApprovalRequested, Content: content(map[string]string{"approvalID": "a1"})},
-		{Seq: 2, Type: events.ExecutionEventTypeApprovalApproved, Summary: "approval approve", Content: content(map[string]string{"approvalID": "a1"})},
-	}, time.Time{})
-	if len(all) != 1 || all[0].DecisionReason != "" {
-		t.Fatalf("approval = %#v, want empty decision reason", all)
 	}
 }
 
@@ -53,14 +42,17 @@ func TestDeriveApprovalFirstTerminalDecisionWins(t *testing.T) {
 	}
 }
 
-func TestDeriveApprovalDuplicateRequestDoesNotReopenTerminal(t *testing.T) {
-	content := func(v map[string]string) json.RawMessage { data, _ := json.Marshal(v); return data }
-	all := Derive([]store.ExecutionEvent{
-		{Seq: 1, Type: events.ExecutionEventTypeApprovalRequested, Content: content(map[string]string{"approvalID": "a1"})},
-		{Seq: 2, Type: events.ExecutionEventTypeApprovalApproved, Content: content(map[string]string{"approvalID": "a1"})},
-		{Seq: 3, Type: events.ExecutionEventTypeApprovalRequested, Content: content(map[string]string{"approvalID": "a1"})},
-	}, time.Time{})
-	if len(all) != 1 || all[0].Status != StatusApproved || all[0].DecisionSeq != 2 {
-		t.Fatalf("approval state = %#v, want terminal approval preserved", all)
+func TestDeriveDuplicateRequestDoesNotResetTerminalApproval(t *testing.T) {
+	requested, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
+	approved, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "decision": "approve"})
+	laterRequest, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "retry"})
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	derived := Derive([]store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeApprovalRequested, Content: requested, CreatedAt: now},
+		{Seq: 2, Type: events.ExecutionEventTypeApprovalApproved, Content: approved, CreatedAt: now.Add(time.Second)},
+		{Seq: 3, Type: events.ExecutionEventTypeApprovalRequested, Content: laterRequest, CreatedAt: now.Add(2 * time.Second)},
+	}, now.Add(3*time.Second))
+	if len(derived) != 1 || derived[0].Status != StatusApproved || derived[0].Action != "create_pr" {
+		t.Fatalf("derived = %#v, want duplicate request to preserve approved state", derived)
 	}
 }

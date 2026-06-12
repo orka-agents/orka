@@ -159,7 +159,7 @@ func newSessionFollowCmd() *cobra.Command {
 	return newExecutionFollowCmd("follow <session>", "Follow session execution events", "/api/v1/sessions")
 }
 
-func newExecutionEventsCmd(use, short, basePath string, isTaskScope bool) *cobra.Command {
+func newExecutionEventsCmd(use, short, basePath string, includeType bool) *cobra.Command {
 	var after int64
 	var limit int
 	var eventTypes []string
@@ -186,7 +186,7 @@ func newExecutionEventsCmd(use, short, basePath string, isTaskScope bool) *cobra
 			if format != outputTable {
 				return printStructured(cmd, result)
 			}
-			return printExecutionEventsTable(cmd, result, isTaskScope)
+			return printExecutionEventsTable(cmd, result, includeType)
 		},
 	}
 	cmd.Flags().Int64Var(&after, "after", 0, "Only return events after this sequence")
@@ -272,7 +272,7 @@ func appendRepeatedTypes(path string, query map[string]string, eventTypes []stri
 	return path
 }
 
-func printExecutionEventsTable(cmd *cobra.Command, value any, isTaskScope bool) error {
+func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask bool) error {
 	m, _ := value.(map[string]any)
 	events, _ := m["events"].([]any)
 	if len(events) == 0 {
@@ -280,14 +280,14 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, isTaskScope bool) 
 		return nil
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-	if isTaskScope {
+	if includeTask {
 		fmt.Fprintln(w, "SEQ\tTYPE\tSEVERITY\tSUMMARY") //nolint:errcheck
 	} else {
 		fmt.Fprintln(w, "SEQ\tTASK\tTASKSEQ\tTYPE\tSEVERITY\tSUMMARY") //nolint:errcheck
 	}
 	for _, raw := range events {
 		event, _ := raw.(map[string]any)
-		if isTaskScope {
+		if includeTask {
 			_, _ = fmt.Fprintf(
 				w,
 				"%s\t%s\t%s\t%s\n",

@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -94,7 +93,6 @@ type Handlers struct {
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
-	approvalDecisionMu        sync.Mutex
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 }
