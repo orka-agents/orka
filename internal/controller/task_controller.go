@@ -39,6 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	execevents "github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
@@ -273,6 +274,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			span.SetStatus(codes.Error, err.Error())
 			return ctrl.Result{}, err
 		}
+		r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskCreated,
+			execevents.ExecutionEventSeverityInfo,
+			"Task status initialized to Pending",
+		)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
@@ -289,6 +297,39 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *TaskReconciler) recordTaskLifecycleEvent(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	eventType string,
+	severity string,
+	summary string,
+) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return
+	}
+	if strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
+		return
+	}
+	_, err := r.ExecutionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		TaskName:   task.Name,
+		Type:       eventType,
+		Severity:   severity,
+		Summary:    summary,
+	})
+	if err != nil {
+		logf.FromContext(ctx).Error(
+			err,
+			"failed to record task lifecycle execution event",
+			"namespace", task.Namespace,
+			"task", task.Name,
+			"eventType", eventType,
+		)
+	}
 }
 
 // handleDeletion handles Task cleanup when deleted
