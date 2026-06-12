@@ -332,6 +332,31 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 	}
 }
 
+func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
+	switch phase {
+	case corev1alpha1.TaskPhaseFailed:
+		return execevents.ExecutionEventSeverityError
+	case corev1alpha1.TaskPhaseCancelled:
+		return execevents.ExecutionEventSeverityWarning
+	default:
+		return execevents.ExecutionEventSeverityInfo
+	}
+}
+
+func (r *TaskReconciler) deleteTaskExecutionEvents(ctx context.Context, task *corev1alpha1.Task) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return
+	}
+	if err := r.ExecutionEventStore.DeleteExecutionEvents(
+		ctx,
+		task.Namespace,
+		store.ExecutionEventStreamTypeTask,
+		task.Name,
+	); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to delete execution events", "task", task.Name)
+	}
+}
+
 // handleDeletion handles Task cleanup when deleted
 func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
 	log := logf.FromContext(ctx)
@@ -371,17 +396,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		if r.ExecutionEventStore != nil {
-			if err := r.ExecutionEventStore.DeleteExecutionEvents(
-				ctx,
-				task.Namespace,
-				store.ExecutionEventStreamTypeTask,
-				task.Name,
-			); err != nil {
-				log.Error(err, "failed to delete execution events", "task", task.Name)
-			}
-		}
-
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
@@ -406,6 +420,8 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+
+		r.deleteTaskExecutionEvents(ctx, task)
 
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
@@ -1967,6 +1983,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		log.Error(err, "failed to update completion status")
 		return ctrl.Result{}, err
 	}
+	r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		reason,
+		executionEventSeverityForTaskPhase(phase),
+		message,
+	)
 
 	// Update the Agent's LastUsed timestamp so TTL tracking works
 	if task.Spec.AgentRef != nil {
