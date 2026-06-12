@@ -94,7 +94,7 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	app := setupInternalExecutionEventAppWithClient(
 		eventStore,
 		testInternalExecutionEventClient(t, task, job, pod),
-		testInternalExecutionEventWorkerUser("owned-task-pod", "pod-uid"),
+		testInternalExecutionEventWorkerUser("owned-task-pod"),
 	)
 
 	resp := doJSONRequest(
@@ -126,12 +126,20 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 	deletingTask, deletingJob, deletingPod := testInternalExecutionEventOwnedWorkerObjects("deleting-task")
 	deletingTask.Finalizers = []string{labels.TaskFinalizer}
 	deletingTask.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	terminalTask, terminalJob, terminalPod := testInternalExecutionEventOwnedWorkerObjects("terminal-task")
+	terminalTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	eventStore := store.NewFakeExecutionEventStore()
-	k8sClient := testInternalExecutionEventClient(t, task, job, pod, otherTask, otherJob, deletingTask, deletingJob, deletingPod)
+	k8sClient := testInternalExecutionEventClient(
+		t,
+		task, job, pod,
+		otherTask, otherJob,
+		deletingTask, deletingJob, deletingPod,
+		terminalTask, terminalJob, terminalPod,
+	)
 	app := setupInternalExecutionEventAppWithClient(
 		eventStore,
 		k8sClient,
-		testInternalExecutionEventWorkerUser("owned-task-pod", "pod-uid"),
+		testInternalExecutionEventWorkerUser("owned-task-pod"),
 	)
 
 	tests := []struct {
@@ -167,7 +175,7 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 	deletingApp := setupInternalExecutionEventAppWithClient(
 		eventStore,
 		k8sClient,
-		testInternalExecutionEventWorkerUser("deleting-task-pod", "pod-uid"),
+		testInternalExecutionEventWorkerUser("deleting-task-pod"),
 	)
 	deletingResp := doJSONRequest(
 		t,
@@ -177,6 +185,21 @@ func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
 	)
 	if deletingResp.StatusCode != http.StatusGone {
 		t.Fatalf("owned deleting task status = %d, want 410", deletingResp.StatusCode)
+	}
+
+	terminalApp := setupInternalExecutionEventAppWithClient(
+		eventStore,
+		k8sClient,
+		testInternalExecutionEventWorkerUser("terminal-task-pod"),
+	)
+	terminalResp := doJSONRequest(
+		t,
+		terminalApp,
+		"/internal/v1/events/default/task/terminal-task",
+		map[string]any{"type": events.ExecutionEventTypeWorkerCompleted},
+	)
+	if terminalResp.StatusCode != http.StatusConflict {
+		t.Fatalf("terminal task status = %d, want 409", terminalResp.StatusCode)
 	}
 }
 
@@ -341,14 +364,14 @@ func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha
 	return task, job, pod
 }
 
-func testInternalExecutionEventWorkerUser(podName, podUID string) *UserInfo {
+func testInternalExecutionEventWorkerUser(podName string) *UserInfo {
 	return &UserInfo{
 		Username:  "system:serviceaccount:default:worker",
 		Namespace: "default",
 		AuthType:  AuthTypeTokenReview,
 		Extra: map[string]authenticationv1.ExtraValue{
 			"authentication.kubernetes.io/pod-name": {podName},
-			"authentication.kubernetes.io/pod-uid":  {podUID},
+			"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
 		},
 	}
 }

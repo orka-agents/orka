@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -238,6 +240,27 @@ func TestStreamTaskEventsFilteredSQLiteCompletesAfterTerminal(t *testing.T) {
 	}
 }
 
+func TestStreamTaskEventsCompletesWhenTaskDeleted(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	task := testTask("default", "task-delete-stream")
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	configureShortTaskEventStream(h)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+
+	deleteErr := make(chan error, 1)
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		deleteErr <- h.client.Delete(context.Background(), task.DeepCopy())
+	}()
+	body := doStreamRequestAllowUnexpectedEOF(t, app, "/api/v1/tasks/task-delete-stream/stream?namespace=default")
+	if err := <-deleteErr; err != nil {
+		t.Fatalf("Delete task: %v", err)
+	}
+	if !strings.Contains(body, "event: stream_complete") || !strings.Contains(body, "TaskDeleted") {
+		t.Fatalf("deleted task stream did not complete: %q", body)
+	}
+}
+
 func TestSSEExecutionEventFromInternalPostSQLite(t *testing.T) {
 	eventStore := newSQLiteExecutionEventStoreForTest(t)
 	app := setupExecutionEventIntegrationApp(
@@ -446,6 +469,23 @@ func newSQLiteExecutionEventStoreForTest(t *testing.T) *sqlite.Store {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return sqlite.NewStore(db, dbPath)
+}
+
+func doStreamRequestAllowUnexpectedEOF(t *testing.T, app *fiber.App, target string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 500 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(data)
 }
 
 func getTaskEvents(t *testing.T, app *fiber.App, target string) ListExecutionEventsResponse {
