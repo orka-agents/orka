@@ -211,6 +211,10 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
+	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
+	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
+	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
@@ -220,6 +224,8 @@ func (s *Server) setupRoutes() {
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
+	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
 
 	// Memory endpoints

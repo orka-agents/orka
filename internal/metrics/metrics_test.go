@@ -146,3 +146,70 @@ func TestRecordContextTokenMetrics(t *testing.T) {
 		t.Fatalf("ContextTokenTTSExchangeDuration count = %v, want 1", count)
 	}
 }
+
+func getGaugeValue(gauge *prometheus.GaugeVec, labels ...string) float64 {
+	var m dto.Metric
+	if err := gauge.WithLabelValues(labels...).Write(&m); err != nil {
+		return 0
+	}
+	return m.GetGauge().GetValue()
+}
+
+func TestRecordExecutionEventMetrics(t *testing.T) {
+	ExecutionEventsAppendedTotal.Reset()
+	ExecutionEventAppendFailuresTotal.Reset()
+	ExecutionEventAppendDuration.Reset()
+	ExecutionEventListRequestsTotal.Reset()
+	ExecutionEventListDuration.Reset()
+	ExecutionEventStreamConnections.Reset()
+	ExecutionEventStreamReconnectsTotal.Reset()
+	ExecutionEventStreamErrorsTotal.Reset()
+	ExecutionEventRedactionsTotal.Reset()
+	ExecutionEventTruncationsTotal.Reset()
+	ExecutionEventDerivedLatency.Reset()
+	ExecutionEventDerivedFailuresTotal.Reset()
+
+	RecordExecutionEventAppend("task", "TaskStarted", true, 0.01)
+	RecordExecutionEventAppend("task", "TaskStarted", false, 0.02)
+	RecordExecutionEventList("task_api", true, 0.03)
+	done := RecordExecutionEventStreamOpen("task", true)
+	RecordExecutionEventStreamError("task", "list")
+	RecordExecutionEventPayloadSanitization("task", "ModelMessage", true, true)
+	RecordExecutionEventDerivedLatency("tool_call", "success", 0.5)
+	RecordExecutionEventDerivedFailure("tool_call", "ToolCallFailed")
+
+	if got := getCounterValue(ExecutionEventsAppendedTotal, "task", "TaskStarted"); got != 1 {
+		t.Fatalf("appended=%v, want 1", got)
+	}
+	if got := getCounterValue(ExecutionEventAppendFailuresTotal, "task", "TaskStarted"); got != 1 {
+		t.Fatalf("append failures=%v, want 1", got)
+	}
+	if got := getCounterValue(ExecutionEventListRequestsTotal, "task_api", "success"); got != 1 {
+		t.Fatalf("list requests=%v, want 1", got)
+	}
+	if got := getGaugeValue(ExecutionEventStreamConnections, "task"); got != 1 {
+		t.Fatalf("stream gauge=%v, want 1", got)
+	}
+	done()
+	if got := getGaugeValue(ExecutionEventStreamConnections, "task"); got != 0 {
+		t.Fatalf("stream gauge after close=%v, want 0", got)
+	}
+	if got := getCounterValue(ExecutionEventStreamReconnectsTotal, "task"); got != 1 {
+		t.Fatalf("reconnects=%v, want 1", got)
+	}
+	if got := getCounterValue(ExecutionEventStreamErrorsTotal, "task", "list"); got != 1 {
+		t.Fatalf("stream errors=%v, want 1", got)
+	}
+	if got := getCounterValue(ExecutionEventRedactionsTotal, "task", "ModelMessage"); got != 1 {
+		t.Fatalf("redactions=%v, want 1", got)
+	}
+	if got := getCounterValue(ExecutionEventTruncationsTotal, "task", "ModelMessage"); got != 1 {
+		t.Fatalf("truncations=%v, want 1", got)
+	}
+	if got := getHistogramCount(ExecutionEventDerivedLatency, "tool_call", "success"); got != 1 {
+		t.Fatalf("derived latency count=%v, want 1", got)
+	}
+	if got := getCounterValue(ExecutionEventDerivedFailuresTotal, "tool_call", "ToolCallFailed"); got != 1 {
+		t.Fatalf("derived failures=%v, want 1", got)
+	}
+}
