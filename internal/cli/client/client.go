@@ -437,6 +437,7 @@ type ListTasksOptions struct {
 	Namespace string
 	Limit     int
 	Continue  string
+	All       bool
 }
 
 // ListTasksResult contains a page of task summaries and pagination metadata.
@@ -500,7 +501,9 @@ func (c *Client) ListTasksPage(ctx context.Context, opts ListTasksOptions) (*Lis
 	if opts.Namespace != "" {
 		q.Set("namespace", opts.Namespace)
 	}
-	if opts.Limit > 0 {
+	if opts.All {
+		q.Set("limit", "0")
+	} else if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
 	}
 	if opts.Continue != "" {

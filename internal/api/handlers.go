@@ -503,13 +503,20 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 		return err
 	}
 
-	// Apply pagination
-	pagination, err := ParsePagination(limit, continueToken)
-	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	// Apply pagination. A limit of 0 is an explicit unpaginated list request for
+	// cache-backed client-side filtered scans; omitted limits keep the default page size.
+	if limit == "0" {
+		if continueToken != "" {
+			return fiber.NewError(fiber.StatusBadRequest, "continue cannot be used with limit=0")
+		}
+	} else {
+		pagination, err := ParsePagination(limit, continueToken)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		opts.Limit = pagination.Limit
+		opts.Continue = pagination.Continue
 	}
-	opts.Limit = pagination.Limit
-	opts.Continue = pagination.Continue
 
 	taskList := &corev1alpha1.TaskList{}
 	ctx := c.Context()

@@ -19,8 +19,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/sozercan/orka/test/utils"
 )
 
 var _ = Describe("Orka CLI binary", Ordered, func() {
@@ -391,24 +389,3 @@ spec:
 		expectOrkaSuccess(runOrka(home, "provider", "delete", providerName), token, secretSentinel)
 	})
 })
-
-func runSuccessfulOrka(home string, forbidden []string, args ...string) cliResult {
-	GinkgoHelper()
-	result := runOrka(home, args...)
-	expectOrkaSuccess(result, forbidden...)
-	return result
-}
-
-func deleteK8sResource(kind, name string) {
-	if strings.TrimSpace(name) == "" {
-		return
-	}
-	cmd := exec.Command("kubectl", "delete", kind, name, "-n", namespace, "--ignore-not-found")
-	_, _ = utils.Run(cmd)
-}
-
-func k8sResourceExists(kind, name string) bool {
-	cmd := exec.Command("kubectl", "get", kind, name, "-n", namespace, "--ignore-not-found")
-	output, err := utils.Run(cmd)
-	return err == nil && strings.TrimSpace(output) != ""
-}
