@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,8 +67,8 @@ func TestSubmitListExecutionEventSQLite(t *testing.T) {
 
 	second := doJSONRequest(t, app, "/internal/v1/events/default/task/task-a", map[string]any{
 		"seq":     1,
-		"type":    events.ExecutionEventTypeTaskSucceeded,
-		"summary": "task completed",
+		"type":    events.ExecutionEventTypeWorkerCompleted,
+		"summary": "worker completed",
 	})
 	if second.StatusCode != http.StatusCreated {
 		t.Fatalf("second POST status = %d, want 201", second.StatusCode)
@@ -353,16 +351,17 @@ func TestStreamTaskEventsReconnectCatchUpSQLite(t *testing.T) {
 	terminalErr := make(chan string, 1)
 	go func() {
 		time.Sleep(15 * time.Millisecond)
-		status, err := postJSON(postApp, "/internal/v1/events/default/task/task-reconnect-e2e", map[string]any{
-			"type":    events.ExecutionEventTypeTaskSucceeded,
-			"summary": "terminal event from internal POST",
+		_, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:  "default",
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   "task-reconnect-e2e",
+			TaskName:   "task-reconnect-e2e",
+			Type:       events.ExecutionEventTypeTaskSucceeded,
+			Severity:   events.ExecutionEventSeverityInfo,
+			Summary:    "terminal event from controller",
 		})
 		if err != nil {
 			terminalErr <- err.Error()
-			return
-		}
-		if status != http.StatusCreated {
-			terminalErr <- fmt.Sprintf("terminal POST status = %d, want 201", status)
 			return
 		}
 		terminalErr <- ""
@@ -404,12 +403,16 @@ func TestSSEExecutionEventFromInternalPostSQLite(t *testing.T) {
 		testTask("default", "task-post-stream"),
 	)
 
-	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-post-stream", map[string]any{
-		"type":    events.ExecutionEventTypeTaskSucceeded,
-		"summary": "posted terminal event",
-	})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("POST status = %d, want 201", resp.StatusCode)
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-post-stream",
+		TaskName:   "task-post-stream",
+		Type:       events.ExecutionEventTypeTaskSucceeded,
+		Severity:   events.ExecutionEventSeverityInfo,
+		Summary:    "posted terminal event",
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
 	}
 
 	body := doStreamRequest(t, app, "/api/v1/tasks/task-post-stream/stream?namespace=default")
@@ -738,20 +741,6 @@ func sseIDs(body string) []int64 {
 		}
 	}
 	return ids
-}
-
-func postJSON(app *fiber.App, target string, body any) (int, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return 0, fmt.Errorf("marshal body: %w", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := app.Test(req)
-	if err != nil {
-		return 0, fmt.Errorf("app.Test: %w", err)
-	}
-	return resp.StatusCode, nil
 }
 
 func testDashToken(prefix string) string {

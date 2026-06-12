@@ -14,7 +14,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -o worker ./workers/ai
 
 # Runtime stage - using python slim for code_exec tool support
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # Install Node.js for JavaScript execution
 RUN apt-get update && apt-get install -y --no-install-recommends \

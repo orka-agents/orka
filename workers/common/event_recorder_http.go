@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -62,7 +63,7 @@ func NewHTTPEventRecorderFromEnv() EventRecorder {
 		Namespace:     os.Getenv(EnvOrkaTaskNamespace),
 		TaskName:      os.Getenv(EnvOrkaTaskName),
 		SessionName:   os.Getenv(EnvOrkaSessionName),
-		BearerPath:    DefaultServiceAccountBearerPath,
+		BearerPath:    firstNonEmpty(os.Getenv(workerenv.ServiceAccountTokenPath), DefaultServiceAccountBearerPath),
 	})
 }
 
@@ -216,9 +217,21 @@ func executionEventEndpoint(controllerURL, namespace, taskName string) (string, 
 }
 
 func readServiceAccountToken(path string) string {
+	if token := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken)); token != "" {
+		return token
+	}
 	data, err := os.ReadFile(path) //nolint:gosec // path is the Kubernetes service-account token mount or a test override.
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

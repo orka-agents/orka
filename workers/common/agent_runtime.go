@@ -765,6 +765,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		}
 		if artifactErr := UploadArtifacts(); artifactErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", artifactErr)
+			recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, false, artifactErr)
+		} else {
+			recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, true, nil)
 		}
 		return fmt.Errorf("%s execution failed: %w", name, err)
 	}
@@ -802,6 +805,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	}
 	if err := UploadArtifacts(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, false, err)
+	} else {
+		recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, true, nil)
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
@@ -815,6 +821,28 @@ func agentRuntimeEventContent(values map[string]any) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(data)
+}
+
+func recordAgentArtifactUploadEvent(recorder EventRecorder, agentName, taskName string, success bool, err error) {
+	eventType := events.ExecutionEventTypeArtifactUploadCompleted
+	severity := events.ExecutionEventSeverityInfo
+	summary := "agent worker artifact upload completed"
+	content := map[string]any{"artifact": "all"}
+	if !success {
+		eventType = events.ExecutionEventTypeArtifactUploadFailed
+		severity = events.ExecutionEventSeverityWarning
+		summary = "agent worker artifact upload failed"
+		if err != nil {
+			content["error"] = err.Error()
+		}
+	}
+	RecordEventWithTimeout(recorder, eventType, 0,
+		WithEventSeverity(severity),
+		WithEventTaskName(taskName),
+		WithEventAgentName(agentName),
+		WithEventSummary(summary),
+		WithEventContent(agentRuntimeEventContent(content)),
+	)
 }
 
 func recordAgentWorkerFailedEvent(recorder EventRecorder, agentName, taskName string, err error) {

@@ -281,7 +281,19 @@ func run() (err error) {
 	// Upload any artifacts the agent wrote
 	if err := common.UploadArtifacts(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadFailed, 0,
+			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker artifact upload failed"),
+			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
+		)
 		// Don't fail the task if artifact upload fails
+	} else {
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted, 0,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker artifact upload completed"),
+			common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
+		)
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
@@ -900,6 +912,7 @@ func executeAgentLoopWithEvents(
 				"toolCalls":    len(resp.ToolCalls),
 				"stopReason":   resp.StopReason,
 			})),
+			common.WithEventContentText(resp.Content),
 		)
 
 		// If no tool calls, we're done

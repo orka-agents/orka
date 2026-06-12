@@ -103,10 +103,6 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
-	ctx := c.Context()
-	if ctx == nil {
-		ctx = c.RequestCtx()
-	}
 	streamStore := h.executionEventStore
 
 	c.Set("Content-Type", "text/event-stream")
@@ -115,6 +111,10 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		// SendStreamWriter outlives the Fiber request handler; use a fresh
+		// background context for polling so Fiber request-context recycling does
+		// not immediately terminate long-lived event streams.
+		ctx := context.Background()
 		done := metrics.RecordExecutionEventStreamOpen("task", query.afterSeq > 0)
 		defer done()
 		lastSeq := query.afterSeq
@@ -235,10 +235,6 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
-	ctx := c.Context()
-	if ctx == nil {
-		ctx = c.RequestCtx()
-	}
 	streamStore := h.executionEventStore
 
 	c.Set("Content-Type", "text/event-stream")
@@ -247,6 +243,10 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		// SendStreamWriter outlives the Fiber request handler; use a fresh
+		// background context for polling so Fiber request-context recycling does
+		// not immediately terminate long-lived event streams.
+		ctx := context.Background()
 		done := metrics.RecordExecutionEventStreamOpen("session", query.afterSeq > 0)
 		defer done()
 		lastSeq := query.afterSeq

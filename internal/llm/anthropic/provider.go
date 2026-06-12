@@ -72,7 +72,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 
 	// Convert response
 	resp := &llm.CompletionResponse{
-		Model:        string(message.Model),
+		Model:        message.Model,
 		StopReason:   string(message.StopReason),
 		InputTokens:  int(message.Usage.InputTokens),
 		OutputTokens: int(message.Usage.OutputTokens),
@@ -165,7 +165,7 @@ func buildRequestParams(req *llm.CompletionRequest, messages []anthropic.Message
 	}
 
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(req.Model),
+		Model:     req.Model,
 		Messages:  messages,
 		MaxTokens: maxTokens,
 	}

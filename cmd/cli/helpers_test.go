@@ -623,3 +623,19 @@ func TestRootCmdIncludesCoverageCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestArticleFor(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "agent", want: "an"},
+		{name: "provider", want: "a"},
+		{name: "", want: "a"},
+	}
+	for _, tt := range tests {
+		if got := articleFor(tt.name); got != tt.want {
+			t.Errorf("articleFor(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}

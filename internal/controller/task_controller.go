@@ -401,20 +401,6 @@ func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
-func (r *TaskReconciler) deleteTaskExecutionEvents(ctx context.Context, task *corev1alpha1.Task) {
-	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return
-	}
-	if err := r.ExecutionEventStore.DeleteExecutionEvents(
-		ctx,
-		task.Namespace,
-		store.ExecutionEventStreamTypeTask,
-		task.Name,
-	); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to delete execution events", "task", task.Name)
-	}
-}
-
 // handleDeletion handles Task cleanup when deleted
 func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
 	log := logf.FromContext(ctx)
@@ -487,8 +473,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
-
-		r.deleteTaskExecutionEvents(ctx, task)
 
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)

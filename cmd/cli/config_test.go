@@ -3,8 +3,12 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 )
+
+const configTestNamespace = "orka-system"
 
 func TestNewConfigCmd(t *testing.T) {
 	cmd := newConfigCmd()
@@ -17,7 +21,7 @@ func TestNewConfigCmd(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		subNames[sub.Use] = true
 	}
-	for _, want := range []string{"set-server <url>", "set-token <token>", "view"} {
+	for _, want := range []string{"set-server <url>", "set-token [token]", "set-namespace <namespace>", "view"} {
 		if !subNames[want] {
 			t.Errorf("missing subcommand %q", want)
 		}
@@ -54,15 +58,15 @@ func TestConfigSetTokenCmd(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	cmd := newConfigSetTokenCmd()
-	cmd.SetArgs([]string{"my-secret-token"})
+	cmd.SetArgs([]string{"opaque-value-123"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
 
 	cfg := loadConfig()
-	if cfg.Token != "my-secret-token" {
-		t.Errorf("Token = %q, want %q", cfg.Token, "my-secret-token")
+	if cfg.Token != "opaque-value-123" {
+		t.Errorf("Token = %q, want %q", cfg.Token, "opaque-value-123")
 	}
 }
 
@@ -71,6 +75,71 @@ func TestConfigSetTokenCmdNoArgs(t *testing.T) {
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err == nil {
 		t.Error("expected error with no args")
+	}
+}
+
+func TestConfigSetTokenCmdFromFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	tokenPath := tmp + "/token.txt"
+	if err := os.WriteFile(tokenPath, []byte("file-value-123\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	cmd := newConfigSetTokenCmd()
+	cmd.SetArgs([]string{"--file", tokenPath})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+
+	cfg := loadConfig()
+	if cfg.Token != "file-value-123" {
+		t.Errorf("Token = %q, want %q", cfg.Token, "file-value-123")
+	}
+}
+
+func TestConfigSetTokenCmdFromStdin(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cmd := newConfigSetTokenCmd()
+	cmd.SetIn(strings.NewReader("stdin-value-123\n"))
+	cmd.SetArgs([]string{"--file", "-"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+
+	cfg := loadConfig()
+	if cfg.Token != "stdin-value-123" {
+		t.Errorf("Token = %q, want %q", cfg.Token, "stdin-value-123")
+	}
+}
+
+func TestConfigSetTokenCmdRejectsArgWithFile(t *testing.T) {
+	cmd := newConfigSetTokenCmd()
+	cmd.SetArgs([]string{"arg-value-123", "--file", "token.txt"})
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error when token arg and --file are both provided")
+	}
+}
+
+func TestConfigSetNamespaceCmd(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cmd := newConfigSetNamespaceCmd()
+	cmd.SetArgs([]string{configTestNamespace})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+
+	cfg := loadConfig()
+	if cfg.Namespace != configTestNamespace {
+		t.Errorf("Namespace = %q, want %q", cfg.Namespace, configTestNamespace)
 	}
 }
 
@@ -111,7 +180,7 @@ func TestConfigSetServerPreservesToken(t *testing.T) {
 
 	// Set token first
 	tokenCmd := newConfigSetTokenCmd()
-	tokenCmd.SetArgs([]string{"my-token"})
+	tokenCmd.SetArgs([]string{"opaque-value-456"})
 	if err := tokenCmd.Execute(); err != nil {
 		t.Fatalf("set-token error: %v", err)
 	}
@@ -125,8 +194,8 @@ func TestConfigSetServerPreservesToken(t *testing.T) {
 
 	// Verify both are preserved
 	cfg := loadConfig()
-	if cfg.Token != "my-token" {
-		t.Errorf("Token = %q, want %q (should be preserved)", cfg.Token, "my-token")
+	if cfg.Token != "opaque-value-456" {
+		t.Errorf("Token = %q, want %q (should be preserved)", cfg.Token, "opaque-value-456")
 	}
 	if cfg.Server != "http://srv:8080" {
 		t.Errorf("Server = %q, want %q", cfg.Server, "http://srv:8080")

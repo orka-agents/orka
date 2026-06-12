@@ -142,6 +142,9 @@ var _ = BeforeSuite(func() {
 			"tools.core.orka.ai",
 			"providers.core.orka.ai",
 			"skills.core.orka.ai",
+			"repositoryscans.core.orka.ai",
+			"repositorymonitors.core.orka.ai",
+			"substrateactorpools.core.orka.ai",
 		} {
 			cmd := exec.Command("kubectl", "wait", "--for=condition=Established",
 				"crd/"+crd, "--timeout=30s")
