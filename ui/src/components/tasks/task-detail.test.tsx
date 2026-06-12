@@ -208,4 +208,64 @@ describe('TaskDetail', () => {
     expect(screen.getByText('2h ago')).toBeInTheDocument()
     expect(screen.getByText('2d ago')).toBeInTheDocument()
   })
+
+  it('renders the execution graph (not a table) in the Children tab', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'parent', namespace: 'default', uid: 'uid-p', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'orchestrator' } },
+          status: {
+            phase: 'Running',
+            childTasks: [
+              { name: 'child-1', agent: 'reviewer', phase: 'Succeeded' },
+              { name: 'child-2', agent: 'fixer', phase: 'Running' },
+            ],
+          },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="parent" />)
+    await waitFor(() => expect(screen.getByText('parent')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('tab', { name: /children/i }))
+    // Execution graph (role=tree) replaces the old child-tasks table.
+    expect(await screen.findByRole('tree', { name: /execution graph/i })).toBeInTheDocument()
+    expect(screen.getByText('child-1')).toBeInTheDocument()
+    expect(screen.getByText('child-2')).toBeInTheDocument()
+  })
+
+  it('renders the run timeline in the Plan tab when iterating', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'auto', namespace: 'default', uid: 'uid-a', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'agent', agentRef: { name: 'looper' } },
+          status: { phase: 'Running', iteration: 3, startTime: new Date().toISOString() },
+          plan: { summary: 'converging on the goal', progressPct: 66 },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="auto" />)
+    await waitFor(() => expect(screen.getByText('auto')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('tab', { name: /plan/i }))
+    // RunTimeline shows the iteration + plan summary + progress bar.
+    expect(await screen.findAllByText('Iteration 3')).toHaveLength(1)
+    expect(screen.getAllByText('converging on the goal').length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('progressbar', { name: /goal progress/i }).length).toBeGreaterThan(0)
+  })
+
+  it('does not show the Plan tab when iteration is 0', async () => {
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'noiter', namespace: 'default', uid: 'uid-n', creationTimestamp: new Date().toISOString() },
+          spec: { type: 'container', image: 'alpine' },
+          status: { phase: 'Running', iteration: 0 },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="noiter" />)
+    await waitFor(() => expect(screen.getByText('noiter')).toBeInTheDocument())
+    expect(screen.queryByRole('tab', { name: /plan/i })).not.toBeInTheDocument()
+  })
 })
