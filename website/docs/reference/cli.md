@@ -258,7 +258,6 @@ Regenerate completions after upgrading `orka` if commands or flags change.
 | `orka models list --compat openai` / `anthropic` | List model IDs in provider-compatible formats. |
 | `orka workspace status TASK` | Inspect task workspace status. |
 | `orka audit trace TRANSACTION_ID` | Show tasks correlated by Kontxt transaction ID. |
-| `orka completion SHELL` | Generate shell completion scripts. |
 
 ## Binary e2e coverage matrix
 
