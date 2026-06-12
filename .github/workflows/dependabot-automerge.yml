@@ -30,7 +30,10 @@ permissions:
   statuses: read
 
 concurrency:
-  group: dependabot-automerge-${{ github.event.workflow_run.head_branch || inputs.pr || github.run_id }}
+  # workflow_run events can arrive in large bursts. Use the upstream run id so
+  # unrelated PR completions do not evict pending automerge attempts from the
+  # same broad `main` concurrency group.
+  group: dependabot-automerge-${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || format('manual-{0}', inputs.pr || github.run_id) }}
   cancel-in-progress: false
 
 jobs:
