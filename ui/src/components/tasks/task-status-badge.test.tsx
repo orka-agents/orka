@@ -16,28 +16,29 @@ describe('TaskStatusBadge', () => {
     },
   )
 
-  it('uses yellow classes for Pending', () => {
-    render(<TaskStatusBadge phase="Pending" />)
-    expect(screen.getByText('Pending').className).toContain('bg-yellow-100')
+  it.each([
+    ['Pending', 'bg-status-pending'],
+    ['Running', 'bg-status-running'],
+    ['Succeeded', 'bg-status-succeeded'],
+    ['Failed', 'bg-status-failed'],
+  ] as const)('uses the %s status token (not a pastel)', (phase, dotClass) => {
+    render(<TaskStatusBadge phase={phase} />)
+    const dot = screen.getByTestId('status-dot')
+    expect(dot.className).toContain(dotClass)
+    // No legacy template pastel survives.
+    expect(dot.className).not.toMatch(/bg-(yellow|blue|green|red)-(100|800|900)/)
   })
 
-  it('uses blue classes for Running', () => {
+  it('renders a colored status dot alongside the label', () => {
     render(<TaskStatusBadge phase="Running" />)
-    expect(screen.getByText('Running').className).toContain('bg-blue-100')
-  })
-
-  it('uses green classes for Succeeded', () => {
-    render(<TaskStatusBadge phase="Succeeded" />)
-    expect(screen.getByText('Succeeded').className).toContain('bg-green-100')
-  })
-
-  it('uses red classes for Failed', () => {
-    render(<TaskStatusBadge phase="Failed" />)
-    expect(screen.getByText('Failed').className).toContain('bg-red-100')
+    expect(screen.getByTestId('status-dot')).toBeInTheDocument()
+    expect(screen.getByText('Running')).toBeInTheDocument()
   })
 
   it('falls back to Pending style for unknown phase', () => {
     render(<TaskStatusBadge phase="Unknown" />)
-    expect(screen.getByText('Unknown').className).toContain('bg-yellow-100')
+    expect(screen.getByText('Unknown')).toBeInTheDocument()
+    // Unknown phases inherit the Pending dot color.
+    expect(screen.getByTestId('status-dot').className).toContain('bg-status-pending')
   })
 })

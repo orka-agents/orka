@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ListTodo, Play, CheckCircle, XCircle, MessageSquare, Bot, Wrench } from 'lucide-react'
 import type { Task } from '@/schemas/task'
 import { Skeleton } from '@/components/ui/skeleton'
+import { phaseStyle } from '@/lib/task-status'
 
 interface StatsCardsProps {
   tasks?: Task[]
@@ -37,9 +38,9 @@ export function StatsCards({ tasks, sessionCount, agentCount, toolCount, isLoadi
 
   const stats = [
     { label: 'Total Tasks', value: total, icon: ListTodo, color: 'text-foreground' },
-    { label: 'Running', value: running, icon: Play, color: 'text-blue-500' },
-    { label: 'Succeeded', value: succeeded, icon: CheckCircle, color: 'text-green-500' },
-    { label: 'Failed', value: failed, icon: XCircle, color: 'text-red-500' },
+    { label: 'Running', value: running, icon: Play, color: phaseStyle('Running').textClass },
+    { label: 'Succeeded', value: succeeded, icon: CheckCircle, color: phaseStyle('Succeeded').textClass },
+    { label: 'Failed', value: failed, icon: XCircle, color: phaseStyle('Failed').textClass },
   ]
 
   return (

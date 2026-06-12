@@ -1,18 +1,13 @@
-import { Badge } from '@/components/ui/badge'
+import { StatusDot } from '@/components/ui/status-dot'
 import type { TaskPhase } from '@/schemas/task'
 
-const phaseStyles: Record<string, string> = {
-  Pending: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-  Running: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
-  Succeeded: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-  Failed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-}
-
+/**
+ * Phase badge for a task. Thin wrapper over the shared <StatusDot>, which
+ * sources all phase color/label from `lib/task-status.ts` (the single source
+ * of truth) — no local color map.
+ */
 export function TaskStatusBadge({ phase }: { phase?: TaskPhase | string }) {
-  const p = phase ?? 'Pending'
-  return (
-    <Badge className={phaseStyles[p] ?? phaseStyles.Pending} variant="secondary">
-      {p}
-    </Badge>
-  )
+  // StatusDot renders the literal phase text (so an unknown phase still reads
+  // as itself) while its dot color falls back to Pending via the shared map.
+  return <StatusDot phase={phase} />
 }
