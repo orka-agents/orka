@@ -6,11 +6,16 @@ import { Activity } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { EmptyState } from '@/components/ui/empty-state'
 import { useTaskList } from '@/hooks/use-tasks'
+import { useFreshness } from '@/hooks/use-freshness'
+import { cn } from '@/lib/utils'
 import { TaskStatusBadge } from './task-status-badge'
 import type { Task } from '@/schemas/task'
 
 function AgentMiniPanel({ task }: { task: Task }) {
   const [now, setNow] = useState(() => Date.now())
+  // Glow briefly when this running task's status message changes — draws the
+  // eye to what just advanced in a grid that polls every few seconds.
+  const justUpdated = useFreshness(task.status?.message)
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
@@ -29,7 +34,12 @@ function AgentMiniPanel({ task }: { task: Task }) {
 
   return (
     <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }}>
-      <Card className="hover:border-primary/50 hover:shadow-md transition-all motion-safe:hover:-translate-y-0.5 cursor-pointer h-full">
+      <Card
+        className={cn(
+          'border-l-2 border-l-live hover:border-primary/50 hover:shadow-md transition-all motion-safe:hover:-translate-y-0.5 cursor-pointer h-full',
+          justUpdated && 'motion-safe:animate-freshness',
+        )}
+      >
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-medium truncate">{task.metadata.name}</CardTitle>

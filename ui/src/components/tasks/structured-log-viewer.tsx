@@ -115,10 +115,16 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
               ({filteredLogs.length} line{filteredLogs.length !== 1 ? 's' : ''})
             </span>
             {isLive && (
-              <span className="text-xs font-normal text-green-600 dark:text-green-400 animate-pulse">● Live</span>
+              <span className="flex items-center gap-1 text-xs font-normal text-live">
+                <span className="inline-block size-1.5 rounded-full bg-live motion-safe:animate-pulse-live" aria-hidden="true" />
+                Live
+              </span>
             )}
             {isStreaming && !isLive && (
-              <span className="text-xs font-normal text-blue-600 dark:text-blue-400">● Streaming</span>
+              <span className="flex items-center gap-1 text-xs font-normal text-live">
+                <span className="inline-block size-1.5 rounded-full bg-live" aria-hidden="true" />
+                Streaming
+              </span>
             )}
           </CardTitle>
           <div className="flex items-center gap-2">

@@ -47,6 +47,13 @@ export function KanbanBoard() {
             )}
           >
             <div className="flex items-center gap-2 mb-3 px-1">
+              {style.live && (
+                <span
+                  data-testid="live-indicator"
+                  className="inline-block size-2 rounded-full bg-live motion-safe:animate-pulse-live"
+                  aria-hidden="true"
+                />
+              )}
               <h2 className="font-semibold text-sm">{label}</h2>
               <span
                 className={cn(

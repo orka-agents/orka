@@ -147,4 +147,23 @@ describe('KanbanBoard', () => {
     expect(chip).toHaveClass('bg-status-running-bg')
     expect(chip.className).not.toMatch(/bg-(yellow|blue|green|red)-/)
   })
+
+  it('shows a live pulse indicator ONLY on the Running column (liveness scarcity)', async () => {
+    render(<KanbanBoard />)
+    await waitFor(() => {
+      expect(screen.getByText('Running')).toBeInTheDocument()
+    })
+    // Exactly one live indicator, and it lives in the Running column header.
+    const indicators = screen.getAllByTestId('live-indicator')
+    expect(indicators).toHaveLength(1)
+    const indicator = indicators[0]
+    expect(indicator.className).toContain('bg-live')
+    expect(indicator.className).toContain('animate-pulse-live')
+    // It sits beside the "Running" heading, not Pending/Succeeded/Failed.
+    expect(indicator.parentElement?.textContent).toContain('Running')
+    for (const terminal of ['Pending', 'Succeeded', 'Failed']) {
+      const header = screen.getByText(terminal).parentElement!
+      expect(header.querySelector('[data-testid="live-indicator"]')).toBeNull()
+    }
+  })
 })

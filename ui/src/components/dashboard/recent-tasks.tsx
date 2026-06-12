@@ -59,7 +59,7 @@ export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: 
               >
                 <div className="space-y-1">
                   <p className="text-sm font-medium">{task.metadata.name}</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs text-muted-foreground tabular-nums">
                     {task.spec.type} · {task.metadata.namespace} · {timeAgo(task.metadata.creationTimestamp)}
                   </p>
                 </div>
