@@ -203,6 +203,15 @@ ui-test-coverage: ## Run UI unit tests with coverage.
 build: manifests generate fmt vet ui-build ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+
+.PHONY: docs-cli
+docs-cli: build-cli ## Generate CLI command reference docs.
+	scripts/generate-cli-docs.sh
+
+.PHONY: docs-cli-check
+docs-cli-check: build-cli ## Check generated CLI command reference docs are up to date.
+	scripts/generate-cli-docs.sh --check
+
 .PHONY: build-cli
 build-cli: ## Build orka CLI binary.
 	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)" -o bin/orka ./cmd/cli/

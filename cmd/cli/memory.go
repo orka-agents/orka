@@ -227,7 +227,7 @@ func newMemoryDeleteCmd() *cobra.Command {
 func newMemoryEnableDisableCmd(action string) *cobra.Command {
 	return &cobra.Command{
 		Use:   action + " <id>",
-		Short: action + " a memory",
+		Short: titleName(action) + " a memory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)

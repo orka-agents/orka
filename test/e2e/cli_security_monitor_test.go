@@ -12,6 +12,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -121,6 +122,12 @@ spec:
 			expectJSONObject(result.Stdout)
 		}
 
+		if os.Getenv("ORKA_CLI_E2E_LIVE_ACTIONS") == "1" {
+			By("triggering an explicitly enabled manual security scan run")
+			scanRun := runOrka(home, "security", "scan", "run", repositoryScanName)
+			expectOrkaSuccess(scanRun, token, fakeAnthropicKey)
+		}
+
 		By("creating and reading a RepositoryMonitor with required repoURL and reviewer agent fields")
 		monitorManifest := writeTempManifest(tmpDir, "repository-monitor.yaml", repositoryMonitorManifest(monitorName, repoURL, agentName))
 		expectOrkaSuccess(runOrka(home, "monitor", "create", "-f", monitorManifest), token, fakeAnthropicKey)
@@ -147,6 +154,12 @@ spec:
 			result := runOrka(home, args...)
 			expectOrkaSuccess(result, token, fakeAnthropicKey)
 			expectJSONObject(result.Stdout)
+		}
+
+		if os.Getenv("ORKA_CLI_E2E_LIVE_ACTIONS") == "1" {
+			By("triggering an explicitly enabled repository monitor run")
+			monitorRun := runOrka(home, "monitor", "run", monitorName, "--target-kind", "pull_request", "--target-number", "1")
+			expectOrkaSuccess(monitorRun, token, fakeAnthropicKey)
 		}
 
 		By("deleting the monitor and repository scan through the CLI")

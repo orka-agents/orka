@@ -61,12 +61,16 @@ var _ = Describe("Orka CLI local binary paths", Ordered, func() {
 
 		writeCLIConfig(localHome, "", namespace, "")
 		configPath := filepath.Join(localHome, ".orka", "config.yaml")
-		fakeToken := "fake-config-token-sentinel-" + suffix
+		fakeToken := "fake-config-value-sentinel-" + suffix
 
-		By("setting server and a fake token through the compiled binary")
+		By("setting server, namespace, and a fake token through the compiled binary")
+		tokenPath := filepath.Join(localHome, "fake-token.txt")
+		Expect(os.WriteFile(tokenPath, []byte(fakeToken+"\n"), 0o600)).To(Succeed())
 		setServer := runOrka(localHome, "config", "set-server", apiBaseURL)
 		expectOrkaSuccess(setServer, fakeToken)
-		setToken := runOrka(localHome, "config", "set-token", fakeToken)
+		setNamespace := runOrka(localHome, "config", "set-namespace", namespace)
+		expectOrkaSuccess(setNamespace, fakeToken)
+		setToken := runOrka(localHome, "config", "set-token", "--file", tokenPath)
 		expectOrkaSuccess(setToken, fakeToken)
 
 		By("verifying config view uses the isolated config and masks the fake token")
@@ -97,6 +101,40 @@ var _ = Describe("Orka CLI local binary paths", Ordered, func() {
 		Expect(status.Stdout).To(ContainSubstring("Ready:"))
 		Expect(status.Stdout).To(ContainSubstring("Tasks:"))
 		Expect(status.Stdout).To(ContainSubstring("Agents:"))
+	})
+
+	It("generates completion scripts and safe redacted login output", func() {
+		localHome, err := os.MkdirTemp("", "orka-cli-local-e2e-home-*")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = os.RemoveAll(localHome) })
+
+		By("generating shell completions through the compiled binary")
+		for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+			completion := runOrka(localHome, "completion", shell)
+			expectOrkaSuccess(completion)
+			Expect(completion.Stdout).To(ContainSubstring("orka"), "completion output for %s should mention the orka command", shell)
+		}
+
+		By("printing a redacted login URL without opening a browser")
+		fakeToken := "fake-login-value-sentinel-" + suffix
+		login := runOrka(localHome,
+			"login",
+			"--server", apiBaseURL,
+			"--token", fakeToken,
+			"--no-open",
+			"--redact-token",
+		)
+		expectOrkaSuccess(login, fakeToken)
+		Expect(login.Stdout).To(ContainSubstring("Login URL: " + apiBaseURL + "/login#token=<redacted>"))
+		Expect(login.Stdout).To(ContainSubstring("Browser opening skipped"))
+	})
+
+	It("returns a clean run error when the API is unreachable", func() {
+		fakeToken := "fake-run-value-sentinel-" + suffix
+		unreachableHome := newIsolatedCLIHome("http://127.0.0.1:1", fakeToken)
+		run := runOrkaWithTimeout(15*time.Second, unreachableHome, "run", "--session", "e2e-cli-run-negative-"+suffix, "hello")
+		expectOrkaFailure(run, fakeToken)
+		Expect(run.Stderr + run.Stdout).To(ContainSubstring("cannot reach server"))
 	})
 
 	It("creates a container task from flags, reads logs, filters tasks, and traces an empty audit", func() {

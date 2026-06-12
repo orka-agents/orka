@@ -13,7 +13,7 @@ make build-cli
 bin/orka --help
 ```
 
-Install or copy `bin/orka` wherever you keep developer tools if you want `orka` on your `PATH`.
+Install or copy `bin/orka` wherever you keep developer tools if you want `orka` on your `PATH`. For exhaustive flag and subcommand help generated from Cobra, see [CLI Command Reference](./cli-commands.md).
 
 ## Connection and authentication
 
@@ -32,11 +32,12 @@ The CLI reads persistent config from `~/.orka/config.yaml`:
 
 ```bash
 orka config set-server http://127.0.0.1:8080
-orka config set-token "$(kubectl create token orka-client -n orka-system)"
+orka config set-namespace orka-system
+kubectl create token orka-client -n orka-system | orka config set-token --file -
 orka config view
 ```
 
-`config view` masks the token. `config set-token` necessarily receives the token as a process argument, so use short-lived tokens and avoid pasting long-lived secrets into shell history.
+`config view` masks the token. Prefer `config set-token --file <path>` or `--file -` over passing real tokens as process arguments. If you use `config set-token <token>` directly, use short-lived tokens and avoid pasting long-lived secrets into shell history.
 
 Validate auth before running larger workflows:
 
@@ -116,7 +117,19 @@ It may depend on live provider credentials, model configuration, and server-side
 orka login --service-account orka-client --namespace orka-system
 ```
 
-Do not use `login` in logs or shared terminals where the generated browser URL might be captured.
+For automation, tests, or terminals where token-bearing URLs could be captured, use the safe print-only mode:
+
+```bash
+orka login \
+  --service-account orka-client \
+  --namespace orka-system \
+  --no-open \
+  --redact-token
+```
+
+`--no-open` skips browser launch. `--redact-token` prints `<redacted>` instead of the raw token while still using the full token internally if browser opening is enabled. A redacted URL is not usable for manual login; rerun without `--redact-token` only in a trusted terminal if you need to copy the full URL.
+
+Do not use default `login` output in logs or shared terminals where the generated browser URL might be captured.
 
 ## Resource management commands
 
@@ -197,6 +210,47 @@ orka monitor delete my-monitor
 ```
 
 Manual run/action commands such as `orka security scan run`, `orka monitor run`, and finding patch/PR actions can create downstream Tasks and may require live GitHub, provider, and agent configuration.
+
+## Live-gated workflows
+
+Some commands intentionally create downstream work or require external services. Keep these behind explicit operator intent in automation and e2e tests.
+
+### `orka run`
+
+`orka run` streams chat responses over the Orka chat API. A positive smoke needs server-side chat enabled plus a configured provider/model or agent:
+
+```bash
+ORKA_API=http://127.0.0.1:8080
+ORKA_TOKEN="$(kubectl create token orka-client -n orka-system)"
+
+orka --server "$ORKA_API" --token "$ORKA_TOKEN" \
+  run --session cli-live-smoke "Reply with one short sentence."
+```
+
+For normal non-live validation, prefer a negative smoke against an unreachable or deliberately unconfigured server and assert a clean error without printing tokens.
+
+### `orka security scan run`
+
+Manual security scan runs can create scan Tasks and may require GitHub credentials, analysis agents, provider credentials, and repository network access:
+
+```bash
+orka security scan run my-repository-scan
+orka security scan list my-repository-scan -o json
+```
+
+Gate this path with explicit environment variables in CI, for example `ORKA_CLI_E2E_LIVE_ACTIONS=1`, and skip by default when credentials or fixtures are missing.
+
+### `orka monitor run`
+
+Manual repository monitor runs can enqueue repository review/repair work and may require GitHub credentials plus reviewer/repair agents:
+
+```bash
+orka monitor run my-monitor --target-kind pull_request --target-number 123
+orka monitor runs my-monitor -o json
+orka monitor items my-monitor -o json
+```
+
+Use live-gated tests or manual verification for this path until stable GitHub/provider fixtures are available.
 
 ## Substrate actor pools
 
@@ -282,9 +336,9 @@ Normal binary e2e tests build and invoke `bin/orka` directly with isolated confi
 | `security` | Partially covered | Repository scan create/get/list/delete, threat model update/get, scan/finding/slice/dropped-finding list; repository scan update is not covered. |
 | `monitor` | Partially covered | Repository monitor create/get/list/delete plus runs/items/events list; monitor update is not covered. |
 | `substrate` | Covered | Pool create/get/list/update/delete. |
-| `run` | Deferred/live-gated | Depends on chat/SSE/provider fixtures. |
-| `login` | Deferred | Browser-open behavior and token-bearing URL make normal e2e unsafe until a no-open/redacted test mode exists. |
-| `completion` | Not custom-covered | Cobra-generated shell completion; add binary e2e only if project-specific completion behavior is added. |
+| `run` | Negative covered; positive live-gated | Unreachable-server error path is safe for normal e2e; positive chat/SSE flow needs provider fixtures. |
+| `login` | Safe mode covered | `--no-open --redact-token` is covered; full browser-open token URL remains unsuitable for normal e2e logs. |
+| `completion` | Covered | Binary smoke generates bash, zsh, fish, and PowerShell completion output. |
 | `security scan run` | Deferred/live-gated | Creates downstream scan Tasks and requires live agent/GitHub/provider setup. |
 | `monitor run` | Deferred/live-gated | Creates downstream monitor work and can require GitHub/provider setup. |
 | security finding actions | Deferred/live-gated | Need stable finding fixtures or live scan data. |

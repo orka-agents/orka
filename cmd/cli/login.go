@@ -11,6 +11,7 @@ import (
 
 func newLoginCmd() *cobra.Command {
 	var serviceAccount string
+	var noOpen, redactToken bool
 
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -29,12 +30,15 @@ func newLoginCmd() *cobra.Command {
 				server = defaultServer
 			}
 			if ns == "" {
+				ns = cfg.Namespace
+			}
+			if ns == "" {
 				ns = "default"
 			}
 
 			if token == "" {
 				var err error
-				token, err = createServiceAccountToken(serviceAccount, ns)
+				token, err = serviceAccountLoginFunc(serviceAccount, ns)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error creating token: %v\n", err)
 					fmt.Fprintf(os.Stderr, "You can provide a token directly with --token\n")
@@ -43,11 +47,35 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			loginURL := fmt.Sprintf("%s/login#token=%s", server, token)
-			fmt.Printf("Login URL: %s\n", loginURL)
+			displayURL := loginURL
+			if redactToken {
+				displayURL = fmt.Sprintf("%s/login#token=<redacted>", server)
+			}
+			fmt.Printf("Login URL: %s\n", displayURL)
+
+			if noOpen {
+				if redactToken {
+					fmt.Println(
+						"Browser opening skipped. The printed login URL is redacted and cannot be opened manually. " +
+							"Rerun without --redact-token in a trusted terminal if you need to copy the URL.",
+					)
+				} else {
+					fmt.Println("Browser opening skipped. Open the login URL above in your browser manually.")
+				}
+				return nil
+			}
 
 			if err := openBrowser(loginURL); err != nil {
 				fmt.Fprintf(os.Stderr, "Could not open browser: %v\n", err)
-				fmt.Fprintln(os.Stderr, "Open the URL above in your browser manually.")
+				if redactToken {
+					fmt.Fprintln(
+						os.Stderr,
+						"The printed login URL is redacted and cannot be opened manually. "+
+							"Rerun without --redact-token in a trusted terminal if you need to copy the URL.",
+					)
+				} else {
+					fmt.Fprintln(os.Stderr, "Open the URL above in your browser manually.")
+				}
 				return nil
 			}
 			fmt.Println("Browser opened successfully. You can now log in to the Orka dashboard.")
@@ -56,6 +84,13 @@ func newLoginCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "default", "ServiceAccount name")
+	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the login URL without opening a browser")
+	cmd.Flags().BoolVar(
+		&redactToken,
+		"redact-token",
+		false,
+		"Redact the token in printed output while preserving browser login",
+	)
 
 	return cmd
 }

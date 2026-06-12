@@ -85,7 +85,7 @@ func newCRUDListCmd(spec crudResourceSpec) *cobra.Command {
 func newCRUDGetCmd(spec crudResourceSpec) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <name>",
-		Short: "Get a " + spec.Name + " resource",
+		Short: "Get " + articleFor(spec.Name) + " " + spec.Name + " resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
@@ -104,7 +104,7 @@ func newCRUDCreateCmd(spec crudResourceSpec) *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
 		Use:   "create -f <file>",
-		Short: "Create a " + spec.Name + " resource from a manifest",
+		Short: "Create " + articleFor(spec.Name) + " " + spec.Name + " resource from a manifest",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {
 				return fmt.Errorf("--file (-f) is required")
@@ -130,7 +130,7 @@ func newCRUDUpdateCmd(spec crudResourceSpec) *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
 		Use:   "update <name> -f <file>",
-		Short: "Update a " + spec.Name + " resource from a manifest",
+		Short: "Update " + articleFor(spec.Name) + " " + spec.Name + " resource from a manifest",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if file == "" {
@@ -160,7 +160,7 @@ func newCRUDUpdateCmd(spec crudResourceSpec) *cobra.Command {
 func newCRUDDeleteCmd(spec crudResourceSpec) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <name>",
-		Short: "Delete a " + spec.Name + " resource",
+		Short: "Delete " + articleFor(spec.Name) + " " + spec.Name + " resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
@@ -170,6 +170,18 @@ func newCRUDDeleteCmd(spec crudResourceSpec) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s deleted: %s\n", titleName(spec.Name), args[0]) //nolint:errcheck
 			return nil
 		},
+	}
+}
+
+func articleFor(s string) string {
+	if s == "" {
+		return "a"
+	}
+	switch strings.ToLower(s[:1]) {
+	case "a", "e", "i", "o", "u":
+		return "an"
+	default:
+		return "a"
 	}
 }
 
