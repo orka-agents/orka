@@ -79,6 +79,10 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
+// serviceAccountLoginFunc is used by login to request ServiceAccount login credentials.
+// Tests can replace this to avoid calling kubectl.
+var serviceAccountLoginFunc = createServiceAccountToken
+
 // createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
 func createServiceAccountToken(serviceAccount, namespace string) (string, error) {
 	kubectlPath, err := exec.LookPath("kubectl")

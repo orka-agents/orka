@@ -48,3 +48,12 @@ func TestMemoryUpdateFileUsesManifestNamespace(t *testing.T) {
 		t.Fatalf("body namespace = %#v, want %s", gotBody["namespace"], manifestNamespace)
 	}
 }
+
+func TestMemoryEnableDisableShortDescriptionsUseSentenceCase(t *testing.T) {
+	if got := newMemoryEnableDisableCmd("enable").Short; got != "Enable a memory" {
+		t.Fatalf("enable short = %q, want %q", got, "Enable a memory")
+	}
+	if got := newMemoryEnableDisableCmd("disable").Short; got != "Disable a memory" {
+		t.Fatalf("disable short = %q, want %q", got, "Disable a memory")
+	}
+}
