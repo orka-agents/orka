@@ -256,7 +256,7 @@ func TestBuildRequestParams(t *testing.T) {
 		if params.MaxTokens != 4096 {
 			t.Errorf("expected default MaxTokens 4096, got %d", params.MaxTokens)
 		}
-		if string(params.Model) != "claude-3" {
+		if params.Model != "claude-3" {
 			t.Errorf("expected model claude-3, got %s", params.Model)
 		}
 	})
