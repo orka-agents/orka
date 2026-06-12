@@ -52,7 +52,7 @@ Many read/list commands support `-o table`, `-o json`, and/or `-o yaml`. Prefer 
 ```bash
 orka task list -o json
 orka provider list -o yaml
-orka session get <session-id> -o json
+orka session get SESSION_ID -o json
 ```
 
 Do not rely on full table layouts in automation; table output is optimized for people.
@@ -95,7 +95,7 @@ Common task commands:
 | `orka task children NAME` | List child tasks. |
 | `orka task plan NAME` | Read autonomous plan state. |
 | `orka task artifacts NAME` | List task artifacts. |
-| `orka task download NAME [filename] -o PATH` | Download task artifact content. |
+| `orka task download NAME [FILENAME] --output PATH` | Download task artifact content. |
 | `orka task delete NAME` | Delete/cancel a task. |
 
 ## Chat and dashboard helpers
@@ -148,20 +148,24 @@ Sessions and durable memory are store-backed workflows rather than Kubernetes CR
 
 ```bash
 orka session list -o json
-orka session get <session-id> -o json
-orka session delete <session-id>
+orka session get SESSION_ID -o json
+orka session delete SESSION_ID
 
 orka memory create --content "stable project fact" --source cli --tags docs,cli
 orka memory list -o json --query "project fact"
-orka memory get <memory-id> -o json
-orka memory disable <memory-id>
-orka memory enable <memory-id>
-orka memory update <memory-id> --content "updated fact"
-orka memory delete <memory-id>
+orka memory get MEMORY_ID -o json
+orka memory disable MEMORY_ID
+orka memory enable MEMORY_ID
+orka memory update MEMORY_ID --content "updated fact"
+orka memory delete MEMORY_ID
 orka memory proposal list -o json
+orka memory proposal get PROPOSAL_ID -o json
+orka memory proposal review PROPOSAL_ID --status accepted --reviewer OPERATOR
+orka memory proposal apply PROPOSAL_ID --applied-by OPERATOR
+orka memory proposal archive PROPOSAL_ID
 ```
 
-Memory governance is explicit: reviewing a memory proposal does not automatically create durable memory. Use `orka memory proposal apply ID` only for an accepted proposal that should become durable memory.
+Memory governance is explicit: reviewing a memory proposal does not automatically create durable memory. Use `orka memory proposal apply PROPOSAL_ID` only for an accepted proposal that should become durable memory.
 
 ## Security scans and repository monitors
 
