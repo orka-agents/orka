@@ -3,27 +3,34 @@ package events
 import "strings"
 
 const (
-	ExecutionEventTypeTaskCreated             = "TaskCreated"
-	ExecutionEventTypeTaskPhaseChanged        = "TaskPhaseChanged"
-	ExecutionEventTypeTaskJobCreated          = "TaskJobCreated"
-	ExecutionEventTypeTaskStarted             = "TaskStarted"
-	ExecutionEventTypeTaskSucceeded           = "TaskSucceeded"
-	ExecutionEventTypeTaskFailed              = "TaskFailed"
-	ExecutionEventTypeTaskCancelled           = "TaskCancelled"
-	ExecutionEventTypeWorkerStarted           = "WorkerStarted"
-	ExecutionEventTypeWorkerCompleted         = "WorkerCompleted"
-	ExecutionEventTypeWorkerFailed            = "WorkerFailed"
-	ExecutionEventTypeModelRequestStarted     = "ModelRequestStarted"
-	ExecutionEventTypeModelRequestCompleted   = "ModelRequestCompleted"
-	ExecutionEventTypeModelRequestFailed      = "ModelRequestFailed"
-	ExecutionEventTypeModelMessage            = "ModelMessage"
-	ExecutionEventTypeContextTruncated        = "ContextTruncated"
-	ExecutionEventTypeToolCallStarted         = "ToolCallStarted"
-	ExecutionEventTypeToolCallCompleted       = "ToolCallCompleted"
-	ExecutionEventTypeToolCallFailed          = "ToolCallFailed"
-	ExecutionEventTypeResultSubmitted         = "ResultSubmitted"
-	ExecutionEventTypeArtifactUploadCompleted = "ArtifactUploadCompleted"
-	ExecutionEventTypeArtifactUploadFailed    = "ArtifactUploadFailed"
+	ExecutionEventTypeTaskCreated                   = "TaskCreated"
+	ExecutionEventTypeTaskPhaseChanged              = "TaskPhaseChanged"
+	ExecutionEventTypeTaskJobCreated                = "TaskJobCreated"
+	ExecutionEventTypeTaskStarted                   = "TaskStarted"
+	ExecutionEventTypeTaskSucceeded                 = "TaskSucceeded"
+	ExecutionEventTypeTaskFailed                    = "TaskFailed"
+	ExecutionEventTypeTaskCancelled                 = "TaskCancelled"
+	ExecutionEventTypeWorkerStarted                 = "WorkerStarted"
+	ExecutionEventTypeWorkerCompleted               = "WorkerCompleted"
+	ExecutionEventTypeWorkerFailed                  = "WorkerFailed"
+	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
+	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
+	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
+	ExecutionEventTypeModelMessage                  = "ModelMessage"
+	ExecutionEventTypeContextTruncated              = "ContextTruncated"
+	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
+	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
+	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
+	ExecutionEventTypeWorkspacePreparationStarted   = "WorkspacePreparationStarted"
+	ExecutionEventTypeWorkspacePreparationCompleted = "WorkspacePreparationCompleted"
+	ExecutionEventTypeWorkspacePreparationFailed    = "WorkspacePreparationFailed"
+	ExecutionEventTypeAgentRuntimeStarted           = "AgentRuntimeStarted"
+	ExecutionEventTypeAgentRuntimeCommandStarted    = "AgentRuntimeCommandStarted"
+	ExecutionEventTypeAgentRuntimeCompleted         = "AgentRuntimeCompleted"
+	ExecutionEventTypeAgentRuntimeFailed            = "AgentRuntimeFailed"
+	ExecutionEventTypeResultSubmitted               = "ResultSubmitted"
+	ExecutionEventTypeArtifactUploadCompleted       = "ArtifactUploadCompleted"
+	ExecutionEventTypeArtifactUploadFailed          = "ArtifactUploadFailed"
 )
 
 const (
@@ -40,27 +47,34 @@ const (
 )
 
 var validExecutionEventTypes = map[string]struct{}{
-	ExecutionEventTypeTaskCreated:             {},
-	ExecutionEventTypeTaskPhaseChanged:        {},
-	ExecutionEventTypeTaskJobCreated:          {},
-	ExecutionEventTypeTaskStarted:             {},
-	ExecutionEventTypeTaskSucceeded:           {},
-	ExecutionEventTypeTaskFailed:              {},
-	ExecutionEventTypeTaskCancelled:           {},
-	ExecutionEventTypeWorkerStarted:           {},
-	ExecutionEventTypeWorkerCompleted:         {},
-	ExecutionEventTypeWorkerFailed:            {},
-	ExecutionEventTypeModelRequestStarted:     {},
-	ExecutionEventTypeModelRequestCompleted:   {},
-	ExecutionEventTypeModelRequestFailed:      {},
-	ExecutionEventTypeModelMessage:            {},
-	ExecutionEventTypeContextTruncated:        {},
-	ExecutionEventTypeToolCallStarted:         {},
-	ExecutionEventTypeToolCallCompleted:       {},
-	ExecutionEventTypeToolCallFailed:          {},
-	ExecutionEventTypeResultSubmitted:         {},
-	ExecutionEventTypeArtifactUploadCompleted: {},
-	ExecutionEventTypeArtifactUploadFailed:    {},
+	ExecutionEventTypeTaskCreated:                   {},
+	ExecutionEventTypeTaskPhaseChanged:              {},
+	ExecutionEventTypeTaskJobCreated:                {},
+	ExecutionEventTypeTaskStarted:                   {},
+	ExecutionEventTypeTaskSucceeded:                 {},
+	ExecutionEventTypeTaskFailed:                    {},
+	ExecutionEventTypeTaskCancelled:                 {},
+	ExecutionEventTypeWorkerStarted:                 {},
+	ExecutionEventTypeWorkerCompleted:               {},
+	ExecutionEventTypeWorkerFailed:                  {},
+	ExecutionEventTypeModelRequestStarted:           {},
+	ExecutionEventTypeModelRequestCompleted:         {},
+	ExecutionEventTypeModelRequestFailed:            {},
+	ExecutionEventTypeModelMessage:                  {},
+	ExecutionEventTypeContextTruncated:              {},
+	ExecutionEventTypeToolCallStarted:               {},
+	ExecutionEventTypeToolCallCompleted:             {},
+	ExecutionEventTypeToolCallFailed:                {},
+	ExecutionEventTypeWorkspacePreparationStarted:   {},
+	ExecutionEventTypeWorkspacePreparationCompleted: {},
+	ExecutionEventTypeWorkspacePreparationFailed:    {},
+	ExecutionEventTypeAgentRuntimeStarted:           {},
+	ExecutionEventTypeAgentRuntimeCommandStarted:    {},
+	ExecutionEventTypeAgentRuntimeCompleted:         {},
+	ExecutionEventTypeAgentRuntimeFailed:            {},
+	ExecutionEventTypeResultSubmitted:               {},
+	ExecutionEventTypeArtifactUploadCompleted:       {},
+	ExecutionEventTypeArtifactUploadFailed:          {},
 }
 
 // ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
@@ -84,6 +98,13 @@ func ExecutionEventTypes() []string {
 		ExecutionEventTypeToolCallStarted,
 		ExecutionEventTypeToolCallCompleted,
 		ExecutionEventTypeToolCallFailed,
+		ExecutionEventTypeWorkspacePreparationStarted,
+		ExecutionEventTypeWorkspacePreparationCompleted,
+		ExecutionEventTypeWorkspacePreparationFailed,
+		ExecutionEventTypeAgentRuntimeStarted,
+		ExecutionEventTypeAgentRuntimeCommandStarted,
+		ExecutionEventTypeAgentRuntimeCompleted,
+		ExecutionEventTypeAgentRuntimeFailed,
 		ExecutionEventTypeResultSubmitted,
 		ExecutionEventTypeArtifactUploadCompleted,
 		ExecutionEventTypeArtifactUploadFailed,

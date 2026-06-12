@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/llm"
 	_ "github.com/sozercan/orka/internal/llm/anthropic"
 	_ "github.com/sozercan/orka/internal/llm/openai"
@@ -63,6 +64,8 @@ const (
 
 var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
 
+const modelLoopEventTimeout = 25 * time.Millisecond
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -70,22 +73,45 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
 	// Get configuration from environment
 	workerEnv := workerenv.ParseAIWorkerEnv(os.Getenv)
+	taskName := workerEnv.TaskName
+	taskNamespace := workerEnv.TaskNamespace
+	eventRecorder := common.NewHTTPEventRecorderFromEnv()
+	defer func() {
+		if err != nil {
+			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerFailed, 0,
+				common.WithEventSeverity(events.ExecutionEventSeverityError),
+				common.WithEventTaskName(taskName),
+				common.WithEventSummary(err.Error()),
+			)
+			return
+		}
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker completed"),
+		)
+	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
 	}
 
-	taskName := workerEnv.TaskName
-	taskNamespace := workerEnv.TaskNamespace
 	transactionLogFields := workerenv.TransactionLogFields(
 		workerEnv.TransactionID, workerEnv.TransactionProfile,
 	)
 	fmt.Printf("Worker ai started task=%s/%s%s\n", taskNamespace, taskName, transactionLogFields)
+	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkerStarted,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("AI worker started"),
+		common.WithEventContent(eventContent(map[string]any{
+			"provider": workerEnv.Provider,
+			"model":    workerEnv.Model,
+		})),
+	)
 	provider := workerEnv.Provider
 	model := workerEnv.Model
 	prompt := workerEnv.Prompt
@@ -234,9 +260,9 @@ func run() error {
 	}
 
 	// Execute the agent loop
-	result, err := executeAgentLoop(
+	result, err := executeAgentLoopWithEvents(
 		ctx, llmProvider, messages, systemPrompt, model,
-		llmTools, customTools, toolExecutor, baseToolCtx,
+		llmTools, customTools, toolExecutor, eventRecorder, baseToolCtx,
 	)
 	if err != nil {
 		return fmt.Errorf("agent execution failed: %w", err)
@@ -246,6 +272,11 @@ func run() error {
 	if err := writeResult(result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
+	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("AI worker submitted result"),
+		common.WithEventContent(eventContent(map[string]any{"resultLength": len(result)})),
+	)
 
 	// Upload any artifacts the agent wrote
 	if err := common.UploadArtifacts(); err != nil {
@@ -757,6 +788,30 @@ func executeAgentLoop(
 	llmTools []llm.Tool,
 	customTools map[string]*corev1alpha1.Tool,
 	toolExecutor *worker.ToolExecutor,
+) (string, error) {
+	return executeAgentLoopWithEvents(
+		ctx,
+		provider,
+		messages,
+		systemPrompt,
+		model,
+		llmTools,
+		customTools,
+		toolExecutor,
+		common.NoopEventRecorder{},
+	)
+}
+
+func executeAgentLoopWithEvents(
+	ctx context.Context,
+	provider llm.Provider,
+	messages []llm.Message,
+	systemPrompt string,
+	model string,
+	llmTools []llm.Tool,
+	customTools map[string]*corev1alpha1.Tool,
+	toolExecutor *worker.ToolExecutor,
+	eventRecorder common.EventRecorder,
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
 	var baseToolCtx *tools.ToolContext
@@ -774,7 +829,7 @@ func executeAgentLoop(
 	}
 	allowedToolCalls := advertisedToolNames(llmTools)
 
-	for range maxIterations {
+	for iteration := range maxIterations {
 		req := &llm.CompletionRequest{
 			Model:        model,
 			Messages:     messages,
@@ -782,6 +837,16 @@ func executeAgentLoop(
 			MaxTokens:    4096,
 			Tools:        llmTools,
 		}
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
+			common.WithEventSummary("model request started"),
+			common.WithEventContent(eventContent(map[string]any{
+				"iteration":    iteration + 1,
+				"model":        model,
+				"provider":     provider.Name(),
+				"messageCount": len(messages),
+				"toolCount":    len(llmTools),
+			})),
+		)
 
 		resp, err := provider.Complete(ctx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
@@ -789,13 +854,53 @@ func executeAgentLoop(
 			for _, m := range messages {
 				tokenEstimate += len(m.Content) / 4
 			}
+			beforeCount := len(messages)
 			messages = llm.TruncateMessages(messages, tokenEstimate/2)
 			req.Messages = messages
+			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
+				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+				common.WithEventSummary("model context truncated after provider context limit error"),
+				common.WithEventContent(eventContent(map[string]any{
+					"iteration":          iteration + 1,
+					"messageCountBefore": beforeCount,
+					"messageCountAfter":  len(messages),
+				})),
+			)
 			resp, err = provider.Complete(ctx, req)
 		}
 		if err != nil {
+			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestFailed, modelLoopEventTimeout,
+				common.WithEventSeverity(events.ExecutionEventSeverityError),
+				common.WithEventSummary(err.Error()),
+				common.WithEventContent(eventContent(map[string]any{
+					"iteration": iteration + 1,
+					"model":     model,
+					"provider":  provider.Name(),
+				})),
+			)
 			return "", fmt.Errorf("completion failed: %w", err)
 		}
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,
+			common.WithEventSummary("model request completed"),
+			common.WithEventContent(eventContent(map[string]any{
+				"iteration":    iteration + 1,
+				"model":        firstNonEmpty(resp.Model, model),
+				"provider":     provider.Name(),
+				"inputTokens":  resp.InputTokens,
+				"outputTokens": resp.OutputTokens,
+				"stopReason":   resp.StopReason,
+				"toolCalls":    len(resp.ToolCalls),
+			})),
+		)
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelMessage, modelLoopEventTimeout,
+			common.WithEventSummary("model returned message"),
+			common.WithEventContent(eventContent(map[string]any{
+				"iteration":    iteration + 1,
+				"contentChars": len([]rune(resp.Content)),
+				"toolCalls":    len(resp.ToolCalls),
+				"stopReason":   resp.StopReason,
+			})),
+		)
 
 		// If no tool calls, we're done
 		if len(resp.ToolCalls) == 0 {
@@ -816,6 +921,16 @@ func executeAgentLoop(
 			var result string
 			var execErr error
 			toolName := strings.TrimSpace(tc.Name)
+			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallStarted, modelLoopEventTimeout,
+				common.WithEventToolName(toolName),
+				common.WithEventToolCallID(tc.ID),
+				common.WithEventSummary("tool call started"),
+				common.WithEventContent(eventContent(map[string]any{
+					"toolName":      toolName,
+					"toolCallID":    tc.ID,
+					"argumentBytes": len(tc.Arguments),
+				})),
+			)
 
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
@@ -836,7 +951,24 @@ func executeAgentLoop(
 			}
 
 			if execErr != nil {
+				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
+					common.WithEventSeverity(events.ExecutionEventSeverityError),
+					common.WithEventToolName(toolName),
+					common.WithEventToolCallID(tc.ID),
+					common.WithEventSummary(execErr.Error()),
+				)
 				result = fmt.Sprintf("Error executing tool: %v", execErr)
+			} else {
+				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallCompleted, modelLoopEventTimeout,
+					common.WithEventToolName(toolName),
+					common.WithEventToolCallID(tc.ID),
+					common.WithEventSummary("tool call completed"),
+					common.WithEventContent(eventContent(map[string]any{
+						"toolName":     toolName,
+						"toolCallID":   tc.ID,
+						"resultLength": len(result),
+					})),
+				)
 			}
 
 			// Add tool result
@@ -860,6 +992,23 @@ func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {
 		}
 	}
 	return names
+}
+
+func eventContent(values map[string]any) json.RawMessage {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // writeResult submits the result to the controller via HTTP POST.

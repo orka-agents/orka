@@ -286,6 +286,9 @@ func normalizeSQLiteExecutionEvent(event *store.ExecutionEvent) error {
 	if !events.IsValidExecutionEventType(event.Type) {
 		return store.ValidationErrorf("unsupported execution event type %q", event.Type)
 	}
+	if err := store.SanitizeExecutionEventPayloadFields(event); err != nil {
+		return store.ValidationErrorf("invalid execution event payload: %v", err)
+	}
 	return nil
 }
 

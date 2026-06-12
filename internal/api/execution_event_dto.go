@@ -50,7 +50,7 @@ func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamI
 		Summary:     payload.Summary,
 		Content:     payload.Content,
 		ContentText: payload.ContentText,
-		Truncation:  mergeExecutionEventTruncation(r.Truncation, payload.Truncation),
+		Truncation:  store.MergeExecutionEventTruncation(r.Truncation, payload.Truncation),
 	}, nil
 }
 
@@ -145,23 +145,4 @@ func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *even
 	}
 	copy := *value
 	return &copy
-}
-
-func mergeExecutionEventTruncation(values ...*events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
-	var merged events.ExecutionEventTruncation
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-		merged.SummaryTruncated = merged.SummaryTruncated || value.SummaryTruncated
-		merged.SummaryOriginalChars = max(merged.SummaryOriginalChars, value.SummaryOriginalChars)
-		merged.ContentTextTruncated = merged.ContentTextTruncated || value.ContentTextTruncated
-		merged.ContentTextOriginalChars = max(merged.ContentTextOriginalChars, value.ContentTextOriginalChars)
-		merged.ContentJSONTruncated = merged.ContentJSONTruncated || value.ContentJSONTruncated
-		merged.ContentJSONOriginalBytes = max(merged.ContentJSONOriginalBytes, value.ContentJSONOriginalBytes)
-	}
-	if merged.Empty() {
-		return nil
-	}
-	return &merged
 }

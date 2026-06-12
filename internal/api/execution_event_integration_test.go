@@ -1,13 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +117,51 @@ func TestTaskEventsSQLiteReadsPersistedEvents(t *testing.T) {
 		listed.Events[0].Type != events.ExecutionEventTypeTaskStarted ||
 		listed.Events[0].Summary != "persisted event" {
 		t.Fatalf("listed persisted event = %#v", listed)
+	}
+}
+
+func TestTaskLifecycleEventsQueryableThroughAPI(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	for _, typ := range []string{
+		events.ExecutionEventTypeTaskJobCreated,
+		events.ExecutionEventTypeTaskStarted,
+		events.ExecutionEventTypeTaskSucceeded,
+	} {
+		appendIntegrationTaskEvent(t, eventStore, "task-lifecycle-api", typ)
+	}
+	app := setupExecutionEventIntegrationApp(
+		t,
+		eventStore,
+		&UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"},
+		testTask("default", "task-lifecycle-api"),
+	)
+
+	listed := getTaskEvents(t, app, "/api/v1/tasks/task-lifecycle-api/events?namespace=default&after=0")
+	if len(listed.Events) != 3 || listed.LatestSeq != 3 {
+		t.Fatalf("listed lifecycle events = %#v, want 3 events with latest seq 3", listed)
+	}
+	var previousSeq int64
+	for i, event := range listed.Events {
+		if event.Seq <= previousSeq {
+			t.Fatalf("event seqs not strictly increasing: %#v", listed.Events)
+		}
+		previousSeq = event.Seq
+		if want := []string{
+			events.ExecutionEventTypeTaskJobCreated,
+			events.ExecutionEventTypeTaskStarted,
+			events.ExecutionEventTypeTaskSucceeded,
+		}[i]; event.Type != want {
+			t.Fatalf("event[%d].Type = %s, want %s", i, event.Type, want)
+		}
+	}
+	afterFirst := getTaskEvents(t, app, "/api/v1/tasks/task-lifecycle-api/events?namespace=default&after=1")
+	if len(afterFirst.Events) != 2 || afterFirst.AfterSeq != 1 {
+		t.Fatalf("after=1 response = %#v, want two later events", afterFirst)
+	}
+	for _, event := range afterFirst.Events {
+		if event.Seq <= 1 {
+			t.Fatalf("after=1 returned old event: %#v", afterFirst.Events)
+		}
 	}
 }
 
@@ -258,6 +306,92 @@ func TestStreamTaskEventsCompletesWhenTaskDeleted(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: stream_complete") || !strings.Contains(body, "TaskDeleted") {
 		t.Fatalf("deleted task stream did not complete: %q", body)
+	}
+}
+
+func TestStreamTaskEventsReconnectCatchUpSQLite(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	postApp := setupExecutionEventIntegrationApp(
+		t,
+		eventStore,
+		&UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"},
+		testTask("default", "task-reconnect-e2e"),
+	)
+	resp := doJSONRequest(t, postApp, "/internal/v1/events/default/task/task-reconnect-e2e", map[string]any{
+		"type":    events.ExecutionEventTypeTaskStarted,
+		"summary": "initial event from internal POST",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("initial POST status = %d, want 201", resp.StatusCode)
+	}
+
+	firstStream, firstApp := setupTaskEventHandlers(t, eventStore, testTask("default", "task-reconnect-e2e"))
+	configureShortTaskEventStream(firstStream)
+	firstApp.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"})
+		return c.Next()
+	})
+	useCancelingContext(firstApp, 25*time.Millisecond)
+	firstApp.Get("/api/v1/tasks/:id/stream", firstStream.StreamTaskEvents)
+	firstBody := doStreamRequest(t, firstApp, "/api/v1/tasks/task-reconnect-e2e/stream?namespace=default&after=0")
+	firstIDs := sseIDs(firstBody)
+	if len(firstIDs) != 1 || firstIDs[0] != 1 {
+		t.Fatalf("first stream IDs = %v, body = %q; want only initial seq 1 before disconnect", firstIDs, firstBody)
+	}
+	if !strings.Contains(firstBody, ": heartbeat") {
+		t.Fatalf("first stream body missing shortened heartbeat before disconnect: %q", firstBody)
+	}
+	lastSeq := firstIDs[len(firstIDs)-1]
+
+	resp = doJSONRequest(t, postApp, "/internal/v1/events/default/task/task-reconnect-e2e", map[string]any{
+		"type":    events.ExecutionEventTypeWorkerStarted,
+		"summary": "missed event from internal POST",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("missed POST status = %d, want 201", resp.StatusCode)
+	}
+	terminalErr := make(chan string, 1)
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		status, err := postJSON(postApp, "/internal/v1/events/default/task/task-reconnect-e2e", map[string]any{
+			"type":    events.ExecutionEventTypeTaskSucceeded,
+			"summary": "terminal event from internal POST",
+		})
+		if err != nil {
+			terminalErr <- err.Error()
+			return
+		}
+		if status != http.StatusCreated {
+			terminalErr <- fmt.Sprintf("terminal POST status = %d, want 201", status)
+			return
+		}
+		terminalErr <- ""
+	}()
+
+	secondStream, secondApp := setupTaskEventHandlers(t, eventStore, testTask("default", "task-reconnect-e2e"))
+	configureShortTaskEventStream(secondStream)
+	secondApp.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"})
+		return c.Next()
+	})
+	secondApp.Get("/api/v1/tasks/:id/stream", secondStream.StreamTaskEvents)
+	secondBody := doStreamRequest(t, secondApp, "/api/v1/tasks/task-reconnect-e2e/stream?namespace=default&after=1")
+	if errMsg := <-terminalErr; errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	secondIDs := sseIDs(secondBody)
+	if len(secondIDs) != 3 || secondIDs[0] != 2 || secondIDs[1] != 3 || secondIDs[2] != 3 {
+		t.Fatalf("second stream IDs = %v, body = %q; want event seqs 2,3 plus stream_complete id 3", secondIDs, secondBody)
+	}
+	for _, id := range secondIDs {
+		if id <= lastSeq {
+			t.Fatalf("reconnect replayed duplicate seq <= %d: IDs=%v body=%q", lastSeq, secondIDs, secondBody)
+		}
+	}
+	if strings.Contains(secondBody, "initial event from internal POST") ||
+		!strings.Contains(secondBody, "missed event from internal POST") ||
+		!strings.Contains(secondBody, "event: stream_complete") {
+		t.Fatalf("second stream body did not catch up correctly: %q", secondBody)
 	}
 }
 
@@ -406,6 +540,77 @@ func TestEventRedactPublicDTO(t *testing.T) {
 	}
 }
 
+func TestEventRedactionAuditPersistsAndServesRedactedPayloads(t *testing.T) {
+	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	app := setupExecutionEventIntegrationApp(
+		t,
+		eventStore,
+		&UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"},
+		testTask("default", "task-redaction-audit"),
+	)
+	secrets := eventAuditSecrets()
+	contentText := strings.Join([]string{
+		"Authorization: Bearer " + secrets["bearer"],
+		"Cookie: session=" + secrets["cookie"],
+		"Transaction-Token: " + secrets["txn"],
+		"jwt=" + secrets["jwt"],
+		"openai=" + secrets["openai"],
+		"github=" + secrets["github"],
+		"anthropic=" + secrets["anthropic"],
+	}, "\n")
+	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-redaction-audit", map[string]any{
+		"type":    events.ExecutionEventTypeModelMessage,
+		"summary": "api_key=" + secrets["openai"] + " Authorization: Bearer " + secrets["bearer"],
+		"content": map[string]any{
+			"authorization":     "Bearer " + secrets["bearer"],
+			"jwt":               secrets["jwt"],
+			"apiKey":            secrets["openai"],
+			"cookie":            "session=" + secrets["cookie"],
+			"transaction-token": secrets["txn"],
+			"githubToken":       secrets["github"],
+			"anthropic_api_key": secrets["anthropic"],
+			"safe":              "preserved",
+		},
+		"contentText": contentText + "\n" + strings.Repeat("x", events.MaxExecutionEventContentTextChars),
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST status = %d, want 201", resp.StatusCode)
+	}
+
+	persisted, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-redaction-audit",
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents persisted: %v", err)
+	}
+	persistedData, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatalf("marshal persisted events: %v", err)
+	}
+	listed := getTaskEvents(t, app, "/api/v1/tasks/task-redaction-audit/events?namespace=default")
+	publicData, err := json.Marshal(listed)
+	if err != nil {
+		t.Fatalf("marshal public response: %v", err)
+	}
+	for name, secret := range secrets {
+		if strings.Contains(string(persistedData), secret) {
+			t.Fatalf("persisted events leaked %s secret %q in %s", name, secret, persistedData)
+		}
+		if strings.Contains(string(publicData), secret) {
+			t.Fatalf("public response leaked %s secret %q in %s", name, secret, publicData)
+		}
+	}
+	if !strings.Contains(string(persistedData), events.ExecutionEventRedactedValue) ||
+		!strings.Contains(string(publicData), events.ExecutionEventRedactedValue) {
+		t.Fatalf("redaction marker missing persisted=%s public=%s", persistedData, publicData)
+	}
+	if len(listed.Events) != 1 || listed.Events[0].Truncation == nil || !listed.Events[0].Truncation.ContentTextTruncated {
+		t.Fatalf("listed truncation = %#v, want contentText truncation preserved", listed.Events)
+	}
+}
+
 func setupExecutionEventIntegrationApp(
 	t *testing.T,
 	eventStore store.ExecutionEventStore,
@@ -517,6 +722,51 @@ func appendIntegrationTaskEvent(t *testing.T, eventStore store.ExecutionEventSto
 		Summary:    eventType + " summary",
 	}); err != nil {
 		t.Fatalf("AppendExecutionEvent %s/%s: %v", taskName, eventType, err)
+	}
+}
+
+func sseIDs(body string) []int64 {
+	ids := []int64{}
+	for line := range strings.SplitSeq(body, "\n") {
+		raw, ok := strings.CutPrefix(line, "id: ")
+		if !ok {
+			continue
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func postJSON(app *fiber.App, target string, body any) (int, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, fmt.Errorf("marshal body: %w", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		return 0, fmt.Errorf("app.Test: %w", err)
+	}
+	return resp.StatusCode, nil
+}
+
+func eventAuditSecrets() map[string]string {
+	return map[string]string{
+		"bearer": strings.Join([]string{"bearer", "value", "for", "redaction"}, "-"),
+		"jwt": strings.Join([]string{
+			"ey" + "JhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+			"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
+			"signature" + strings.Repeat("a", 24),
+		}, "."),
+		"openai":    strings.Join([]string{"sk", strings.Repeat("a", 24)}, "-"),
+		"cookie":    strings.Join([]string{"cookie", "value", "for", "redaction"}, "-"),
+		"txn":       strings.Join([]string{"txn", "value", "for", "redaction"}, "-"),
+		"github":    "github" + "_pat_" + strings.Repeat("a", 32),
+		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
 	}
 }
 

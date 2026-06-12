@@ -359,7 +359,13 @@ func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.C
 		Limit:      1,
 	})
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "failed to check terminal execution event", "task", task.Name)
+		logf.FromContext(ctx).Error(
+			err,
+			"failed to check existing terminal task lifecycle execution event",
+			"namespace", task.Namespace,
+			"task", task.Name,
+			"eventType", eventType,
+		)
 		return
 	}
 	if len(listed) > 0 {
@@ -925,7 +931,9 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 
 	attempts := task.Status.Attempts
 	jobName := task.Status.JobName
+	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		transitionedToRunning = false
 		if !canStartTaskJob(t.Status.Phase) {
 			return
 		}
@@ -940,9 +948,26 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			Reason:             "JobCreated",
 			Message:            fmt.Sprintf("Job %s created", job.Name),
 		})
+		transitionedToRunning = true
 	}); err != nil {
 		log.Error(err, "failed to update status")
 		return ctrl.Result{}, err
+	}
+	if transitionedToRunning {
+		r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskJobCreated,
+			execevents.ExecutionEventSeverityInfo,
+			fmt.Sprintf("Job %s created", jobName),
+		)
+		r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskStarted,
+			execevents.ExecutionEventSeverityInfo,
+			fmt.Sprintf("Task started with Job %s", jobName),
+		)
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil

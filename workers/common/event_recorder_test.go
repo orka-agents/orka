@@ -48,6 +48,20 @@ func TestEventRecorderNoopAllowsNilAndEmptyOptions(t *testing.T) {
 	recorder.Record(context.Background(), events.ExecutionEventTypeTaskCreated, nil, WithEventSeverity("warning"))
 }
 
+func TestRecordEventWithTimeoutUsesFreshContext(t *testing.T) {
+	recorder := NewFakeEventRecorder()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	RecordEvent(canceled, recorder, events.ExecutionEventTypeWorkerFailed)
+	if got := recorder.EventTypes(); len(got) != 0 {
+		t.Fatalf("RecordEvent with canceled context captured %v, want none", got)
+	}
+	RecordEventWithTimeout(recorder, events.ExecutionEventTypeWorkerFailed, time.Second)
+	if got := recorder.EventTypes(); !reflect.DeepEqual(got, []string{events.ExecutionEventTypeWorkerFailed}) {
+		t.Fatalf("RecordEventWithTimeout captured %v, want WorkerFailed", got)
+	}
+}
+
 func TestEventRecorderFakeSanitizesPayloadOptions(t *testing.T) {
 	recorder := NewFakeEventRecorder()
 	bearerValue := testDashToken("bearer")
@@ -71,6 +85,47 @@ func TestEventRecorderFakeSanitizesPayloadOptions(t *testing.T) {
 	}
 	if event.Truncation == nil || !event.Truncation.ContentTextTruncated {
 		t.Fatalf("Truncation = %#v, want contentText truncated", event.Truncation)
+	}
+}
+
+func TestSecretEventRedactionAuditWorkerSide(t *testing.T) {
+	recorder := NewFakeEventRecorder()
+	secrets := workerEventAuditSecrets()
+	recorder.Record(context.Background(), events.ExecutionEventTypeModelMessage,
+		WithEventSummary("Authorization: Bearer "+secrets["bearer"]+" token is "+secrets["openai"]),
+		WithEventContent(mustRawJSON(t, map[string]any{
+			"authorization":     "Bearer " + secrets["bearer"],
+			"jwt":               secrets["jwt"],
+			"apiKey":            secrets["openai"],
+			"cookie":            "session=" + secrets["cookie"],
+			"transaction-token": secrets["txn"],
+			"githubToken":       secrets["github"],
+			"anthropicAPIKey":   secrets["anthropic"],
+			"safe":              "preserved",
+		})),
+		WithEventContentText(strings.Join([]string{
+			"Cookie: session=" + secrets["cookie"],
+			"Transaction-Token: " + secrets["txn"],
+			"jwt=" + secrets["jwt"],
+			"github=" + secrets["github"],
+			"anthropic=" + secrets["anthropic"],
+		}, "\n")),
+	)
+	captured := recorder.Events()
+	if len(captured) != 1 {
+		t.Fatalf("Events() length = %d, want 1", len(captured))
+	}
+	data, err := json.Marshal(captured[0])
+	if err != nil {
+		t.Fatalf("marshal captured event: %v", err)
+	}
+	for name, secret := range secrets {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("worker event leaked %s secret %q in %s", name, secret, data)
+		}
+	}
+	if !strings.Contains(string(data), events.ExecutionEventRedactedValue) {
+		t.Fatalf("worker event = %s, want redaction marker", data)
 	}
 }
 
@@ -254,4 +309,20 @@ func testDashToken(prefix string) string {
 
 func testOpenAIKey() string {
 	return strings.Join([]string{"sk", "test12345678901234567890"}, "-")
+}
+
+func workerEventAuditSecrets() map[string]string {
+	return map[string]string{
+		"bearer": strings.Join([]string{"bearer", "value", "for", "redaction"}, "-"),
+		"jwt": strings.Join([]string{
+			"ey" + "JhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+			"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
+			"signature" + strings.Repeat("a", 24),
+		}, "."),
+		"openai":    strings.Join([]string{"sk", strings.Repeat("a", 24)}, "-"),
+		"cookie":    strings.Join([]string{"cookie", "value", "for", "redaction"}, "-"),
+		"txn":       strings.Join([]string{"txn", "value", "for", "redaction"}, "-"),
+		"github":    "github" + "_pat_" + strings.Repeat("a", 32),
+		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
+	}
 }

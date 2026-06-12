@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -162,6 +163,62 @@ func TestExecutionEventStoreListDefaultAndMaxLimit(t *testing.T) {
 	}
 }
 
+func TestEventSecretRedactionPersistedRows(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	secrets := executionEventAuditSecrets()
+	content := map[string]any{
+		"authorization":     "Bearer " + secrets["bearer"],
+		"jwt":               secrets["jwt"],
+		"apiKey":            secrets["openai"],
+		"cookie":            "session=" + secrets["cookie"],
+		"transaction-token": secrets["txn"],
+		"githubToken":       secrets["github"],
+		"anthropic_api_key": secrets["anthropic"],
+		"safe":              "preserved",
+	}
+	contentBytes, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("marshal content: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "task-redact-store",
+		TaskName:    "task-redact-store",
+		Type:        events.ExecutionEventTypeModelMessage,
+		Summary:     "Authorization: Bearer " + secrets["bearer"] + "\nTransaction-Token: " + secrets["txn"],
+		Content:     json.RawMessage(contentBytes),
+		ContentText: "Cookie: session=" + secrets["cookie"] + "\napi_key=" + secrets["openai"],
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+
+	var persisted string
+	if err := s.db.QueryRowContext(ctx, `SELECT summary || COALESCE(content_json, '') || content_text FROM execution_events WHERE stream_id = ?`, "task-redact-store").Scan(&persisted); err != nil {
+		t.Fatalf("query persisted event: %v", err)
+	}
+	for name, secret := range secrets {
+		if strings.Contains(persisted, secret) {
+			t.Fatalf("persisted event leaked %s secret %q in %q", name, secret, persisted)
+		}
+	}
+	if !strings.Contains(persisted, events.ExecutionEventRedactedValue) {
+		t.Fatalf("persisted event = %q, want redaction marker", persisted)
+	}
+	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-redact-store",
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || !strings.Contains(string(listed[0].Content), events.ExecutionEventRedactedValue) {
+		t.Fatalf("listed redacted event = %#v content=%s", listed, listed[0].Content)
+	}
+}
+
 func TestExecutionEventStoreConcurrentSameStreamAppends(t *testing.T) {
 	s := setupDiskStore(t)
 	assertConcurrentExecutionEventAppends(t, s)
@@ -238,5 +295,21 @@ func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {
 	}
 	if latest != count {
 		t.Fatalf("latest = %d, want %d", latest, count)
+	}
+}
+
+func executionEventAuditSecrets() map[string]string {
+	return map[string]string{
+		"bearer": strings.Join([]string{"bearer", "value", "for", "redaction"}, "-"),
+		"jwt": strings.Join([]string{
+			"ey" + "JhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+			"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
+			"signature" + strings.Repeat("a", 24),
+		}, "."),
+		"openai":    strings.Join([]string{"sk", strings.Repeat("a", 24)}, "-"),
+		"cookie":    strings.Join([]string{"cookie", "value", "for", "redaction"}, "-"),
+		"txn":       strings.Join([]string{"txn", "value", "for", "redaction"}, "-"),
+		"github":    "github" + "_pat_" + strings.Repeat("a", 32),
+		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
 	}
 }

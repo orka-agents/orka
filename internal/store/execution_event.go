@@ -109,6 +109,45 @@ type ExecutionEventStore interface {
 	DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error
 }
 
+// SanitizeExecutionEventPayloadFields applies the shared event redaction and
+// truncation contract to store-facing event payload fields. Stores call this as
+// a defense-in-depth boundary so direct appends cannot persist obvious secrets.
+func SanitizeExecutionEventPayloadFields(event *ExecutionEvent) error {
+	if event == nil {
+		return nil
+	}
+	payload, err := events.SanitizeExecutionEventPayload(event.Summary, event.Content, event.ContentText)
+	if err != nil {
+		return err
+	}
+	event.Summary = payload.Summary
+	event.Content = payload.Content
+	event.ContentText = payload.ContentText
+	event.Truncation = MergeExecutionEventTruncation(event.Truncation, payload.Truncation)
+	return nil
+}
+
+// MergeExecutionEventTruncation combines truncation metadata, preserving the
+// highest original lengths without exposing raw values.
+func MergeExecutionEventTruncation(values ...*events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
+	var merged events.ExecutionEventTruncation
+	for _, value := range values {
+		if value == nil {
+			continue
+		}
+		merged.SummaryTruncated = merged.SummaryTruncated || value.SummaryTruncated
+		merged.SummaryOriginalChars = max(merged.SummaryOriginalChars, value.SummaryOriginalChars)
+		merged.ContentTextTruncated = merged.ContentTextTruncated || value.ContentTextTruncated
+		merged.ContentTextOriginalChars = max(merged.ContentTextOriginalChars, value.ContentTextOriginalChars)
+		merged.ContentJSONTruncated = merged.ContentJSONTruncated || value.ContentJSONTruncated
+		merged.ContentJSONOriginalBytes = max(merged.ContentJSONOriginalBytes, value.ContentJSONOriginalBytes)
+	}
+	if merged.Empty() {
+		return nil
+	}
+	return &merged
+}
+
 type executionEventStreamKey struct {
 	namespace  string
 	streamType string
@@ -175,6 +214,9 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 	}
 	if !events.IsValidExecutionEventType(copy.Type) {
 		return nil, ValidationErrorf("unsupported execution event type %q", copy.Type)
+	}
+	if err := SanitizeExecutionEventPayloadFields(&copy); err != nil {
+		return nil, ValidationErrorf("invalid execution event payload: %v", err)
 	}
 	if copy.CreatedAt.IsZero() {
 		copy.CreatedAt = s.now().UTC()
