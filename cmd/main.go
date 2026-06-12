@@ -704,6 +704,7 @@ func main() {
 		PlanStore:                          sqliteStore,
 		MessageStore:                       sqliteStore,
 		ArtifactStore:                      sqliteStore,
+		ExecutionEventStore:                sqliteStore,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
@@ -825,6 +826,7 @@ func main() {
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
+		ExecutionEventStore:       sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{

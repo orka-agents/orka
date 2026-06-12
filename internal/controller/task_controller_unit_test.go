@@ -81,13 +81,14 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 	}
 	ss := sqlite.NewStore(db, ":memory:")
 	return &TaskReconciler{
-		Client:         fc,
-		Scheme:         scheme,
-		JobBuilder:     NewJobBuilder(fc),
-		SessionManager: NewSessionManager(ss),
-		Recorder:       record.NewFakeRecorder(100),
-		ResultStore:    ss,
-		PlanStore:      ss,
+		Client:              fc,
+		Scheme:              scheme,
+		JobBuilder:          NewJobBuilder(fc),
+		SessionManager:      NewSessionManager(ss),
+		Recorder:            record.NewFakeRecorder(100),
+		ResultStore:         ss,
+		PlanStore:           ss,
+		ExecutionEventStore: ss,
 	}
 }
 
@@ -95,6 +96,26 @@ type recordingTaskWorkspaceExecutor struct {
 	deleteReqs  []workspace.DeleteRequest
 	deleteErr   error
 	closeCalled bool
+}
+
+type failingExecutionEventStore struct {
+	err error
+}
+
+func (s failingExecutionEventStore) AppendExecutionEvent(context.Context, *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return nil, s.err
+}
+
+func (s failingExecutionEventStore) ListExecutionEvents(context.Context, store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	return nil, s.err
+}
+
+func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
+	return 0, s.err
+}
+
+func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
+	return s.err
 }
 
 func (e *recordingTaskWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2521,6 +2542,86 @@ func TestHandleDeletion_WithResultRef(t *testing.T) {
 	_, getErr := r.ResultStore.GetResult(context.Background(), "default", "del-result")
 	if getErr == nil {
 		t.Error("expected result to be deleted")
+	}
+}
+
+func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-events",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "del-events",
+		TaskName:   "del-events",
+		Type:       "TaskStarted",
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent task: %v", err)
+	}
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "other-task",
+		TaskName:   "other-task",
+		Type:       "TaskStarted",
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent other task: %v", err)
+	}
+
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	deletedEvents, err := r.ExecutionEventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "del-events",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents deleted task: %v", err)
+	}
+	if len(deletedEvents) != 0 {
+		t.Fatalf("deleted task events len = %d, want 0", len(deletedEvents))
+	}
+	otherEvents, err := r.ExecutionEventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "other-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents other task: %v", err)
+	}
+	if len(otherEvents) != 1 {
+		t.Fatalf("other task events len = %d, want 1", len(otherEvents))
+	}
+}
+
+func TestHandleDeletionKeepsFinalizerWhenExecutionEventCleanupFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-events-fail",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.ExecutionEventStore = failingExecutionEventStore{err: errors.New("store unavailable")}
+
+	_, err := r.handleDeletion(context.Background(), task)
+	if err == nil {
+		t.Fatal("handleDeletion() error = nil, want execution event cleanup error")
+	}
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		t.Fatal("task finalizer was removed after execution event cleanup failed")
 	}
 }
 

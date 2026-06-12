@@ -99,6 +99,7 @@ type TaskReconciler struct {
 	PlanStore                          store.PlanStore
 	MessageStore                       store.MessageStore
 	ArtifactStore                      store.ArtifactStore
+	ExecutionEventStore                store.ExecutionEventStore
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
 	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
@@ -326,6 +327,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			// If this is a coordinator, clean up all children's messages
 			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete parent messages", "task", task.Name)
+			}
+		}
+
+		// Clean up execution timeline events before allowing a future task with the
+		// same namespace/name to expose stale history.
+		if r.ExecutionEventStore != nil {
+			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
+				log.Error(err, "failed to delete execution events", "task", task.Name)
+				return ctrl.Result{}, err
 			}
 		}
 

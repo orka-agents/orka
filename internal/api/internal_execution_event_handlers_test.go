@@ -11,15 +11,24 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
 
 func TestInternalSubmitExecutionEvent(t *testing.T) {
 	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	eventStore := store.NewFakeExecutionEventStoreWithClock(func() time.Time { return now })
-	app := setupInternalExecutionEventApp(eventStore, &UserInfo{Username: "system:serviceaccount:default:worker", Namespace: "default"})
+	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
 
 	redactionValue := strings.Join([]string{"bearer", "value", "for", "redaction"}, "-")
 	body := map[string]any{
@@ -32,7 +41,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 		"content":     map[string]any{"token": redactionValue, "safe": "ok"},
 		"contentText": strings.Repeat("x", events.MaxExecutionEventContentTextChars+5),
 	}
-	resp := doJSONRequest(t, app, http.MethodPost, "/internal/v1/events/default/task/task-1", body)
+	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
@@ -115,7 +124,7 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := doJSONRequest(t, authenticatedApp, http.MethodPost, tt.path, tt.body)
+			resp := doJSONRequest(t, authenticatedApp, tt.path, tt.body)
 			if resp.StatusCode != tt.want {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
 			}
@@ -136,15 +145,94 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 
 	t.Run("unauthenticated", func(t *testing.T) {
 		app := setupInternalExecutionEventApp(eventStore, nil)
-		resp := doJSONRequest(t, app, http.MethodPost, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
+		resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", resp.StatusCode)
 		}
 	})
 }
 
+func TestInternalSubmitExecutionEventRequiresCurrentTaskWorker(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "other-pod", "other-pod-uid")
+	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
 func setupInternalExecutionEventApp(eventStore store.ExecutionEventStore, userInfo *UserInfo) *fiber.App {
 	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{ExecutionEventStore: eventStore})
+	return setupInternalExecutionEventAppWithHandler(h, userInfo)
+}
+
+func setupOwnedInternalExecutionEventApp(t *testing.T, eventStore store.ExecutionEventStore, taskName, callerPodName, callerPodUID string) *fiber.App {
+	t.Helper()
+	taskUID := types.UID(taskName + "-uid")
+	jobUID := types.UID(taskName + "-job-uid")
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme task: %v", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme batch: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme core: %v", err)
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default", UID: taskUID},
+		Status:     corev1alpha1.TaskStatus{JobName: taskName + "-job"},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:      taskName + "-job",
+		Namespace: "default",
+		UID:       jobUID,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(),
+			Kind:       "Task",
+			Name:       taskName,
+			UID:        taskUID,
+		}},
+	}}
+	workerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "worker-pod",
+		Namespace: "default",
+		UID:       types.UID("worker-pod-uid"),
+		Labels:    map[string]string{labels.LabelTask: labels.SelectorValue(taskName)},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(),
+			Kind:       "Job",
+			Name:       taskName + "-job",
+			UID:        jobUID,
+		}},
+	}}
+	otherPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "other-pod",
+		Namespace: "default",
+		UID:       types.UID("other-pod-uid"),
+		Labels:    map[string]string{labels.LabelTask: labels.SelectorValue("other-task")},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(),
+			Kind:       "Job",
+			Name:       taskName + "-job",
+			UID:        jobUID,
+		}},
+	}}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, workerPod, otherPod).Build()
+	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{Client: k8sClient, ExecutionEventStore: eventStore})
+	return setupInternalExecutionEventAppWithHandler(h, &UserInfo{
+		Username:  "system:serviceaccount:default:worker",
+		Namespace: "default",
+		AuthType:  AuthTypeTokenReview,
+		Extra: map[string]authenticationv1.ExtraValue{
+			"authentication.kubernetes.io/pod-name": {callerPodName},
+			"authentication.kubernetes.io/pod-uid":  {callerPodUID},
+		},
+	})
+}
+
+func setupInternalExecutionEventAppWithHandler(h *InternalHandlers, userInfo *UserInfo) *fiber.App {
 	app := fiber.New()
 	if userInfo != nil {
 		app.Use(func(c fiber.Ctx) error {
@@ -156,13 +244,13 @@ func setupInternalExecutionEventApp(eventStore store.ExecutionEventStore, userIn
 	return app
 }
 
-func doJSONRequest(t *testing.T, app *fiber.App, method, target string, body any) *http.Response {
+func doJSONRequest(t *testing.T, app *fiber.App, target string, body any) *http.Response {
 	t.Helper()
 	data, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	req := httptest.NewRequest(method, target, bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {

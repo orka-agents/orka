@@ -9,7 +9,10 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/store"
 )
@@ -64,6 +67,21 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask && strings.TrimSpace(event.TaskName) == "" {
 		event.TaskName = streamID
+	}
+	if event.StreamType == events.ExecutionEventStreamTypeTask {
+		if h.k8sClient == nil {
+			return fiber.NewError(fiber.StatusNotImplemented, "task ownership validation not enabled")
+		}
+		task := &corev1alpha1.Task{}
+		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fiber.NewError(fiber.StatusNotFound, "task not found")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+		}
+		if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
+			return err
+		}
 	}
 
 	appended, err := h.executionEventStore.AppendExecutionEvent(c.Context(), event)
