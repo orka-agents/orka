@@ -280,8 +280,8 @@ Normal binary e2e tests build and invoke `bin/orka` directly with isolated confi
 | `audit` | Covered | Trace no-match path. |
 | `session` | Covered | List/get/delete against a controlled fixture. |
 | `memory` | Covered | Create/list/get/disable/enable/update/delete and proposal-list smoke. |
-| `security` | Covered | Repository scan CRUD/read/list, threat model update/get, scan/finding/slice/dropped-finding list. |
-| `monitor` | Covered | CRUD/read/list plus runs/items/events list. |
+| `security` | Partially covered | Repository scan create/get/list/delete, threat model update/get, scan/finding/slice/dropped-finding list; repository scan update is not covered. |
+| `monitor` | Partially covered | Repository monitor create/get/list/delete plus runs/items/events list; monitor update is not covered. |
 | `substrate` | Covered | Pool create/get/list/update/delete. |
 | `run` | Deferred/live-gated | Depends on chat/SSE/provider fixtures. |
 | `login` | Deferred | Browser-open behavior and token-bearing URL make normal e2e unsafe until a no-open/redacted test mode exists. |
