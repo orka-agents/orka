@@ -43,6 +43,13 @@ func (failingExecutionEventStore) ListExecutionEvents(
 	return nil, errors.New("not implemented")
 }
 
+func (failingExecutionEventStore) ListSessionExecutionEvents(
+	context.Context,
+	store.SessionExecutionEventFilter,
+) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, errors.New("not implemented")
+}
+
 func (failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, errors.New("not implemented")
 }
@@ -63,6 +70,7 @@ func TestEventRecorderHTTPIntegrationPostsToInternalAPI(t *testing.T) {
 		ControllerURL: controllerURL,
 		Namespace:     "default",
 		TaskName:      "task-worker",
+		SessionName:   "session-worker",
 		BearerPath:    writeWorkerTestSAToken(t, bearerToken),
 		Timeout:       time.Second,
 	})
@@ -91,6 +99,23 @@ func TestEventRecorderHTTPIntegrationPostsToInternalAPI(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeWorkerStarted || listed[0].Seq != 1 {
 		t.Fatalf("listed events = %#v, want WorkerStarted seq 1", listed)
+	}
+	if listed[0].SessionName != "session-worker" {
+		t.Fatalf("listed sessionName = %q, want session-worker", listed[0].SessionName)
+	}
+	sessionListed, latestSessionSeq, err := eventStore.ListSessionExecutionEvents(
+		context.Background(),
+		store.SessionExecutionEventFilter{
+			Namespace:   "default",
+			SessionName: "session-worker",
+			Limit:       10,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latestSessionSeq != 1 || len(sessionListed) != 1 || sessionListed[0].SessionSeq != 1 {
+		t.Fatalf("session latest=%d listed=%#v, want one session event at seq 1", latestSessionSeq, sessionListed)
 	}
 	content := string(listed[0].Content)
 	if strings.Contains(content, secret) || !strings.Contains(content, events.ExecutionEventRedactedValue) {

@@ -21,6 +21,7 @@ const (
 	EnvOrkaControllerURL = "ORKA_CONTROLLER_URL"
 	EnvOrkaTaskNamespace = "ORKA_TASK_NAMESPACE"
 	EnvOrkaTaskName      = "ORKA_TASK_NAME"
+	EnvOrkaSessionName   = "ORKA_SESSION_NAME"
 
 	DefaultServiceAccountBearerPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultEventRecorderTimeout     = 2 * time.Second
@@ -31,6 +32,7 @@ type HTTPEventRecorderConfig struct {
 	ControllerURL string
 	Namespace     string
 	TaskName      string
+	SessionName   string
 	BearerPath    string
 	Client        *http.Client
 	Timeout       time.Duration
@@ -39,13 +41,14 @@ type HTTPEventRecorderConfig struct {
 
 // HTTPEventRecorder posts worker execution events to the controller internal API.
 type HTTPEventRecorder struct {
-	endpoint   string
-	namespace  string
-	taskName   string
-	bearerPath string
-	client     *http.Client
-	timeout    time.Duration
-	now        func() time.Time
+	endpoint    string
+	namespace   string
+	taskName    string
+	sessionName string
+	bearerPath  string
+	client      *http.Client
+	timeout     time.Duration
+	now         func() time.Time
 }
 
 var _ EventRecorder = (*HTTPEventRecorder)(nil)
@@ -58,6 +61,7 @@ func NewHTTPEventRecorderFromEnv() EventRecorder {
 		ControllerURL: os.Getenv(EnvOrkaControllerURL),
 		Namespace:     os.Getenv(EnvOrkaTaskNamespace),
 		TaskName:      os.Getenv(EnvOrkaTaskName),
+		SessionName:   os.Getenv(EnvOrkaSessionName),
 		BearerPath:    DefaultServiceAccountBearerPath,
 	})
 }
@@ -68,6 +72,7 @@ func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 	controllerURL := strings.TrimSpace(cfg.ControllerURL)
 	namespace := strings.TrimSpace(cfg.Namespace)
 	taskName := strings.TrimSpace(cfg.TaskName)
+	sessionName := strings.TrimSpace(cfg.SessionName)
 	if controllerURL == "" || namespace == "" || taskName == "" {
 		return NoopEventRecorder{}
 	}
@@ -92,13 +97,14 @@ func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 		bearerPath = DefaultServiceAccountBearerPath
 	}
 	return &HTTPEventRecorder{
-		endpoint:   endpoint,
-		namespace:  namespace,
-		taskName:   taskName,
-		bearerPath: bearerPath,
-		client:     client,
-		timeout:    timeout,
-		now:        now,
+		endpoint:    endpoint,
+		namespace:   namespace,
+		taskName:    taskName,
+		sessionName: sessionName,
+		bearerPath:  bearerPath,
+		client:      client,
+		timeout:     timeout,
+		now:         now,
 	}
 }
 
@@ -114,10 +120,11 @@ func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 		return
 	}
 	event := RecordedEvent{
-		Type:      events.NormalizeExecutionEventType(typ),
-		Severity:  events.ExecutionEventSeverityInfo,
-		TaskName:  r.taskName,
-		CreatedAt: r.now().UTC(),
+		Type:        events.NormalizeExecutionEventType(typ),
+		Severity:    events.ExecutionEventSeverityInfo,
+		TaskName:    r.taskName,
+		SessionName: r.sessionName,
+		CreatedAt:   r.now().UTC(),
 	}
 	if event.Type == "" {
 		event.Type = typ

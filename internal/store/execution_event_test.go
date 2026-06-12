@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestExecutionEventFilterNormalizationDefaultsLimit(t *testing.T) {
 
 func TestExecutionEventFilterValidateRejectsUnsupportedValues(t *testing.T) {
 	if err := (ExecutionEventFilter{StreamType: "session"}).Validate(); err == nil {
-		t.Fatalf("Validate() accepted unsupported session stream type")
+		t.Fatalf("Validate() accepted unsupported direct session stream type")
 	}
 	if err := (ExecutionEventFilter{EventTypes: []string{"Nope"}}).Validate(); err == nil {
 		t.Fatalf("Validate() accepted unsupported event type")
@@ -117,6 +118,101 @@ func TestExecutionEventStoreFakeAppendsMonotonicSeqPerStream(t *testing.T) {
 	}
 }
 
+func TestExecutionEventStoreFakeAggregatesSessionEvents(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		now = now.Add(time.Second)
+		return now
+	}
+	store := NewFakeExecutionEventStoreWithClock(clock)
+	for _, item := range []struct {
+		task string
+		typ  string
+	}{
+		{"task-a", events.ExecutionEventTypeTaskStarted},
+		{"task-b", events.ExecutionEventTypeWorkerStarted},
+		{"task-a", events.ExecutionEventTypeTaskSucceeded},
+	} {
+		if _, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  ExecutionEventStreamTypeTask,
+			StreamID:    item.task,
+			TaskName:    item.task,
+			SessionName: "session-1",
+			Type:        item.typ,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent: %v", err)
+		}
+	}
+
+	listed, latest, err := store.ListSessionExecutionEvents(ctx, SessionExecutionEventFilter{Namespace: "default", SessionName: "session-1", AfterSeq: 1})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 3 || len(listed) != 2 {
+		t.Fatalf("latest=%d listed=%#v, want latest 3 and two events", latest, listed)
+	}
+	if listed[0].SessionSeq != 2 || listed[0].TaskName != "task-b" || listed[0].TaskSeq != 1 {
+		t.Fatalf("first session event = %#v, want task-b session seq 2 task seq 1", listed[0])
+	}
+}
+
+func TestExecutionEventStoreFakeSessionTypeFilterPreservesCursor(t *testing.T) {
+	ctx := context.Background()
+	store := NewFakeExecutionEventStore()
+	for _, item := range []struct {
+		task string
+		typ  string
+	}{
+		{"task-a", events.ExecutionEventTypeTaskStarted},
+		{"task-b", events.ExecutionEventTypeWorkerStarted},
+	} {
+		if _, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+			Namespace: "default", StreamType: ExecutionEventStreamTypeTask, StreamID: item.task,
+			TaskName: item.task, SessionName: "session-1", Type: item.typ,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent: %v", err)
+		}
+	}
+	listed, latest, err := store.ListSessionExecutionEvents(ctx, SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1", EventTypes: []string{events.ExecutionEventTypeWorkerStarted},
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 2 || len(listed) != 1 || listed[0].SessionSeq != 2 {
+		t.Fatalf("latest=%d listed=%#v, want latest 2 and preserved session seq 2", latest, listed)
+	}
+}
+
+func TestExecutionEventStoreFakeRejectsDuplicateApprovalDecision(t *testing.T) {
+	ctx := context.Background()
+	store := NewFakeExecutionEventStore()
+	approved := jsonRawMessageForTest(t, map[string]string{"approvalID": "approval-1"})
+	declined := jsonRawMessageForTest(t, map[string]string{"approvalID": "approval-1"})
+	if _, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+		Namespace:  "default",
+		StreamType: ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+		TaskName:   "task-1",
+		Type:       events.ExecutionEventTypeApprovalApproved,
+		Content:    approved,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent approved: %v", err)
+	}
+	if _, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+		Namespace:  "default",
+		StreamType: ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+		TaskName:   "task-1",
+		Type:       events.ExecutionEventTypeApprovalDeclined,
+		Content:    declined,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("AppendExecutionEvent duplicate decision error = %v, want ErrConflict", err)
+	}
+}
+
 func TestExecutionEventStoreFakeValidationAndDelete(t *testing.T) {
 	ctx := context.Background()
 	store := NewFakeExecutionEventStore()
@@ -138,4 +234,13 @@ func TestExecutionEventStoreFakeValidationAndDelete(t *testing.T) {
 	if latest != 0 {
 		t.Fatalf("latest after delete = %d, want 0", latest)
 	}
+}
+
+func jsonRawMessageForTest(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return json.RawMessage(data)
 }

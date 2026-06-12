@@ -92,6 +92,25 @@ type ListExecutionEventsResponse struct {
 	Events     []ExecutionEventResponse `json:"events"`
 }
 
+// SessionExecutionEventResponse is the public representation of a task-derived
+// session event. Seq is the session-level cursor; taskSeq is the source task
+// stream sequence.
+type SessionExecutionEventResponse struct {
+	ExecutionEventResponse
+	TaskSeq      int64  `json:"taskSeq"`
+	TaskStreamID string `json:"taskStreamID"`
+}
+
+// ListSessionExecutionEventsResponse is the API response for an aggregated session stream.
+type ListSessionExecutionEventsResponse struct {
+	Namespace  string                          `json:"namespace"`
+	StreamType string                          `json:"streamType"`
+	StreamID   string                          `json:"streamID"`
+	AfterSeq   int64                           `json:"afterSeq"`
+	LatestSeq  int64                           `json:"latestSeq"`
+	Events     []SessionExecutionEventResponse `json:"events"`
+}
+
 // NewExecutionEventResponse converts a store event to an API DTO and intentionally
 // omits store-only fields such as ExecutionEvent.Internal.
 func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventResponse {
@@ -126,6 +145,35 @@ func NewListExecutionEventsResponse(namespace, streamType, streamID string, afte
 		Namespace:  namespace,
 		StreamType: streamType,
 		StreamID:   streamID,
+		AfterSeq:   afterSeq,
+		LatestSeq:  latestSeq,
+		Events:     responses,
+	}
+}
+
+// NewSessionExecutionEventResponse converts an aggregated store event to a session DTO.
+func NewSessionExecutionEventResponse(event store.SessionExecutionEvent) SessionExecutionEventResponse {
+	response := NewExecutionEventResponse(event.ExecutionEvent)
+	response.Seq = event.SessionSeq
+	response.StreamType = events.ExecutionEventStreamTypeSession
+	response.StreamID = event.SessionName
+	return SessionExecutionEventResponse{
+		ExecutionEventResponse: response,
+		TaskSeq:                event.TaskSeq,
+		TaskStreamID:           event.StreamID,
+	}
+}
+
+// NewListSessionExecutionEventsResponse builds a session timeline DTO.
+func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterSeq, latestSeq int64, storeEvents []store.SessionExecutionEvent) ListSessionExecutionEventsResponse {
+	responses := make([]SessionExecutionEventResponse, 0, len(storeEvents))
+	for _, event := range storeEvents {
+		responses = append(responses, NewSessionExecutionEventResponse(event))
+	}
+	return ListSessionExecutionEventsResponse{
+		Namespace:  namespace,
+		StreamType: events.ExecutionEventStreamTypeSession,
+		StreamID:   sessionName,
 		AfterSeq:   afterSeq,
 		LatestSeq:  latestSeq,
 		Events:     responses,

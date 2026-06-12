@@ -5984,6 +5984,13 @@ func (failingTaskExecutionEventStore) ListExecutionEvents(context.Context, store
 	return nil, errors.New("not implemented")
 }
 
+func (failingTaskExecutionEventStore) ListSessionExecutionEvents(
+	context.Context,
+	store.SessionExecutionEventFilter,
+) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, errors.New("not implemented")
+}
+
 func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, errors.New("not implemented")
 }

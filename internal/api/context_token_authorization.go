@@ -27,6 +27,8 @@ import (
 )
 
 const (
+	defaultTaskUpdateScope = "orka:tasks:update"
+
 	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
 	ContextTokenAuthorizationModeOff = "off"
 	// ContextTokenAuthorizationModeAudit logs context-token authorization failures but allows the request.
@@ -88,6 +90,7 @@ type ContextTokenAuthorizationConfig struct {
 	TaskReadScopes                []string
 	TaskListScopes                []string
 	TaskDeleteScopes              []string
+	TaskUpdateScopes              []string
 	ToolReadScopes                []string
 	ToolUseScopes                 []string
 	ProviderUseScopes             []string
@@ -116,6 +119,7 @@ type ContextTokenAuthorizationConfigOptions struct {
 	TaskReadScopes             string
 	TaskListScopes             string
 	TaskDeleteScopes           string
+	TaskUpdateScopes           string
 	ToolReadScopes             string
 	ToolUseScopes              string
 	ProviderUseScopes          string
@@ -152,6 +156,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	readScopes := defaultScopes(opts.TaskReadScopes, ContextTokenScopeTaskGet)
 	listScopes := defaultScopes(opts.TaskListScopes, ContextTokenScopeTaskList)
 	deleteScopes := defaultScopes(opts.TaskDeleteScopes, ContextTokenScopeTaskDelete)
+	updateScopes := defaultScopes(opts.TaskUpdateScopes, defaultTaskUpdateScope)
 	toolRead := defaultScopes(opts.ToolReadScopes, ContextTokenScopeToolsRead)
 	toolUse := defaultScopes(opts.ToolUseScopes, ContextTokenScopeToolsUse)
 	providerUse := defaultScopes(opts.ProviderUseScopes, ContextTokenScopeProvidersUse)
@@ -176,6 +181,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		TaskReadScopes:                readScopes,
 		TaskListScopes:                listScopes,
 		TaskDeleteScopes:              deleteScopes,
+		TaskUpdateScopes:              updateScopes,
 		ToolReadScopes:                toolRead,
 		ToolUseScopes:                 toolUse,
 		ProviderUseScopes:             providerUse,
