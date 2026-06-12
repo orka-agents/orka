@@ -2561,7 +2561,8 @@ func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
 		StreamType: store.ExecutionEventStreamTypeTask,
 		StreamID:   "del-events",
 		TaskName:   "del-events",
-		Type:       "TaskStarted",
+		Type:       events.ExecutionEventTypeTaskStarted,
+		Severity:   events.ExecutionEventSeverityInfo,
 	}); err != nil {
 		t.Fatalf("AppendExecutionEvent task: %v", err)
 	}
@@ -2570,7 +2571,8 @@ func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
 		StreamType: store.ExecutionEventStreamTypeTask,
 		StreamID:   "other-task",
 		TaskName:   "other-task",
-		Type:       "TaskStarted",
+		Type:       events.ExecutionEventTypeTaskStarted,
+		Severity:   events.ExecutionEventSeverityInfo,
 	}); err != nil {
 		t.Fatalf("AppendExecutionEvent other task: %v", err)
 	}
