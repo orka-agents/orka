@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -84,6 +85,98 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 	}
 	if event.Truncation == nil || !event.Truncation.ContentTextTruncated {
 		t.Fatalf("truncation = %#v, want content text truncation", event.Truncation)
+	}
+}
+
+func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
+	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+	eventStore := store.NewFakeExecutionEventStore()
+	app := setupInternalExecutionEventAppWithClient(
+		eventStore,
+		testInternalExecutionEventClient(t, task, job, pod),
+		testInternalExecutionEventWorkerUser("owned-task-pod", "pod-uid"),
+	)
+
+	resp := doJSONRequest(
+		t,
+		app,
+		"/internal/v1/events/default/task/owned-task",
+		map[string]any{"type": events.ExecutionEventTypeWorkerStarted},
+	)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("owned worker status = %d, want 201", resp.StatusCode)
+	}
+	stored, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "owned-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("stored len = %d, want 1", len(stored))
+	}
+}
+
+func TestInternalSubmitExecutionEventRejectsWrongOrDeletingTask(t *testing.T) {
+	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+	otherTask, otherJob, _ := testInternalExecutionEventOwnedWorkerObjects("other-task")
+	deletingTask, deletingJob, deletingPod := testInternalExecutionEventOwnedWorkerObjects("deleting-task")
+	deletingTask.Finalizers = []string{labels.TaskFinalizer}
+	deletingTask.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	eventStore := store.NewFakeExecutionEventStore()
+	k8sClient := testInternalExecutionEventClient(t, task, job, pod, otherTask, otherJob, deletingTask, deletingJob, deletingPod)
+	app := setupInternalExecutionEventAppWithClient(
+		eventStore,
+		k8sClient,
+		testInternalExecutionEventWorkerUser("owned-task-pod", "pod-uid"),
+	)
+
+	tests := []struct {
+		name string
+		path string
+		want int
+	}{
+		{
+			name: "wrong task",
+			path: "/internal/v1/events/default/task/other-task",
+			want: http.StatusForbidden,
+		},
+		{
+			name: "deleting task not owned",
+			path: "/internal/v1/events/default/task/deleting-task",
+			want: http.StatusForbidden,
+		},
+		{
+			name: "missing task",
+			path: "/internal/v1/events/default/task/missing-task",
+			want: http.StatusForbidden,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := doJSONRequest(t, app, tt.path, map[string]any{"type": events.ExecutionEventTypeTaskSucceeded})
+			if resp.StatusCode != tt.want {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
+			}
+		})
+	}
+
+	deletingApp := setupInternalExecutionEventAppWithClient(
+		eventStore,
+		k8sClient,
+		testInternalExecutionEventWorkerUser("deleting-task-pod", "pod-uid"),
+	)
+	deletingResp := doJSONRequest(
+		t,
+		deletingApp,
+		"/internal/v1/events/default/task/deleting-task",
+		map[string]any{"type": events.ExecutionEventTypeTaskSucceeded},
+	)
+	if deletingResp.StatusCode != http.StatusGone {
+		t.Fatalf("owned deleting task status = %d, want 410", deletingResp.StatusCode)
 	}
 }
 
@@ -242,6 +335,101 @@ func setupInternalExecutionEventAppWithHandler(h *InternalHandlers, userInfo *Us
 	}
 	app.Post("/internal/v1/events/:namespace/:streamType/:streamID", h.SubmitExecutionEvent)
 	return app
+}
+
+func setupInternalExecutionEventAppWithClient(
+	eventStore store.ExecutionEventStore,
+	k8sClient client.Client,
+	userInfo *UserInfo,
+) *fiber.App {
+	h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{
+		Client:              k8sClient,
+		ExecutionEventStore: eventStore,
+	})
+	app := fiber.New()
+	if userInfo != nil {
+		app.Use(func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, userInfo)
+			return c.Next()
+		})
+	}
+	app.Post("/internal/v1/events/:namespace/:streamType/:streamID", h.SubmitExecutionEvent)
+	return app
+}
+
+func testInternalExecutionEventClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = batchv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(clientObjectsToRuntimeObjects(objs)...).
+		Build()
+}
+
+func clientObjectsToRuntimeObjects(objs []client.Object) []runtime.Object {
+	runtimeObjects := make([]runtime.Object, 0, len(objs))
+	for _, obj := range objs {
+		runtimeObjects = append(runtimeObjects, obj)
+	}
+	return runtimeObjects
+}
+
+func testInternalExecutionEventOwnedWorkerObjects(taskName string) (*corev1alpha1.Task, *batchv1.Job, *corev1.Pod) {
+	taskUID := types.UID(taskName + "-uid")
+	jobUID := types.UID(taskName + "-job-uid")
+	podUID := types.UID("pod-uid")
+	jobName := taskName + "-job"
+	podName := taskName + "-pod"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: taskName, Namespace: "default", UID: taskUID},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{JobName: jobName},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: "default",
+			UID:       jobUID,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				Kind:       "Task",
+				Name:       taskName,
+				UID:        taskUID,
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: "default",
+			UID:       podUID,
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue(taskName),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: batchv1.SchemeGroupVersion.String(),
+				Kind:       "Job",
+				Name:       jobName,
+				UID:        jobUID,
+			}},
+		},
+	}
+	return task, job, pod
+}
+
+func testInternalExecutionEventWorkerUser(podName, podUID string) *UserInfo {
+	return &UserInfo{
+		Username:  "system:serviceaccount:default:worker",
+		Namespace: "default",
+		AuthType:  AuthTypeTokenReview,
+		Extra: map[string]authenticationv1.ExtraValue{
+			"authentication.kubernetes.io/pod-name": {podName},
+			"authentication.kubernetes.io/pod-uid":  {podUID},
+		},
+	}
 }
 
 func doJSONRequest(t *testing.T, app *fiber.App, target string, body any) *http.Response {

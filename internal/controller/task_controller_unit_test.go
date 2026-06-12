@@ -5311,6 +5311,38 @@ func TestHandleRunning_ChildTasksSortedByName(t *testing.T) {
 // completeTask — with plan store cleanup
 // ---------------------------------------------------------------------------
 
+func TestCompleteTaskRecordsTerminalExecutionEvent(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "terminal-event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+
+	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "terminal-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 ||
+		listed[0].Type != events.ExecutionEventTypeTaskSucceeded ||
+		listed[0].Summary != "done" {
+		t.Fatalf("terminal events = %#v, want TaskSucceeded with summary", listed)
+	}
+}
+
 func TestCompleteTask_WithPlanStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{

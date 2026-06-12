@@ -41,6 +41,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if strings.Contains(streamID, "/") {
 		return fiber.NewError(fiber.StatusBadRequest, "streamID must not contain slash")
 	}
+	if err := h.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID); err != nil {
+		return err
+	}
 
 	body, err := readExecutionEventRequestBody(c)
 	if err != nil {
@@ -124,4 +127,24 @@ func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {
 		return nil, fiber.NewError(fiber.StatusRequestEntityTooLarge, "execution event payload exceeds size limit")
 	}
 	return data, nil
+}
+
+func (h *InternalHandlers) verifyExecutionEventStreamWriter(c fiber.Ctx, namespace, streamType, streamID string) error {
+	if h.k8sClient == nil || streamType != events.ExecutionEventStreamTypeTask {
+		return nil
+	}
+	task := &corev1alpha1.Task{}
+	if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
+		return err
+	}
+	if !task.DeletionTimestamp.IsZero() {
+		return fiber.NewError(fiber.StatusGone, "task is deleting")
+	}
+	return nil
 }
