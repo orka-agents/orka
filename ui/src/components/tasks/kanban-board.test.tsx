@@ -47,6 +47,38 @@ describe('KanbanBoard', () => {
     expect(screen.getByText('No running tasks')).toBeInTheDocument()
     expect(screen.getByText('No succeeded tasks')).toBeInTheDocument()
     expect(screen.getByText('No failed tasks')).toBeInTheDocument()
+    expect(screen.getByText('No scheduled tasks')).toBeInTheDocument()
+    expect(screen.getByText('No cancelled tasks')).toBeInTheDocument()
+  })
+
+  it('has a column for every task phase and buckets Scheduled/Cancelled in their own columns', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'sched-task', namespace: 'default', uid: 's1', creationTimestamp: new Date().toISOString() },
+              spec: { type: 'container' },
+              status: { phase: 'Scheduled' },
+            },
+            {
+              metadata: { name: 'cancel-task', namespace: 'default', uid: 'c1', creationTimestamp: new Date().toISOString() },
+              spec: { type: 'container' },
+              status: { phase: 'Cancelled' },
+            },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<KanbanBoard />)
+    await waitFor(() => expect(screen.getByText('sched-task')).toBeInTheDocument())
+    expect(screen.getByText('cancel-task')).toBeInTheDocument()
+    // Column headers exist for the new phases.
+    expect(screen.getByText('Scheduled')).toBeInTheDocument()
+    expect(screen.getByText('Cancelled')).toBeInTheDocument()
+    // The Pending column stays empty — Scheduled/Cancelled are NOT mis-bucketed.
+    expect(screen.getByText('No pending tasks')).toBeInTheDocument()
   })
 
   it('populated board shows tasks in correct columns', async () => {

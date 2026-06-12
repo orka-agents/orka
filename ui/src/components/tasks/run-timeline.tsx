@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils'
-import { CheckCircle2, Circle, XCircle, Flag } from 'lucide-react'
-import type { Task, PlanState } from '@/schemas/task'
+import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
+import type { Task, PlanState, TaskPhase } from '@/schemas/task'
 
 interface TimelineEvent {
   key: string
@@ -15,7 +15,12 @@ interface TimelineEvent {
    * still-running synthetic event.
    */
   bucket: number
-  status: 'done' | 'active' | 'pending' | 'failed'
+  status: 'done' | 'active' | 'pending' | 'failed' | 'cancelled'
+}
+
+/** The backend's terminal task phases — no further iterations follow these. */
+function isTerminalPhase(phase?: TaskPhase | string): boolean {
+  return phase === 'Succeeded' || phase === 'Failed' || phase === 'Cancelled'
 }
 
 /** A condition as carried on task.status.conditions[]. */
@@ -78,7 +83,7 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   // sorts after the work that led to it rather than floating to the end.
   const iteration = task.status?.iteration ?? 0
   if (iteration > 0) {
-    const terminal = phase === 'Succeeded' || phase === 'Failed'
+    const terminal = isTerminalPhase(phase)
     const startMs = task.status?.startTime ? new Date(task.status.startTime).getTime() : NaN
     const anchorMs = Math.max(
       ...conditionTimes,
@@ -95,14 +100,15 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   }
 
   // Terminal marker — pinned to the last bucket so it always renders last,
-  // with phase-correct styling.
-  if (phase === 'Succeeded' || phase === 'Failed') {
+  // with phase-correct styling. Cancelled is terminal too (a user-stopped run),
+  // shown neutrally rather than as a failure.
+  if (isTerminalPhase(phase)) {
     events.push({
       key: 'terminal',
-      label: phase,
+      label: phase as string,
       at: task.status?.completionTime,
       bucket: 1,
-      status: phase === 'Failed' ? 'failed' : 'done',
+      status: phase === 'Failed' ? 'failed' : phase === 'Cancelled' ? 'cancelled' : 'done',
     })
   }
 
@@ -126,6 +132,8 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
 function EventIcon({ status }: { status: TimelineEvent['status'] }) {
   if (status === 'failed')
     return <XCircle className="size-4 text-status-failed" aria-hidden="true" />
+  if (status === 'cancelled')
+    return <MinusCircle className="size-4 text-muted-foreground" aria-hidden="true" />
   if (status === 'done')
     return <CheckCircle2 className="size-4 text-status-succeeded" aria-hidden="true" />
   if (status === 'active')
@@ -211,6 +219,7 @@ export function RunTimeline({ task, plan, className }: RunTimelineProps) {
                   'text-sm font-medium',
                   e.status === 'active' && 'text-status-running',
                   e.status === 'failed' && 'text-status-failed',
+                  e.status === 'cancelled' && 'text-muted-foreground',
                 )}
               >
                 {e.label}

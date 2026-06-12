@@ -105,6 +105,24 @@ describe('RunTimeline', () => {
     expect(screen.getByText('Succeeded')).toBeInTheDocument()
   })
 
+  it('treats a Cancelled run as terminal (no pulsing iteration, shows a neutral terminal marker)', () => {
+    const task = makeTask({
+      status: {
+        phase: 'Cancelled',
+        iteration: 3,
+        startTime: '2026-01-01T00:01:00Z',
+        completionTime: '2026-01-01T00:30:00Z',
+      },
+    })
+    const { container } = render(<RunTimeline task={task} plan={{ summary: 'stopped early' }} />)
+    const cancelled = screen.getByText('Cancelled')
+    expect(cancelled).toBeInTheDocument()
+    // Neutral (not failed/success) styling for a user-stopped run.
+    expect(cancelled.className).toContain('text-muted-foreground')
+    // The current iteration must NOT remain active/pulsing on a terminal run.
+    expect(container.querySelector('[class*="animate-pulse-live"]')).toBeNull()
+  })
+
   it('renders a Failed terminal event with failed styling (not success)', () => {
     const task = makeTask({
       status: {

@@ -6,15 +6,21 @@ import { PageHeader } from '@/components/layout/page-header'
 import { KanbanCard } from './kanban-card'
 import type { Task, TaskPhase } from '@/schemas/task'
 
+// One column per backend task phase, in lifecycle order, so every task lands in
+// its real column instead of being mis-bucketed as Pending.
 const columns: { phase: TaskPhase; label: string }[] = [
   { phase: 'Pending', label: 'Pending' },
+  { phase: 'Scheduled', label: 'Scheduled' },
   { phase: 'Running', label: 'Running' },
   { phase: 'Succeeded', label: 'Succeeded' },
   { phase: 'Failed', label: 'Failed' },
+  { phase: 'Cancelled', label: 'Cancelled' },
 ]
 
 function groupByPhase(tasks: Task[]): Record<string, Task[]> {
-  const groups: Record<string, Task[]> = { Pending: [], Running: [], Succeeded: [], Failed: [] }
+  const groups: Record<string, Task[]> = Object.fromEntries(
+    columns.map((c) => [c.phase, [] as Task[]]),
+  )
   for (const task of tasks) {
     const phase = task.status?.phase ?? 'Pending'
     if (groups[phase]) {
