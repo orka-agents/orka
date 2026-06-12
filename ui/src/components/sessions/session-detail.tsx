@@ -2,6 +2,7 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Trash2 } from 'lucide-react'
 import { TranscriptViewer } from './transcript-viewer'
 import { useSession, useDeleteSession } from '@/hooks/use-sessions'
@@ -26,24 +27,25 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Link to="/sessions"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">{session.name}</h1>
-            <p className="text-muted-foreground">{session.namespace}</p>
-          </div>
-        </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={async () => {
-            await deleteSession.mutateAsync(session.name)
-            navigate({ to: '/sessions' })
-          }}
-        >
-          <Trash2 className="mr-2 h-4 w-4" /> Delete
-        </Button>
+      <div className="flex items-center gap-4">
+        <Link to="/sessions"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <PageHeader
+          className="flex-1"
+          title={session.name}
+          description={session.namespace}
+          action={
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={async () => {
+                await deleteSession.mutateAsync(session.name)
+                navigate({ to: '/sessions' })
+              }}
+            >
+              <Trash2 className="mr-2 h-4 w-4" /> Delete
+            </Button>
+          }
+        />
       </div>
 
       <div className="grid gap-4 md:grid-cols-4">

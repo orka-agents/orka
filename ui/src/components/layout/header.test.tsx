@@ -39,13 +39,27 @@ describe('Header', () => {
     expect(buttons.length).toBeGreaterThanOrEqual(2)
   })
 
+  it('exposes accessible names on the icon-only theme + logout buttons', () => {
+    render(<Header />)
+    // Light theme → the toggle offers to switch to dark.
+    expect(
+      screen.getByRole('button', { name: /switch to dark theme/i }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /log out/i })).toBeInTheDocument()
+  })
+
+  it('theme toggle accessible name reflects the current theme', () => {
+    useUIStore.setState({ theme: 'dark' })
+    render(<Header />)
+    expect(
+      screen.getByRole('button', { name: /switch to light theme/i }),
+    ).toBeInTheDocument()
+  })
+
   it('logout button calls clearToken on auth store', async () => {
     const user = userEvent.setup()
     render(<Header />)
-    // Logout button is the last button
-    const buttons = screen.getAllByRole('button')
-    const logoutButton = buttons[buttons.length - 1]
-    await user.click(logoutButton)
+    await user.click(screen.getByRole('button', { name: /log out/i }))
     expect(useAuthStore.getState().token).toBeNull()
   })
 })

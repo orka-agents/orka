@@ -102,4 +102,49 @@ describe('KanbanBoard', () => {
     render(<KanbanBoard />)
     expect(screen.getByText('Board')).toBeInTheDocument()
   })
+
+  it('each column has a phase-keyed top rail from the token system', async () => {
+    render(<KanbanBoard />)
+    await waitFor(() => {
+      expect(screen.getByText('Pending')).toBeInTheDocument()
+    })
+    const rails: Record<string, string> = {
+      Pending: 'border-status-pending',
+      Running: 'border-status-running',
+      Succeeded: 'border-status-succeeded',
+      Failed: 'border-status-failed',
+    }
+    for (const [label, railClass] of Object.entries(rails)) {
+      const column = screen.getByText(label).closest('.border-t-2')
+      expect(column).not.toBeNull()
+      expect(column).toHaveClass(railClass)
+    }
+  })
+
+  it('count chips use token tint/text classes, not pastels', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'r1', namespace: 'default', uid: 'r1', creationTimestamp: new Date().toISOString() },
+              spec: { type: 'ai' },
+              status: { phase: 'Running' },
+            },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<KanbanBoard />)
+    const runningHeader = await screen.findByText('Running')
+    const header = runningHeader.parentElement!
+    const chip = header.querySelector('span:last-child')!
+    await waitFor(() => {
+      expect(chip).toHaveTextContent('1')
+    })
+    expect(chip).toHaveClass('text-status-running')
+    expect(chip).toHaveClass('bg-status-running-bg')
+    expect(chip.className).not.toMatch(/bg-(yellow|blue|green|red)-/)
+  })
 })

@@ -1,14 +1,16 @@
-import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTaskList } from '@/hooks/use-tasks'
+import { phaseStyle } from '@/lib/task-status'
+import { cn } from '@/lib/utils'
+import { PageHeader } from '@/components/layout/page-header'
 import { KanbanCard } from './kanban-card'
 import type { Task, TaskPhase } from '@/schemas/task'
 
-const columns: { phase: TaskPhase; label: string; color: string }[] = [
-  { phase: 'Pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' },
-  { phase: 'Running', label: 'Running', color: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' },
-  { phase: 'Succeeded', label: 'Succeeded', color: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' },
-  { phase: 'Failed', label: 'Failed', color: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' },
+const columns: { phase: TaskPhase; label: string }[] = [
+  { phase: 'Pending', label: 'Pending' },
+  { phase: 'Running', label: 'Running' },
+  { phase: 'Succeeded', label: 'Succeeded' },
+  { phase: 'Failed', label: 'Failed' },
 ]
 
 function groupByPhase(tasks: Task[]): Record<string, Task[]> {
@@ -31,20 +33,32 @@ export function KanbanBoard() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Board</h1>
-        <p className="text-muted-foreground">Kanban view of task execution</p>
-      </div>
+      <PageHeader title="Board" description="Kanban view of task execution" />
       <div className="flex gap-4 overflow-x-auto pb-4">
-        {columns.map(({ phase, label, color }) => (
-          <div key={phase} className="flex flex-col min-w-[280px] flex-1">
+        {columns.map(({ phase, label }) => {
+          const style = phaseStyle(phase)
+          return (
+          <div
+            key={phase}
+            className={cn(
+              'flex flex-col min-w-[280px] flex-1 rounded-lg border-t-2 px-1 pt-2',
+              style.railClass,
+              style.bgClass,
+            )}
+          >
             <div className="flex items-center gap-2 mb-3 px-1">
               <h2 className="font-semibold text-sm">{label}</h2>
-              <Badge className={color} variant="secondary">
+              <span
+                className={cn(
+                  'inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs font-medium tabular-nums',
+                  style.bgClass,
+                  style.textClass,
+                )}
+              >
                 {isLoading ? '…' : grouped[phase].length}
-              </Badge>
+              </span>
             </div>
-            <div className="flex flex-col gap-2 min-h-[120px]">
+            <div className="flex flex-col gap-2 min-h-[120px] pb-2">
               {isLoading ? (
                 Array.from({ length: 2 }).map((_, i) => (
                   <Skeleton key={i} className="h-20 w-full rounded-xl" />
@@ -58,7 +72,8 @@ export function KanbanBoard() {
               )}
             </div>
           </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )

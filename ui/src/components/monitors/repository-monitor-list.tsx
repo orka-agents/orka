@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import type { RepositoryMonitor } from '@/schemas/monitor'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
@@ -22,18 +23,18 @@ export function RepositoryMonitorList() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Repository Monitors</h1>
-          <p className="text-muted-foreground">Maintainer automation state for pull requests, repairs, and audit trails</p>
-        </div>
-        <Link to="/monitors/create/new">
-          <Button>
-            <Plus className="mr-2 h-4 w-4" />
-            New Monitor
-          </Button>
-        </Link>
-      </div>
+      <PageHeader
+        title="Repository Monitors"
+        description="Maintainer automation state for pull requests, repairs, and audit trails"
+        action={
+          <Link to="/monitors/create/new">
+            <Button>
+              <Plus className="mr-2 h-4 w-4" />
+              New Monitor
+            </Button>
+          </Link>
+        }
+      />
 
       {isLoading ? (
         <div className="grid gap-4 md:grid-cols-2">

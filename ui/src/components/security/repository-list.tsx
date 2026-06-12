@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryScans, useRunSecurityScan } from '@/hooks/use-security'
 import type { RepositoryScan } from '@/schemas/security'
 
@@ -21,15 +22,15 @@ export function RepositoryList() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Security</h1>
-          <p className="text-muted-foreground">Repository security scans, threat models, and findings</p>
-        </div>
-        <Link to="/security/new">
-          <Button><Plus className="mr-2 h-4 w-4" />New Repository</Button>
-        </Link>
-      </div>
+      <PageHeader
+        title="Security"
+        description="Repository security scans, threat models, and findings"
+        action={
+          <Link to="/security/new">
+            <Button><Plus className="mr-2 h-4 w-4" />New Repository</Button>
+          </Link>
+        }
+      />
 
       {isLoading ? (
         <div className="grid gap-4 md:grid-cols-2">

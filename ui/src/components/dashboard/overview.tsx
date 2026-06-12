@@ -2,6 +2,7 @@ import { useTaskList } from '@/hooks/use-tasks'
 import { useSessionList } from '@/hooks/use-sessions'
 import { useAgentList } from '@/hooks/use-agents'
 import { useToolList } from '@/hooks/use-tools'
+import { PageHeader } from '@/components/layout/page-header'
 import { StatsCards } from './stats-cards'
 import { RecentTasks } from './recent-tasks'
 
@@ -15,10 +16,7 @@ export function Overview() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground">Overview of your Orka workspace</p>
-      </div>
+      <PageHeader title="Dashboard" description="Overview of your Orka workspace" />
       <StatsCards
         tasks={tasksData?.items}
         sessionCount={sessionsData?.items?.length}

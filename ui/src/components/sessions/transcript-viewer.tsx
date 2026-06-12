@@ -1,5 +1,6 @@
 import { Card, CardContent } from '@/components/ui/card'
-import { Bot, User } from 'lucide-react'
+import { EmptyState } from '@/components/ui/empty-state'
+import { Bot, MessageSquare, User } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TranscriptMessage } from '@/schemas/session'
 
@@ -19,7 +20,7 @@ export function TranscriptViewer({ transcript }: { transcript?: string }) {
   const messages = parseTranscript(transcript)
 
   if (messages.length === 0) {
-    return <p className="text-sm text-muted-foreground py-4">No messages in this session.</p>
+    return <EmptyState icon={MessageSquare} headline="No messages in this session." />
   }
 
   return (

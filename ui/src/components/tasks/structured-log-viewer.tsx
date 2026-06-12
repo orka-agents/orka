@@ -4,7 +4,8 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useTaskLogs } from '@/hooks/use-task-logs'
-import { ArrowDown, Search, X, RefreshCw } from 'lucide-react'
+import { ArrowDown, Search, X, RefreshCw, ScrollText } from 'lucide-react'
+import { EmptyState } from '@/components/ui/empty-state'
 
 type LogLevel = 'info' | 'warn' | 'error' | 'debug' | 'default'
 
@@ -81,7 +82,7 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
               <Skeleton className="h-4 w-5/6" />
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No logs available yet.</p>
+            <EmptyState headline="No logs available yet." icon={ScrollText} />
           )}
         </CardContent>
       </Card>
@@ -149,10 +150,11 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
                 scrollToBottom()
               }}
               title="Pin to bottom"
+              aria-label="Pin logs to bottom"
             >
               <ArrowDown className="h-3 w-3" />
             </Button>
-            <Button variant="outline" size="sm" onClick={clear}>Clear</Button>
+            <Button variant="outline" size="sm" onClick={clear} aria-label="Clear logs">Clear</Button>
           </div>
         </div>
       </CardHeader>

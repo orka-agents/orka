@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ArrowLeft, Trash2 } from 'lucide-react'
+import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
 import { PRCreateDialog } from './pr-create-dialog'
@@ -46,10 +47,10 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <Link to="/tasks"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">{task.metadata.name}</h1>
-            <p className="text-muted-foreground">{task.metadata.namespace} · {task.spec.type}</p>
-          </div>
+          <PageHeader
+            title={task.metadata.name}
+            description={`${task.metadata.namespace} · ${task.spec.type}`}
+          />
           <TaskStatusBadge phase={task.status?.phase} />
           <PRStatusBadge annotations={task.metadata.annotations} />
         </div>

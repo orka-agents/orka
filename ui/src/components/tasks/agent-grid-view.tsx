@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Activity } from 'lucide-react'
+import { PageHeader } from '@/components/layout/page-header'
+import { EmptyState } from '@/components/ui/empty-state'
 import { useTaskList } from '@/hooks/use-tasks'
 import { TaskStatusBadge } from './task-status-badge'
 import type { Task } from '@/schemas/task'
@@ -26,7 +29,7 @@ function AgentMiniPanel({ task }: { task: Task }) {
 
   return (
     <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }}>
-      <Card className="hover:border-primary/50 transition-colors cursor-pointer h-full">
+      <Card className="hover:border-primary/50 hover:shadow-md transition-all motion-safe:hover:-translate-y-0.5 cursor-pointer h-full">
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-medium truncate">{task.metadata.name}</CardTitle>
@@ -34,7 +37,7 @@ function AgentMiniPanel({ task }: { task: Task }) {
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             {task.spec.agentRef?.name && <span>{task.spec.agentRef.name}</span>}
-            <span>{formatElapsed(elapsed)}</span>
+            <span className="tabular-nums">{formatElapsed(elapsed)}</span>
           </div>
         </CardHeader>
         <CardContent className="pt-0">
@@ -55,10 +58,7 @@ export function AgentGridView() {
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Live Agents</h1>
-          <p className="text-muted-foreground">Active task execution overview</p>
-        </div>
+        <PageHeader title="Live Agents" description="Active task execution overview" />
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} className="h-32 w-full" />
@@ -70,16 +70,18 @@ export function AgentGridView() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Live Agents</h1>
-        <p className="text-muted-foreground">
-          {runningTasks.length} active {runningTasks.length === 1 ? 'task' : 'tasks'}
-        </p>
-      </div>
+      <PageHeader
+        title="Live Agents"
+        description={`${runningTasks.length} active ${runningTasks.length === 1 ? 'task' : 'tasks'}`}
+      />
       {runningTasks.length === 0 ? (
         <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
-            No tasks currently running
+          <CardContent className="py-8">
+            <EmptyState
+              icon={Activity}
+              headline="No tasks currently running"
+              hint="Running agents will appear here as they start."
+            />
           </CardContent>
         </Card>
       ) : (
