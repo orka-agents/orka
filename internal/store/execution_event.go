@@ -11,10 +11,15 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 const (
-	ExecutionEventStreamTypeTask = events.ExecutionEventStreamTypeTask
+	unknownMetricLabel = "unknown"
+	invalidMetricLabel = "invalid"
+
+	ExecutionEventStreamTypeTask    = events.ExecutionEventStreamTypeTask
+	ExecutionEventStreamTypeSession = events.ExecutionEventStreamTypeSession
 
 	DefaultExecutionEventLimit = 100
 	MaxExecutionEventLimit     = 1000
@@ -28,6 +33,7 @@ type ExecutionEvent struct {
 	StreamType  string                           `json:"streamType"`
 	StreamID    string                           `json:"streamID"`
 	Seq         int64                            `json:"seq"`
+	SessionSeq  int64                            `json:"-"`
 	Type        string                           `json:"type"`
 	Severity    string                           `json:"severity"`
 	TaskName    string                           `json:"taskName,omitempty"`
@@ -55,6 +61,23 @@ type ExecutionEventFilter struct {
 	EventTypes  []string
 	AfterSeq    int64
 	Limit       int
+}
+
+// SessionExecutionEventFilter constrains the aggregated session event read model.
+// AfterSeq is a session-level cursor assigned by deterministic ordering over task events.
+type SessionExecutionEventFilter struct {
+	Namespace   string
+	SessionName string
+	EventTypes  []string
+	AfterSeq    int64
+	Limit       int
+}
+
+// SessionExecutionEvent is a task-derived event with an aggregated session sequence.
+type SessionExecutionEvent struct {
+	ExecutionEvent
+	SessionSeq int64
+	TaskSeq    int64
 }
 
 // Normalized returns a copy of f with whitespace trimmed and limit defaults applied.
@@ -87,7 +110,7 @@ func (f ExecutionEventFilter) Normalized() ExecutionEventFilter {
 	return f
 }
 
-// Validate reports unsupported Wave 0 filter values.
+// Validate reports unsupported filter values.
 func (f ExecutionEventFilter) Validate() error {
 	f = f.Normalized()
 	if !events.IsValidExecutionEventStreamType(f.StreamType) {
@@ -101,10 +124,82 @@ func (f ExecutionEventFilter) Validate() error {
 	return nil
 }
 
+// Normalized returns a copy of f with whitespace trimmed and limit defaults applied.
+func (f SessionExecutionEventFilter) Normalized() SessionExecutionEventFilter {
+	f.Namespace = strings.TrimSpace(f.Namespace)
+	f.SessionName = strings.TrimSpace(f.SessionName)
+	if f.Limit <= 0 {
+		f.Limit = DefaultExecutionEventLimit
+	} else if f.Limit > MaxExecutionEventLimit {
+		f.Limit = MaxExecutionEventLimit
+	}
+	if f.AfterSeq < 0 {
+		f.AfterSeq = 0
+	}
+	if len(f.EventTypes) > 0 {
+		types := make([]string, 0, len(f.EventTypes))
+		for _, typ := range f.EventTypes {
+			if typ = strings.TrimSpace(typ); typ != "" {
+				types = append(types, typ)
+			}
+		}
+		f.EventTypes = types
+	}
+	return f
+}
+
+// Validate reports unsupported session event read-model filter values.
+func (f SessionExecutionEventFilter) Validate() error {
+	f = f.Normalized()
+	if f.Namespace == "" {
+		return ValidationErrorf("session event namespace is required")
+	}
+	if f.SessionName == "" {
+		return ValidationErrorf("session name is required")
+	}
+	for _, typ := range f.EventTypes {
+		if !events.IsValidExecutionEventType(typ) {
+			return ValidationErrorf("unsupported execution event type %q", typ)
+		}
+	}
+	return nil
+}
+
+// ApprovalDecisionID returns the approval identity guarded by terminal approval events.
+func ApprovalDecisionID(event ExecutionEvent) (string, bool) {
+	switch event.Type {
+	case events.ExecutionEventTypeApprovalApproved,
+		events.ExecutionEventTypeApprovalDeclined,
+		events.ExecutionEventTypeApprovalExpired,
+		events.ExecutionEventTypeApprovalCancelled:
+	default:
+		return "", false
+	}
+	var payload struct {
+		ID         string `json:"id"`
+		ApprovalID string `json:"approvalID"`
+	}
+	if len(event.Content) > 0 {
+		_ = json.Unmarshal(event.Content, &payload)
+	}
+	id := firstNonEmptyString(payload.ApprovalID, payload.ID, event.ToolCallID)
+	return id, id != ""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // ExecutionEventStore defines the persistence/query contract for execution events.
 type ExecutionEventStore interface {
 	AppendExecutionEvent(ctx context.Context, event *ExecutionEvent) (*ExecutionEvent, error)
 	ListExecutionEvents(ctx context.Context, filter ExecutionEventFilter) ([]ExecutionEvent, error)
+	ListSessionExecutionEvents(ctx context.Context, filter SessionExecutionEventFilter) ([]SessionExecutionEvent, int64, error)
 	GetLatestExecutionEventSeq(ctx context.Context, namespace, streamType, streamID string) (int64, error)
 	DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error
 }
@@ -124,6 +219,12 @@ func SanitizeExecutionEventPayloadFields(event *ExecutionEvent) error {
 	event.Content = payload.Content
 	event.ContentText = payload.ContentText
 	event.Truncation = MergeExecutionEventTruncation(event.Truncation, payload.Truncation)
+	metrics.RecordExecutionEventPayloadSanitization(
+		event.StreamType,
+		event.Type,
+		executionEventPayloadContainsRedactionMarker(event),
+		event.Truncation != nil && !event.Truncation.Empty(),
+	)
 	return nil
 }
 
@@ -154,12 +255,18 @@ type executionEventStreamKey struct {
 	streamID   string
 }
 
+type executionEventSessionKey struct {
+	namespace   string
+	sessionName string
+}
+
 // FakeExecutionEventStore is an in-memory test implementation of ExecutionEventStore.
 type FakeExecutionEventStore struct {
-	mu     sync.Mutex
-	now    func() time.Time
-	events []ExecutionEvent
-	latest map[executionEventStreamKey]int64
+	mu            sync.Mutex
+	now           func() time.Time
+	events        []ExecutionEvent
+	latest        map[executionEventStreamKey]int64
+	sessionLatest map[executionEventSessionKey]int64
 }
 
 var _ ExecutionEventStore = (*FakeExecutionEventStore)(nil)
@@ -175,13 +282,20 @@ func NewFakeExecutionEventStoreWithClock(now func() time.Time) *FakeExecutionEve
 		now = time.Now
 	}
 	return &FakeExecutionEventStore{
-		now:    now,
-		latest: make(map[executionEventStreamKey]int64),
+		now:           now,
+		latest:        make(map[executionEventStreamKey]int64),
+		sessionLatest: make(map[executionEventSessionKey]int64),
 	}
 }
 
 // AppendExecutionEvent appends an event and assigns a per-stream sequence when missing.
 func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, event *ExecutionEvent) (*ExecutionEvent, error) {
+	started := time.Now()
+	metricStreamType, metricEventType := metricLabelsForExecutionEvent(event)
+	success := false
+	defer func() {
+		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -237,13 +351,46 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 	if copy.ID == "" {
 		copy.ID = fmt.Sprintf("%s/%s/%s/%d", copy.Namespace, copy.StreamType, copy.StreamID, copy.Seq)
 	}
+	if err := s.ensureNoApprovalDecisionLocked(copy); err != nil {
+		return nil, err
+	}
 	s.latest[key] = copy.Seq
+	if copy.SessionName != "" {
+		sessionKey := executionEventSessionKey{namespace: copy.Namespace, sessionName: copy.SessionName}
+		copy.SessionSeq = s.sessionLatest[sessionKey] + 1
+		s.sessionLatest[sessionKey] = copy.SessionSeq
+	}
 	s.events = append(s.events, cloneExecutionEvent(copy))
+	success = true
 	return &copy, nil
+}
+
+func (s *FakeExecutionEventStore) ensureNoApprovalDecisionLocked(event ExecutionEvent) error {
+	approvalID, ok := ApprovalDecisionID(event)
+	if !ok {
+		return nil
+	}
+	for _, existing := range s.events {
+		if existing.Namespace != event.Namespace ||
+			existing.StreamType != event.StreamType ||
+			existing.StreamID != event.StreamID {
+			continue
+		}
+		existingApprovalID, ok := ApprovalDecisionID(existing)
+		if ok && existingApprovalID == approvalID {
+			return fmt.Errorf("%w: approval %s already has a terminal decision", ErrConflict, approvalID)
+		}
+	}
+	return nil
 }
 
 // ListExecutionEvents returns events matching filter in ascending sequence order per stream.
 func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filter ExecutionEventFilter) ([]ExecutionEvent, error) {
+	started := time.Now()
+	success := false
+	defer func() {
+		metrics.RecordExecutionEventList("task_store", success, time.Since(started).Seconds())
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -301,7 +448,66 @@ func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filte
 	if len(matches) > filter.Limit {
 		matches = matches[:filter.Limit]
 	}
+	success = true
 	return matches, nil
+}
+
+// ListSessionExecutionEvents returns task-derived events for one session with an aggregated cursor.
+func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context, filter SessionExecutionEventFilter) ([]SessionExecutionEvent, int64, error) {
+	started := time.Now()
+	success := false
+	defer func() {
+		metrics.RecordExecutionEventList("session_store", success, time.Since(started).Seconds())
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	filter = filter.Normalized()
+	if err := filter.Validate(); err != nil {
+		return nil, 0, err
+	}
+	types := make(map[string]struct{}, len(filter.EventTypes))
+	for _, typ := range filter.EventTypes {
+		types[typ] = struct{}{}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ordered := make([]ExecutionEvent, 0, len(s.events))
+	for _, event := range s.events {
+		if event.Namespace != filter.Namespace || event.SessionName != filter.SessionName {
+			continue
+		}
+		ordered = append(ordered, cloneExecutionEvent(event))
+	}
+
+	var latestSeq int64
+	if filter.SessionName != "" {
+		latestSeq = s.sessionLatest[executionEventSessionKey{namespace: filter.Namespace, sessionName: filter.SessionName}]
+	}
+	matches := make([]SessionExecutionEvent, 0, min(len(ordered), filter.Limit))
+	for _, event := range ordered {
+		sessionSeq := event.SessionSeq
+		if sessionSeq <= filter.AfterSeq {
+			continue
+		}
+		if len(types) > 0 {
+			if _, ok := types[event.Type]; !ok {
+				continue
+			}
+		}
+		matches = append(matches, SessionExecutionEvent{
+			ExecutionEvent: event,
+			SessionSeq:     sessionSeq,
+			TaskSeq:        event.Seq,
+		})
+		if len(matches) >= filter.Limit {
+			break
+		}
+	}
+	success = true
+	return matches, latestSeq, nil
 }
 
 // GetLatestExecutionEventSeq returns the latest sequence for a stream or zero when empty.
@@ -343,6 +549,35 @@ func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, nam
 	s.events = kept
 	delete(s.latest, key)
 	return nil
+}
+
+func metricLabelsForExecutionEvent(event *ExecutionEvent) (string, string) {
+	if event == nil {
+		return unknownMetricLabel, unknownMetricLabel
+	}
+	streamType := strings.TrimSpace(event.StreamType)
+	if streamType == "" {
+		streamType = ExecutionEventStreamTypeTask
+	}
+	if !events.IsValidExecutionEventStreamType(streamType) {
+		streamType = invalidMetricLabel
+	}
+	eventType := strings.TrimSpace(event.Type)
+	if eventType == "" {
+		eventType = unknownMetricLabel
+	} else if !events.IsValidExecutionEventType(eventType) {
+		eventType = invalidMetricLabel
+	}
+	return streamType, eventType
+}
+
+func executionEventPayloadContainsRedactionMarker(event *ExecutionEvent) bool {
+	if event == nil {
+		return false
+	}
+	return strings.Contains(event.Summary, events.ExecutionEventRedactedValue) ||
+		strings.Contains(event.ContentText, events.ExecutionEventRedactedValue) ||
+		strings.Contains(string(event.Content), events.ExecutionEventRedactedValue)
 }
 
 func cloneExecutionEvent(event ExecutionEvent) ExecutionEvent {

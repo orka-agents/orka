@@ -31,6 +31,13 @@ const (
 	ExecutionEventTypeResultSubmitted               = "ResultSubmitted"
 	ExecutionEventTypeArtifactUploadCompleted       = "ArtifactUploadCompleted"
 	ExecutionEventTypeArtifactUploadFailed          = "ArtifactUploadFailed"
+	ExecutionEventTypeTaskForkRequested             = "TaskForkRequested"
+	ExecutionEventTypeTaskForkCreated               = "TaskForkCreated"
+	ExecutionEventTypeApprovalRequested             = "ApprovalRequested"
+	ExecutionEventTypeApprovalApproved              = "ApprovalApproved"
+	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
+	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
+	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
 )
 
 const (
@@ -41,9 +48,10 @@ const (
 )
 
 const (
-	// ExecutionEventStreamTypeTask is the only supported Wave 0 stream type.
-	// Session streams are intentionally not defined in P0.
+	// ExecutionEventStreamTypeTask is the persisted per-task stream type.
 	ExecutionEventStreamTypeTask = "task"
+	// ExecutionEventStreamTypeSession names the public aggregated session stream read model.
+	ExecutionEventStreamTypeSession = "session"
 )
 
 var validExecutionEventTypes = map[string]struct{}{
@@ -75,6 +83,13 @@ var validExecutionEventTypes = map[string]struct{}{
 	ExecutionEventTypeResultSubmitted:               {},
 	ExecutionEventTypeArtifactUploadCompleted:       {},
 	ExecutionEventTypeArtifactUploadFailed:          {},
+	ExecutionEventTypeTaskForkRequested:             {},
+	ExecutionEventTypeTaskForkCreated:               {},
+	ExecutionEventTypeApprovalRequested:             {},
+	ExecutionEventTypeApprovalApproved:              {},
+	ExecutionEventTypeApprovalDeclined:              {},
+	ExecutionEventTypeApprovalExpired:               {},
+	ExecutionEventTypeApprovalCancelled:             {},
 }
 
 // ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
@@ -108,6 +123,13 @@ func ExecutionEventTypes() []string {
 		ExecutionEventTypeResultSubmitted,
 		ExecutionEventTypeArtifactUploadCompleted,
 		ExecutionEventTypeArtifactUploadFailed,
+		ExecutionEventTypeTaskForkRequested,
+		ExecutionEventTypeTaskForkCreated,
+		ExecutionEventTypeApprovalRequested,
+		ExecutionEventTypeApprovalApproved,
+		ExecutionEventTypeApprovalDeclined,
+		ExecutionEventTypeApprovalExpired,
+		ExecutionEventTypeApprovalCancelled,
 	}
 }
 
@@ -147,7 +169,8 @@ func NormalizeExecutionEventSeverity(value string) string {
 	return value
 }
 
-// IsValidExecutionEventStreamType reports whether value is supported by the Wave 0 contract.
+// IsValidExecutionEventStreamType reports whether value is a supported persisted stream type.
+// Session timelines are an aggregated read model over task streams, not a direct P1 append target.
 func IsValidExecutionEventStreamType(value string) bool {
 	return strings.TrimSpace(value) == ExecutionEventStreamTypeTask
 }

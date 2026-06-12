@@ -817,6 +817,13 @@ func (s *terminalAppearsBetweenStreamQueriesStore) ListExecutionEvents(
 	return []store.ExecutionEvent{terminal}, nil
 }
 
+func (s *terminalAppearsBetweenStreamQueriesStore) ListSessionExecutionEvents(
+	context.Context,
+	store.SessionExecutionEventFilter,
+) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, nil
+}
+
 func (s *terminalAppearsBetweenStreamQueriesStore) GetLatestExecutionEventSeq(
 	context.Context,
 	string,

@@ -147,6 +147,34 @@ func TestHTTPEventRecorderFromEnvMissingConfigNoop(t *testing.T) {
 	}
 }
 
+func TestHTTPEventRecorderFromEnvPropagatesSessionName(t *testing.T) {
+	gotBody := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotBody <- body
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	t.Setenv(EnvOrkaControllerURL, server.URL)
+	t.Setenv(EnvOrkaTaskNamespace, "default")
+	t.Setenv(EnvOrkaTaskName, "task-1")
+	t.Setenv(EnvOrkaSessionName, "session-1")
+
+	recorder := NewHTTPEventRecorderFromEnv()
+	recorder.Record(context.Background(), events.ExecutionEventTypeWorkerStarted)
+
+	body := <-gotBody
+	if body["sessionName"] != "session-1" {
+		t.Fatalf("sessionName = %#v, want session-1", body["sessionName"])
+	}
+}
+
 func TestHTTPEventRecorderPostsEventWithBearerToken(t *testing.T) {
 	bearerValue := strings.Join([]string{"service", "account", "value"}, "-")
 	bearerPath := writeTestSAToken(t, bearerValue)
@@ -171,6 +199,7 @@ func TestHTTPEventRecorderPostsEventWithBearerToken(t *testing.T) {
 		ControllerURL: server.URL,
 		Namespace:     "default",
 		TaskName:      "task-1",
+		SessionName:   "session-1",
 		BearerPath:    bearerPath,
 		Timeout:       time.Second,
 	})
@@ -197,8 +226,11 @@ func TestHTTPEventRecorderPostsEventWithBearerToken(t *testing.T) {
 		body["severity"] != events.ExecutionEventSeverityWarning {
 		t.Fatalf("body type/severity = %#v", body)
 	}
-	if body["taskName"] != "task-1" || body["toolName"] != "file_read" || body["toolCallID"] != "call-1" {
-		t.Fatalf("body task/tool fields = %#v", body)
+	if body["taskName"] != "task-1" ||
+		body["sessionName"] != "session-1" ||
+		body["toolName"] != "file_read" ||
+		body["toolCallID"] != "call-1" {
+		t.Fatalf("body task/session/tool fields = %#v", body)
 	}
 	content, ok := body["content"].(map[string]any)
 	if !ok {

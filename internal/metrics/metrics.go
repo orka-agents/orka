@@ -72,6 +72,106 @@ var (
 		},
 		[]string{"result", "reason"},
 	)
+
+	// Execution event metrics. Labels intentionally exclude task/session IDs.
+	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_events_appended_total",
+			Help: "Total execution events appended by stream type and event type",
+		},
+		[]string{"stream_type", "event_type"},
+	)
+
+	ExecutionEventAppendFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_append_failures_total",
+			Help: "Total execution event append failures by stream type and event type",
+		},
+		[]string{"stream_type", "event_type"},
+	)
+
+	ExecutionEventAppendDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_execution_event_append_duration_seconds",
+			Help:    "Execution event append latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"stream_type", "event_type", "result"},
+	)
+
+	ExecutionEventListRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_list_requests_total",
+			Help: "Total execution event list/read-model requests by scope and result",
+		},
+		[]string{"scope", "result"},
+	)
+
+	ExecutionEventListDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_execution_event_list_duration_seconds",
+			Help:    "Execution event list/read-model latency in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"scope", "result"},
+	)
+
+	ExecutionEventStreamConnections = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_execution_event_stream_connections_current",
+			Help: "Current execution event SSE stream connections by scope",
+		},
+		[]string{"scope"},
+	)
+
+	ExecutionEventStreamReconnectsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_stream_reconnects_total",
+			Help: "Total execution event SSE reconnects detected by after cursor by scope",
+		},
+		[]string{"scope"},
+	)
+
+	ExecutionEventStreamErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_stream_errors_total",
+			Help: "Total execution event SSE stream errors by scope and low-cardinality reason",
+		},
+		[]string{"scope", "reason"},
+	)
+
+	ExecutionEventRedactionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_redactions_total",
+			Help: "Total execution events whose payloads contained redacted sensitive values by stream type and event type",
+		},
+		[]string{"stream_type", "event_type"},
+	)
+
+	ExecutionEventTruncationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_truncations_total",
+			Help: "Total execution events whose payloads were truncated by stream type and event type",
+		},
+		[]string{"stream_type", "event_type"},
+	)
+
+	ExecutionEventDerivedLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_execution_event_derived_latency_seconds",
+			Help:    "Latency derived from execution event start/end pairs",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"measurement", "result"},
+	)
+
+	ExecutionEventDerivedFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_execution_event_derived_failures_total",
+			Help: "Failure counts derived from execution event terminal/failure event types",
+		},
+		[]string{"category", "event_type"},
+	)
 )
 
 func init() {
@@ -83,6 +183,18 @@ func init() {
 		ContextTokenAuthorizationTotal,
 		ContextTokenTTSExchangeTotal,
 		ContextTokenTTSExchangeDuration,
+		ExecutionEventsAppendedTotal,
+		ExecutionEventAppendFailuresTotal,
+		ExecutionEventAppendDuration,
+		ExecutionEventListRequestsTotal,
+		ExecutionEventListDuration,
+		ExecutionEventStreamConnections,
+		ExecutionEventStreamReconnectsTotal,
+		ExecutionEventStreamErrorsTotal,
+		ExecutionEventRedactionsTotal,
+		ExecutionEventTruncationsTotal,
+		ExecutionEventDerivedLatency,
+		ExecutionEventDerivedFailuresTotal,
 	)
 }
 
@@ -118,6 +230,68 @@ func RecordContextTokenTTSExchange(result, reason string, durationSeconds float6
 	reason = normalizeMetricLabel(reason)
 	ContextTokenTTSExchangeTotal.WithLabelValues(result, reason).Inc()
 	ContextTokenTTSExchangeDuration.WithLabelValues(result, reason).Observe(durationSeconds)
+}
+
+// RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.
+func RecordExecutionEventAppend(streamType, eventType string, success bool, durationSeconds float64) {
+	streamType = normalizeMetricLabel(streamType)
+	eventType = normalizeMetricLabel(eventType)
+	result := "success"
+	if success {
+		ExecutionEventsAppendedTotal.WithLabelValues(streamType, eventType).Inc()
+	} else {
+		result = "error"
+		ExecutionEventAppendFailuresTotal.WithLabelValues(streamType, eventType).Inc()
+	}
+	ExecutionEventAppendDuration.WithLabelValues(streamType, eventType, result).Observe(durationSeconds)
+}
+
+// RecordExecutionEventList records list/read-model request count and latency.
+func RecordExecutionEventList(scope string, success bool, durationSeconds float64) {
+	scope = normalizeMetricLabel(scope)
+	result := "success"
+	if !success {
+		result = "error"
+	}
+	ExecutionEventListRequestsTotal.WithLabelValues(scope, result).Inc()
+	ExecutionEventListDuration.WithLabelValues(scope, result).Observe(durationSeconds)
+}
+
+// RecordExecutionEventStreamOpen records stream lifecycle and reconnect detection.
+func RecordExecutionEventStreamOpen(scope string, reconnect bool) func() {
+	scope = normalizeMetricLabel(scope)
+	ExecutionEventStreamConnections.WithLabelValues(scope).Inc()
+	if reconnect {
+		ExecutionEventStreamReconnectsTotal.WithLabelValues(scope).Inc()
+	}
+	return func() { ExecutionEventStreamConnections.WithLabelValues(scope).Dec() }
+}
+
+// RecordExecutionEventStreamError records a low-cardinality stream failure reason.
+func RecordExecutionEventStreamError(scope, reason string) {
+	ExecutionEventStreamErrorsTotal.WithLabelValues(normalizeMetricLabel(scope), normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordExecutionEventPayloadSanitization records event-level redaction/truncation signals.
+func RecordExecutionEventPayloadSanitization(streamType, eventType string, redacted, truncated bool) {
+	streamType = normalizeMetricLabel(streamType)
+	eventType = normalizeMetricLabel(eventType)
+	if redacted {
+		ExecutionEventRedactionsTotal.WithLabelValues(streamType, eventType).Inc()
+	}
+	if truncated {
+		ExecutionEventTruncationsTotal.WithLabelValues(streamType, eventType).Inc()
+	}
+}
+
+// RecordExecutionEventDerivedLatency records one idempotent event-derived latency observation.
+func RecordExecutionEventDerivedLatency(measurement, result string, durationSeconds float64) {
+	ExecutionEventDerivedLatency.WithLabelValues(normalizeMetricLabel(measurement), normalizeMetricLabel(result)).Observe(durationSeconds)
+}
+
+// RecordExecutionEventDerivedFailure records one event-derived failure category.
+func RecordExecutionEventDerivedFailure(category, eventType string) {
+	ExecutionEventDerivedFailuresTotal.WithLabelValues(normalizeMetricLabel(category), normalizeMetricLabel(eventType)).Inc()
 }
 
 func normalizeMetricLabel(value string) string {

@@ -36,6 +36,13 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeResultSubmitted,
 		ExecutionEventTypeArtifactUploadCompleted,
 		ExecutionEventTypeArtifactUploadFailed,
+		ExecutionEventTypeTaskForkRequested,
+		ExecutionEventTypeTaskForkCreated,
+		ExecutionEventTypeApprovalRequested,
+		ExecutionEventTypeApprovalApproved,
+		ExecutionEventTypeApprovalDeclined,
+		ExecutionEventTypeApprovalExpired,
+		ExecutionEventTypeApprovalCancelled,
 	}
 	got := ExecutionEventTypes()
 	if len(got) != len(want) {

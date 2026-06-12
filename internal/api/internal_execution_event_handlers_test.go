@@ -90,6 +90,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 
 func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-owned"}
 	eventStore := store.NewFakeExecutionEventStore()
 	app := setupInternalExecutionEventAppWithClient(
 		eventStore,
@@ -117,6 +118,18 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	}
 	if len(stored) != 1 {
 		t.Fatalf("stored len = %d, want 1", len(stored))
+	}
+	if stored[0].SessionName != "session-owned" {
+		t.Fatalf("stored sessionName = %q, want task session", stored[0].SessionName)
+	}
+	mismatchResp := doJSONRequest(
+		t,
+		app,
+		"/internal/v1/events/default/task/owned-task",
+		map[string]any{"type": events.ExecutionEventTypeWorkerCompleted, "sessionName": "other-session"},
+	)
+	if mismatchResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mismatched session status = %d, want 400", mismatchResp.StatusCode)
 	}
 }
 
@@ -230,6 +243,15 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 			path: "/internal/v1/events/default/task/task-1",
 			body: map[string]any{"type": "UnknownEvent"},
 			want: http.StatusBadRequest,
+		},
+		{
+			name: "approval terminal event denied",
+			path: "/internal/v1/events/default/task/task-1",
+			body: map[string]any{
+				"type":    events.ExecutionEventTypeApprovalApproved,
+				"content": map[string]any{"approvalID": "approval-1"},
+			},
+			want: http.StatusForbidden,
 		},
 		{
 			name: "cross namespace service account denied",
