@@ -110,6 +110,24 @@ describe('ExecutionGraph', () => {
     expect(screen.getByText('parent-task')).toBeInTheDocument()
   })
 
+  it('preserves the literal phase string for unknown phases (label + aria, not "Pending")', () => {
+    const task = makeTask({
+      status: {
+        phase: 'Running',
+        childTasks: [{ name: 'odd-child', agent: 'x', phase: 'Terminating' as never }],
+      },
+    })
+    render(<ExecutionGraph task={task} />)
+    // The literal phase renders (in the visible badge and the StatusDot sr-only
+    // label), never the "Pending" fallback.
+    expect(screen.getAllByText('Terminating').length).toBeGreaterThan(0)
+    expect(
+      screen.getByRole('treeitem', { name: /odd-child \(Terminating\)/i }),
+    ).toBeInTheDocument()
+    // No node is mislabeled as Pending.
+    expect(screen.queryByText('Pending')).not.toBeInTheDocument()
+  })
+
   it('nodes are keyboard-traversable and activate on Enter', async () => {
     navigateMock.mockClear()
     const task = makeTask({

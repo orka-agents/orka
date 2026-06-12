@@ -109,12 +109,13 @@ export function useSendMessage() {
               // (internal/tools/registry.go), and create-task tools put the task
               // name in `data.name`. Read there first; fall back to top-level
               // fields defensively for any tool that returns a flatter shape.
-              const data = (result.data ?? result) as Record<string, unknown>
+              // (Named `payload` to avoid shadowing the outer SSE `data` string.)
+              const payload = (result.data ?? result) as Record<string, unknown>
               const name =
-                (typeof data.name === 'string' && data.name) ||
-                (typeof data.taskName === 'string' && data.taskName) ||
-                (typeof (data.task as Record<string, unknown>)?.name === 'string' &&
-                  ((data.task as Record<string, unknown>).name as string)) ||
+                (typeof payload.name === 'string' && payload.name) ||
+                (typeof payload.taskName === 'string' && payload.taskName) ||
+                (typeof (payload.task as Record<string, unknown>)?.name === 'string' &&
+                  ((payload.task as Record<string, unknown>).name as string)) ||
                 undefined
               if (name && !createdTaskNames.includes(name)) createdTaskNames.push(name)
             }

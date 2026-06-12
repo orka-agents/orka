@@ -48,12 +48,16 @@ function TreeNode({
   onNavigate: (name: string) => void
 }) {
   const phase = phaseStyle(node.phase)
+  // Preserve the literal phase string for display/AT (matching StatusDot's
+  // contract); only the *styling* falls back to Pending for unknown phases.
+  const phaseLabel =
+    typeof node.phase === 'string' && node.phase ? node.phase : phase.label
   const type = node.type ? typeStyle(node.type) : undefined
   const TypeIcon = type?.icon
   const hasChildren = node.children.length > 0
 
   return (
-    <li role="treeitem" aria-label={`${node.name} (${phase.label})`} className="relative">
+    <li role="treeitem" aria-label={`${node.name} (${phaseLabel})`} className="relative">
       <button
         type="button"
         onClick={() => onNavigate(node.name)}
@@ -73,7 +77,7 @@ function TreeNode({
           <span className="truncate text-xs text-muted-foreground">{node.agent}</span>
         )}
         <span className={cn('ml-auto shrink-0 text-xs font-medium', phase.textClass)}>
-          {phase.label}
+          {phaseLabel}
         </span>
       </button>
       {hasChildren && (
