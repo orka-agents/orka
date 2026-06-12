@@ -343,6 +343,50 @@ func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
+func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.Context, task *corev1alpha1.Task) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return
+	}
+	eventType := executionEventTypeForTaskPhase(task.Status.Phase)
+	if eventType == "" {
+		return
+	}
+	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		EventTypes: []string{eventType},
+		Limit:      1,
+	})
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to check terminal execution event", "task", task.Name)
+		return
+	}
+	if len(listed) > 0 {
+		return
+	}
+	r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		eventType,
+		executionEventSeverityForTaskPhase(task.Status.Phase),
+		task.Status.Message,
+	)
+}
+
+func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded:
+		return execevents.ExecutionEventTypeTaskSucceeded
+	case corev1alpha1.TaskPhaseFailed:
+		return execevents.ExecutionEventTypeTaskFailed
+	case corev1alpha1.TaskPhaseCancelled:
+		return execevents.ExecutionEventTypeTaskCancelled
+	default:
+		return ""
+	}
+}
+
 func (r *TaskReconciler) deleteTaskExecutionEvents(ctx context.Context, task *corev1alpha1.Task) {
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
 		return
@@ -1797,6 +1841,7 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
@@ -1995,7 +2040,7 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 	r.recordTaskLifecycleEvent(
 		ctx,
 		task,
-		reason,
+		executionEventTypeForTaskPhase(phase),
 		executionEventSeverityForTaskPhase(phase),
 		message,
 	)

@@ -146,5 +146,17 @@ func (h *InternalHandlers) verifyExecutionEventStreamWriter(c fiber.Ctx, namespa
 	if !task.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
+	if isTerminalInternalTaskPhase(task.Status.Phase) {
+		return fiber.NewError(fiber.StatusConflict, "task is complete")
+	}
 	return nil
+}
+
+func isTerminalInternalTaskPhase(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
 }

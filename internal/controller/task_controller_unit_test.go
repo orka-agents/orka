@@ -5311,6 +5311,41 @@ func TestHandleRunning_ChildTasksSortedByName(t *testing.T) {
 // completeTask — with plan store cleanup
 // ---------------------------------------------------------------------------
 
+func TestHandleCompletedRecordsMissingCancelledExecutionEvent(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancelled-event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			Message: "cancelled by tool",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+
+	_, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleCompleted() error = %v", err)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "cancelled-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 ||
+		listed[0].Type != events.ExecutionEventTypeTaskCancelled ||
+		listed[0].Summary != "cancelled by tool" {
+		t.Fatalf("terminal events = %#v, want TaskCancelled with summary", listed)
+	}
+}
+
 func TestCompleteTaskRecordsTerminalExecutionEvent(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{

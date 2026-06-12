@@ -122,6 +122,9 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 		if !writeAvailable() {
 			return
 		}
+		if !h.writeTaskDeletedStreamComplete(ctx, w, namespace, taskName, lastSeq) {
+			return
+		}
 
 		poll := time.NewTicker(pollInterval)
 		defer poll.Stop()
@@ -133,6 +136,9 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 				return
 			case <-poll.C:
 				if !writeAvailable() {
+					return
+				}
+				if !h.writeTaskDeletedStreamComplete(ctx, w, namespace, taskName, lastSeq) {
 					return
 				}
 			case <-heartbeat.C:
@@ -196,6 +202,34 @@ func (h *Handlers) ensureTaskReadable(c fiber.Ctx, namespace, taskName, action s
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
 	return h.authorizeContextTokenLoadedTask(c, action, task)
+}
+
+func (h *Handlers) writeTaskDeletedStreamComplete(
+	ctx context.Context,
+	w *bufio.Writer,
+	namespace string,
+	taskName string,
+	lastSeq int64,
+) bool {
+	if h == nil || h.client == nil {
+		return true
+	}
+	task := &corev1alpha1.Task{}
+	err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task)
+	if err == nil {
+		return true
+	}
+	if !apierrors.IsNotFound(err) {
+		log.Error(err, "failed to check task existence for event stream", "namespace", namespace, "task", taskName)
+		return true
+	}
+	if !writeExecutionEventStreamCompleteFrame(w, lastSeq, "TaskDeleted") {
+		return false
+	}
+	if err := w.Flush(); err != nil {
+		return false
+	}
+	return false
 }
 
 func writeAvailableExecutionEventSSEFrames(
@@ -322,18 +356,22 @@ func executionEventTypeFilterExcludes(eventTypes []string, eventType string) boo
 }
 
 func writeExecutionEventStreamCompleteSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {
+	return writeExecutionEventStreamCompleteFrame(w, event.Seq, event.Type)
+}
+
+func writeExecutionEventStreamCompleteFrame(w *bufio.Writer, lastSeq int64, eventType string) bool {
 	data, err := json.Marshal(struct {
 		LastSeq int64  `json:"lastSeq"`
 		Type    string `json:"type"`
 	}{
-		LastSeq: event.Seq,
-		Type:    event.Type,
+		LastSeq: lastSeq,
+		Type:    eventType,
 	})
 	if err != nil {
-		log.Error(err, "failed to marshal execution event stream completion", "eventID", event.ID)
+		log.Error(err, "failed to marshal execution event stream completion", "eventType", eventType)
 		return true
 	}
-	if _, err := fmt.Fprintf(w, "id: %d\nevent: stream_complete\ndata: %s\n\n", event.Seq, data); err != nil {
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: stream_complete\ndata: %s\n\n", lastSeq, data); err != nil {
 		return false
 	}
 	return true
