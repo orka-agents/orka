@@ -3,27 +3,41 @@ package events
 import "strings"
 
 const (
-	ExecutionEventTypeTaskCreated             = "TaskCreated"
-	ExecutionEventTypeTaskPhaseChanged        = "TaskPhaseChanged"
-	ExecutionEventTypeTaskJobCreated          = "TaskJobCreated"
-	ExecutionEventTypeTaskStarted             = "TaskStarted"
-	ExecutionEventTypeTaskSucceeded           = "TaskSucceeded"
-	ExecutionEventTypeTaskFailed              = "TaskFailed"
-	ExecutionEventTypeTaskCancelled           = "TaskCancelled"
-	ExecutionEventTypeWorkerStarted           = "WorkerStarted"
-	ExecutionEventTypeWorkerCompleted         = "WorkerCompleted"
-	ExecutionEventTypeWorkerFailed            = "WorkerFailed"
-	ExecutionEventTypeModelRequestStarted     = "ModelRequestStarted"
-	ExecutionEventTypeModelRequestCompleted   = "ModelRequestCompleted"
-	ExecutionEventTypeModelRequestFailed      = "ModelRequestFailed"
-	ExecutionEventTypeModelMessage            = "ModelMessage"
-	ExecutionEventTypeContextTruncated        = "ContextTruncated"
-	ExecutionEventTypeToolCallStarted         = "ToolCallStarted"
-	ExecutionEventTypeToolCallCompleted       = "ToolCallCompleted"
-	ExecutionEventTypeToolCallFailed          = "ToolCallFailed"
-	ExecutionEventTypeResultSubmitted         = "ResultSubmitted"
-	ExecutionEventTypeArtifactUploadCompleted = "ArtifactUploadCompleted"
-	ExecutionEventTypeArtifactUploadFailed    = "ArtifactUploadFailed"
+	ExecutionEventTypeTaskCreated                   = "TaskCreated"
+	ExecutionEventTypeTaskPhaseChanged              = "TaskPhaseChanged"
+	ExecutionEventTypeTaskJobCreated                = "TaskJobCreated"
+	ExecutionEventTypeTaskStarted                   = "TaskStarted"
+	ExecutionEventTypeTaskSucceeded                 = "TaskSucceeded"
+	ExecutionEventTypeTaskFailed                    = "TaskFailed"
+	ExecutionEventTypeTaskCancelled                 = "TaskCancelled"
+	ExecutionEventTypeWorkerStarted                 = "WorkerStarted"
+	ExecutionEventTypeWorkerCompleted               = "WorkerCompleted"
+	ExecutionEventTypeWorkerFailed                  = "WorkerFailed"
+	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
+	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
+	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
+	ExecutionEventTypeModelMessage                  = "ModelMessage"
+	ExecutionEventTypeContextTruncated              = "ContextTruncated"
+	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
+	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
+	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
+	ExecutionEventTypeWorkspacePreparationStarted   = "WorkspacePreparationStarted"
+	ExecutionEventTypeWorkspacePreparationCompleted = "WorkspacePreparationCompleted"
+	ExecutionEventTypeWorkspacePreparationFailed    = "WorkspacePreparationFailed"
+	ExecutionEventTypeAgentRuntimeStarted           = "AgentRuntimeStarted"
+	ExecutionEventTypeAgentRuntimeCommandStarted    = "AgentRuntimeCommandStarted"
+	ExecutionEventTypeAgentRuntimeCompleted         = "AgentRuntimeCompleted"
+	ExecutionEventTypeAgentRuntimeFailed            = "AgentRuntimeFailed"
+	ExecutionEventTypeResultSubmitted               = "ResultSubmitted"
+	ExecutionEventTypeArtifactUploadCompleted       = "ArtifactUploadCompleted"
+	ExecutionEventTypeArtifactUploadFailed          = "ArtifactUploadFailed"
+	ExecutionEventTypeTaskForkRequested             = "TaskForkRequested"
+	ExecutionEventTypeTaskForkCreated               = "TaskForkCreated"
+	ExecutionEventTypeApprovalRequested             = "ApprovalRequested"
+	ExecutionEventTypeApprovalApproved              = "ApprovalApproved"
+	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
+	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
+	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
 )
 
 const (
@@ -34,9 +48,10 @@ const (
 )
 
 const (
-	// ExecutionEventStreamTypeTask is the only supported Wave 0 stream type.
-	// Session streams are intentionally not defined in P0.
+	// ExecutionEventStreamTypeTask is the persisted per-task stream type.
 	ExecutionEventStreamTypeTask = "task"
+	// ExecutionEventStreamTypeSession names the public aggregated session stream read model.
+	ExecutionEventStreamTypeSession = "session"
 )
 
 var executionEventTypes = []string{
@@ -58,9 +73,23 @@ var executionEventTypes = []string{
 	ExecutionEventTypeToolCallStarted,
 	ExecutionEventTypeToolCallCompleted,
 	ExecutionEventTypeToolCallFailed,
+	ExecutionEventTypeWorkspacePreparationStarted,
+	ExecutionEventTypeWorkspacePreparationCompleted,
+	ExecutionEventTypeWorkspacePreparationFailed,
+	ExecutionEventTypeAgentRuntimeStarted,
+	ExecutionEventTypeAgentRuntimeCommandStarted,
+	ExecutionEventTypeAgentRuntimeCompleted,
+	ExecutionEventTypeAgentRuntimeFailed,
 	ExecutionEventTypeResultSubmitted,
 	ExecutionEventTypeArtifactUploadCompleted,
 	ExecutionEventTypeArtifactUploadFailed,
+	ExecutionEventTypeTaskForkRequested,
+	ExecutionEventTypeTaskForkCreated,
+	ExecutionEventTypeApprovalRequested,
+	ExecutionEventTypeApprovalApproved,
+	ExecutionEventTypeApprovalDeclined,
+	ExecutionEventTypeApprovalExpired,
+	ExecutionEventTypeApprovalCancelled,
 }
 
 var validExecutionEventTypes = newExecutionEventTypeSet(executionEventTypes)
@@ -118,7 +147,8 @@ func NormalizeExecutionEventSeverity(value string) string {
 	return value
 }
 
-// IsValidExecutionEventStreamType reports whether value is supported by the Wave 0 contract.
+// IsValidExecutionEventStreamType reports whether value is a supported persisted stream type.
+// Session timelines are an aggregated read model over task streams, not a direct P1 append target.
 func IsValidExecutionEventStreamType(value string) bool {
 	return strings.TrimSpace(value) == ExecutionEventStreamTypeTask
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -251,7 +252,7 @@ func doStreamRequest(t *testing.T, app *fiber.App, target string) string {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("read body: %v", err)
 	}
 	return string(data)

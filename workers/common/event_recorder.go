@@ -9,6 +9,8 @@ import (
 	"github.com/sozercan/orka/internal/events"
 )
 
+const defaultDetachedEventTimeout = 250 * time.Millisecond
+
 // EventRecorder records worker-side execution events.
 type EventRecorder interface {
 	Record(ctx context.Context, typ string, opts ...EventOption)
@@ -40,6 +42,31 @@ var _ EventRecorder = NoopEventRecorder{}
 
 // Record implements EventRecorder.
 func (NoopEventRecorder) Record(context.Context, string, ...EventOption) {}
+
+// RecordEvent emits a best-effort worker execution event.
+// Event recording must never change worker task behavior, so nil recorders and
+// recorder implementation panics are ignored.
+func RecordEvent(ctx context.Context, recorder EventRecorder, typ string, opts ...EventOption) {
+	if recorder == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	recorder.Record(ctx, typ, opts...)
+}
+
+// RecordEventWithTimeout emits a best-effort event using a fresh bounded
+// context. Use this for terminal events that may run after the worker's signal
+// context is already canceled.
+func RecordEventWithTimeout(recorder EventRecorder, typ string, timeout time.Duration, opts ...EventOption) {
+	if timeout <= 0 {
+		timeout = defaultDetachedEventTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	RecordEvent(ctx, recorder, typ, opts...)
+}
 
 // FakeEventRecorder captures worker events in memory for tests.
 type FakeEventRecorder struct {

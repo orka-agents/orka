@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -17,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/store"
 )
 
@@ -27,6 +29,11 @@ const (
 
 // ListTaskEvents handles GET /api/v1/tasks/{id}/events.
 func (h *Handlers) ListTaskEvents(c fiber.Ctx) error {
+	started := time.Now()
+	success := false
+	defer func() {
+		metrics.RecordExecutionEventList("task_api", success, time.Since(started).Seconds())
+	}()
 	taskName := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -63,6 +70,7 @@ func (h *Handlers) ListTaskEvents(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get latest execution event sequence: %v", err))
 	}
 
+	success = true
 	return c.JSON(NewListExecutionEventsResponse(namespace, events.ExecutionEventStreamTypeTask, taskName, query.afterSeq, latestSeq, listed))
 }
 
@@ -107,6 +115,8 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		done := metrics.RecordExecutionEventStreamOpen("task", query.afterSeq > 0)
+		defer done()
 		lastSeq := query.afterSeq
 		writeAvailable := func() bool {
 			return writeAvailableExecutionEventSSEFrames(
@@ -143,9 +153,162 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 				}
 			case <-heartbeat.C:
 				if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+					metrics.RecordExecutionEventStreamError("task", "write")
 					return
 				}
 				if err := w.Flush(); err != nil {
+					metrics.RecordExecutionEventStreamError("task", "write")
+					return
+				}
+			}
+		}
+	})
+}
+
+// ListSessionEvents handles GET /api/v1/sessions/{id}/events.
+func (h *Handlers) ListSessionEvents(c fiber.Ctx) error {
+	started := time.Now()
+	success := false
+	defer func() {
+		metrics.RecordExecutionEventList("session_api", success, time.Since(started).Seconds())
+	}()
+	sessionName := c.Params("id")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listSessionEvents", h.contextTokenAuthorization.SessionReadScopes); err != nil {
+		return err
+	}
+	if err := h.ensureSessionReadable(c, namespace, sessionName); err != nil {
+		return err
+	}
+	if h.executionEventStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
+	}
+
+	query, err := parseExecutionEventListQuery(c)
+	if err != nil {
+		return err
+	}
+	listed, latestSeq, err := h.executionEventStore.ListSessionExecutionEvents(c.Context(), store.SessionExecutionEventFilter{
+		Namespace:   namespace,
+		SessionName: sessionName,
+		EventTypes:  query.eventTypes,
+		AfterSeq:    query.afterSeq,
+		Limit:       query.limit,
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list session execution events: %v", err))
+	}
+
+	success = true
+	return c.JSON(NewListSessionExecutionEventsResponse(namespace, sessionName, query.afterSeq, latestSeq, listed))
+}
+
+// StreamSessionEvents handles GET /api/v1/sessions/{id}/stream?after=N.
+func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
+	sessionName := c.Params("id")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "streamSessionEvents", h.contextTokenAuthorization.SessionReadScopes); err != nil {
+		return err
+	}
+	if err := h.ensureSessionReadable(c, namespace, sessionName); err != nil {
+		return err
+	}
+	if h.executionEventStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
+	}
+
+	query, err := parseExecutionEventListQuery(c)
+	if err != nil {
+		return err
+	}
+	pollInterval := h.eventStreamPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultEventStreamPollInterval
+	}
+	heartbeatEvery := h.eventStreamHeartbeatEvery
+	if heartbeatEvery <= 0 {
+		heartbeatEvery = defaultEventStreamHeartbeatEvery
+	}
+	ctx := c.Context()
+	if ctx == nil {
+		ctx = c.RequestCtx()
+	}
+	streamStore := h.executionEventStore
+
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	return c.SendStreamWriter(func(w *bufio.Writer) {
+		done := metrics.RecordExecutionEventStreamOpen("session", query.afterSeq > 0)
+		defer done()
+		lastSeq := query.afterSeq
+		writeAvailable := func() bool {
+			listed, _, err := streamStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+				Namespace:   namespace,
+				SessionName: sessionName,
+				EventTypes:  query.eventTypes,
+				AfterSeq:    lastSeq,
+				Limit:       store.MaxExecutionEventLimit,
+			})
+			if err != nil {
+				metrics.RecordExecutionEventStreamError("session", "list")
+				log.Error(err, "failed to list execution events for session stream", "namespace", namespace, "session", sessionName)
+				return true
+			}
+			for _, event := range listed {
+				if event.SessionSeq > lastSeq {
+					lastSeq = event.SessionSeq
+				}
+				if !writeSessionExecutionEventSSEFrame(w, event) {
+					metrics.RecordExecutionEventStreamError("session", "write")
+					return false
+				}
+			}
+			if len(listed) > 0 {
+				if err := w.Flush(); err != nil {
+					metrics.RecordExecutionEventStreamError("session", "write")
+					return false
+				}
+			}
+			return true
+		}
+		if !writeAvailable() {
+			return
+		}
+		if !h.writeSessionDeletedStreamComplete(ctx, w, namespace, sessionName, lastSeq) {
+			return
+		}
+
+		poll := time.NewTicker(pollInterval)
+		defer poll.Stop()
+		heartbeat := time.NewTicker(heartbeatEvery)
+		defer heartbeat.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-poll.C:
+				if !writeAvailable() {
+					return
+				}
+				if !h.writeSessionDeletedStreamComplete(ctx, w, namespace, sessionName, lastSeq) {
+					return
+				}
+			case <-heartbeat.C:
+				if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+					metrics.RecordExecutionEventStreamError("session", "write")
+					return
+				}
+				if err := w.Flush(); err != nil {
+					metrics.RecordExecutionEventStreamError("session", "write")
 					return
 				}
 			}
@@ -191,6 +354,33 @@ func parseExecutionEventListQuery(c fiber.Ctx) (executionEventListQuery, error) 
 		query.eventTypes = append(query.eventTypes, typ)
 	}
 	return query, nil
+}
+
+func (h *Handlers) writeSessionDeletedStreamComplete(
+	ctx context.Context,
+	w *bufio.Writer,
+	namespace string,
+	sessionName string,
+	lastSeq int64,
+) bool {
+	if h == nil || h.sessionStore == nil {
+		return true
+	}
+	if _, err := h.sessionStore.GetSession(ctx, namespace, sessionName); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			if !writeExecutionEventStreamCompleteFrame(w, lastSeq, "SessionDeleted") {
+				metrics.RecordExecutionEventStreamError("session", "write")
+				return false
+			}
+			if err := w.Flush(); err != nil {
+				metrics.RecordExecutionEventStreamError("session", "write")
+				return false
+			}
+			return false
+		}
+		log.Error(err, "failed to check session existence for event stream", "namespace", namespace, "session", sessionName)
+	}
+	return true
 }
 
 func (h *Handlers) ensureTaskReadable(c fiber.Ctx, namespace, taskName, action string) error {
@@ -250,6 +440,7 @@ func writeAvailableExecutionEventSSEFrames(
 		Limit:      store.MaxExecutionEventLimit,
 	})
 	if err != nil {
+		metrics.RecordExecutionEventStreamError("task", "list")
 		log.Error(err, "failed to list execution events for stream", "namespace", namespace, "task", taskName)
 		return true
 	}
@@ -260,6 +451,7 @@ func writeAvailableExecutionEventSSEFrames(
 			*lastSeq = event.Seq
 		}
 		if !writeExecutionEventSSEFrame(w, event) {
+			metrics.RecordExecutionEventStreamError("task", "write")
 			return false
 		}
 		if isTerminalExecutionEventType(event.Type) {
@@ -281,11 +473,13 @@ func writeAvailableExecutionEventSSEFrames(
 	}
 	if terminalEvent != nil {
 		if !writeExecutionEventStreamCompleteSSEFrame(w, *terminalEvent) {
+			metrics.RecordExecutionEventStreamError("task", "write")
 			return false
 		}
 	}
 	if len(listed) > 0 || terminalEvent != nil {
 		if err := w.Flush(); err != nil {
+			metrics.RecordExecutionEventStreamError("task", "write")
 			return false
 		}
 	}
@@ -298,6 +492,19 @@ func shouldCompleteForTerminalCandidate(
 	eventTypes []string,
 ) bool {
 	return terminalCandidate.Seq <= lastSeq || executionEventTypeFilterExcludes(eventTypes, terminalCandidate.Type)
+}
+
+func (h *Handlers) ensureSessionReadable(c fiber.Ctx, namespace, sessionName string) error {
+	if h.sessionStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "session store not configured")
+	}
+	if _, err := h.sessionStore.GetSession(c.Context(), namespace, sessionName); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+	}
+	return nil
 }
 
 func writeExecutionEventSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {
@@ -353,6 +560,18 @@ func executionEventTypeFilterExcludes(eventTypes []string, eventType string) boo
 		return false
 	}
 	return !slices.Contains(eventTypes, eventType)
+}
+
+func writeSessionExecutionEventSSEFrame(w *bufio.Writer, event store.SessionExecutionEvent) bool {
+	data, err := json.Marshal(NewSessionExecutionEventResponse(event))
+	if err != nil {
+		log.Error(err, "failed to marshal session execution event for SSE", "eventID", event.ID, "sessionSeq", event.SessionSeq)
+		return true
+	}
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: execution_event\ndata: %s\n\n", event.SessionSeq, data); err != nil {
+		return false
+	}
+	return true
 }
 
 func writeExecutionEventStreamCompleteSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {

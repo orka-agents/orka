@@ -48,6 +48,20 @@ func TestEventRecorderNoopAllowsNilAndEmptyOptions(t *testing.T) {
 	recorder.Record(context.Background(), events.ExecutionEventTypeTaskCreated, nil, WithEventSeverity("warning"))
 }
 
+func TestRecordEventWithTimeoutUsesFreshContext(t *testing.T) {
+	recorder := NewFakeEventRecorder()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	RecordEvent(canceled, recorder, events.ExecutionEventTypeWorkerFailed)
+	if got := recorder.EventTypes(); len(got) != 0 {
+		t.Fatalf("RecordEvent with canceled context captured %v, want none", got)
+	}
+	RecordEventWithTimeout(recorder, events.ExecutionEventTypeWorkerFailed, time.Second)
+	if got := recorder.EventTypes(); !reflect.DeepEqual(got, []string{events.ExecutionEventTypeWorkerFailed}) {
+		t.Fatalf("RecordEventWithTimeout captured %v, want WorkerFailed", got)
+	}
+}
+
 func TestEventRecorderFakeSanitizesPayloadOptions(t *testing.T) {
 	recorder := NewFakeEventRecorder()
 	bearerValue := fakeDashToken("bearer")
@@ -74,6 +88,47 @@ func TestEventRecorderFakeSanitizesPayloadOptions(t *testing.T) {
 	}
 }
 
+func TestSecretEventRedactionAuditWorkerSide(t *testing.T) {
+	recorder := NewFakeEventRecorder()
+	secrets := workerEventAuditSecrets()
+	recorder.Record(context.Background(), events.ExecutionEventTypeModelMessage,
+		WithEventSummary("Authorization: Bearer "+secrets["bearer"]+" token is "+secrets["openai"]),
+		WithEventContent(mustRawJSON(t, map[string]any{
+			"authorization":     "Bearer " + secrets["bearer"],
+			"jwt":               secrets["jwt"],
+			"apiKey":            secrets["openai"],
+			"cookie":            "session=" + secrets["cookie"],
+			"transaction-token": secrets["txn"],
+			"githubToken":       secrets["github"],
+			"anthropicAPIKey":   secrets["anthropic"],
+			"safe":              "preserved",
+		})),
+		WithEventContentText(strings.Join([]string{
+			"Cookie: session=" + secrets["cookie"],
+			"Transaction-Token: " + secrets["txn"],
+			"jwt=" + secrets["jwt"],
+			"github=" + secrets["github"],
+			"anthropic=" + secrets["anthropic"],
+		}, "\n")),
+	)
+	captured := recorder.Events()
+	if len(captured) != 1 {
+		t.Fatalf("Events() length = %d, want 1", len(captured))
+	}
+	data, err := json.Marshal(captured[0])
+	if err != nil {
+		t.Fatalf("marshal captured event: %v", err)
+	}
+	for name, secret := range secrets {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("worker event leaked %s secret %q in %s", name, secret, data)
+		}
+	}
+	if !strings.Contains(string(data), events.ExecutionEventRedactedValue) {
+		t.Fatalf("worker event = %s, want redaction marker", data)
+	}
+}
+
 func TestFakeEventRecorderReset(t *testing.T) {
 	recorder := NewFakeEventRecorder()
 	recorder.Record(context.Background(), events.ExecutionEventTypeTaskStarted)
@@ -89,6 +144,34 @@ func TestHTTPEventRecorderFromEnvMissingConfigNoop(t *testing.T) {
 	t.Setenv(EnvOrkaTaskName, "task-1")
 	if _, ok := NewHTTPEventRecorderFromEnv().(NoopEventRecorder); !ok {
 		t.Fatalf("NewHTTPEventRecorderFromEnv() = %T, want NoopEventRecorder", NewHTTPEventRecorderFromEnv())
+	}
+}
+
+func TestHTTPEventRecorderFromEnvPropagatesSessionName(t *testing.T) {
+	gotBody := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotBody <- body
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	t.Setenv(EnvOrkaControllerURL, server.URL)
+	t.Setenv(EnvOrkaTaskNamespace, "default")
+	t.Setenv(EnvOrkaTaskName, "task-1")
+	t.Setenv(EnvOrkaSessionName, "session-1")
+
+	recorder := NewHTTPEventRecorderFromEnv()
+	recorder.Record(context.Background(), events.ExecutionEventTypeWorkerStarted)
+
+	body := <-gotBody
+	if body["sessionName"] != "session-1" {
+		t.Fatalf("sessionName = %#v, want session-1", body["sessionName"])
 	}
 }
 
@@ -116,6 +199,7 @@ func TestHTTPEventRecorderPostsEventWithBearerToken(t *testing.T) {
 		ControllerURL: server.URL,
 		Namespace:     "default",
 		TaskName:      "task-1",
+		SessionName:   "session-1",
 		BearerPath:    bearerPath,
 		Timeout:       time.Second,
 	})
@@ -142,8 +226,11 @@ func TestHTTPEventRecorderPostsEventWithBearerToken(t *testing.T) {
 		body["severity"] != events.ExecutionEventSeverityWarning {
 		t.Fatalf("body type/severity = %#v", body)
 	}
-	if body["taskName"] != "task-1" || body["toolName"] != "file_read" || body["toolCallID"] != "call-1" {
-		t.Fatalf("body task/tool fields = %#v", body)
+	if body["taskName"] != "task-1" ||
+		body["sessionName"] != "session-1" ||
+		body["toolName"] != "file_read" ||
+		body["toolCallID"] != "call-1" {
+		t.Fatalf("body task/session/tool fields = %#v", body)
 	}
 	content, ok := body["content"].(map[string]any)
 	if !ok {
@@ -254,4 +341,20 @@ func fakeDashToken(prefix string) string {
 
 func fakeOpenAIKey() string {
 	return strings.Join([]string{"sk", "test12345678901234567890"}, "-")
+}
+
+func workerEventAuditSecrets() map[string]string {
+	return map[string]string{
+		"bearer": strings.Join([]string{"bearer", "value", "for", "redaction"}, "-"),
+		"jwt": strings.Join([]string{
+			"ey" + "JhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+			"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
+			"signature" + strings.Repeat("a", 24),
+		}, "."),
+		"openai":    strings.Join([]string{"sk", strings.Repeat("a", 24)}, "-"),
+		"cookie":    strings.Join([]string{"cookie", "value", "for", "redaction"}, "-"),
+		"txn":       strings.Join([]string{"txn", "value", "for", "redaction"}, "-"),
+		"github":    "github" + "_pat_" + strings.Repeat("a", 32),
+		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
+	}
 }

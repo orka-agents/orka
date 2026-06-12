@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -162,6 +165,62 @@ func TestExecutionEventStoreListDefaultAndMaxLimit(t *testing.T) {
 	}
 }
 
+func TestEventSecretRedactionPersistedRows(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	secrets := executionEventAuditSecrets()
+	content := map[string]any{
+		"authorization":     "Bearer " + secrets["bearer"],
+		"jwt":               secrets["jwt"],
+		"apiKey":            secrets["openai"],
+		"cookie":            "session=" + secrets["cookie"],
+		"transaction-token": secrets["txn"],
+		"githubToken":       secrets["github"],
+		"anthropic_api_key": secrets["anthropic"],
+		"safe":              "preserved",
+	}
+	contentBytes, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("marshal content: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "task-redact-store",
+		TaskName:    "task-redact-store",
+		Type:        events.ExecutionEventTypeModelMessage,
+		Summary:     "Authorization: Bearer " + secrets["bearer"] + "\nTransaction-Token: " + secrets["txn"],
+		Content:     json.RawMessage(contentBytes),
+		ContentText: "Cookie: session=" + secrets["cookie"] + "\napi_key=" + secrets["openai"],
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+
+	var persisted string
+	if err := s.db.QueryRowContext(ctx, `SELECT summary || COALESCE(content_json, '') || content_text FROM execution_events WHERE stream_id = ?`, "task-redact-store").Scan(&persisted); err != nil {
+		t.Fatalf("query persisted event: %v", err)
+	}
+	for name, secret := range secrets {
+		if strings.Contains(persisted, secret) {
+			t.Fatalf("persisted event leaked %s secret %q in %q", name, secret, persisted)
+		}
+	}
+	if !strings.Contains(persisted, events.ExecutionEventRedactedValue) {
+		t.Fatalf("persisted event = %q, want redaction marker", persisted)
+	}
+	listed, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-redact-store",
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || !strings.Contains(string(listed[0].Content), events.ExecutionEventRedactedValue) {
+		t.Fatalf("listed redacted event = %#v content=%s", listed, listed[0].Content)
+	}
+}
+
 func TestExecutionEventStoreConcurrentSameStreamAppends(t *testing.T) {
 	s := setupDiskStore(t)
 	assertConcurrentExecutionEventAppends(t, s)
@@ -192,6 +251,201 @@ func TestExecutionEventStoreConcurrentSameStreamAppendsMultiConnection(t *testin
 		t.Fatalf("migrate: %v", err)
 	}
 	assertConcurrentExecutionEventAppends(t, NewStore(db, dbPath))
+}
+
+func TestExecutionEventStoreRejectsDuplicateApprovalDecision(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	approved := mustRawMessage(t, map[string]string{"approvalID": "approval-1"})
+	declined := mustRawMessage(t, map[string]string{"approvalID": "approval-1"})
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+		TaskName:   "task-1",
+		Type:       events.ExecutionEventTypeApprovalApproved,
+		Content:    approved,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent approved: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "task-1",
+		TaskName:   "task-1",
+		Type:       events.ExecutionEventTypeApprovalDeclined,
+		Content:    declined,
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("AppendExecutionEvent duplicate decision error = %v, want ErrConflict", err)
+	}
+}
+
+func TestExecutionEventStoreConcurrentSessionAppendsAllocateUniqueSessionSeq(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "session-concurrent.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	stores := []*Store{NewStore(db, dbPath), NewStore(db, dbPath)}
+	ctx := context.Background()
+	const count = 25
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for i := range count {
+		wg.Go(func() {
+			_, err := stores[i%len(stores)].AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+				Namespace:   "default",
+				StreamType:  store.ExecutionEventStreamTypeTask,
+				StreamID:    fmt.Sprintf("task-%d", i),
+				TaskName:    fmt.Sprintf("task-%d", i),
+				SessionName: "session-concurrent",
+				Type:        events.ExecutionEventTypeWorkerStarted,
+			})
+			if err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("AppendExecutionEvent concurrent session: %v", err)
+	}
+	listed, latest, err := stores[0].ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace:   "default",
+		SessionName: "session-concurrent",
+		Limit:       count,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != count || len(listed) != count {
+		t.Fatalf("latest=%d len=%d, want %d", latest, len(listed), count)
+	}
+	for i, event := range listed {
+		want := int64(i + 1)
+		if event.SessionSeq != want {
+			t.Fatalf("listed[%d].SessionSeq=%d, want %d; events=%#v", i, event.SessionSeq, want, listed)
+		}
+	}
+}
+
+func TestExecutionEventStoreDeleteSessionRemovesSessionEvents(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-reuse", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "task-old",
+		TaskName:    "task-old",
+		SessionName: "session-reuse",
+		Type:        events.ExecutionEventTypeWorkerStarted,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+	if err := s.DeleteSession(ctx, "default", "session-reuse"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	taskEvents, err := s.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace: "default", StreamID: "task-old", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents after DeleteSession: %v", err)
+	}
+	if len(taskEvents) != 1 || taskEvents[0].SessionName != "" {
+		t.Fatalf("task events after session delete = %#v, want retained without session link", taskEvents)
+	}
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-reuse", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("CreateSession reused name: %v", err)
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace:   "default",
+		SessionName: "session-reuse",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 0 || len(listed) != 0 {
+		t.Fatalf("latest=%d listed=%#v, want empty event read model after session reuse", latest, listed)
+	}
+}
+
+func TestExecutionEventStoreMigrationBackfillsLegacySessionSeq(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-session-seq.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`CREATE TABLE execution_events (
+		id              TEXT PRIMARY KEY,
+		namespace       TEXT NOT NULL,
+		stream_type     TEXT NOT NULL,
+		stream_id       TEXT NOT NULL,
+		seq             INTEGER NOT NULL,
+		type            TEXT NOT NULL,
+		severity        TEXT NOT NULL DEFAULT 'info',
+		task_name       TEXT NOT NULL DEFAULT '',
+		session_name    TEXT NOT NULL DEFAULT '',
+		agent_name      TEXT NOT NULL DEFAULT '',
+		tool_name       TEXT NOT NULL DEFAULT '',
+		tool_call_id    TEXT NOT NULL DEFAULT '',
+		summary         TEXT NOT NULL DEFAULT '',
+		content_json    TEXT,
+		content_text    TEXT NOT NULL DEFAULT '',
+		truncation_json TEXT,
+		created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(namespace, stream_type, stream_id, seq)
+	)`); err != nil {
+		t.Fatalf("create legacy execution_events: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO execution_events
+		(id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name, created_at)
+		VALUES ('evt-legacy', 'default', 'task', 'task-legacy', 1, ?, 'info', 'task-legacy', 'session-legacy', ?)`,
+		events.ExecutionEventTypeWorkerStarted,
+		time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatalf("insert legacy execution event: %v", err)
+	}
+
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate legacy execution_events: %v", err)
+	}
+
+	s := NewStore(db, dbPath)
+	if _, err := s.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "task-next",
+		TaskName:    "task-next",
+		SessionName: "session-legacy",
+		Type:        events.ExecutionEventTypeWorkerCompleted,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent after migration: %v", err)
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(context.Background(), store.SessionExecutionEventFilter{
+		Namespace:   "default",
+		SessionName: "session-legacy",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents after migration: %v", err)
+	}
+	if latest != 2 || len(listed) != 2 || listed[0].SessionSeq != 1 || listed[1].SessionSeq != 2 {
+		t.Fatalf("latest=%d listed=%#v, want backfilled seq 1 and next seq 2", latest, listed)
+	}
 }
 
 func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {
@@ -239,4 +493,118 @@ func assertConcurrentExecutionEventAppends(t *testing.T, s *Store) {
 	if latest != count {
 		t.Fatalf("latest = %d, want %d", latest, count)
 	}
+}
+
+func executionEventAuditSecrets() map[string]string {
+	return map[string]string{
+		"bearer": strings.Join([]string{"bearer", "value", "for", "redaction"}, "-"),
+		"jwt": strings.Join([]string{
+			"ey" + "JhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+			"ey" + "JzdWIiOiJ0YXNrIiwiYXVkIjoib3JrYSJ9",
+			"signature" + strings.Repeat("a", 24),
+		}, "."),
+		"openai":    strings.Join([]string{"sk", strings.Repeat("a", 24)}, "-"),
+		"cookie":    strings.Join([]string{"cookie", "value", "for", "redaction"}, "-"),
+		"txn":       strings.Join([]string{"txn", "value", "for", "redaction"}, "-"),
+		"github":    "github" + "_pat_" + strings.Repeat("a", 32),
+		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
+	}
+}
+
+func TestExecutionEventStoreListSessionExecutionEvents(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	for i, item := range []struct {
+		task string
+		typ  string
+	}{
+		{"task-a", events.ExecutionEventTypeTaskStarted},
+		{"task-b", events.ExecutionEventTypeWorkerStarted},
+		{"task-a", events.ExecutionEventTypeTaskSucceeded},
+	} {
+		if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    item.task,
+			TaskName:    item.task,
+			SessionName: "session-1",
+			Type:        item.typ,
+			CreatedAt:   now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent: %v", err)
+		}
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{Namespace: "default", SessionName: "session-1", AfterSeq: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 3 || len(listed) != 2 {
+		t.Fatalf("latest=%d listed=%#v, want latest 3 and two events", latest, listed)
+	}
+	if listed[0].SessionSeq != 2 || listed[0].TaskName != "task-b" || listed[0].TaskSeq != 1 {
+		t.Fatalf("first = %#v, want task-b session seq 2 task seq 1", listed[0])
+	}
+}
+
+func TestExecutionEventStoreListSessionTypeFilterPreservesCursor(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	for _, item := range []struct {
+		task string
+		typ  string
+	}{
+		{"task-a", events.ExecutionEventTypeTaskStarted},
+		{"task-b", events.ExecutionEventTypeWorkerStarted},
+	} {
+		if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: item.task,
+			TaskName: item.task, SessionName: "session-1", Type: item.typ,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent: %v", err)
+		}
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1", EventTypes: []string{events.ExecutionEventTypeWorkerStarted},
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 2 || len(listed) != 1 || listed[0].SessionSeq != 2 {
+		t.Fatalf("latest=%d listed=%#v, want latest 2 and preserved session seq 2", latest, listed)
+	}
+}
+
+func TestExecutionEventStoreListSessionCursorSurvivesTaskDeletion(t *testing.T) {
+	const taskC = "task-c"
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-a", TaskName: "task-a", SessionName: "session-1", Type: events.ExecutionEventTypeTaskStarted}); err != nil {
+		t.Fatalf("append task-a: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "task-b", TaskName: "task-b", SessionName: "session-1", Type: events.ExecutionEventTypeWorkerStarted}); err != nil {
+		t.Fatalf("append task-b: %v", err)
+	}
+	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "task-a"); err != nil {
+		t.Fatalf("DeleteExecutionEvents: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: taskC, TaskName: taskC, SessionName: "session-1", Type: events.ExecutionEventTypeTaskSucceeded}); err != nil {
+		t.Fatalf("append task-c: %v", err)
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{Namespace: "default", SessionName: "session-1", AfterSeq: 2})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 3 || len(listed) != 1 || listed[0].SessionSeq != 3 || listed[0].TaskName != taskC {
+		t.Fatalf("latest=%d listed=%#v, want new event at stable seq 3", latest, listed)
+	}
+}
+
+func mustRawMessage(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return json.RawMessage(data)
 }

@@ -111,6 +111,10 @@ func (s failingExecutionEventStore) ListExecutionEvents(context.Context, store.E
 	return nil, s.err
 }
 
+func (s failingExecutionEventStore) ListSessionExecutionEvents(context.Context, store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, s.err
+}
+
 func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, s.err
 }
@@ -5378,6 +5382,42 @@ func TestCompleteTaskRecordsTerminalExecutionEvent(t *testing.T) {
 	}
 }
 
+func TestHandleCompletedRecordsCancelledExecutionEventOnce(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancelled-event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			Message: "cancelled by parent task",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+
+	for range 2 {
+		if _, err := r.handleCompleted(context.Background(), task); err != nil {
+			t.Fatalf("handleCompleted() error = %v", err)
+		}
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "cancelled-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 ||
+		listed[0].Type != events.ExecutionEventTypeTaskCancelled ||
+		listed[0].Summary != "cancelled by parent task" {
+		t.Fatalf("terminal events = %#v, want one TaskCancelled event", listed)
+	}
+}
+
 func TestCompleteTask_WithPlanStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -5541,6 +5581,8 @@ func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	stale.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
 
 	r := newUnitReconciler(scheme, current)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
 	result, err := r.createTaskJob(context.Background(), stale, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -5563,6 +5605,18 @@ func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	}
 	if len(jobs.Items) != 0 {
 		t.Fatalf("expected no jobs to be created, got %d", len(jobs.Items))
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   current.Name,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("start events = %#v, want none for cancelled task", listed)
 	}
 }
 
@@ -5996,6 +6050,13 @@ func (failingTaskExecutionEventStore) ListExecutionEvents(context.Context, store
 	return nil, errors.New("not implemented")
 }
 
+func (failingTaskExecutionEventStore) ListSessionExecutionEvents(
+	context.Context,
+	store.SessionExecutionEventFilter,
+) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, errors.New("not implemented")
+}
+
 func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
 	return 0, errors.New("not implemented")
 }
@@ -6039,6 +6100,118 @@ func TestTaskReconcilerRecordsTaskCreatedEventOnStatusInitialization(t *testing.
 	}
 	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeTaskCreated || listed[0].Seq != 1 || listed[0].TaskName != "event-task" {
 		t.Fatalf("listed events = %#v, want one TaskCreated event", listed)
+	}
+}
+
+func TestTaskControllerLifecycleEvents(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "lifecycle-task",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hello"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	if _, err := reconciler.createTaskJob(context.Background(), task, nil, nil); err != nil {
+		t.Fatalf("createTaskJob() error = %v", err)
+	}
+	if _, err := reconciler.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "task completed"); err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "lifecycle-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	wantTypes := map[string]bool{
+		events.ExecutionEventTypeTaskJobCreated: false,
+		events.ExecutionEventTypeTaskStarted:    false,
+		events.ExecutionEventTypeTaskSucceeded:  false,
+	}
+	var previousSeq int64
+	for _, event := range listed {
+		if event.Seq <= previousSeq {
+			t.Fatalf("events are not strictly increasing: %#v", listed)
+		}
+		previousSeq = event.Seq
+		if _, ok := wantTypes[event.Type]; ok {
+			wantTypes[event.Type] = true
+		}
+	}
+	for typ, seen := range wantTypes {
+		if !seen {
+			t.Fatalf("lifecycle events missing %s: %#v", typ, listed)
+		}
+	}
+	afterFirst, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "lifecycle-task",
+		AfterSeq:   listed[0].Seq,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents after first seq: %v", err)
+	}
+	for _, event := range afterFirst {
+		if event.Seq <= listed[0].Seq {
+			t.Fatalf("after query returned old seq <= %d: %#v", listed[0].Seq, afterFirst)
+		}
+	}
+}
+
+func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
+	scheme := newTestScheme()
+	now := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "delete-events-task",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "delete-events-task",
+		TaskName:   "delete-events-task",
+		Type:       events.ExecutionEventTypeTaskStarted,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+
+	if _, err := reconciler.handleDeletion(context.Background(), task); err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	remaining, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "delete-events-task",
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents after deletion: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining events = %#v, want none after task deletion", remaining)
 	}
 }
 

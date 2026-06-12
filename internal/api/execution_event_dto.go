@@ -56,7 +56,7 @@ func (r SubmitExecutionEventRequest) ToStoreEvent(namespace, streamType, streamI
 		Summary:     payload.Summary,
 		Content:     payload.Content,
 		ContentText: payload.ContentText,
-		Truncation:  mergeExecutionEventTruncation(r.Truncation, payload.Truncation),
+		Truncation:  store.MergeExecutionEventTruncation(r.Truncation, payload.Truncation),
 	}, nil
 }
 
@@ -96,6 +96,25 @@ type ListExecutionEventsResponse struct {
 	AfterSeq   int64                    `json:"afterSeq"`
 	LatestSeq  int64                    `json:"latestSeq"`
 	Events     []ExecutionEventResponse `json:"events"`
+}
+
+// SessionExecutionEventResponse is the public representation of a task-derived
+// session event. Seq is the session-level cursor; taskSeq is the source task
+// stream sequence.
+type SessionExecutionEventResponse struct {
+	ExecutionEventResponse
+	TaskSeq      int64  `json:"taskSeq"`
+	TaskStreamID string `json:"taskStreamID"`
+}
+
+// ListSessionExecutionEventsResponse is the API response for an aggregated session stream.
+type ListSessionExecutionEventsResponse struct {
+	Namespace  string                          `json:"namespace"`
+	StreamType string                          `json:"streamType"`
+	StreamID   string                          `json:"streamID"`
+	AfterSeq   int64                           `json:"afterSeq"`
+	LatestSeq  int64                           `json:"latestSeq"`
+	Events     []SessionExecutionEventResponse `json:"events"`
 }
 
 // NewExecutionEventResponse converts a store event to an API DTO and intentionally
@@ -138,6 +157,35 @@ func NewListExecutionEventsResponse(namespace, streamType, streamID string, afte
 	}
 }
 
+// NewSessionExecutionEventResponse converts an aggregated store event to a session DTO.
+func NewSessionExecutionEventResponse(event store.SessionExecutionEvent) SessionExecutionEventResponse {
+	response := NewExecutionEventResponse(event.ExecutionEvent)
+	response.Seq = event.SessionSeq
+	response.StreamType = events.ExecutionEventStreamTypeSession
+	response.StreamID = event.SessionName
+	return SessionExecutionEventResponse{
+		ExecutionEventResponse: response,
+		TaskSeq:                event.TaskSeq,
+		TaskStreamID:           event.StreamID,
+	}
+}
+
+// NewListSessionExecutionEventsResponse builds a session timeline DTO.
+func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterSeq, latestSeq int64, storeEvents []store.SessionExecutionEvent) ListSessionExecutionEventsResponse {
+	responses := make([]SessionExecutionEventResponse, 0, len(storeEvents))
+	for _, event := range storeEvents {
+		responses = append(responses, NewSessionExecutionEventResponse(event))
+	}
+	return ListSessionExecutionEventsResponse{
+		Namespace:  namespace,
+		StreamType: events.ExecutionEventStreamTypeSession,
+		StreamID:   sessionName,
+		AfterSeq:   afterSeq,
+		LatestSeq:  latestSeq,
+		Events:     responses,
+	}
+}
+
 func cloneRawMessage(raw json.RawMessage) json.RawMessage {
 	if raw == nil {
 		return nil
@@ -151,23 +199,4 @@ func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *even
 	}
 	truncationCopy := *value
 	return &truncationCopy
-}
-
-func mergeExecutionEventTruncation(values ...*events.ExecutionEventTruncation) *events.ExecutionEventTruncation {
-	var merged events.ExecutionEventTruncation
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-		merged.SummaryTruncated = merged.SummaryTruncated || value.SummaryTruncated
-		merged.SummaryOriginalChars = max(merged.SummaryOriginalChars, value.SummaryOriginalChars)
-		merged.ContentTextTruncated = merged.ContentTextTruncated || value.ContentTextTruncated
-		merged.ContentTextOriginalChars = max(merged.ContentTextOriginalChars, value.ContentTextOriginalChars)
-		merged.ContentJSONTruncated = merged.ContentJSONTruncated || value.ContentJSONTruncated
-		merged.ContentJSONOriginalBytes = max(merged.ContentJSONOriginalBytes, value.ContentJSONOriginalBytes)
-	}
-	if merged.Empty() {
-		return nil
-	}
-	return &merged
 }

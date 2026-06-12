@@ -26,6 +26,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -34,6 +35,40 @@ const (
 	testAgentSandboxTemplateNamespace = "template-ns"
 	executorResultDone                = "done"
 )
+
+func setBasicRunAgentEnv(t *testing.T, taskName string) {
+	t.Helper()
+	t.Setenv(workerenv.Prompt, "test prompt")
+	t.Setenv(workerenv.TaskName, taskName)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.MaxTurns, "")
+	t.Setenv(workerenv.AllowedTools, "")
+	t.Setenv(workerenv.DisallowedTools, "")
+	t.Setenv(workerenv.TimeoutSeconds, "")
+	t.Setenv(workerenv.GitRepo, "")
+	t.Setenv(workerenv.PriorTask, "")
+	t.Setenv(workerenv.ControllerURL, "")
+	t.Setenv(workerenv.ResultEndpoint, "")
+}
+
+func setRunAgentEventRecorderForTest(recorder EventRecorder) func() {
+	previous := newEventRecorderFromEnv
+	newEventRecorderFromEnv = func() EventRecorder { return recorder }
+	return func() { newEventRecorderFromEnv = previous }
+}
+
+func assertRecordedEventTypes(t *testing.T, got []string, want []string) {
+	t.Helper()
+	seen := make(map[string]bool, len(got))
+	for _, typ := range got {
+		seen[typ] = true
+	}
+	for _, typ := range want {
+		if !seen[typ] {
+			t.Fatalf("event types %v missing %s", got, typ)
+		}
+	}
+}
 
 func TestLoadConfig_RequiredFields(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "")
@@ -770,6 +805,35 @@ func TestRunAgent_ConfigError(t *testing.T) {
 	}
 }
 
+func TestRunAgentConfigErrorEmitsWorkerFailedEvent(t *testing.T) {
+	t.Setenv(workerenv.Prompt, "")
+	t.Setenv(workerenv.TaskName, "config-error-task")
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.MaxTurns, "")
+	t.Setenv(workerenv.AllowedTools, "")
+	t.Setenv(workerenv.DisallowedTools, "")
+	t.Setenv(workerenv.TimeoutSeconds, "")
+	t.Setenv(workerenv.GitRepo, "")
+
+	recorder := NewFakeEventRecorder()
+	restoreRecorder := setRunAgentEventRecorderForTest(recorder)
+	defer restoreRecorder()
+
+	err := RunAgent("codex", t.TempDir(), 50, func(context.Context, *AgentConfig) (string, error) {
+		return "should not run", nil
+	})
+	if err == nil {
+		t.Fatal("RunAgent() error = nil, want config error")
+	}
+	if got := recorder.EventTypes(); !reflect.DeepEqual(got, []string{events.ExecutionEventTypeWorkerFailed}) {
+		t.Fatalf("event types = %v, want WorkerFailed", got)
+	}
+	captured := recorder.Events()[0]
+	if captured.TaskName != "config-error-task" || !strings.Contains(captured.Summary, "invalid configuration") {
+		t.Fatalf("captured event = %#v, want task name and config error summary", captured)
+	}
+}
+
 func TestRunAgent_ExecutorSuccess(t *testing.T) {
 	t.Setenv("ORKA_PROMPT", "test prompt")
 	t.Setenv("ORKA_TASK_NAME", "t1")
@@ -799,6 +863,103 @@ func TestRunAgent_ExecutorSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAgent should succeed, got: %v", err)
 	}
+}
+
+func TestRunAgentEmitsLifecycleEvents(t *testing.T) {
+	setBasicRunAgentEnv(t, "event-task")
+	recorder := NewFakeEventRecorder()
+	restoreRecorder := setRunAgentEventRecorderForTest(recorder)
+	defer restoreRecorder()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+
+	err := RunAgent("codex", t.TempDir(), 50, func(_ context.Context, cfg *AgentConfig) (string, error) {
+		if cfg.Prompt != "test prompt" {
+			t.Fatalf("prompt = %q, want test prompt", cfg.Prompt)
+		}
+		return "completed successfully", nil
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	assertRecordedEventTypes(t, recorder.EventTypes(), []string{
+		events.ExecutionEventTypeWorkerStarted,
+		events.ExecutionEventTypeWorkspacePreparationStarted,
+		events.ExecutionEventTypeWorkspacePreparationCompleted,
+		events.ExecutionEventTypeAgentRuntimeStarted,
+		events.ExecutionEventTypeAgentRuntimeCommandStarted,
+		events.ExecutionEventTypeAgentRuntimeCompleted,
+		events.ExecutionEventTypeResultSubmitted,
+		events.ExecutionEventTypeWorkerCompleted,
+	})
+	var sawRuntimeCommand bool
+	for _, event := range recorder.Events() {
+		if event.Type == events.ExecutionEventTypeAgentRuntimeCommandStarted && event.AgentName == "codex" {
+			sawRuntimeCommand = true
+			if strings.Contains(string(event.Content), "test prompt") {
+				t.Fatalf("runtime command event leaked prompt text: %s", event.Content)
+			}
+		}
+	}
+	if !sawRuntimeCommand {
+		t.Fatalf("missing codex runtime command event: %#v", recorder.Events())
+	}
+}
+
+func TestRunAgentFailureEmitsRuntimeAndWorkerFailedEvents(t *testing.T) {
+	setBasicRunAgentEnv(t, "event-fail-task")
+	recorder := NewFakeEventRecorder()
+	restoreRecorder := setRunAgentEventRecorderForTest(recorder)
+	defer restoreRecorder()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+
+	err := RunAgent("claude", t.TempDir(), 50, func(context.Context, *AgentConfig) (string, error) {
+		return "partial output", fmt.Errorf("agent crashed")
+	})
+	if err == nil {
+		t.Fatal("RunAgent() error = nil, want executor failure")
+	}
+	assertRecordedEventTypes(t, recorder.EventTypes(), []string{
+		events.ExecutionEventTypeAgentRuntimeFailed,
+		events.ExecutionEventTypeResultSubmitted,
+		events.ExecutionEventTypeWorkerFailed,
+	})
+}
+
+func TestRunAgentWorkspacePreparationFailedEvent(t *testing.T) {
+	setBasicRunAgentEnv(t, "event-workspace-fail-task")
+	recorder := NewFakeEventRecorder()
+	restoreRecorder := setRunAgentEventRecorderForTest(recorder)
+	defer restoreRecorder()
+	workspaceDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(workspaceDir, workspaceArtifactsDirName),
+		[]byte("not a symlink"),
+		0o644,
+	); err != nil {
+		t.Fatalf("write conflicting artifact path: %v", err)
+	}
+
+	err := RunAgent("copilot", workspaceDir, 50, func(context.Context, *AgentConfig) (string, error) {
+		return "should not run", nil
+	})
+	if err == nil {
+		t.Fatal("RunAgent() error = nil, want workspace setup failure")
+	}
+	assertRecordedEventTypes(t, recorder.EventTypes(), []string{
+		events.ExecutionEventTypeWorkspacePreparationStarted,
+		events.ExecutionEventTypeWorkspacePreparationFailed,
+		events.ExecutionEventTypeWorkerFailed,
+	})
 }
 
 func TestRunAgent_ResultStdoutSubmitsRawExecutorOutputWithGitWorkspace(t *testing.T) {
@@ -1218,6 +1379,9 @@ func TestRunAgent_AgentSandboxExecutesInnerWorkerAndDeletesWorkspace(t *testing.
 	recorder := newRecordingWorkspaceExecutor()
 	restoreExecutor := setAgentSandboxWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
+	eventRecorder := NewFakeEventRecorder()
+	restoreEventRecorder := setRunAgentEventRecorderForTest(eventRecorder)
+	t.Cleanup(restoreEventRecorder)
 
 	workspaceDir := "/sandbox/workspace"
 	err := RunAgent("test-agent", workspaceDir, 50, func(_ context.Context, _ *AgentConfig) (string, error) {
@@ -1229,6 +1393,9 @@ func TestRunAgent_AgentSandboxExecutesInnerWorkerAndDeletesWorkspace(t *testing.
 	}
 
 	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
+	if got := eventRecorder.EventTypes(); len(got) != 0 {
+		t.Fatalf("outer sandbox wrapper events = %v, want none on successful handoff", got)
+	}
 	assertAgentSandboxClaimRequest(t, recorder)
 	assertAgentSandboxWaitReadyRequest(t, recorder)
 	assertAgentSandboxUploadRequest(t, recorder)

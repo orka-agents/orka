@@ -41,7 +41,8 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if strings.Contains(streamID, "/") {
 		return fiber.NewError(fiber.StatusBadRequest, "streamID must not contain slash")
 	}
-	if err := h.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID); err != nil {
+	writerTask, err := h.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
+	if err != nil {
 		return err
 	}
 
@@ -68,25 +69,30 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	if event.StreamType == events.ExecutionEventStreamTypeTask && strings.TrimSpace(event.TaskName) == "" {
-		event.TaskName = streamID
+	if isApprovalDecisionEventType(event.Type) {
+		return fiber.NewError(fiber.StatusForbidden, "approval decisions must use the approval decision API")
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
-		if h.k8sClient == nil {
-			return fiber.NewError(fiber.StatusNotImplemented, "task ownership validation not enabled")
+		if strings.TrimSpace(event.TaskName) == "" {
+			event.TaskName = streamID
 		}
-		task := &corev1alpha1.Task{}
-		if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fiber.NewError(fiber.StatusNotFound, "task not found")
+		if writerTask != nil {
+			expectedSessionName := sessionNameFromTask(writerTask)
+			if expectedSessionName != "" && h.sessionStore != nil {
+				if _, err := h.sessionStore.GetSession(c.Context(), namespace, expectedSessionName); err != nil {
+					if errors.Is(err, store.ErrNotFound) {
+						expectedSessionName = ""
+					} else {
+						return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+					}
+				}
 			}
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-		}
-		if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
-			return err
+			if event.SessionName != "" && event.SessionName != expectedSessionName {
+				return fiber.NewError(fiber.StatusBadRequest, "sessionName does not match task session")
+			}
+			event.SessionName = expectedSessionName
 		}
 	}
-
 	appended, err := h.executionEventStore.AppendExecutionEvent(c.Context(), event)
 	if err != nil {
 		if errors.Is(err, store.ErrValidation) {
@@ -100,6 +106,16 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		Seq:       appended.Seq,
 		CreatedAt: appended.CreatedAt,
 	})
+}
+
+func isApprovalDecisionEventType(eventType string) bool {
+	switch eventType {
+	case events.ExecutionEventTypeApprovalApproved,
+		events.ExecutionEventTypeApprovalDeclined:
+		return true
+	default:
+		return false
+	}
 }
 
 func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {
@@ -129,27 +145,32 @@ func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {
 	return data, nil
 }
 
-func (h *InternalHandlers) verifyExecutionEventStreamWriter(c fiber.Ctx, namespace, streamType, streamID string) error {
+func (h *InternalHandlers) verifyExecutionEventStreamWriter(
+	c fiber.Ctx,
+	namespace string,
+	streamType string,
+	streamID string,
+) (*corev1alpha1.Task, error) {
 	if h.k8sClient == nil || streamType != events.ExecutionEventStreamTypeTask {
-		return nil
+		return nil, nil
 	}
 	task := &corev1alpha1.Task{}
 	if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
+			return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
 	if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
-		return err
+		return nil, err
 	}
 	if !task.DeletionTimestamp.IsZero() {
-		return fiber.NewError(fiber.StatusGone, "task is deleting")
+		return nil, fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
 	if isTerminalInternalTaskPhase(task.Status.Phase) {
-		return fiber.NewError(fiber.StatusConflict, "task is complete")
+		return nil, fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
-	return nil
+	return task, nil
 }
 
 func isTerminalInternalTaskPhase(phase corev1alpha1.TaskPhase) bool {
