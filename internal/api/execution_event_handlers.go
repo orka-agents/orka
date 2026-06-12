@@ -119,6 +119,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 				log.Error(err, "failed to list execution events for stream", "namespace", namespace, "task", taskName)
 				return true
 			}
+			terminal := false
 			for _, event := range listed {
 				if event.Seq > lastSeq {
 					lastSeq = event.Seq
@@ -126,13 +127,20 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 				if !writeExecutionEventSSEFrame(w, event) {
 					return false
 				}
+				if isTerminalExecutionEventType(event.Type) {
+					terminal = true
+					if !writeExecutionEventStreamCompleteSSEFrame(w, event) {
+						return false
+					}
+					break
+				}
 			}
 			if len(listed) > 0 {
 				if err := w.Flush(); err != nil {
 					return false
 				}
 			}
-			return true
+			return !terminal
 		}
 		if !writeAvailable() {
 			return
@@ -223,4 +231,31 @@ func writeExecutionEventSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bo
 		return false
 	}
 	return true
+}
+
+func writeExecutionEventStreamCompleteSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {
+	data, err := json.Marshal(struct {
+		LastSeq int64  `json:"lastSeq"`
+		Type    string `json:"type"`
+	}{
+		LastSeq: event.Seq,
+		Type:    event.Type,
+	})
+	if err != nil {
+		log.Error(err, "failed to marshal execution event stream completion", "eventID", event.ID)
+		return true
+	}
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: stream_complete\ndata: %s\n\n", event.Seq, data); err != nil {
+		return false
+	}
+	return true
+}
+
+func isTerminalExecutionEventType(eventType string) bool {
+	switch eventType {
+	case events.ExecutionEventTypeTaskSucceeded, events.ExecutionEventTypeTaskFailed, events.ExecutionEventTypeTaskCancelled:
+		return true
+	default:
+		return false
+	}
 }

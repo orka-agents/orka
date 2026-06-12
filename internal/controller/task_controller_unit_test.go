@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
@@ -5814,3 +5815,82 @@ func TestEnsureWorkerRBAC_SAExistsButCRBMissing(t *testing.T) {
 
 // Ensure the store.ErrNotFound sentinel is used correctly in tests above.
 var _ = store.ErrNotFound
+
+type failingTaskExecutionEventStore struct{}
+
+func (failingTaskExecutionEventStore) AppendExecutionEvent(context.Context, *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return nil, errors.New("execution event append failed")
+}
+
+func (failingTaskExecutionEventStore) ListExecutionEvents(context.Context, store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
+	return errors.New("not implemented")
+}
+
+func TestTaskReconcilerRecordsTaskCreatedEventOnStatusInitialization(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	controllerutil.AddFinalizer(task, labels.TaskFinalizer)
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "event-task"}})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "event-task"}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending", updated.Status.Phase)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeTaskCreated || listed[0].Seq != 1 || listed[0].TaskName != "event-task" {
+		t.Fatalf("listed events = %#v, want one TaskCreated event", listed)
+	}
+}
+
+func TestTaskEventWriteFailureDoesNotBreakStatusUpdate(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "event-failure-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	controllerutil.AddFinalizer(task, labels.TaskFinalizer)
+	reconciler := newUnitReconciler(scheme, task)
+	reconciler.ExecutionEventStore = failingTaskExecutionEventStore{}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "event-failure-task"}})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "event-failure-task"}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending despite event write failure", updated.Status.Phase)
+	}
+}

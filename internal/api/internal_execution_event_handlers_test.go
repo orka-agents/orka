@@ -32,7 +32,7 @@ func TestInternalSubmitExecutionEvent(t *testing.T) {
 		"content":     map[string]any{"token": redactionValue, "safe": "ok"},
 		"contentText": strings.Repeat("x", events.MaxExecutionEventContentTextChars+5),
 	}
-	resp := doJSONRequest(t, app, http.MethodPost, "/internal/v1/events/default/task/task-1", body)
+	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", body)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
@@ -115,7 +115,7 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := doJSONRequest(t, authenticatedApp, http.MethodPost, tt.path, tt.body)
+			resp := doJSONRequest(t, authenticatedApp, tt.path, tt.body)
 			if resp.StatusCode != tt.want {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.want)
 			}
@@ -136,7 +136,7 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 
 	t.Run("unauthenticated", func(t *testing.T) {
 		app := setupInternalExecutionEventApp(eventStore, nil)
-		resp := doJSONRequest(t, app, http.MethodPost, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
+		resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{"type": events.ExecutionEventTypeTaskStarted})
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", resp.StatusCode)
 		}
@@ -156,13 +156,13 @@ func setupInternalExecutionEventApp(eventStore store.ExecutionEventStore, userIn
 	return app
 }
 
-func doJSONRequest(t *testing.T, app *fiber.App, method, target string, body any) *http.Response {
+func doJSONRequest(t *testing.T, app *fiber.App, target string, body any) *http.Response {
 	t.Helper()
 	data, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	req := httptest.NewRequest(method, target, bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
