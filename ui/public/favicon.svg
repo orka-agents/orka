@@ -1,3 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <text y=".9em" font-size="90">🐟</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Orka">
+  <defs>
+    <linearGradient id="orca" x1="6" y1="10" x2="58" y2="54" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38E2F2" />
+      <stop offset="1" stop-color="#0EA5E9" />
+    </linearGradient>
+  </defs>
+  <g fill="url(#orca)">
+    <!-- tail flukes -->
+    <path d="M11 34 C6 31 3 28 1 27 C4 30 6 32 8 34 C6 36 4 38 1 41 C4 40 7 37 11 34 Z" />
+    <!-- body, facing right -->
+    <path d="M10 34 C10 30 16 27 24 27 C32 27 38 27 45 28 C51 29 56 31 56 34 C56 37 51 39 45 40 C37 41 31 41 24 40 C16 39 10 38 10 34 Z" />
+    <!-- dorsal fin -->
+    <path d="M27 27 C28 18 31 13 34 11 C35 16 35 23 37 27 Z" />
+    <!-- pectoral fin -->
+    <path d="M34 39 C36 45 39 49 42 51 C42 46 41 42 41 39 Z" />
+  </g>
+  <!-- eye patch -->
+  <ellipse cx="48" cy="31" rx="4.2" ry="2.5" fill="#F6FEFF" transform="rotate(-16 48 31)" />
+  <!-- eye -->
+  <circle cx="50.5" cy="33" r="1.7" fill="#0A0E14" />
 </svg>

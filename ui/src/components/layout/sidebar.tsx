@@ -3,6 +3,7 @@ import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Column
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
 import { Button } from '@/components/ui/button'
+import { OrcaMark } from '@/components/ui/orca-mark'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -29,7 +30,7 @@ export function Sidebar() {
       <div className="flex h-14 items-center border-b border-border px-4">
         {!sidebarCollapsed && (
           <Link to="/" className="flex items-center gap-2 font-semibold text-foreground">
-            <span className="text-xl">🐋</span>
+            <OrcaMark className="h-6 w-6" />
             <span>Orka</span>
           </Link>
         )}
@@ -37,6 +38,7 @@ export function Sidebar() {
           variant="ghost"
           size="icon"
           onClick={toggleSidebar}
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           className={cn('ml-auto h-8 w-8', sidebarCollapsed && 'mx-auto')}
         >
           <span className="text-sm">{sidebarCollapsed ? '→' : '←'}</span>

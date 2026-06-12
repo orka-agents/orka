@@ -5,6 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orka</title>
+    <script>
+      // Kill dark-mode FOUC: apply the persisted theme before first paint.
+      // Mirrors the zustand `persist` store keyed as "orka-ui"
+      // ({ state: { theme } }). __root.tsx remains the post-hydration source of truth.
+      (function () {
+        try {
+          var raw = localStorage.getItem('orka-ui')
+          var theme = raw && JSON.parse(raw).state && JSON.parse(raw).state.theme
+          if (theme === 'dark') document.documentElement.classList.add('dark')
+        } catch (e) {
+          /* ignore malformed storage; React syncs on mount */
+        }
+      })()
+    </script>
   </head>
   <body class="min-h-screen bg-background font-sans antialiased">
     <div id="root"></div>

@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { OrcaMark } from '@/components/ui/orca-mark'
 
 export const Route = createFileRoute('/login')({
   component: LoginPage,
@@ -75,7 +76,7 @@ function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
-          <div className="mb-2 text-4xl">🐋</div>
+          <OrcaMark className="mx-auto mb-2 h-12 w-12" />
           <CardTitle className="text-2xl">Orka</CardTitle>
           <CardDescription>
             Enter your Kubernetes service account token or use <code className="text-xs">orka login</code> from the CLI.
