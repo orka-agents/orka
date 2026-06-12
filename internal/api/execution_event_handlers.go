@@ -104,6 +104,10 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
 	streamStore := h.executionEventStore
+	// SendStreamWriter outlives the Fiber handler, so clone strings derived
+	// from fiber.Ctx before Fiber can recycle request buffers.
+	namespace = strings.Clone(namespace)
+	taskName = strings.Clone(taskName)
 
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
@@ -236,6 +240,10 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
 	streamStore := h.executionEventStore
+	// SendStreamWriter outlives the Fiber handler, so clone strings derived
+	// from fiber.Ctx before Fiber can recycle request buffers.
+	namespace = strings.Clone(namespace)
+	sessionName = strings.Clone(sessionName)
 
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
