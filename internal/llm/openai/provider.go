@@ -354,7 +354,7 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
 				ID:        item.CallID,
 				Name:      item.Name,
-				Arguments: json.RawMessage(item.Arguments),
+				Arguments: json.RawMessage(responseOutputArguments(item.Arguments)),
 			})
 		}
 	}
@@ -519,6 +519,19 @@ func (t *responseFuncCallTracker) get(itemID string, outputIndex int64, hasOutpu
 	return fc
 }
 
+func responseOutputArguments(arguments responses.ResponseOutputItemUnionArguments) string {
+	if arguments.JSON.OfString.Valid() || arguments.OfString != "" {
+		return arguments.OfString
+	}
+	if arguments.OfResponseToolSearchCallArguments != nil {
+		data, err := json.Marshal(arguments.OfResponseToolSearchCallArguments)
+		if err == nil {
+			return string(data)
+		}
+	}
+	return ""
+}
+
 func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item responses.ResponseOutputItemUnion, argumentsDone bool) {
 	if fc == nil {
 		return
@@ -532,8 +545,8 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 	if item.Name != "" {
 		fc.name = item.Name
 	}
-	if item.Arguments != "" {
-		fc.arguments = item.Arguments
+	if arguments := responseOutputArguments(item.Arguments); arguments != "" {
+		fc.arguments = arguments
 		fc.argumentsDone = true
 	} else if argumentsDone {
 		if fc.arguments == "" {
