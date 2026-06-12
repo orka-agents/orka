@@ -348,6 +348,61 @@ func TestNewTaskListCmd_WithStatusScansPaginatedResults(t *testing.T) {
 	}
 }
 
+func TestNewTaskListCmd_WithStatusFallsBackWhenCacheRejectsPagination(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != tasksAPIPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requests = append(requests, r.URL.RawQuery)
+		if r.URL.Query().Get("limit") != "" && r.URL.Query().Get("limit") != "0" {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"error": map[string]any{"message": "failed to list tasks: continue list option is not supported by the cache"},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{
+					"metadata": map[string]any{
+						"name":              "matching-task",
+						"namespace":         "default",
+						"creationTimestamp": time.Now().Format(time.RFC3339),
+					},
+					"spec":   map[string]any{"type": "ai"},
+					"status": map[string]any{"phase": "Running"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "list", "--server", srv.URL, "--status", "Running"})
+
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want initial paginated request plus fallback", len(requests))
+	}
+	if !strings.Contains(requests[0], "limit=500") {
+		t.Fatalf("first query = %q, want paginated request", requests[0])
+	}
+	if !strings.Contains(requests[1], "limit=0") || strings.Contains(requests[1], "continue=") {
+		t.Fatalf("fallback query = %q, want explicit unpaginated request", requests[1])
+	}
+	if !strings.Contains(stdout, "matching-task") {
+		t.Fatalf("stdout = %q, want fallback matching task", stdout)
+	}
+}
+
 func TestNewTaskListCmd_WithTransaction(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

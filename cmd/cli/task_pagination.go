@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sozercan/orka/internal/cli/client"
 )
@@ -23,6 +24,17 @@ func listFilteredTasks(
 	limit int,
 	match func(client.TaskSummary) bool,
 ) ([]client.TaskSummary, bool, error) {
+	return listFilteredTasksWithPagination(ctx, c, namespace, limit, match, true)
+}
+
+func listFilteredTasksWithPagination(
+	ctx context.Context,
+	c *client.Client,
+	namespace string,
+	limit int,
+	match func(client.TaskSummary) bool,
+	usePagination bool,
+) ([]client.TaskSummary, bool, error) {
 	if match == nil {
 		match = func(client.TaskSummary) bool { return true }
 	}
@@ -30,12 +42,18 @@ func listFilteredTasks(
 	var tasks []client.TaskSummary
 	continueToken := ""
 	for {
-		page, err := c.ListTasksPage(ctx, client.ListTasksOptions{
-			Namespace: namespace,
-			Limit:     filteredTaskListPageSize,
-			Continue:  continueToken,
-		})
+		opts := client.ListTasksOptions{Namespace: namespace}
+		if usePagination {
+			opts.Limit = filteredTaskListPageSize
+			opts.Continue = continueToken
+		} else {
+			opts.All = true
+		}
+		page, err := c.ListTasksPage(ctx, opts)
 		if err != nil {
+			if usePagination && isCachePaginationUnsupported(err) {
+				return listFilteredTasksWithPagination(ctx, c, namespace, limit, match, false)
+			}
 			return nil, false, err
 		}
 
@@ -49,7 +67,7 @@ func listFilteredTasks(
 			tasks = append(tasks, task)
 		}
 
-		if page.Continue == "" {
+		if !usePagination || page.Continue == "" {
 			return tasks, false, nil
 		}
 		if limit > 0 && len(tasks) >= limit {
@@ -57,6 +75,10 @@ func listFilteredTasks(
 		}
 		continueToken = page.Continue
 	}
+}
+
+func isCachePaginationUnsupported(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "list option is not supported by the cache")
 }
 
 func warnFilteredTaskOutputLimited(limit int) {

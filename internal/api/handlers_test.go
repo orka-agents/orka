@@ -1902,6 +1902,34 @@ func TestHandlers_ListTasks_WithPagination(t *testing.T) {
 	}
 }
 
+func TestHandlers_ListTasks_LimitZeroDisablesPagination(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Get("/tasks", handlers.ListTasks)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks?limit=0", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestHandlers_ListTasks_LimitZeroRejectsContinue(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Get("/tasks", handlers.ListTasks)
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks?limit=0&continue=next", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestHandlers_ListTasks_WithNamespaceFilter(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Get("/tasks", handlers.ListTasks)
