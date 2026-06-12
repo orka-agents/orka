@@ -208,6 +208,44 @@ orka substrate pool delete my-pool
 
 Pool manifests require at least `spec.templateRef.name`; pool reconciliation may depend on the configured Substrate environment.
 
+## Shell completion
+
+The CLI includes Cobra-generated shell completion. Generate the script for your shell with:
+
+```bash
+orka completion bash
+orka completion zsh
+orka completion fish
+orka completion powershell
+```
+
+Install the generated script using your shell's standard completion path. Common examples:
+
+```bash
+# Bash, current session
+source <(orka completion bash)
+
+# Bash, user-local install on Linux
+mkdir -p ~/.local/share/bash-completion/completions
+orka completion bash > ~/.local/share/bash-completion/completions/orka
+
+# Zsh, current session
+source <(orka completion zsh)
+
+# Zsh, user-local install
+mkdir -p ~/.zsh/completions
+orka completion zsh > ~/.zsh/completions/_orka
+# Ensure ~/.zsh/completions is in fpath before compinit, for example:
+# fpath=(~/.zsh/completions $fpath)
+# autoload -Uz compinit && compinit
+
+# Fish, user-local install
+mkdir -p ~/.config/fish/completions
+orka completion fish > ~/.config/fish/completions/orka.fish
+```
+
+Regenerate completions after upgrading `orka` if commands or flags change.
+
 ## Other utility commands
 
 | Command | Purpose |
