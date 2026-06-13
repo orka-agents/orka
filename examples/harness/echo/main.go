@@ -86,7 +86,7 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 func (s *server) turn(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.TrimPrefix(r.URL.Path, harness.TurnsPath+"/")
 	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
-	if len(parts) != 2 || parts[1] != "events" {
+	if len(parts) != 2 {
 		harness.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -98,6 +98,17 @@ func (s *server) turn(w http.ResponseWriter, r *http.Request) {
 		harness.WriteError(w, http.StatusNotFound, "turn not found")
 		return
 	}
+	switch parts[1] {
+	case "events":
+		s.streamEvents(w, request)
+	case "cancel":
+		s.cancelTurn(w, r, request)
+	default:
+		harness.WriteError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (s *server) streamEvents(w http.ResponseWriter, request harness.StartTurnRequest) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	_ = harness.WriteSSEFrame(w, frame(request, 1, harness.FrameTurnStarted, "turn started", nil))
 	output := frame(request, 2, harness.FrameRuntimeOutput, "echo", nil)
@@ -107,6 +118,34 @@ func (s *server) turn(w http.ResponseWriter, r *http.Request) {
 	completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: 3}
 	_ = harness.WriteSSEFrame(w, frame(request, 3, harness.FrameTurnCompleted, "turn completed", completed))
 	_ = harness.WriteSSEDone(w)
+}
+
+func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, started harness.StartTurnRequest) {
+	if r.Method != http.MethodPost {
+		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var request harness.CancelTurnRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		harness.WriteError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := request.Validate(); err != nil {
+		harness.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if request.RuntimeSessionID != started.RuntimeSessionID || request.TurnID != started.TurnID {
+		harness.WriteError(w, http.StatusBadRequest, "cancel request does not match started turn")
+		return
+	}
+	harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{
+		Version:          harness.ProtocolVersion,
+		Accepted:         true,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		Message:          "cancel accepted",
+	})
 }
 
 func frame(
