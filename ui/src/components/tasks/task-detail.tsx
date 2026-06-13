@@ -14,6 +14,7 @@ import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
 import { TaskEventTimeline } from './task-event-timeline'
 import { TaskTracePanel } from './task-trace-panel'
+import { TaskApprovalPanel } from './task-approval-panel'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
@@ -84,6 +85,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <TabsTrigger value="execution">Execution</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
           <TabsTrigger value="trace">Trace</TabsTrigger>
+          <TabsTrigger value="approvals">Approvals</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           {(task.status?.iteration ?? 0) > 0 && (
@@ -195,6 +197,10 @@ export function TaskDetail({ taskId }: { taskId: string }) {
 
         <TabsContent value="trace">
           <TaskTracePanel taskId={taskId} />
+        </TabsContent>
+
+        <TabsContent value="approvals">
+          <TaskApprovalPanel taskId={taskId} />
         </TabsContent>
 
         <TabsContent value="logs">
