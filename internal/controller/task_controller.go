@@ -317,7 +317,7 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 		StreamType:  store.ExecutionEventStreamTypeTask,
 		StreamID:    task.Name,
 		TaskName:    task.Name,
-		SessionName: taskSessionName(task),
+		SessionName: r.executionEventSessionName(ctx, task),
 		Type:        eventType,
 		Severity:    severity,
 		Summary:     summary,
@@ -331,6 +331,30 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 			"eventType", eventType,
 		)
 	}
+}
+
+func (r *TaskReconciler) executionEventSessionName(ctx context.Context, task *corev1alpha1.Task) string {
+	sessionName := taskSessionName(task)
+	if sessionName == "" {
+		return ""
+	}
+	if r == nil || r.SessionManager == nil || r.SessionManager.store == nil {
+		return ""
+	}
+	if _, err := r.SessionManager.GetSession(ctx, task.Namespace, sessionName); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ""
+		}
+		logf.FromContext(ctx).Error(
+			err,
+			"failed to check session before recording task lifecycle execution event",
+			"namespace", task.Namespace,
+			"task", task.Name,
+			"session", sessionName,
+		)
+		return sessionName
+	}
+	return sessionName
 }
 
 func taskSessionName(task *corev1alpha1.Task) string {

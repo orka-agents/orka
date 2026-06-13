@@ -450,8 +450,9 @@ func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 
 func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
+	appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "early-call")
 	for range store.MaxExecutionEventLimit {
-		appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "call")
+		appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeWorkerStarted)
 	}
 	appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeTaskSucceeded)
 	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "long-trace-task"))
@@ -468,8 +469,14 @@ func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
 		t.Fatal(err)
 	}
-	if trace.LatestSeq != store.MaxExecutionEventLimit+1 || trace.TerminalEvent == nil {
+	if trace.LatestSeq != store.MaxExecutionEventLimit+2 || trace.TerminalEvent == nil {
 		t.Fatalf("trace latest=%d terminal=%#v", trace.LatestSeq, trace.TerminalEvent)
+	}
+	if len(trace.Timeline) != store.MaxExecutionEventLimit+2 || trace.Timeline[0].Seq != 1 {
+		t.Fatalf("trace timeline len=%d first=%#v, want full stream from seq 1", len(trace.Timeline), trace.Timeline[0])
+	}
+	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].ID != "early-call" || trace.ToolCalls[0].StartSeq != 1 {
+		t.Fatalf("trace tool calls = %#v, want early tool call from seq 1", trace.ToolCalls)
 	}
 }
 
