@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { PageHeader } from '@/components/layout/page-header'
 import { useAgentList } from '@/hooks/use-agents'
 import { useCreateRepositoryMonitor } from '@/hooks/use-monitors'
 import { useSecretNames } from '@/hooks/use-secrets'
@@ -181,17 +182,15 @@ export function RepositoryMonitorCreateForm() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">New Repository Monitor</h1>
-          <p className="text-muted-foreground">
-            Create GitHub pull request review automation in the <span className="font-medium text-foreground">{namespace}</span> namespace.
-          </p>
-        </div>
-        <Button type="button" variant="outline" onClick={() => navigate({ to: '/monitors' })}>
-          Cancel
-        </Button>
-      </div>
+      <PageHeader
+        title="New Repository Monitor"
+        description={`Create GitHub pull request review automation in the ${namespace} namespace.`}
+        action={
+          <Button type="button" variant="outline" onClick={() => navigate({ to: '/monitors' })}>
+            Cancel
+          </Button>
+        }
+      />
 
       <Card>
         <CardHeader>

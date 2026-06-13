@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import { Bot, Plus } from 'lucide-react'
 import { useAgentList } from '@/hooks/use-agents'
 import type { Agent } from '@/schemas/agent'
@@ -12,15 +13,15 @@ export function AgentList() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Agents</h1>
-          <p className="text-muted-foreground">Registered AI agent configurations</p>
-        </div>
-        <Link to="/agents/new">
-          <Button><Plus className="mr-2 h-4 w-4" />New Agent</Button>
-        </Link>
-      </div>
+      <PageHeader
+        title="Agents"
+        description="Registered AI agent configurations"
+        action={
+          <Link to="/agents/new">
+            <Button><Plus className="mr-2 h-4 w-4" />New Agent</Button>
+          </Link>
+        }
+      />
 
       {isLoading ? (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">

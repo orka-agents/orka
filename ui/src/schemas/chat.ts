@@ -105,6 +105,9 @@ export interface ChatMessage {
   toolSuccess?: boolean
   // Usage metadata (on assistant messages)
   usage?: ChatUsage
+  // Names of tasks created during this turn (for cross-linking chips), when
+  // surfaced by the backend/tool stream. Count lives in usage.tasksCreated.
+  tasksCreatedNames?: string[]
   // Status metadata
   provider?: string
   model?: string

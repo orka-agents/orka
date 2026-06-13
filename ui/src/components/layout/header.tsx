@@ -16,7 +16,7 @@ export function Header() {
   }
 
   return (
-    <header className="flex h-14 items-center justify-between border-b border-border bg-card px-6">
+    <header className="z-20 flex h-14 shrink-0 items-center justify-between border-b border-border bg-card/80 px-6 backdrop-blur-md">
       <div className="flex items-center gap-4">
         <Select value={namespace} onValueChange={setNamespace}>
           <SelectTrigger className="w-48">
@@ -29,10 +29,20 @@ export function Header() {
         </Select>
       </div>
       <div className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" onClick={toggleTheme}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleTheme}
+          aria-label={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+        >
           {theme === 'light' ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
         </Button>
-        <Button variant="ghost" size="icon" onClick={handleLogout}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleLogout}
+          aria-label="Log out"
+        >
           <LogOut className="h-4 w-4" />
         </Button>
       </div>

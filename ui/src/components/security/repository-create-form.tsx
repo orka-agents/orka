@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { PageHeader } from '@/components/layout/page-header'
 import { useCreateRepositoryScan } from '@/hooks/use-security'
 import { useAgentList } from '@/hooks/use-agents'
 import { useSecretNames } from '@/hooks/use-secrets'
@@ -68,10 +69,10 @@ export function RepositoryCreateForm() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">New Security Repository</h1>
-        <p className="text-muted-foreground">Register a GitHub repository for threat modeling and code scanning</p>
-      </div>
+      <PageHeader
+        title="New Security Repository"
+        description="Register a GitHub repository for threat modeling and code scanning"
+      />
 
       <Card>
         <CardHeader>

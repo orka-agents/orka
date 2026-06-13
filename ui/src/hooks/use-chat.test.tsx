@@ -204,6 +204,72 @@ describe('useSendMessage', () => {
     expect(trMsg!.toolSuccess).toBe(true)
   })
 
+  it('harvests created task names from a successful create-task result (data.name) onto the assistant turn', async () => {
+    // Production shape: ChatToolResult{ success, data: { name, namespace, phase } }.
+    mockSSEFetch([
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-1', name: 'create_agent_task', result: { success: true, data: { name: 'task-alpha', namespace: 'default', phase: 'Pending' } } }),
+      },
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-2', name: 'create_ai_task', result: { success: true, data: { name: 'task-beta', namespace: 'default', phase: 'Pending' } } }),
+      },
+      { event: 'message', data: JSON.stringify({ content: 'Created two tasks.' }) },
+      { event: 'done', data: JSON.stringify({ usage: { tasksCreated: 2 } }) },
+    ])
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('make two tasks')
+    })
+
+    const assistant = useChatStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(assistant?.tasksCreatedNames).toEqual(['task-alpha', 'task-beta'])
+  })
+
+  it('also harvests from a flat top-level name (defensive fallback)', async () => {
+    mockSSEFetch([
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-1', name: 'create_task', result: { success: true, name: 'flat-task' } }),
+      },
+      { event: 'message', data: JSON.stringify({ content: 'done' }) },
+      { event: 'done', data: JSON.stringify({ usage: { tasksCreated: 1 } }) },
+    ])
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('make a task')
+    })
+
+    const assistant = useChatStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(assistant?.tasksCreatedNames).toEqual(['flat-task'])
+  })
+
+  it('does NOT harvest names from non-creation task tools (lookup/update/delete)', async () => {
+    mockSSEFetch([
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-1', name: 'get_task', result: { success: true, data: { name: 'existing-task' } } }),
+      },
+      {
+        event: 'tool_result',
+        data: JSON.stringify({ id: 'tc-2', name: 'cancel_task', result: { success: true, data: { name: 'existing-task' } } }),
+      },
+      { event: 'message', data: JSON.stringify({ content: 'Looked it up.' }) },
+      { event: 'done', data: JSON.stringify({ usage: {} }) },
+    ])
+
+    const { result } = renderHook(() => useSendMessage(), { wrapper: createWrapper() })
+    await act(async () => {
+      await result.current('look up a task')
+    })
+
+    const assistant = useChatStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(assistant?.tasksCreatedNames).toBeUndefined()
+  })
+
   it('handles fetch error — adds error message', async () => {
     fetchSpy.mockImplementation((input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url

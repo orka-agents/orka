@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
+import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Bot, Trash2 } from 'lucide-react'
 import { useAgent, useDeleteAgent } from '@/hooks/use-agents'
 import { toast } from 'sonner'
@@ -34,20 +35,21 @@ export function AgentDetail({ agentId }: { agentId: string }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Link to="/agents"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
-            <Bot className="h-5 w-5 text-primary" />
-          </div>
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">{agent.metadata.name}</h1>
-            <p className="text-muted-foreground">{agent.metadata.namespace}</p>
-          </div>
+      <div className="flex items-center gap-4">
+        <Link to="/agents"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
+          <Bot className="h-5 w-5 text-primary" />
         </div>
-        <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteAgent.isPending}>
-          <Trash2 className="mr-2 h-4 w-4" />{deleteAgent.isPending ? 'Deleting...' : 'Delete'}
-        </Button>
+        <PageHeader
+          className="flex-1"
+          title={agent.metadata.name}
+          description={agent.metadata.namespace}
+          action={
+            <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteAgent.isPending}>
+              <Trash2 className="mr-2 h-4 w-4" />{deleteAgent.isPending ? 'Deleting...' : 'Delete'}
+            </Button>
+          }
+        />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

@@ -15,9 +15,9 @@ export function PRStatusBadge({ annotations }: PRStatusBadgeProps) {
   if (!prUrl && !prNumber) return null
 
   const statusColors: Record<string, string> = {
-    open: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-    merged: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
-    closed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+    open: 'bg-status-succeeded-bg text-status-succeeded',
+    merged: 'bg-type-ai/10 text-type-ai',
+    closed: 'bg-status-failed-bg text-status-failed',
   }
 
   return (

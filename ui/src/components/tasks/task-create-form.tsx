@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import { PageHeader } from '@/components/layout/page-header'
 import { useCreateTask } from '@/hooks/use-tasks'
 import { useAgentList } from '@/hooks/use-agents'
 import { useUIStore } from '@/stores/ui'
@@ -86,10 +87,7 @@ export function TaskCreateForm() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Create Task</h1>
-        <p className="text-muted-foreground">Create a new task for execution</p>
-      </div>
+      <PageHeader title="Create Task" description="Create a new task for execution" />
       <Card>
         <CardHeader>
           <CardTitle>Task Configuration</CardTitle>

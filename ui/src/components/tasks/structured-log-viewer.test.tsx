@@ -110,7 +110,10 @@ describe('StructuredLogViewer', () => {
     })
 
     render(<StructuredLogViewer taskId="task-1" />)
-    expect(screen.getByText('● Streaming')).toBeInTheDocument()
+    const streaming = screen.getByText('Streaming')
+    expect(streaming).toBeInTheDocument()
+    // Liveness uses the reserved live token, not an ad-hoc pastel.
+    expect(streaming.className).toContain('text-live')
   })
 
   it('shows live indicator for running tasks', () => {
@@ -124,6 +127,11 @@ describe('StructuredLogViewer', () => {
     })
 
     render(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
-    expect(screen.getByText('● Live')).toBeInTheDocument()
+    const live = screen.getByText('Live')
+    expect(live).toBeInTheDocument()
+    expect(live.className).toContain('text-live')
+    // The live badge carries a motion-safe pulsing dot (class includes the
+    // motion-safe: variant prefix in the DOM).
+    expect(live.querySelector('[class*="animate-pulse-live"]')).not.toBeNull()
   })
 })

@@ -47,6 +47,38 @@ describe('KanbanBoard', () => {
     expect(screen.getByText('No running tasks')).toBeInTheDocument()
     expect(screen.getByText('No succeeded tasks')).toBeInTheDocument()
     expect(screen.getByText('No failed tasks')).toBeInTheDocument()
+    expect(screen.getByText('No scheduled tasks')).toBeInTheDocument()
+    expect(screen.getByText('No cancelled tasks')).toBeInTheDocument()
+  })
+
+  it('has a column for every task phase and buckets Scheduled/Cancelled in their own columns', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'sched-task', namespace: 'default', uid: 's1', creationTimestamp: new Date().toISOString() },
+              spec: { type: 'container' },
+              status: { phase: 'Scheduled' },
+            },
+            {
+              metadata: { name: 'cancel-task', namespace: 'default', uid: 'c1', creationTimestamp: new Date().toISOString() },
+              spec: { type: 'container' },
+              status: { phase: 'Cancelled' },
+            },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<KanbanBoard />)
+    await waitFor(() => expect(screen.getByText('sched-task')).toBeInTheDocument())
+    expect(screen.getByText('cancel-task')).toBeInTheDocument()
+    // Column headers exist for the new phases.
+    expect(screen.getByText('Scheduled')).toBeInTheDocument()
+    expect(screen.getByText('Cancelled')).toBeInTheDocument()
+    // The Pending column stays empty — Scheduled/Cancelled are NOT mis-bucketed.
+    expect(screen.getByText('No pending tasks')).toBeInTheDocument()
   })
 
   it('populated board shows tasks in correct columns', async () => {
@@ -101,5 +133,69 @@ describe('KanbanBoard', () => {
   it('page title is Board', async () => {
     render(<KanbanBoard />)
     expect(screen.getByText('Board')).toBeInTheDocument()
+  })
+
+  it('each column has a phase-keyed top rail from the token system', async () => {
+    render(<KanbanBoard />)
+    await waitFor(() => {
+      expect(screen.getByText('Pending')).toBeInTheDocument()
+    })
+    const rails: Record<string, string> = {
+      Pending: 'border-status-pending',
+      Running: 'border-status-running',
+      Succeeded: 'border-status-succeeded',
+      Failed: 'border-status-failed',
+    }
+    for (const [label, railClass] of Object.entries(rails)) {
+      const column = screen.getByText(label).closest('.border-t-2')
+      expect(column).not.toBeNull()
+      expect(column).toHaveClass(railClass)
+    }
+  })
+
+  it('count chips use token tint/text classes, not pastels', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () =>
+        HttpResponse.json({
+          items: [
+            {
+              metadata: { name: 'r1', namespace: 'default', uid: 'r1', creationTimestamp: new Date().toISOString() },
+              spec: { type: 'ai' },
+              status: { phase: 'Running' },
+            },
+          ],
+          metadata: {},
+        }),
+      ),
+    )
+    render(<KanbanBoard />)
+    const runningHeader = await screen.findByText('Running')
+    const header = runningHeader.parentElement!
+    const chip = header.querySelector('span:last-child')!
+    await waitFor(() => {
+      expect(chip).toHaveTextContent('1')
+    })
+    expect(chip).toHaveClass('text-status-running')
+    expect(chip).toHaveClass('bg-status-running-bg')
+    expect(chip.className).not.toMatch(/bg-(yellow|blue|green|red)-/)
+  })
+
+  it('shows a live pulse indicator ONLY on the Running column (liveness scarcity)', async () => {
+    render(<KanbanBoard />)
+    await waitFor(() => {
+      expect(screen.getByText('Running')).toBeInTheDocument()
+    })
+    // Exactly one live indicator, and it lives in the Running column header.
+    const indicators = screen.getAllByTestId('live-indicator')
+    expect(indicators).toHaveLength(1)
+    const indicator = indicators[0]
+    expect(indicator.className).toContain('bg-live')
+    expect(indicator.className).toContain('animate-pulse-live')
+    // It sits beside the "Running" heading, not Pending/Succeeded/Failed.
+    expect(indicator.parentElement?.textContent).toContain('Running')
+    for (const terminal of ['Pending', 'Succeeded', 'Failed']) {
+      const header = screen.getByText(terminal).parentElement!
+      expect(header.querySelector('[data-testid="live-indicator"]')).toBeNull()
+    }
   })
 })

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitor, useRepositoryMonitorItems, useRepositoryMonitorRuns, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 
@@ -55,19 +56,19 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">{displayName}</h1>
-          <p className="text-muted-foreground">{monitor.spec.repoURL}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>{status?.phase || 'Pending'}</Badge>
-          <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
-            <Play className="mr-2 h-4 w-4" />
-            Run
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title={displayName}
+        description={monitor.spec.repoURL}
+        action={
+          <>
+            <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>{status?.phase || 'Pending'}</Badge>
+            <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
+              <Play className="mr-2 h-4 w-4" />
+              Run
+            </Button>
+          </>
+        }
+      />
 
       <div className="grid gap-4 md:grid-cols-5">
         <MetricCard title="Open PRs" value={status?.openPullRequests ?? 0} />

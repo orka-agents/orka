@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
+import { ChevronRight } from 'lucide-react'
 import type { ChatMessage } from '@/schemas/chat'
 
 export function ChatToolCall({ message }: { message: ChatMessage }) {
@@ -7,23 +8,33 @@ export function ChatToolCall({ message }: { message: ChatMessage }) {
   const isResult = message.role === 'tool_result'
   const success = message.toolSuccess
 
+  // A single status-dot color encodes the tool call's state, drawn from the
+  // shared status tokens (call = info/running, ok = succeeded, fail = failed).
+  const dotClass = isResult
+    ? success
+      ? 'bg-status-succeeded'
+      : 'bg-status-failed'
+    : 'bg-status-running'
+
+  const glyph = isResult ? (success ? '✓' : '✗') : '→'
+
   return (
     <div className="mx-12 my-1">
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
         className={cn(
-          'flex w-full items-center gap-2 rounded-md border px-3 py-1.5 text-left text-xs transition-colors',
-          isResult
-            ? success
-              ? 'border-green-200 bg-green-50 text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-200'
-              : 'border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200'
-            : 'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-200',
+          'flex w-full items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-left text-xs transition-colors hover:bg-accent',
         )}
       >
-        <span className="font-mono font-medium">
-          {isResult ? (success ? '✓' : '✗') : '→'} {message.toolName}
+        <span className={cn('inline-block size-1.5 shrink-0 rounded-full', dotClass)} aria-hidden="true" />
+        <span className="font-mono font-medium text-foreground">
+          {glyph} {message.toolName}
         </span>
-        <span className="ml-auto text-[10px] opacity-60">{expanded ? '▲' : '▼'}</span>
+        <ChevronRight
+          className={cn('ml-auto size-3 text-muted-foreground transition-transform', expanded && 'rotate-90')}
+          aria-hidden="true"
+        />
       </button>
       {expanded && (
         <div className="mt-1 rounded-md border border-border bg-muted/50 p-2">

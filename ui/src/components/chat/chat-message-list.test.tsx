@@ -20,10 +20,12 @@ beforeEach(() => {
 })
 
 describe('ChatMessageList', () => {
-  it('empty state shows welcome text with orca emoji', () => {
+  it('empty state shows welcome text with orca brand mark', () => {
     render(<ChatMessageList />)
-    expect(screen.getByText('🐋')).toBeInTheDocument()
     expect(screen.getByText('Orka Meta Agent')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Chat with the orchestrator/i),
+    ).toBeInTheDocument()
   })
 
   it('with messages in store, renders ChatMessage for each', () => {

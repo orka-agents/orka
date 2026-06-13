@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ArrowLeft } from 'lucide-react'
+import { PageHeader } from '@/components/layout/page-header'
 import { useTool } from '@/hooks/use-tools'
 
 export function ToolDetail({ toolName }: { toolName: string }) {
@@ -28,7 +29,7 @@ export function ToolDetail({ toolName }: { toolName: string }) {
       <div className="flex items-center gap-4">
         <Link to="/tools"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">{isBuiltin ? (tool as Record<string, unknown>).name as string : tool.metadata?.name ?? toolName}</h1>
+          <PageHeader title={isBuiltin ? (tool as Record<string, unknown>).name as string : tool.metadata?.name ?? toolName} />
           <div className="flex items-center gap-2">
             <Badge variant={isBuiltin ? 'default' : 'secondary'}>{isBuiltin ? 'Built-in' : 'Custom'}</Badge>
             {!isBuiltin && tool.metadata?.namespace && <span className="text-muted-foreground">{tool.metadata.namespace}</span>}
@@ -119,7 +120,7 @@ export function ToolDetail({ toolName }: { toolName: string }) {
               <CardContent className="space-y-2 text-sm">
                 <div>
                   <span className="text-muted-foreground">Available:</span>{' '}
-                  <Badge className={tool.status.available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'} variant="secondary">
+                  <Badge className={tool.status.available ? 'bg-status-succeeded-bg text-status-succeeded' : 'bg-status-failed-bg text-status-failed'} variant="secondary">
                     {tool.status.available ? 'Yes' : 'No'}
                   </Badge>
                 </div>

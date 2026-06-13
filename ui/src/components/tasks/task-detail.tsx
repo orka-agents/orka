@@ -5,12 +5,15 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ArrowLeft, Trash2 } from 'lucide-react'
+import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
 import { PRStatusBadge } from './pr-status-badge'
 import { PRCreateDialog } from './pr-create-dialog'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
+import { ExecutionGraph } from './execution-graph'
+import { RunTimeline } from './run-timeline'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
 import { useNavigate } from '@tanstack/react-router'
 
@@ -46,10 +49,10 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <Link to="/tasks"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">{task.metadata.name}</h1>
-            <p className="text-muted-foreground">{task.metadata.namespace} · {task.spec.type}</p>
-          </div>
+          <PageHeader
+            title={task.metadata.name}
+            description={`${task.metadata.namespace} · ${task.spec.type}`}
+          />
           <TaskStatusBadge phase={task.status?.phase} />
           <PRStatusBadge annotations={task.metadata.annotations} />
         </div>
@@ -91,48 +94,25 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <Card>
             <CardHeader><CardTitle>Metadata</CardTitle></CardHeader>
             <CardContent className="grid gap-2 text-sm md:grid-cols-2">
-              <div><span className="text-muted-foreground">UID:</span> {task.metadata.uid}</div>
-              <div><span className="text-muted-foreground">Created:</span> {timeAgo(task.metadata.creationTimestamp)}</div>
+              <div><span className="text-muted-foreground">UID:</span> <span className="font-mono text-xs">{task.metadata.uid}</span></div>
+              <div><span className="text-muted-foreground">Created:</span> <span className="tabular-nums">{timeAgo(task.metadata.creationTimestamp)}</span></div>
               <div><span className="text-muted-foreground">Priority:</span> {task.spec.priority ?? 500}</div>
               <div><span className="text-muted-foreground">Attempts:</span> {task.status?.attempts ?? 0}</div>
-              {task.status?.jobName && <div><span className="text-muted-foreground">Job:</span> {task.status.jobName}</div>}
-              {task.status?.startTime && <div><span className="text-muted-foreground">Started:</span> {timeAgo(task.status.startTime)}</div>}
-              {task.status?.completionTime && <div><span className="text-muted-foreground">Completed:</span> {timeAgo(task.status.completionTime)}</div>}
+              {task.status?.jobName && <div><span className="text-muted-foreground">Job:</span> <span className="font-mono text-xs">{task.status.jobName}</span></div>}
+              {task.status?.startTime && <div><span className="text-muted-foreground">Started:</span> <span className="tabular-nums">{timeAgo(task.status.startTime)}</span></div>}
+              {task.status?.completionTime && <div><span className="text-muted-foreground">Completed:</span> <span className="tabular-nums">{timeAgo(task.status.completionTime)}</span></div>}
               {task.status?.message && <div className="md:col-span-2"><span className="text-muted-foreground">Message:</span> {task.status.message}</div>}
-              {(task.status?.iteration ?? 0) > 0 && <div><span className="text-muted-foreground">Iteration:</span> {task.status?.iteration}</div>}
             </CardContent>
           </Card>
 
-          {(task.status?.iteration ?? 0) > 0 && !!(task as Record<string, unknown>).plan && (
+          {(task.status?.iteration ?? 0) > 0 && (
             <Card>
-              <CardHeader><CardTitle>Autonomous Plan</CardTitle></CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                {(() => {
-                  const plan = (task as Record<string, unknown>).plan as { summary?: string; progressPct?: number; goalComplete?: boolean; planDocument?: string }
-                  return (
-                    <>
-                      {plan.summary && <div><span className="text-muted-foreground">Summary:</span> {plan.summary}</div>}
-                      {plan.progressPct !== undefined && (
-                        <div className="space-y-1">
-                          <div className="flex justify-between">
-                            <span className="text-muted-foreground">Progress:</span>
-                            <span>{plan.progressPct}%</span>
-                          </div>
-                          <div className="h-2 rounded-full bg-muted overflow-hidden">
-                            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${plan.progressPct}%` }} />
-                          </div>
-                        </div>
-                      )}
-                      {plan.goalComplete && <Badge variant="default">Goal Complete</Badge>}
-                      {plan.planDocument && (
-                        <div>
-                          <span className="text-muted-foreground">Plan:</span>
-                          <pre className="mt-1 rounded-md bg-muted p-3 whitespace-pre-wrap max-h-96 overflow-y-auto">{plan.planDocument}</pre>
-                        </div>
-                      )}
-                    </>
-                  )
-                })()}
+              <CardHeader><CardTitle>Autonomous Loop</CardTitle></CardHeader>
+              <CardContent>
+                <RunTimeline
+                  task={task}
+                  plan={(task as Record<string, unknown>).plan as import('@/schemas/task').PlanState | undefined}
+                />
               </CardContent>
             </Card>
           )}
@@ -215,25 +195,15 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               <CardHeader><CardTitle>Autonomous Plan</CardTitle></CardHeader>
               <CardContent>
                 {(() => {
-                  const plan = (task as Record<string, unknown>).plan as { summary?: string; progressPct?: number; goalComplete?: boolean; planDocument?: string } | undefined
-                  if (!plan) return <p className="text-muted-foreground">No plan data available. Plan state is loaded when viewing task details.</p>
+                  const plan = (task as Record<string, unknown>).plan as import('@/schemas/task').PlanState | undefined
                   return (
-                    <div className="space-y-3 text-sm">
-                      {plan.summary && <div><span className="font-medium">Summary:</span> {plan.summary}</div>}
-                      {plan.progressPct !== undefined && (
-                        <div className="space-y-1">
-                          <div className="flex justify-between">
-                            <span className="font-medium">Progress:</span>
-                            <span>{plan.progressPct}%</span>
-                          </div>
-                          <div className="h-2 rounded-full bg-muted overflow-hidden">
-                            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${plan.progressPct}%` }} />
-                          </div>
+                    <div className="space-y-4">
+                      <RunTimeline task={task} plan={plan} />
+                      {plan?.planDocument && (
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">Plan document</p>
+                          <pre className="rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">{plan.planDocument}</pre>
                         </div>
-                      )}
-                      {plan.goalComplete && <Badge variant="default">Goal Complete ✓</Badge>}
-                      {plan.planDocument && (
-                        <pre className="mt-2 rounded-md bg-muted p-4 whitespace-pre-wrap max-h-[600px] overflow-y-auto text-xs">{plan.planDocument}</pre>
                       )}
                     </div>
                   )
@@ -246,32 +216,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         {(task.status?.childTasks?.length ?? 0) > 0 && (
           <TabsContent value="children">
             <Card>
-              <CardHeader><CardTitle>Child Tasks</CardTitle></CardHeader>
+              <CardHeader><CardTitle>Execution Graph</CardTitle></CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b text-left text-muted-foreground">
-                        <th className="pb-2 pr-4">Name</th>
-                        <th className="pb-2 pr-4">Agent</th>
-                        <th className="pb-2">Phase</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {task.status!.childTasks!.map((child) => (
-                        <tr key={child.name} className="border-b last:border-0">
-                          <td className="py-2 pr-4">
-                            <Link to="/tasks/$taskId" params={{ taskId: child.name }} className="text-blue-600 hover:underline dark:text-blue-400">
-                              {child.name}
-                            </Link>
-                          </td>
-                          <td className="py-2 pr-4">{child.agent}</td>
-                          <td className="py-2"><TaskStatusBadge phase={child.phase} /></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <ExecutionGraph task={task} />
               </CardContent>
             </Card>
           </TabsContent>

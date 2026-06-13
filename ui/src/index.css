@@ -1,49 +1,135 @@
 @import "tailwindcss";
 
+/*
+ * Orka design tokens — deep-ocean identity.
+ *
+ * Color is an encoding, not decoration. It carries exactly three meanings:
+ *   - phase     (status-*): pending / running / succeeded / failed
+ *   - task type (type-*):   container / ai / agent
+ *   - liveness  (live):     reserved bioluminescent cyan = "happening now"
+ * Everything else is neutral (canvas / surface / elevated ramp).
+ */
+
 @theme {
-  --color-background: #ffffff;
-  --color-foreground: #0a0a0a;
+  /* ---- Neutral elevation ramp (light = cool paper) ---- */
+  --color-canvas: #f6f8fa;
+  --color-background: #f6f8fa;
+  --color-surface: #ffffff;
+  --color-elevated: #ffffff;
+
+  --color-foreground: #0b1220;
   --color-card: #ffffff;
-  --color-card-foreground: #0a0a0a;
+  --color-card-foreground: #0b1220;
   --color-popover: #ffffff;
-  --color-popover-foreground: #0a0a0a;
-  --color-primary: #2563eb;
+  --color-popover-foreground: #0b1220;
+
+  /* ---- Brand / interactive (deep azure — distinct from the reserved cyan) ---- */
+  --color-primary: #0b69c7;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #f4f4f5;
-  --color-secondary-foreground: #18181b;
-  --color-muted: #f4f4f5;
-  --color-muted-foreground: #71717a;
-  --color-accent: #f4f4f5;
-  --color-accent-foreground: #18181b;
-  --color-destructive: #ef4444;
+  --color-secondary: #eef2f6;
+  --color-secondary-foreground: #0b1220;
+  --color-muted: #eef2f6;
+  --color-muted-foreground: #56657a;
+  --color-accent: #e7eef6;
+  --color-accent-foreground: #0b1220;
+  --color-destructive: #e11d48;
   --color-destructive-foreground: #ffffff;
-  --color-border: #e4e4e7;
-  --color-input: #e4e4e7;
-  --color-ring: #2563eb;
+  --color-border: #e2e8f0;
+  --color-input: #e2e8f0;
+  --color-ring: #0b69c7;
+
+  /* ---- Phase status tokens (foreground-strength: dots / text / rails) ---- */
+  --color-status-pending: #b45309;
+  --color-status-running: #0891b2;
+  --color-status-succeeded: #047857;
+  --color-status-failed: #be123c;
+
+  /* ---- Phase status tints (translucent: rails / column fills / soft chips) ---- */
+  --color-status-pending-bg: rgb(245 158 11 / 0.12);
+  --color-status-running-bg: rgb(34 211 238 / 0.12);
+  --color-status-succeeded-bg: rgb(16 185 129 / 0.12);
+  --color-status-failed-bg: rgb(244 63 94 / 0.12);
+
+  /* ---- Reserved liveness (bioluminescent cyan; consumed only in active contexts) ---- */
+  --color-live: #0891b2;
+  --color-live-bg: rgb(34 211 238 / 0.14);
+
+  /* ---- Task type tokens (kept off the status hues) ---- */
+  --color-type-container: #475569;
+  --color-type-ai: #7c3aed;
+  --color-type-agent: #4f46e5;
+
+  /* ---- Type / radius / fonts ---- */
   --radius: 0.5rem;
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Consolas, monospace;
+
+  /* ---- Shadow scale that reads on both paper and abyss ---- */
+  --shadow-2xs: 0 1px 2px 0 rgb(15 23 42 / 0.04);
+  --shadow-xs: 0 1px 3px 0 rgb(15 23 42 / 0.06);
+  --shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.06), 0 1px 3px 0 rgb(15 23 42 / 0.1);
+  --shadow-md: 0 2px 4px -1px rgb(15 23 42 / 0.08),
+    0 6px 16px -4px rgb(15 23 42 / 0.1);
+  --shadow-lg: 0 10px 28px -6px rgb(15 23 42 / 0.14);
+  --shadow-xl: 0 20px 48px -12px rgb(15 23 42 / 0.2);
 }
 
+/*
+ * Dark = layered abyss (not flat black). The elevation ramp does the work that
+ * shadows do on light, so cards stay legible without relying on invisible shadow.
+ */
 .dark {
-  --color-background: #0a0a0a;
-  --color-foreground: #fafafa;
-  --color-card: #0a0a0a;
-  --color-card-foreground: #fafafa;
-  --color-popover: #0a0a0a;
-  --color-popover-foreground: #fafafa;
-  --color-primary: #3b82f6;
-  --color-primary-foreground: #ffffff;
-  --color-secondary: #27272a;
-  --color-secondary-foreground: #fafafa;
-  --color-muted: #27272a;
-  --color-muted-foreground: #a1a1aa;
-  --color-accent: #27272a;
-  --color-accent-foreground: #fafafa;
-  --color-destructive: #dc2626;
-  --color-destructive-foreground: #fafafa;
-  --color-border: #27272a;
-  --color-input: #27272a;
-  --color-ring: #3b82f6;
+  --color-canvas: #0a0e14;
+  --color-background: #0a0e14;
+  --color-surface: #111722;
+  --color-elevated: #18202c;
+
+  --color-foreground: #e6edf3;
+  --color-card: #111722;
+  --color-card-foreground: #e6edf3;
+  --color-popover: #18202c;
+  --color-popover-foreground: #e6edf3;
+
+  --color-primary: #38a3ff;
+  --color-primary-foreground: #04121f;
+  --color-secondary: #18202c;
+  --color-secondary-foreground: #e6edf3;
+  --color-muted: #18202c;
+  --color-muted-foreground: #8b9aad;
+  --color-accent: #1e2a38;
+  --color-accent-foreground: #e6edf3;
+  --color-destructive: #fb7185;
+  --color-destructive-foreground: #04121f;
+  --color-border: #1e2a38;
+  --color-input: #1e2a38;
+  --color-ring: #38a3ff;
+
+  /* Status: brighter faces so they sit on the abyss without glowing falsely. */
+  --color-status-pending: #f59e0b;
+  --color-status-running: #22d3ee;
+  --color-status-succeeded: #34d399;
+  --color-status-failed: #fb7185;
+
+  --color-status-pending-bg: rgb(245 158 11 / 0.16);
+  --color-status-running-bg: rgb(34 211 238 / 0.16);
+  --color-status-succeeded-bg: rgb(52 211 153 / 0.16);
+  --color-status-failed-bg: rgb(251 113 133 / 0.16);
+
+  --color-live: #22d3ee;
+  --color-live-bg: rgb(34 211 238 / 0.18);
+
+  --color-type-container: #94a3b8;
+  --color-type-ai: #a78bfa;
+  --color-type-agent: #818cf8;
+
+  /* Deeper shadows so elevation still reads against near-black. */
+  --shadow-2xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.45);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.45), 0 1px 3px 0 rgb(0 0 0 / 0.55);
+  --shadow-md: 0 2px 4px -1px rgb(0 0 0 / 0.5), 0 8px 20px -6px rgb(0 0 0 / 0.6);
+  --shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.65);
+  --shadow-xl: 0 24px 56px -12px rgb(0 0 0 / 0.7);
 }
 
 @layer base {
@@ -52,5 +138,55 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+}
+
+/*
+ * Reserved liveness animation — a gentle breathing pulse meaning "happening now".
+ * Defined here in Phase 0; applied only in active contexts (Phase 2).
+ * Always gated behind motion-safe so reduced-motion users get a still UI.
+ */
+@keyframes orka-pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@utility animate-pulse-live {
+  animation: orka-pulse-live 1.8s ease-in-out infinite;
+}
+
+/*
+ * Freshness flash — a brief glow when a polled value just changed (Phase 2).
+ */
+@keyframes orka-freshness {
+  0% {
+    background-color: var(--color-live-bg);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@utility animate-freshness {
+  animation: orka-freshness 1.2s ease-out;
+}
+
+/*
+ * Reduced-motion baseline (set up once, honored everywhere after).
+ * No essential information is conveyed by motion alone.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

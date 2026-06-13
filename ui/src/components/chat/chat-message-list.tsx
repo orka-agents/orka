@@ -3,6 +3,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ChatMessage } from './chat-message'
 import { useChatStore } from '@/stores/chat'
 import { Loader2 } from 'lucide-react'
+import { OrcaMark } from '@/components/ui/orca-mark'
 
 export function ChatMessageList() {
   const messages = useChatStore((s) => s.messages)
@@ -18,7 +19,7 @@ export function ChatMessageList() {
     return (
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
-          <span className="text-4xl">🐋</span>
+          <OrcaMark className="mx-auto h-12 w-12" />
           <h3 className="mt-4 text-lg font-semibold">Orka Meta Agent</h3>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
             Chat with the orchestrator to create and manage tasks, agents, and tools using natural language.

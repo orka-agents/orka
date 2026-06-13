@@ -1,15 +1,10 @@
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { StatusDot } from '@/components/ui/status-dot'
+import { EmptyState } from '@/components/ui/empty-state'
+import { ListTodo } from 'lucide-react'
 import type { Task } from '@/schemas/task'
-
-const phaseColors: Record<string, string> = {
-  Pending: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
-  Running: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
-  Succeeded: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
-  Failed: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-}
 
 function timeAgo(timestamp?: string): string {
   if (!timestamp) return '-'
@@ -48,7 +43,11 @@ export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: 
       </CardHeader>
       <CardContent>
         {recent.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No tasks yet</p>
+          <EmptyState
+            icon={ListTodo}
+            headline="No tasks yet"
+            hint="Tasks you create will show up here."
+          />
         ) : (
           <div className="space-y-3">
             {recent.map((task) => (
@@ -60,13 +59,11 @@ export function RecentTasks({ tasks, isLoading }: { tasks?: Task[]; isLoading?: 
               >
                 <div className="space-y-1">
                   <p className="text-sm font-medium">{task.metadata.name}</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs text-muted-foreground tabular-nums">
                     {task.spec.type} · {task.metadata.namespace} · {timeAgo(task.metadata.creationTimestamp)}
                   </p>
                 </div>
-                <Badge className={phaseColors[task.status?.phase ?? 'Pending']} variant="secondary">
-                  {task.status?.phase ?? 'Pending'}
-                </Badge>
+                <StatusDot phase={task.status?.phase} />
               </Link>
             ))}
           </div>

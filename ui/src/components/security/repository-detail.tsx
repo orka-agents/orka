@@ -3,6 +3,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import { useAllFindings, useDroppedFindings, useRepositoryScan, useReviewSlices, useRunSecurityScan, useScanRuns } from '@/hooks/use-security'
 import { ThreatModelEditor } from './threat-model-editor'
 import { RecommendedFindings } from './recommended-findings'
@@ -35,28 +36,28 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">{repo.spec.owner}/{repo.spec.repository}</h1>
-          <p className="text-muted-foreground">{repo.spec.repoURL}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={repo.status?.phase === 'Ready' ? 'default' : 'secondary'}>{repo.status?.phase || 'Pending'}</Badge>
-          <Button
-            onClick={async () => {
-              try {
-                await runScan.mutateAsync()
-                toast.success('Manual scan started')
-              } catch (error) {
-                toast.error(`Failed to start scan: ${error instanceof Error ? error.message : 'Unknown error'}`)
-              }
-            }}
-            disabled={runScan.isPending}
-          >
-            Scan Now
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title={`${repo.spec.owner}/${repo.spec.repository}`}
+        description={repo.spec.repoURL}
+        action={
+          <>
+            <Badge variant={repo.status?.phase === 'Ready' ? 'default' : 'secondary'}>{repo.status?.phase || 'Pending'}</Badge>
+            <Button
+              onClick={async () => {
+                try {
+                  await runScan.mutateAsync()
+                  toast.success('Manual scan started')
+                } catch (error) {
+                  toast.error(`Failed to start scan: ${error instanceof Error ? error.message : 'Unknown error'}`)
+                }
+              }}
+              disabled={runScan.isPending}
+            >
+              Scan Now
+            </Button>
+          </>
+        }
+      />
 
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
