@@ -93,6 +93,15 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 	}
 }
 
+type failingGetSessionStore struct {
+	store.SessionStore
+	err error
+}
+
+func (s failingGetSessionStore) GetSession(context.Context, string, string) (*store.SessionRecord, error) {
+	return nil, s.err
+}
+
 type recordingTaskWorkspaceExecutor struct {
 	deleteReqs  []workspace.DeleteRequest
 	deleteErr   error
@@ -6171,6 +6180,122 @@ func TestTaskControllerLifecycleEvents(t *testing.T) {
 		if event.Seq <= listed[0].Seq {
 			t.Fatalf("after query returned old seq <= %d: %#v", listed[0].Seq, afterFirst)
 		}
+	}
+}
+
+func TestTaskLifecycleEventOmitsMissingSessionName(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-session-event-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "deleted-session"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	reconciler.recordTaskLifecycleEvent(
+		context.Background(),
+		task,
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventSeverityInfo,
+		"task completed",
+	)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "missing-session-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionName != "" {
+		t.Fatalf("listed events = %#v, want lifecycle event without deleted session name", listed)
+	}
+}
+
+func TestTaskLifecycleEventKeepsSessionNameOnLookupFailure(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup-failure-session-event-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "session-a"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	reconciler.SessionManager = NewSessionManager(failingGetSessionStore{err: errors.New("session store unavailable")})
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	reconciler.recordTaskLifecycleEvent(
+		context.Background(),
+		task,
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventSeverityInfo,
+		"task completed",
+	)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "lookup-failure-session-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionName != "session-a" {
+		t.Fatalf("listed events = %#v, want lifecycle event to keep session name on ambiguous lookup failure", listed)
+	}
+}
+
+func TestTaskLifecycleEventKeepsExistingSessionName(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "existing-session-event-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "session-a"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	now := time.Now()
+	if err := reconciler.SessionManager.store.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-a",
+		SessionType: "task",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	reconciler.recordTaskLifecycleEvent(
+		context.Background(),
+		task,
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventSeverityInfo,
+		"task completed",
+	)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "existing-session-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionName != "session-a" {
+		t.Fatalf("listed events = %#v, want lifecycle event with existing session name", listed)
 	}
 }
 
