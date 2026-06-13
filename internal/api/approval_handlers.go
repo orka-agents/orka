@@ -120,6 +120,10 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
+	sessionName, err := h.existingSessionNameForTask(c.Context(), namespace, task)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+	}
 	actor := approvalDecisionActor(GetUserInfo(c))
 	content, err := json.Marshal(map[string]string{
 		"approvalID": approvalID,
@@ -135,7 +139,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		StreamType:  events.ExecutionEventStreamTypeTask,
 		StreamID:    taskName,
 		TaskName:    taskName,
-		SessionName: sessionNameForTask(task),
+		SessionName: sessionName,
 		Type:        eventType,
 		Severity:    events.ExecutionEventSeverityInfo,
 		ToolCallID:  current.ToolCallID,
