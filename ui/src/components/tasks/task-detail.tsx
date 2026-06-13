@@ -11,6 +11,7 @@ import { PRCreateDialog } from './pr-create-dialog'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
+import { TaskEventTimeline } from './task-event-timeline'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
 import { useNavigate } from '@tanstack/react-router'
 
@@ -77,6 +78,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="execution">Execution</TabsTrigger>
+          <TabsTrigger value="timeline">Timeline</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           {(task.status?.iteration ?? 0) > 0 && (
@@ -203,6 +205,10 @@ export function TaskDetail({ taskId }: { taskId: string }) {
 
         <TabsContent value="execution">
           <TaskExecutionPanel task={task} />
+        </TabsContent>
+
+        <TabsContent value="timeline">
+          <TaskEventTimeline taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
         <TabsContent value="logs">

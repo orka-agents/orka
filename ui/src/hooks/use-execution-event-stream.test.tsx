@@ -1,0 +1,188 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { renderHook, waitFor, act } from '@/test/test-utils'
+import { useUIStore } from '@/stores/ui'
+import { useAuthStore } from '@/stores/auth'
+import { useExecutionEventStream } from './use-execution-event-stream'
+
+vi.mock('zustand/middleware', () => ({
+  persist: (fn: unknown) => fn,
+}))
+
+function eventFrame(seq: number, type = 'TaskStarted', extra: Record<string, unknown> = {}) {
+  const data = JSON.stringify({
+    id: `evt-${seq}`,
+    namespace: 'default',
+    streamType: 'task',
+    streamID: 'tk',
+    seq,
+    type,
+    severity: 'info',
+    createdAt: '2026-06-13T00:00:00Z',
+    ...extra,
+  })
+  return `id: ${seq}\nevent: execution_event\ndata: ${data}\n\n`
+}
+
+function completeFrame(lastSeq: number, type = 'TaskSucceeded') {
+  return `id: ${lastSeq}\nevent: stream_complete\ndata: {"lastSeq":${lastSeq},"type":"${type}"}\n\n`
+}
+
+// Controllable SSE response: push chunks, then close.
+function makeStreamResponse() {
+  let controller: ReadableStreamDefaultController<Uint8Array>
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+    },
+  })
+  const response = new Response(stream, { status: 200 })
+  return {
+    response,
+    push: (text: string) => act(() => { controller.enqueue(encoder.encode(text)) }),
+    close: () => act(() => { controller.close() }),
+  }
+}
+
+describe('useExecutionEventStream', () => {
+  beforeEach(() => {
+    useUIStore.setState({ namespace: 'default' })
+    useAuthStore.setState({ token: 'test-token' })
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('connects with namespace and after cursor and accumulates events', async () => {
+    const conn = makeStreamResponse()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)
+
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true, after: 0 }),
+    )
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled())
+    const calledUrl = fetchSpy.mock.calls[0][0] as string
+    expect(calledUrl).toContain('/api/v1/tasks/tk/stream')
+    expect(calledUrl).toContain('namespace=default')
+    expect(calledUrl).toContain('after=0')
+    expect(fetchSpy.mock.calls[0][1]).toMatchObject({
+      headers: { Authorization: 'Bearer test-token' },
+    })
+
+    conn.push(eventFrame(1))
+    conn.push(eventFrame(2))
+    await waitFor(() => expect(result.current.events).toHaveLength(2))
+    expect(result.current.lastSeq).toBe(2)
+    expect(result.current.status).toBe('streaming')
+  })
+
+  it('dedupes events by seq across replays', async () => {
+    const conn = makeStreamResponse()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)
+
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    conn.push(eventFrame(1))
+    conn.push(eventFrame(1)) // duplicate seq
+    conn.push(eventFrame(2))
+    await waitFor(() => expect(result.current.events).toHaveLength(2))
+    expect(result.current.events.map((e) => e.seq)).toEqual([1, 2])
+  })
+
+  it('stops following on stream_complete and exposes terminal info', async () => {
+    const conn = makeStreamResponse()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)
+
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    conn.push(eventFrame(1))
+    conn.push(completeFrame(1, 'TaskSucceeded'))
+    await waitFor(() => expect(result.current.status).toBe('complete'))
+    expect(result.current.isFollowing).toBe(false)
+    expect(result.current.streamComplete?.type).toBe('TaskSucceeded')
+    expect(result.current.lastSeq).toBe(1)
+  })
+
+  it('ignores heartbeat frames and does not advance the cursor', async () => {
+    const conn = makeStreamResponse()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)
+
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    conn.push(eventFrame(3))
+    conn.push(': heartbeat\n\n')
+    await waitFor(() => expect(result.current.events).toHaveLength(1))
+    expect(result.current.lastSeq).toBe(3)
+  })
+
+  it('surfaces an error status when the response is not ok', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('boom', { status: 500, statusText: 'Internal Server Error' }),
+    )
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true, reconnectDelayMs: 50 }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('error'))
+    expect(result.current.error).toContain('500')
+  })
+
+  it('marks unsupported when streaming is not enabled (501)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('execution event storage not enabled', { status: 501 }),
+    )
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('unsupported'))
+  })
+
+  it('reconnects from the latest seq after an unexpected close', async () => {
+    const first = makeStreamResponse()
+    const second = makeStreamResponse()
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(first.response)
+      .mockResolvedValueOnce(second.response)
+
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true, reconnectDelayMs: 10 }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+    first.push(eventFrame(5))
+    await waitFor(() => expect(result.current.lastSeq).toBe(5))
+    first.close()
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2))
+    const reconnectUrl = fetchSpy.mock.calls[1][0] as string
+    expect(reconnectUrl).toContain('after=5')
+  })
+
+  it('stop halts following and aborts the request', async () => {
+    const conn = makeStreamResponse()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+    act(() => { result.current.stop() })
+    await waitFor(() => expect(result.current.isFollowing).toBe(false))
+  })
+
+  it('does not connect when disabled', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    renderHook(() => useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: false }))
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
