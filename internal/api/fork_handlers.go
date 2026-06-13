@@ -114,19 +114,9 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	spec := *source.Spec.DeepCopy()
-	spec.RequestedBy = nil
-	spec.Transaction = nil
-	if req.AgentRef != nil {
-		spec.AgentRef = req.AgentRef
-	}
-	if strings.TrimSpace(req.Prompt) != "" {
-		spec.Prompt = strings.TrimSpace(req.Prompt)
-		if spec.AI != nil {
-			spec.AI.Prompt = strings.TrimSpace(req.Prompt)
-		}
-	}
-	if req.Workspace != nil {
-		spec.Workspace = req.Workspace
+	applyForkRequestOverrides(&spec, req)
+	if err := applyForkContextToSpec(&spec, forkCtx); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode fork context: %v", err))
 	}
 
 	forked := &corev1alpha1.Task{
@@ -137,10 +127,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 				labels.LabelParentTask: labels.SelectorValue(sourceName),
 			},
 			Annotations: map[string]string{
-				labels.AnnotationParentTaskName:       sourceName,
-				labels.AnnotationForkSourceTask:       sourceName,
-				labels.AnnotationForkSourceSeq:        strconv.FormatInt(afterSeq, 10),
-				labels.AnnotationForkContextTruncated: strconv.FormatBool(forkCtx.Truncated),
+				labels.AnnotationParentTaskName:                sourceName,
+				labels.AnnotationForkSourceTask:                sourceName,
+				labels.AnnotationForkSourceSeq:                 strconv.FormatInt(afterSeq, 10),
+				labels.AnnotationForkContextTruncated:          strconv.FormatBool(forkCtx.Truncated),
+				labels.AnnotationDisableCoordinationToolInject: strconv.FormatBool(true),
 			},
 		},
 		Spec: spec,
@@ -206,6 +197,66 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
+}
+
+func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest) {
+	if spec == nil {
+		return
+	}
+	spec.RequestedBy = nil
+	spec.Transaction = nil
+	if req.AgentRef != nil {
+		spec.AgentRef = req.AgentRef
+	}
+	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
+		spec.Prompt = prompt
+		if spec.AI != nil {
+			spec.AI.Prompt = prompt
+		}
+	}
+	if req.Workspace != nil {
+		spec.Workspace = req.Workspace
+	}
+	clearForkSchedule(spec)
+}
+
+func clearForkSchedule(spec *corev1alpha1.TaskSpec) {
+	if spec == nil {
+		return
+	}
+	spec.Schedule = ""
+	spec.TimeZone = nil
+	spec.ConcurrencyPolicy = ""
+	spec.StartingDeadlineSeconds = nil
+	spec.SuccessfulRunsHistoryLimit = nil
+	spec.FailedRunsHistoryLimit = nil
+	spec.Suspend = nil
+}
+
+func applyForkContextToSpec(spec *corev1alpha1.TaskSpec, forkCtx forkcontext.Context) error {
+	if spec == nil || len(forkCtx.Events) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(forkCtx)
+	if err != nil {
+		return err
+	}
+	contextBlock := "Fork context through execution event checkpoint:\n" + string(encoded)
+	if spec.AI != nil {
+		spec.AI.Prompt = joinForkContextPrompt(contextBlock, spec.AI.Prompt)
+	}
+	if spec.Type == corev1alpha1.TaskTypeAgent || strings.TrimSpace(spec.Prompt) != "" {
+		spec.Prompt = joinForkContextPrompt(contextBlock, spec.Prompt)
+	}
+	return nil
+}
+
+func joinForkContextPrompt(contextBlock, prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return contextBlock
+	}
+	return contextBlock + "\n\nUser continuation prompt:\n" + prompt
 }
 
 func (h *Handlers) resolveForkSessionNames(

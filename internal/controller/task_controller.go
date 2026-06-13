@@ -274,7 +274,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			span.SetStatus(codes.Error, err.Error())
 			return ctrl.Result{}, err
 		}
-		r.recordTaskLifecycleEvent(
+		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
 			execevents.ExecutionEventTypeTaskCreated,
@@ -305,12 +305,12 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 	eventType string,
 	severity string,
 	summary string,
-) {
+) error {
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return
+		return nil
 	}
 	if strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
-		return
+		return nil
 	}
 	_, err := r.ExecutionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   task.Namespace,
@@ -330,7 +330,9 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 			"task", task.Name,
 			"eventType", eventType,
 		)
+		return err
 	}
+	return nil
 }
 
 func (r *TaskReconciler) executionEventSessionName(ctx context.Context, task *corev1alpha1.Task) string {
@@ -375,13 +377,13 @@ func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
-func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.Context, task *corev1alpha1.Task) {
+func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.Context, task *corev1alpha1.Task) bool {
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return
+		return true
 	}
 	eventType := executionEventTypeForTaskPhase(task.Status.Phase)
 	if eventType == "" {
-		return
+		return true
 	}
 	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
 		Namespace:  task.Namespace,
@@ -398,18 +400,18 @@ func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.C
 			"task", task.Name,
 			"eventType", eventType,
 		)
-		return
+		return false
 	}
 	if len(listed) > 0 {
-		return
+		return true
 	}
-	r.recordTaskLifecycleEvent(
+	return r.recordTaskLifecycleEvent(
 		ctx,
 		task,
 		eventType,
 		executionEventSeverityForTaskPhase(task.Status.Phase),
 		task.Status.Message,
-	)
+	) == nil
 }
 
 func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
@@ -979,14 +981,14 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 	if transitionedToRunning {
-		r.recordTaskLifecycleEvent(
+		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
 			execevents.ExecutionEventTypeTaskJobCreated,
 			execevents.ExecutionEventSeverityInfo,
 			fmt.Sprintf("Job %s created", jobName),
 		)
-		r.recordTaskLifecycleEvent(
+		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
 			execevents.ExecutionEventTypeTaskStarted,
@@ -1882,7 +1884,7 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
+	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
@@ -1917,6 +1919,9 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 
 	if err := r.enforceParentScheduledTaskHistory(ctx, task); err != nil {
 		return ctrl.Result{}, err
+	}
+	if !terminalEventRecorded {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -2078,7 +2083,7 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		log.Error(err, "failed to update completion status")
 		return ctrl.Result{}, err
 	}
-	r.recordTaskLifecycleEvent(
+	terminalEventErr := r.recordTaskLifecycleEvent(
 		ctx,
 		task,
 		executionEventTypeForTaskPhase(phase),
@@ -2091,6 +2096,9 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		if err := r.updateAgentLastUsed(ctx, task.Namespace, task.Spec.AgentRef.Name, now); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "failed to update agent LastUsed")
 		}
+	}
+	if terminalEventErr != nil {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{RequeueAfter: time.Second}, nil

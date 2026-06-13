@@ -4239,6 +4239,36 @@ func TestAddAIEnvVars_ChildTaskMessaging(t *testing.T) {
 	}
 }
 
+func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testTask,
+			Namespace:   defaultNS,
+			Labels:      map[string]string{labels.LabelParentTask: "parent"},
+			Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: scheduledRunLabelValue},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Prompt: "test"},
+		},
+	}
+	envVars := jb.addAIEnvVars(context.Background(), nil, task, nil, nil)
+	envMap := make(map[string]string)
+	for _, e := range envVars {
+		envMap[e.Name] = e.Value
+	}
+	if tools := envMap[workerenv.AITools]; tools != "" {
+		t.Fatalf("%s = %q, want no auto-injected child messaging tools", workerenv.AITools, tools)
+	}
+	// Disabling coordination tool injection should not change the existing child-task
+	// coordination mode marker; it only prevents implicit messaging tools from being
+	// exposed to the LLM.
+	if enabled := envMap[workerenv.CoordinationEnabled]; enabled != scheduledRunLabelValue {
+		t.Fatalf("%s = %q, want %q", workerenv.CoordinationEnabled, enabled, scheduledRunLabelValue)
+	}
+}
+
 func TestAddAIEnvVars_CoordinationEnabled(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{

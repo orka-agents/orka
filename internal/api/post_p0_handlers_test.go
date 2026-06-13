@@ -527,8 +527,15 @@ func TestForkTaskAPI(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "forked-task"}, created); err != nil {
 		t.Fatalf("get created: %v", err)
 	}
-	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" || created.Annotations[labels.AnnotationForkSourceSeq] != "1" || created.Spec.Prompt != "continue" {
-		t.Fatalf("created task = %#v", created)
+	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" ||
+		created.Annotations[labels.AnnotationForkSourceSeq] != "1" ||
+		created.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
+		t.Fatalf("created task annotations = %#v", created.Annotations)
+	}
+	if !strings.Contains(created.Spec.Prompt, "Fork context through execution event checkpoint") ||
+		!strings.Contains(created.Spec.Prompt, events.ExecutionEventTypeTaskStarted) ||
+		!strings.Contains(created.Spec.Prompt, "continue") {
+		t.Fatalf("created prompt = %q, want fork context and continuation", created.Spec.Prompt)
 	}
 	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "forked-task"})
 	if err != nil {
@@ -545,6 +552,40 @@ func TestForkTaskAPI(t *testing.T) {
 	}
 	if latest != 3 || len(sessionEvents) != 3 {
 		t.Fatalf("latest=%d sessionEvents=%#v, want fork request and created events in session timeline", latest, sessionEvents)
+	}
+}
+
+func TestForkTaskAPIClearsScheduleForOneShotFork(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "scheduled-source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "scheduled-source-task")
+	source.Spec.Type = corev1alpha1.TaskTypeAI
+	source.Spec.AI = &corev1alpha1.AISpec{Prompt: "original"}
+	source.Spec.Schedule = "*/5 * * * *"
+	tz := "America/Boise"
+	source.Spec.TimeZone = &tz
+	suspend := true
+	source.Spec.Suspend = &suspend
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/scheduled-source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"scheduled-forked-task","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "scheduled-forked-task"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if created.Spec.Schedule != "" || created.Spec.TimeZone != nil || created.Spec.Suspend != nil {
+		t.Fatalf("created scheduling fields = schedule=%q timezone=%v suspend=%v, want cleared", created.Spec.Schedule, created.Spec.TimeZone, created.Spec.Suspend)
+	}
+	if created.Spec.AI == nil || !strings.Contains(created.Spec.AI.Prompt, "Fork context through execution event checkpoint") || !strings.Contains(created.Spec.AI.Prompt, "continue") {
+		t.Fatalf("created AI prompt = %#v, want fork context and continuation", created.Spec.AI)
 	}
 }
 
