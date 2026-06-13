@@ -13,10 +13,7 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
-const (
-	sqliteUnknownMetricLabel = "unknown"
-	sqliteInvalidMetricLabel = "invalid"
-)
+const sqliteUnknownMetricLabel = "unknown"
 
 var _ store.ExecutionEventStore = (*Store)(nil)
 
@@ -106,10 +103,6 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 		}
 	}()
 
-	if err := ensureNoApprovalDecision(ctx, conn, event); err != nil {
-		return nil, err
-	}
-
 	var latestSeq int64
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(seq), 0)
@@ -120,42 +113,25 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 		return nil, err
 	}
 	event.Seq = latestSeq + 1
-	if event.SessionName != "" {
-		var latestSessionSeq int64
-		seqErr := conn.QueryRowContext(ctx,
-			`SELECT latest_seq
-			 FROM execution_event_session_sequences
-			 WHERE namespace = ? AND session_name = ?`,
-			event.Namespace, event.SessionName,
-		).Scan(&latestSessionSeq)
-		if seqErr != nil && seqErr != sql.ErrNoRows {
-			return nil, seqErr
-		}
-		event.SessionSeq = latestSessionSeq + 1
-		if seqErr == sql.ErrNoRows {
-			if _, err := conn.ExecContext(ctx,
-				`INSERT INTO execution_event_session_sequences(namespace, session_name, latest_seq) VALUES (?, ?, ?)`,
-				event.Namespace, event.SessionName, event.SessionSeq,
-			); err != nil {
-				return nil, err
-			}
-		} else if _, err := conn.ExecContext(ctx,
-			`UPDATE execution_event_session_sequences
-			 SET latest_seq = ?
-			 WHERE namespace = ? AND session_name = ?`,
-			event.SessionSeq, event.Namespace, event.SessionName,
-		); err != nil {
-			return nil, err
-		}
-	}
 	event.ID = executionEventID(event.Namespace, event.StreamType, event.StreamID, event.Seq)
+
+	if existingType, approvalID, conflict, err := existingSQLiteTerminalApprovalEvent(ctx, conn, event); err != nil {
+		return nil, err
+	} else if conflict {
+		return nil, store.TerminalApprovalConflict(existingType, approvalID)
+	}
+
+	sessionSeq, err := nextSQLiteSessionExecutionEventSeq(ctx, conn, event.Namespace, event.SessionName)
+	if err != nil {
+		return nil, err
+	}
 
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO execution_events
 		 (id, namespace, stream_type, stream_id, seq, session_seq, type, severity, task_name, session_name,
 		  agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		event.ID, event.Namespace, event.StreamType, event.StreamID, event.Seq, event.SessionSeq, event.Type, event.Severity,
+		event.ID, event.Namespace, event.StreamType, event.StreamID, event.Seq, sessionSeq, event.Type, event.Severity,
 		event.TaskName, event.SessionName, event.AgentName, event.ToolName, event.ToolCallID,
 		event.Summary, contentJSON, event.ContentText, truncationJSON, event.CreatedAt,
 	); err != nil {
@@ -168,49 +144,121 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 	return &event, nil
 }
 
-type executionEventQueryer interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
-func ensureNoApprovalDecision(ctx context.Context, q executionEventQueryer, event store.ExecutionEvent) error {
-	approvalID, ok := store.ApprovalDecisionID(event)
-	if !ok {
-		return nil
+func existingSQLiteTerminalApprovalEvent(
+	ctx context.Context,
+	conn *sql.Conn,
+	event store.ExecutionEvent,
+) (existingType, approvalID string, conflict bool, err error) {
+	if !store.IsTerminalApprovalExecutionEventType(event.Type) {
+		return "", "", false, nil
 	}
-	rows, err := q.QueryContext(ctx, `SELECT type, tool_call_id, content_json
-		FROM execution_events
-		WHERE namespace = ? AND stream_type = ? AND stream_id = ?
-		  AND type IN (?, ?, ?, ?)`,
-		event.Namespace,
-		event.StreamType,
-		event.StreamID,
+	approvalID = store.ApprovalIDFromExecutionEvent(event)
+	if approvalID == "" {
+		return "", "", false, nil
+	}
+	rows, err := conn.QueryContext(ctx,
+		`SELECT type, tool_call_id, content_json
+		 FROM execution_events
+		 WHERE namespace = ? AND stream_type = ? AND stream_id = ?
+		   AND type IN (?, ?, ?, ?)`,
+		event.Namespace, event.StreamType, event.StreamID,
 		events.ExecutionEventTypeApprovalApproved,
 		events.ExecutionEventTypeApprovalDeclined,
 		events.ExecutionEventTypeApprovalExpired,
 		events.ExecutionEventTypeApprovalCancelled,
 	)
 	if err != nil {
-		return err
+		return "", "", false, err
 	}
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
-		var existing store.ExecutionEvent
-		var contentJSON sql.NullString
-		if err := rows.Scan(&existing.Type, &existing.ToolCallID, &contentJSON); err != nil {
-			return err
+		var typ string
+		var toolCallID string
+		var content sql.NullString
+		if err := rows.Scan(&typ, &toolCallID, &content); err != nil {
+			return "", "", false, err
 		}
-		if contentJSON.Valid && strings.TrimSpace(contentJSON.String) != "" {
-			existing.Content = json.RawMessage(contentJSON.String)
+		candidate := store.ExecutionEvent{Type: typ, ToolCallID: toolCallID}
+		if content.Valid {
+			candidate.Content = json.RawMessage(content.String)
 		}
-		existingApprovalID, ok := store.ApprovalDecisionID(existing)
-		if ok && existingApprovalID == approvalID {
-			return fmt.Errorf("%w: approval %s already has a terminal decision", store.ErrConflict, approvalID)
+		if store.ApprovalIDFromExecutionEvent(candidate) == approvalID {
+			return typ, approvalID, true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return "", "", false, err
 	}
-	return nil
+	return "", approvalID, false, nil
+}
+
+func nextSQLiteSessionExecutionEventSeq(ctx context.Context, conn *sql.Conn, namespace, sessionName string) (int64, error) {
+	if strings.TrimSpace(sessionName) == "" {
+		return 0, nil
+	}
+
+	latest, err := sqliteSessionCursorSeq(ctx, conn, namespace, sessionName)
+	if err != nil {
+		return 0, err
+	}
+	if latest == 0 {
+		if err := conn.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END), 0)
+			 FROM execution_events
+			 WHERE namespace = ? AND session_name = ?`,
+			namespace, sessionName,
+		).Scan(&latest); err != nil {
+			return 0, err
+		}
+	}
+	next := latest + 1
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO execution_event_session_sequences(namespace, session_name, latest_seq)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(namespace, session_name) DO UPDATE SET latest_seq = excluded.latest_seq`,
+		namespace, sessionName, next,
+	); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namespace, sessionName string) (int64, error) {
+	eventSeq := int64(0)
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END), 0)
+		 FROM execution_events
+		 WHERE namespace = ? AND session_name = ?`,
+		namespace, sessionName,
+	).Scan(&eventSeq); err != nil {
+		return 0, err
+	}
+	cursorSeq, err := sqliteSessionCursorSeq(ctx, s.db, namespace, sessionName)
+	if err != nil {
+		return 0, err
+	}
+	return max(eventSeq, cursorSeq), nil
+}
+
+type sqliteSessionCursorQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func sqliteSessionCursorSeq(ctx context.Context, querier sqliteSessionCursorQuerier, namespace, sessionName string) (int64, error) {
+	var latest int64
+	err := querier.QueryRowContext(ctx,
+		`SELECT latest_seq
+		 FROM execution_event_session_sequences
+		 WHERE namespace = ? AND session_name = ?`,
+		namespace, sessionName,
+	).Scan(&latest)
+	if err == nil {
+		return latest, nil
+	}
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return 0, err
 }
 
 // ListExecutionEvents returns execution events matching filter in stream sequence order.
@@ -296,44 +344,39 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 		return nil, 0, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	baseArgs := []any{filter.Namespace, filter.SessionName}
+	latestSeq, err := s.latestSQLiteSessionExecutionEventSeq(ctx, filter.Namespace, filter.SessionName)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
 
-	var latestSeq int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(latest_seq, 0)
-		 FROM execution_event_session_sequences
-		 WHERE namespace = ? AND session_name = ?`,
-		filter.Namespace,
-		filter.SessionName,
-	).Scan(&latestSeq); err != nil {
-		if err != sql.ErrNoRows {
-			return nil, 0, err
-		}
-	}
-
-	where := []string{"namespace = ?", "session_name = ?", "session_seq > ?"}
-	args := []any{filter.Namespace, filter.SessionName, filter.AfterSeq}
+	outerWhere := []string{"effective_session_seq > ?"}
+	queryArgs := append([]any{}, baseArgs...)
+	queryArgs = append(queryArgs, filter.AfterSeq)
 	if len(filter.EventTypes) > 0 {
 		placeholders := make([]string, len(filter.EventTypes))
 		for i, typ := range filter.EventTypes {
 			placeholders[i] = "?"
-			args = append(args, typ)
+			queryArgs = append(queryArgs, typ)
 		}
-		where = append(where, "type IN ("+strings.Join(placeholders, ",")+")")
+		outerWhere = append(outerWhere, "type IN ("+strings.Join(placeholders, ",")+")")
 	}
-	args = append(args, filter.Limit)
+	queryArgs = append(queryArgs, filter.Limit)
 
-	query := `SELECT session_seq, id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
+	query := `WITH ordered AS (
+		SELECT CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END AS effective_session_seq,
+			id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
+			agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at
+		FROM execution_events
+		WHERE namespace = ? AND session_name = ?
+	)
+	SELECT effective_session_seq, id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
 		agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at
-	FROM execution_events
-	WHERE ` + strings.Join(where, " AND ") + `
-	ORDER BY session_seq ASC
+	FROM ordered
+	WHERE ` + strings.Join(outerWhere, " AND ") + `
+	ORDER BY effective_session_seq ASC
 	LIMIT ?`
-	rows, err := tx.QueryContext(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -346,12 +389,10 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 			return nil, 0, err
 		}
 		out = append(out, event)
+		latestSeq = max(latestSeq, event.SessionSeq)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
-	}
-	if len(out) > 0 && latestSeq < out[len(out)-1].SessionSeq {
-		latestSeq = out[len(out)-1].SessionSeq
 	}
 	success = true
 	return out, latestSeq, nil
@@ -525,13 +566,11 @@ func sqliteMetricLabelsForExecutionEvent(event *store.ExecutionEvent) (string, s
 		streamType = store.ExecutionEventStreamTypeTask
 	}
 	if !events.IsValidExecutionEventStreamType(streamType) {
-		streamType = sqliteInvalidMetricLabel
+		streamType = sqliteUnknownMetricLabel
 	}
 	eventType := strings.TrimSpace(event.Type)
-	if eventType == "" {
+	if !events.IsValidExecutionEventType(eventType) {
 		eventType = sqliteUnknownMetricLabel
-	} else if !events.IsValidExecutionEventType(eventType) {
-		eventType = sqliteInvalidMetricLabel
 	}
 	return streamType, eventType
 }

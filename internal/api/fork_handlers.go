@@ -89,19 +89,16 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if afterSeq > latest {
 		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing event sequence")
 	}
-	eventsBefore, err := listTaskEventsThrough(
-		c.Context(),
-		h.executionEventStore,
-		namespace,
-		sourceName,
-		afterSeq,
-		forkcontext.DefaultMaxEvents,
-	)
+	validAfterSeq, err := taskEventSeqExists(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq, latest)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to validate execution event sequence: %v", err))
+	}
+	if !validAfterSeq {
+		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing event sequence")
+	}
+	eventsBefore, err := listTaskEventsThrough(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
-	}
-	if !forkcontext.ValidateAfterSeq(afterSeq, eventsBefore) {
-		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing event sequence")
 	}
 
 	forkCtx := forkcontext.BuildContext(namespace, sourceName, afterSeq, eventsBefore, forkcontext.DefaultMaxEvents)
@@ -147,8 +144,8 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		return err
 	}
 
-	sourceSessionName := sessionNameFromTask(source)
-	forkedSessionName := sessionNameFromTask(forked)
+	sourceSessionName := sessionNameForTask(source)
+	forkedSessionName := sessionNameForTask(forked)
 	requestContent, _ := json.Marshal(map[string]any{"sourceTaskName": sourceName, "newTaskName": newName, "afterSeq": afterSeq})
 	if _, err := h.executionEventStore.AppendExecutionEvent(c.Context(), &store.ExecutionEvent{
 		Namespace:   namespace,
@@ -172,7 +169,7 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	createdContent, _ := json.Marshal(map[string]any{"sourceTaskName": sourceName, "newTaskName": newName, "afterSeq": afterSeq})
-	for _, item := range []struct {
+	for _, event := range []struct {
 		streamID    string
 		sessionName string
 	}{
@@ -182,9 +179,9 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		if _, err := h.executionEventStore.AppendExecutionEvent(c.Context(), &store.ExecutionEvent{
 			Namespace:   namespace,
 			StreamType:  events.ExecutionEventStreamTypeTask,
-			StreamID:    item.streamID,
-			TaskName:    item.streamID,
-			SessionName: item.sessionName,
+			StreamID:    event.streamID,
+			TaskName:    event.streamID,
+			SessionName: event.sessionName,
 			Type:        events.ExecutionEventTypeTaskForkCreated,
 			Severity:    events.ExecutionEventSeverityInfo,
 			Summary:     "task fork created",
@@ -197,40 +194,53 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
 }
 
+func taskEventSeqExists(
+	ctx context.Context,
+	eventStore store.ExecutionEventStore,
+	namespace,
+	taskName string,
+	seq,
+	latestSeq int64,
+) (bool, error) {
+	if seq == 0 || seq == latestSeq {
+		return true, nil
+	}
+	if seq < 0 || seq > latestSeq {
+		return false, nil
+	}
+	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  namespace,
+		StreamType: events.ExecutionEventStreamTypeTask,
+		StreamID:   taskName,
+		AfterSeq:   seq - 1,
+		Limit:      1,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(listed) == 1 && listed[0].Seq == seq, nil
+}
+
 func listTaskEventsThrough(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
 	namespace,
 	taskName string,
 	throughSeq int64,
-	maxEvents ...int,
 ) ([]store.ExecutionEvent, error) {
 	if throughSeq == 0 {
 		return nil, nil
 	}
-	tailLimit := 0
-	if len(maxEvents) > 0 {
-		limit := maxEvents[0]
-		if limit <= 0 {
-			limit = forkcontext.DefaultMaxEvents
-		}
-		tailLimit = limit + 1
-	}
-	out := []store.ExecutionEvent{}
-	if tailLimit > 0 {
-		out = make([]store.ExecutionEvent, 0, tailLimit)
-	}
-	after := int64(0)
-	if tailLimit > 0 && throughSeq > int64(tailLimit) {
-		after = throughSeq - int64(tailLimit)
-	}
+	readLimit := forkcontext.DefaultMaxEvents + 1
+	after := max(throughSeq-int64(readLimit), 0)
+	out := make([]store.ExecutionEvent, 0, readLimit)
 	for {
 		batch, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
 			Namespace:  namespace,
 			StreamType: events.ExecutionEventStreamTypeTask,
 			StreamID:   taskName,
 			AfterSeq:   after,
-			Limit:      store.MaxExecutionEventLimit,
+			Limit:      min(store.MaxExecutionEventLimit, readLimit-len(out)),
 		})
 		if err != nil {
 			return nil, err
@@ -239,17 +249,13 @@ func listTaskEventsThrough(
 			break
 		}
 		for _, event := range batch {
-			if event.Seq > throughSeq {
+			if event.Seq > throughSeq || len(out) >= readLimit {
 				return out, nil
 			}
 			out = append(out, event)
-			if tailLimit > 0 && len(out) > tailLimit {
-				copy(out, out[1:])
-				out = out[:tailLimit]
-			}
 			after = event.Seq
 		}
-		if after >= throughSeq || len(batch) < store.MaxExecutionEventLimit {
+		if after >= throughSeq || len(out) >= readLimit || len(batch) < store.MaxExecutionEventLimit {
 			break
 		}
 	}

@@ -184,6 +184,42 @@ func TestStreamTaskEventsSSEReplayHeartbeatAndPolling(t *testing.T) {
 	})
 }
 
+func TestStreamTaskEventsFlushesCompletionAfterExactLimitBatch(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	for range store.MaxExecutionEventLimit - 1 {
+		appendTestTaskEvent(t, eventStore, "task-limit", events.ExecutionEventTypeWorkerStarted)
+	}
+	appendTestTaskEvent(t, eventStore, "task-limit", events.ExecutionEventTypeTaskSucceeded)
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-limit"))
+	configureShortTaskEventStream(h)
+	useCancelingContext(app, 100*time.Millisecond)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+	body := doStreamRequest(t, app, "/api/v1/tasks/task-limit/stream?namespace=default")
+	if !strings.Contains(body, "event: stream_complete") {
+		t.Fatalf("stream body missing completion frame after exact limit batch")
+	}
+}
+
+func TestStreamTaskEventsReplaysPostTerminalEventsBeforeComplete(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "task-terminal", events.ExecutionEventTypeTaskStarted)
+	appendTestTaskEvent(t, eventStore, "task-terminal", events.ExecutionEventTypeTaskSucceeded)
+	appendTestTaskEvent(t, eventStore, "task-terminal", events.ExecutionEventTypeTaskForkCreated)
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-terminal"))
+	configureShortTaskEventStream(h)
+	useCancelingContext(app, 50*time.Millisecond)
+	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
+	body := doStreamRequest(t, app, "/api/v1/tasks/task-terminal/stream?namespace=default")
+	forkIndex := strings.Index(body, events.ExecutionEventTypeTaskForkCreated)
+	completeIndex := strings.Index(body, "event: stream_complete")
+	if forkIndex < 0 || completeIndex < 0 || forkIndex > completeIndex {
+		t.Fatalf("stream body = %q, want fork event before stream_complete", body)
+	}
+	if !strings.Contains(body, "id: 3\nevent: stream_complete") || !strings.Contains(body, `"lastSeq":3`) {
+		t.Fatalf("stream body = %q, want completion cursor at last delivered event", body)
+	}
+}
+
 func TestSSETaskEventsCancellationExitsCleanly(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-cancel"))

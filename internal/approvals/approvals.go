@@ -50,6 +50,8 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 				id = event.ID
 			}
 			if _, ok := byID[id]; ok {
+				// Duplicate request events are idempotent: once an approval ID exists,
+				// later replays must not reset terminal decisions back to pending.
 				continue
 			}
 			order = append(order, id)
@@ -89,7 +91,7 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 			approval.DecisionSeq = event.Seq
 			decisionTime := event.CreatedAt
 			approval.DecisionTime = &decisionTime
-			approval.DecisionReason = strings.TrimSpace(payload.Reason)
+			approval.DecisionReason = firstNonEmpty(payload.Reason, event.Summary)
 			approval.DecisionActor = payload.Actor
 		}
 	}

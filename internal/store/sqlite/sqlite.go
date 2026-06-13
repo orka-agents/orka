@@ -144,6 +144,8 @@ func migrate(db *sql.DB) error {
 			ON execution_events(namespace, stream_type, stream_id, type, seq)`,
 		`CREATE INDEX IF NOT EXISTS idx_execution_events_task
 			ON execution_events(namespace, task_name, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_session
+			ON execution_events(namespace, session_name, seq)`,
 		`CREATE TABLE IF NOT EXISTS execution_event_session_sequences (
 			namespace    TEXT NOT NULL,
 			session_name TEXT NOT NULL,
@@ -548,38 +550,26 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migration failed: %w", err)
 		}
 	}
+
 	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
 		{Name: "session_seq", Definition: "session_seq INTEGER NOT NULL DEFAULT 0"},
 	}); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_events_session
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_events_session_seq
 		ON execution_events(namespace, session_name, session_seq)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
-	if _, err := db.Exec(`UPDATE execution_events
-		SET session_seq = (
-			SELECT COUNT(*) FROM execution_events prior
-			WHERE prior.namespace = execution_events.namespace
-			  AND prior.session_name = execution_events.session_name
-			  AND prior.session_name <> ''
-			  AND prior.rowid <= execution_events.rowid
-		)
-		WHERE session_name <> '' AND session_seq = 0`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS execution_event_session_sequences (
+		namespace    TEXT NOT NULL,
+		session_name TEXT NOT NULL,
+		latest_seq   INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (namespace, session_name)
+	)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_events_session_seq_unique
-		ON execution_events(namespace, session_name, session_seq)
-		WHERE session_name <> ''`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
-	}
-	if _, err := db.Exec(`INSERT INTO execution_event_session_sequences(namespace, session_name, latest_seq)
-		SELECT namespace, session_name, MAX(session_seq)
-		FROM execution_events
-		WHERE session_name <> ''
-		GROUP BY namespace, session_name
-		ON CONFLICT(namespace, session_name) DO UPDATE SET latest_seq = MAX(latest_seq, excluded.latest_seq)`); err != nil {
-		return fmt.Errorf("migration failed: %w", err)
+	if err := backfillExecutionEventSessionCursors(db); err != nil {
+		return err
 	}
 
 	if err := ensureSQLiteColumns(db, "memories", []sqliteColumnMigration{
@@ -640,6 +630,24 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
+	return nil
+}
+
+func backfillExecutionEventSessionCursors(db *sql.DB) error {
+	_, err := db.Exec(`INSERT INTO execution_event_session_sequences(namespace, session_name, latest_seq)
+		SELECT namespace, session_name, MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END)
+		FROM execution_events
+		WHERE session_name <> ''
+		GROUP BY namespace, session_name
+		ON CONFLICT(namespace, session_name) DO UPDATE SET latest_seq =
+			CASE
+				WHEN execution_event_session_sequences.latest_seq > excluded.latest_seq
+				THEN execution_event_session_sequences.latest_seq
+				ELSE excluded.latest_seq
+			END`)
+	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
 	return nil
 }
 

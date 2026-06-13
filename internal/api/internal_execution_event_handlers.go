@@ -77,7 +77,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			event.TaskName = streamID
 		}
 		if writerTask != nil {
-			expectedSessionName := sessionNameFromTask(writerTask)
+			expectedSessionName := sessionNameForTask(writerTask)
 			if expectedSessionName != "" && h.sessionStore != nil {
 				if _, err := h.sessionStore.GetSession(c.Context(), namespace, expectedSessionName); err != nil {
 					if errors.Is(err, store.ErrNotFound) {
