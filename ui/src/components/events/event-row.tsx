@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { ChevronRight, GitFork } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { SeverityIcon } from './severity-icon'
@@ -55,6 +55,7 @@ export interface EventRowProps {
 
 export function EventRow({ event, showTask, taskLink, onFork, onCopy }: EventRowProps) {
   const [expanded, setExpanded] = useState(false)
+  const payloadId = useId()
   const category = executionEventCategory(event.type)
   const contentJson = stringifyContent(event)
   const hasDisclosure = Boolean(contentJson || event.contentText)
@@ -104,10 +105,11 @@ export function EventRow({ event, showTask, taskLink, onFork, onCopy }: EventRow
                 <button
                   type="button"
                   onClick={() => setExpanded((v) => !v)}
-                  className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  className="inline-flex items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-expanded={expanded}
+                  aria-controls={payloadId}
                 >
-                  <ChevronRight className={`h-3 w-3 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                  <ChevronRight className={`h-3 w-3 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden="true" />
                   {expanded ? 'Hide payload' : 'Show payload'}
                 </button>
               )}
@@ -115,7 +117,7 @@ export function EventRow({ event, showTask, taskLink, onFork, onCopy }: EventRow
                 <button
                   type="button"
                   onClick={() => onCopy(event)}
-                  className="text-xs text-muted-foreground hover:text-foreground"
+                  className="rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   Copy JSON
                 </button>
@@ -124,15 +126,15 @@ export function EventRow({ event, showTask, taskLink, onFork, onCopy }: EventRow
                 <button
                   type="button"
                   onClick={() => onFork(event)}
-                  className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  className="inline-flex items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <GitFork className="h-3 w-3" /> Fork from here
+                  <GitFork className="h-3 w-3" aria-hidden="true" /> Fork from here
                 </button>
               )}
             </div>
           )}
           {expanded && (
-            <div className="mt-1.5 space-y-2">
+            <div className="mt-1.5 space-y-2" id={payloadId}>
               {event.contentText && (
                 <pre className="overflow-x-auto rounded bg-muted p-2 text-xs whitespace-pre-wrap">{event.contentText}</pre>
               )}

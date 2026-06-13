@@ -4,8 +4,14 @@ import userEvent from '@testing-library/user-event'
 import { EventTimeline } from './event-timeline'
 import { makeEvent, resetEventSeq } from '@/test/fixtures/events'
 
+const toastSuccess = vi.fn()
+vi.mock('sonner', () => ({ toast: { success: (...a: unknown[]) => toastSuccess(...a), error: vi.fn() } }))
+
 describe('EventTimeline', () => {
-  beforeEach(() => resetEventSeq())
+  beforeEach(() => {
+    resetEventSeq()
+    toastSuccess.mockClear()
+  })
 
   it('renders the empty state when there are no events', () => {
     render(<EventTimeline events={[]} emptyMessage="No execution events recorded." />)
@@ -125,5 +131,59 @@ describe('EventTimeline', () => {
   it('exposes a resume-from-seq helper for CLI/API users', () => {
     render(<EventTimeline events={[makeEvent({ seq: 7 })]} lastSeq={7} />)
     expect(screen.getByText(/after=7/)).toBeInTheDocument()
+  })
+
+  it('filters by category', async () => {
+    const user = userEvent.setup()
+    const events = [
+      makeEvent({ seq: 1, type: 'TaskStarted', summary: 'lifecycle one' }),
+      makeEvent({ seq: 2, type: 'ToolCallStarted', summary: 'a tool call' }),
+    ]
+    render(<EventTimeline events={events} />)
+    expect(screen.getAllByTestId('event-row')).toHaveLength(2)
+    await user.selectOptions(screen.getByLabelText('Filter by category'), 'tools')
+    const rows = screen.getAllByTestId('event-row')
+    expect(rows).toHaveLength(1)
+    expect(screen.getByText('a tool call')).toBeInTheDocument()
+  })
+
+  it('copies the redacted API payload as JSON, not hidden raw data', async () => {
+    const user = userEvent.setup()
+    // userEvent installs a clipboard stub; spy on it after setup so the spy wins.
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
+    render(
+      <EventTimeline
+        events={[makeEvent({ seq: 4, type: 'ToolCallCompleted', content: { ok: true }, summary: 's' })]}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const copied = writeText.mock.calls[0][0] as string
+    // The copied text is the serialized event payload exactly as the API serves it.
+    const parsed = JSON.parse(copied)
+    expect(parsed.seq).toBe(4)
+    expect(parsed.content).toEqual({ ok: true })
+  })
+
+  it('disclosure toggle is keyboard operable and wires aria-controls', async () => {
+    const user = userEvent.setup()
+    render(<EventTimeline events={[makeEvent({ seq: 1, type: 'ToolCallCompleted', content: { x: 1 } })]} />)
+    const toggle = screen.getByRole('button', { name: /show payload/i })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle).toHaveAttribute('aria-controls')
+    toggle.focus()
+    expect(toggle).toHaveFocus()
+    // Activate via keyboard (Enter), as a keyboard-only user would.
+    await user.keyboard('{Enter}')
+    expect(screen.getByTestId('event-payload')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /hide payload/i })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('the event list and filters expose accessible labels', () => {
+    render(<EventTimeline events={[makeEvent({ seq: 1 })]} />)
+    expect(screen.getByRole('list', { name: 'Event timeline' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Search events')).toBeInTheDocument()
+    expect(screen.getByLabelText('Filter by severity')).toBeInTheDocument()
+    expect(screen.getByLabelText('Filter by category')).toBeInTheDocument()
   })
 })

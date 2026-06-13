@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Search, X, Inbox, FilterX } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -48,7 +49,10 @@ function copyEventJson(event: ExecutionEvent) {
   // Copy the redacted API payload exactly as served — never hidden raw data.
   const payload = JSON.stringify(event, null, 2)
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    void navigator.clipboard.writeText(payload)
+    void navigator.clipboard
+      .writeText(payload)
+      .then(() => toast.success(`Copied event #${event.seq} JSON`))
+      .catch(() => toast.error('Failed to copy to clipboard'))
   }
 }
 
