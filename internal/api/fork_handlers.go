@@ -150,9 +150,14 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		return err
 	}
 
-	sourceSessionName := sessionNameForTask(source)
-	forkedSessionName := sessionNameForTask(forked)
-	requestContent, _ := json.Marshal(map[string]any{"sourceTaskName": sourceName, "newTaskName": newName, "afterSeq": afterSeq})
+	sourceSessionName, forkedSessionName, err := h.resolveForkSessionNames(c.Context(), namespace, source, forked)
+	if err != nil {
+		return err
+	}
+	requestContent, err := marshalForkEventContent(sourceName, newName, afterSeq, "request")
+	if err != nil {
+		return err
+	}
 	if _, err := h.executionEventStore.AppendExecutionEvent(c.Context(), &store.ExecutionEvent{
 		Namespace:   namespace,
 		StreamType:  events.ExecutionEventStreamTypeTask,
@@ -174,7 +179,10 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked task: %v", err))
 	}
 
-	createdContent, _ := json.Marshal(map[string]any{"sourceTaskName": sourceName, "newTaskName": newName, "afterSeq": afterSeq})
+	createdContent, err := marshalForkEventContent(sourceName, newName, afterSeq, "created")
+	if err != nil {
+		return err
+	}
 	for _, event := range []struct {
 		streamID    string
 		sessionName string
@@ -198,6 +206,34 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
+}
+
+func (h *Handlers) resolveForkSessionNames(
+	ctx context.Context,
+	namespace string,
+	source *corev1alpha1.Task,
+	forked *corev1alpha1.Task,
+) (string, string, error) {
+	sourceSessionName, err := h.existingSessionNameForTask(ctx, namespace, source)
+	if err != nil {
+		return "", "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get source session: %v", err))
+	}
+	if sessionNameForTask(source) != "" && sourceSessionName == "" {
+		forked.Spec.SessionRef = nil
+	}
+	forkedSessionName, err := h.existingSessionNameForTask(ctx, namespace, forked)
+	if err != nil {
+		return "", "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get forked session: %v", err))
+	}
+	return sourceSessionName, forkedSessionName, nil
+}
+
+func marshalForkEventContent(sourceName, newName string, afterSeq int64, eventKind string) (json.RawMessage, error) {
+	content, err := json.Marshal(map[string]any{"sourceTaskName": sourceName, "newTaskName": newName, "afterSeq": afterSeq})
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode fork %s event: %v", eventKind, err))
+	}
+	return content, nil
 }
 
 func taskEventSeqExists(

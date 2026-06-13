@@ -294,6 +294,45 @@ func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	}
 }
 
+func TestTaskApprovalDecisionAPIOmitsDeletedSession(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-stale", "action": "create_pr"})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "approval-stale-task",
+		TaskName:    "approval-stale-task",
+		SessionName: "deleted-session",
+		Type:        events.ExecutionEventTypeApprovalRequested,
+		ToolCallID:  "approval-stale",
+		Content:     content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := testTask("default", "approval-stale-task")
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "deleted-session"}
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	h.sessionStore = &postP0FakeSessionStore{records: map[string]*store.SessionRecord{}}
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-stale-task/approvals/approval-stale/decision?namespace=default", bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "approval-stale-task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := listed[len(listed)-1]
+	if decision.Type != events.ExecutionEventTypeApprovalApproved || decision.SessionName != "" {
+		t.Fatalf("decision event = %#v, want approved with no deleted session", decision)
+	}
+}
+
 func TestTaskApprovalDecisionAPIRejectsTerminalTaskAndRecordsActor(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
@@ -506,6 +545,43 @@ func TestForkTaskAPI(t *testing.T) {
 	}
 	if latest != 3 || len(sessionEvents) != 3 {
 		t.Fatalf("latest=%d sessionEvents=%#v, want fork request and created events in session timeline", latest, sessionEvents)
+	}
+}
+
+func TestForkTaskAPIClearsDeletedSessionRef(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "stale-source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "stale-source-task")
+	source.Spec.Type = corev1alpha1.TaskTypeAI
+	source.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "deleted-session"}
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	h.sessionStore = &postP0FakeSessionStore{records: map[string]*store.SessionRecord{}}
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/stale-source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"stale-forked-task","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "stale-forked-task"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if created.Spec.SessionRef != nil {
+		t.Fatalf("created sessionRef = %#v, want stale deleted session cleared", created.Spec.SessionRef)
+	}
+	for _, streamID := range []string{"stale-source-task", "stale-forked-task"} {
+		listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: streamID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := listed[len(listed)-1]
+		if last.SessionName != "" {
+			t.Fatalf("%s last event sessionName = %q, want omitted", streamID, last.SessionName)
+		}
 	}
 }
 

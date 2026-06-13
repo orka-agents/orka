@@ -499,6 +499,23 @@ func sessionNameForTask(task *corev1alpha1.Task) string {
 	return strings.TrimSpace(task.Spec.SessionRef.Name)
 }
 
+func (h *Handlers) existingSessionNameForTask(ctx context.Context, namespace string, task *corev1alpha1.Task) (string, error) {
+	sessionName := sessionNameForTask(task)
+	if sessionName == "" {
+		return "", nil
+	}
+	if h == nil || h.sessionStore == nil {
+		return sessionName, nil
+	}
+	if _, err := h.sessionStore.GetSession(ctx, namespace, sessionName); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return sessionName, nil
+}
+
 func (h *Handlers) ensureSessionReadable(c fiber.Ctx, namespace, sessionName string) error {
 	if h.sessionStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "session store not configured")
