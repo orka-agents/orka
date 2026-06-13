@@ -8,13 +8,16 @@ export interface SeverityMeta {
 }
 
 // Severity is a distinct visual axis from phase/type — it describes an event's
-// importance, not a task's lifecycle. Kept in a plain .ts module (no JSX) so the
-// non-component export doesn't trip react-refresh, mirroring lib/task-status.ts.
+// importance, not a task's lifecycle. It still draws from the same deep-ocean
+// status palette so the UI speaks one color language: info→running (cyan),
+// warning→pending (amber), error→failed (rose). Kept in a plain .ts module (no
+// JSX) so the non-component export doesn't trip react-refresh, mirroring
+// lib/task-status.ts.
 const SEVERITY_META: Record<ExecutionEventSeverityLevel, SeverityMeta> = {
   debug: { label: 'Debug', icon: Bug, className: 'text-muted-foreground' },
-  info: { label: 'Info', icon: Info, className: 'text-blue-600 dark:text-blue-400' },
-  warning: { label: 'Warning', icon: TriangleAlert, className: 'text-yellow-600 dark:text-yellow-400' },
-  error: { label: 'Error', icon: CircleAlert, className: 'text-red-600 dark:text-red-400' },
+  info: { label: 'Info', icon: Info, className: 'text-status-running' },
+  warning: { label: 'Warning', icon: TriangleAlert, className: 'text-status-pending' },
+  error: { label: 'Error', icon: CircleAlert, className: 'text-status-failed' },
 }
 
 export function severityMeta(severity?: string): SeverityMeta {

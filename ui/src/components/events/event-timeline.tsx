@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Radio, Search, X } from 'lucide-react'
+import { Search, X, Inbox, FilterX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { EmptyState } from '@/components/ui/empty-state'
 import { EventRow } from './event-row'
 import {
   executionEventCategory,
@@ -101,8 +102,9 @@ export function EventTimeline({
           {filtered.length} of {events.length} event{events.length !== 1 ? 's' : ''}
         </span>
         {live && (
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-green-600 dark:text-green-400">
-            <Radio className="h-3 w-3 animate-pulse" aria-hidden="true" /> Live
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-live">
+            <span className="inline-block size-1.5 rounded-full bg-live motion-safe:animate-pulse-live" aria-hidden="true" />
+            Live
           </span>
         )}
         {completed && (
@@ -176,9 +178,13 @@ export function EventTimeline({
       )}
 
       {!error && events.length === 0 && (
-        <div className="rounded-md border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
-          {isLoading ? 'Loading events…' : emptyMessage}
-        </div>
+        isLoading ? (
+          <div className="rounded-md border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
+            Loading events…
+          </div>
+        ) : (
+          <EmptyState icon={Inbox} headline={emptyMessage} className="rounded-md border border-dashed" />
+        )
       )}
 
       {filtered.length > 0 && (
@@ -198,9 +204,12 @@ export function EventTimeline({
       )}
 
       {events.length > 0 && filtered.length === 0 && (
-        <div className="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-          No events match the current filters.
-        </div>
+        <EmptyState
+          icon={FilterX}
+          headline="No events match the current filters."
+          hint="Try clearing the search or selecting a different severity or category."
+          className="rounded-md border border-dashed"
+        />
       )}
 
       {typeof lastSeq === 'number' && lastSeq > 0 && (

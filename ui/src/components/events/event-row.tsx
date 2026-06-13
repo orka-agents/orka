@@ -35,7 +35,7 @@ function TruncationMarkers({ event }: { event: ExecutionEvent }) {
   if (t.contentTextTruncated) parts.push(`text truncated${t.contentTextOriginalChars ? ` (${t.contentTextOriginalChars} chars)` : ''}`)
   if (t.contentJsonTruncated) parts.push(`payload truncated${t.contentJsonOriginalBytes ? ` (${t.contentJsonOriginalBytes} bytes)` : ''}`)
   return (
-    <Badge variant="outline" className="border-yellow-500/50 text-yellow-700 dark:text-yellow-400" title={parts.join('; ')}>
+    <Badge variant="outline" className="border-status-pending/50 text-status-pending" title={parts.join('; ')}>
       truncated
     </Badge>
   )

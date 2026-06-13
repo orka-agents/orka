@@ -99,9 +99,13 @@ describe('EventTimeline', () => {
     expect(screen.getByText('beta event')).toBeInTheDocument()
   })
 
-  it('shows a live indicator while streaming', () => {
+  it('shows a live indicator using the deep-ocean liveness token while streaming', () => {
     render(<EventTimeline events={[makeEvent({ seq: 1 })]} streamStatus="streaming" />)
-    expect(screen.getByText('Live')).toBeInTheDocument()
+    const live = screen.getByText('Live')
+    expect(live).toBeInTheDocument()
+    // Liveness is encoded with the reserved --color-live token, matching the
+    // structured log viewer and live grid conventions from the redesign.
+    expect(live.className).toContain('text-live')
   })
 
   it('shows stream complete when terminal', () => {
