@@ -39,6 +39,8 @@ describe('taskPhaseSchema', () => {
     expect(taskPhaseSchema.parse('Running')).toBe('Running')
     expect(taskPhaseSchema.parse('Succeeded')).toBe('Succeeded')
     expect(taskPhaseSchema.parse('Failed')).toBe('Failed')
+    expect(taskPhaseSchema.parse('Scheduled')).toBe('Scheduled')
+    expect(taskPhaseSchema.parse('Cancelled')).toBe('Cancelled')
   })
 
   it('rejects invalid values', () => {

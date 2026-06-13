@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import {
   useCreatePullRequest,
   useDismissFinding,
@@ -63,8 +64,7 @@ export function FindingDetail({ findingId }: { findingId: string }) {
             <Badge variant="outline">{finding.validationStatus}</Badge>
             <Badge variant="outline">{finding.state}</Badge>
           </div>
-          <h1 className="text-3xl font-bold tracking-tight">{finding.title}</h1>
-          <p className="text-muted-foreground">{finding.summary}</p>
+          <PageHeader title={finding.title} description={finding.summary} />
         </div>
         <div className="flex flex-wrap gap-2">
           {finding.state === 'dismissed' ? (

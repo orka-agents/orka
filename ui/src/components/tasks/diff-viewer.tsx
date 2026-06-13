@@ -44,9 +44,9 @@ function parseDiff(diff: string): DiffLine[] {
 }
 
 const lineStyles: Record<DiffLine['type'], string> = {
-  addition: 'bg-green-100 dark:bg-green-900/40 text-green-900 dark:text-green-200',
-  deletion: 'bg-red-100 dark:bg-red-900/40 text-red-900 dark:text-red-200',
-  'hunk-header': 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
+  addition: 'bg-status-succeeded-bg text-status-succeeded',
+  deletion: 'bg-status-failed-bg text-status-failed',
+  'hunk-header': 'bg-status-running-bg text-status-running',
   'file-header': 'bg-muted font-semibold',
   context: '',
 }

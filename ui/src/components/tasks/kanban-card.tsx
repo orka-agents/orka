@@ -1,6 +1,9 @@
 import { Link } from '@tanstack/react-router'
+import { Timer, GitBranch } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { phaseStyle, typeStyle } from '@/lib/task-status'
+import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
 
 function elapsed(startTime?: string): string {
@@ -12,24 +15,26 @@ function elapsed(startTime?: string): string {
   return `${Math.floor(s / 86400)}d`
 }
 
-const typeBadgeStyles: Record<string, string> = {
-  container: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
-  ai: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200',
-  agent: 'bg-teal-100 text-teal-800 dark:bg-teal-900 dark:text-teal-200',
-}
-
 export function KanbanCard({ task }: { task: Task }) {
   const childCount = task.status?.childTasks?.length ?? 0
   const isRunning = task.status?.phase === 'Running'
+  const phase = phaseStyle(task.status?.phase)
+  const type = typeStyle(task.spec.type)
+  const TypeIcon = type.icon
 
   return (
     <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="block">
-      <Card className="gap-0 py-3 hover:shadow-md transition-shadow cursor-pointer">
+      <Card
+        className={cn('gap-0 py-3 border-l-4 transition-all cursor-pointer hover:shadow-md motion-safe:hover:-translate-y-0.5', phase.railClass)}
+      >
         <CardContent className="px-3 py-0 space-y-1.5">
+          {/* Phase is encoded by the left-rail color; surface it to AT too. */}
+          <span className="sr-only">Phase: {phase.label}</span>
           <div className="flex items-center justify-between gap-2">
             <span className="font-semibold text-sm truncate">{task.metadata.name}</span>
-            <Badge className={typeBadgeStyles[task.spec.type] ?? ''} variant="secondary">
-              {task.spec.type}
+            <Badge className={type.tintClass} variant="secondary">
+              <TypeIcon aria-hidden="true" />
+              {type.label}
             </Badge>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
@@ -43,10 +48,14 @@ export function KanbanCard({ task }: { task: Task }) {
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             {isRunning && task.status?.startTime && (
-              <span data-testid="elapsed-time">⏱ {elapsed(task.status.startTime)}</span>
+              <span data-testid="elapsed-time" className="inline-flex items-center gap-1 tabular-nums">
+                <Timer className="size-3" aria-hidden="true" /> {elapsed(task.status.startTime)}
+              </span>
             )}
             {childCount > 0 && (
-              <span data-testid="child-count">🔗 {childCount} child{childCount !== 1 ? 'ren' : ''}</span>
+              <span data-testid="child-count" className="inline-flex items-center gap-1">
+                <GitBranch className="size-3" aria-hidden="true" /> {childCount} child{childCount !== 1 ? 'ren' : ''}
+              </span>
             )}
           </div>
         </CardContent>

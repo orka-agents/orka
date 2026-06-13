@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { PageHeader } from '@/components/layout/page-header'
 import { useCreateAgent } from '@/hooks/use-agents'
 import { useSecretNames } from '@/hooks/use-secrets'
 import { useUIStore } from '@/stores/ui'
@@ -72,10 +73,7 @@ export function AgentCreateForm() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Create Agent</h1>
-        <p className="text-muted-foreground">Configure a new AI agent</p>
-      </div>
+      <PageHeader title="Create Agent" description="Configure a new AI agent" />
       <Card>
         <CardHeader>
           <CardTitle>Agent Configuration</CardTitle>

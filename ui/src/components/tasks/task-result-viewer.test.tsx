@@ -105,7 +105,7 @@ describe('TaskResultViewer', () => {
     await waitFor(() => {
       const badge = screen.getByTestId('verdict-badge')
       expect(badge).toHaveTextContent('REQUEST_CHANGES')
-      expect(badge.className).toContain('bg-red-100')
+      expect(badge.className).toContain('bg-status-failed-bg')
     })
   })
 

@@ -19,7 +19,7 @@ vi.mock('@tanstack/react-router', async () => {
 })
 
 import { KanbanCard } from './kanban-card'
-import type { Task } from '@/schemas/task'
+import type { Task, TaskPhase } from '@/schemas/task'
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -105,5 +105,34 @@ describe('KanbanCard', () => {
     })
     render(<KanbanCard task={task} />)
     expect(screen.queryByText(/pri:/)).not.toBeInTheDocument()
+  })
+
+  it('applies a phase-keyed left-rail accent from the token system', () => {
+    const cases: { phase: TaskPhase; rail: string }[] = [
+      { phase: 'Pending', rail: 'border-status-pending' },
+      { phase: 'Running', rail: 'border-status-running' },
+      { phase: 'Succeeded', rail: 'border-status-succeeded' },
+      { phase: 'Failed', rail: 'border-status-failed' },
+    ]
+    for (const { phase, rail } of cases) {
+      const { container, unmount } = render(<KanbanCard task={makeTask({ status: { phase } })} />)
+      const card = container.querySelector('[data-slot="card"]')
+      expect(card).toHaveClass('border-l-4')
+      expect(card).toHaveClass(rail)
+      unmount()
+    }
+  })
+
+  it('conveys phase to assistive tech, not by color alone', () => {
+    render(<KanbanCard task={makeTask({ status: { phase: 'Failed' } })} />)
+    expect(screen.getByText('Phase: Failed')).toBeInTheDocument()
+  })
+
+  it('renders the type badge with token tint classes, not pastels', () => {
+    render(<KanbanCard task={makeTask({ spec: { type: 'ai' } })} />)
+    const badge = screen.getByText('ai').closest('[data-slot="badge"]')
+    expect(badge).toHaveClass('bg-type-ai/10')
+    expect(badge).toHaveClass('text-type-ai')
+    expect(badge?.className).not.toMatch(/bg-(purple|indigo|teal)-/)
   })
 })

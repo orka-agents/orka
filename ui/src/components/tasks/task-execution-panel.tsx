@@ -5,8 +5,12 @@ import type { Task } from '@/schemas/task'
 
 const steps = ['Pending', 'Running', 'Completed'] as const
 
+// Map a task phase onto the coarse Pending → Running → Completed stepper.
+// Scheduled hasn't started yet, so it sits at the start (step 0) rather than
+// being mistaken for Completed. Terminal phases (Succeeded/Failed/Cancelled)
+// land on the final step — the run has ended.
 function stepIndex(phase?: string): number {
-  if (!phase || phase === 'Pending') return 0
+  if (!phase || phase === 'Pending' || phase === 'Scheduled') return 0
   if (phase === 'Running') return 1
   return 2
 }
@@ -70,16 +74,16 @@ export function TaskExecutionPanel({ task }: { task: Task }) {
             <div key={step} className="flex items-center gap-2">
               <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium ${
                 i < current
-                  ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                  ? 'bg-status-succeeded-bg text-status-succeeded'
                   : i === current
-                  ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+                  ? 'bg-status-running-bg text-status-running'
                   : 'bg-muted text-muted-foreground'
               }`}>
                 {i < current ? '✓' : i + 1}
               </div>
               <span className={`text-sm ${i <= current ? 'font-medium' : 'text-muted-foreground'}`}>{step}</span>
               {i < steps.length - 1 && (
-                <div className={`h-0.5 w-8 ${i < current ? 'bg-green-500' : 'bg-muted'}`} />
+                <div className={`h-0.5 w-8 ${i < current ? 'bg-status-succeeded' : 'bg-muted'}`} />
               )}
             </div>
           ))}

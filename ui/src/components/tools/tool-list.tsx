@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/layout/page-header'
 import { useToolList } from '@/hooks/use-tools'
 
 export function ToolList() {
@@ -9,10 +10,7 @@ export function ToolList() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Tools</h1>
-        <p className="text-muted-foreground">Available tools for AI agents</p>
-      </div>
+      <PageHeader title="Tools" description="Available tools for AI agents" />
       <div className="rounded-md border">
         <Table>
           <TableHeader>
@@ -56,11 +54,11 @@ export function ToolList() {
                   <TableCell className="max-w-xs truncate">{tool.description}</TableCell>
                   <TableCell>
                     {tool.builtin ? (
-                      <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" variant="secondary">Available</Badge>
+                      <Badge className="bg-status-succeeded-bg text-status-succeeded" variant="secondary">Available</Badge>
                     ) : tool.available ? (
-                      <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" variant="secondary">Available</Badge>
+                      <Badge className="bg-status-succeeded-bg text-status-succeeded" variant="secondary">Available</Badge>
                     ) : (
-                      <Badge className="bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200" variant="secondary">Unavailable</Badge>
+                      <Badge className="bg-status-failed-bg text-status-failed" variant="secondary">Unavailable</Badge>
                     )}
                   </TableCell>
                 </TableRow>

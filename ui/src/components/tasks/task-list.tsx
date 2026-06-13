@@ -3,6 +3,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Plus, Trash2 } from 'lucide-react'
+import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
 import { useTaskList, useDeleteTask } from '@/hooks/use-tasks'
 import type { Task } from '@/schemas/task'
@@ -22,18 +23,18 @@ export function TaskList() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Tasks</h1>
-          <p className="text-muted-foreground">Manage your task execution</p>
-        </div>
-        <Link to="/tasks/new">
-          <Button>
-            <Plus className="mr-2 h-4 w-4" />
-            New Task
-          </Button>
-        </Link>
-      </div>
+      <PageHeader
+        title="Tasks"
+        description="Manage your task execution"
+        action={
+          <Link to="/tasks/new">
+            <Button>
+              <Plus className="mr-2 h-4 w-4" />
+              New Task
+            </Button>
+          </Link>
+        }
+      />
       <div className="rounded-md border">
         <Table>
           <TableHeader>
@@ -65,7 +66,7 @@ export function TaskList() {
               (data?.items ?? []).map((task: Task) => (
                 <TableRow key={task.metadata.uid || task.metadata.name} className="cursor-pointer">
                   <TableCell>
-                    <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="font-medium hover:underline">
+                    <Link to="/tasks/$taskId" params={{ taskId: task.metadata.name }} className="font-mono text-sm font-medium hover:underline">
                       {task.metadata.name}
                     </Link>
                   </TableCell>

@@ -3,6 +3,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
+import { PageHeader } from '@/components/layout/page-header'
 import { Trash2 } from 'lucide-react'
 import { useSessionList, useDeleteSession } from '@/hooks/use-sessions'
 
@@ -21,10 +22,7 @@ export function SessionList() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Sessions</h1>
-        <p className="text-muted-foreground">View conversation sessions</p>
-      </div>
+      <PageHeader title="Sessions" description="View conversation sessions" />
       <div className="rounded-md border">
         <Table>
           <TableHeader>
@@ -57,7 +55,7 @@ export function SessionList() {
               (data?.items ?? []).map((session) => (
                 <TableRow key={session.name}>
                   <TableCell>
-                    <Link to="/sessions/$sessionId" params={{ sessionId: session.name }} className="font-medium hover:underline">
+                    <Link to="/sessions/$sessionId" params={{ sessionId: session.name }} className="font-mono text-sm font-medium hover:underline">
                       {session.name}
                     </Link>
                   </TableCell>

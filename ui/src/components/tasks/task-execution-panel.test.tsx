@@ -35,6 +35,21 @@ describe('TaskExecutionPanel', () => {
     expect(screen.getByTestId('progress-steps')).toBeInTheDocument()
   })
 
+  it('treats a Scheduled task as not-yet-started (Completed step is not current)', () => {
+    const { container } = render(
+      <TaskExecutionPanel task={makeTask({ status: { phase: 'Scheduled', attempts: 0 } })} />,
+    )
+    const steps = container.querySelector('[data-testid="progress-steps"]') as HTMLElement
+    const circles = steps.querySelectorAll('.rounded-full')
+    expect(circles).toHaveLength(3) // Pending / Running / Completed
+    // Pending (step 0) is the current/highlighted step.
+    expect(circles[0].className).toContain('bg-status-running-bg')
+    // Completed (step 2) is NOT highlighted and still shows its index ("3") —
+    // a scheduled task is not mislabeled as completed.
+    expect(circles[2].className).toContain('bg-muted')
+    expect(circles[2].textContent).toBe('3')
+  })
+
   it('renders with Running phase', () => {
     render(<TaskExecutionPanel task={makeTask({
       status: { phase: 'Running', attempts: 1, startTime: new Date().toISOString() },

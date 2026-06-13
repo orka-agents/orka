@@ -28,10 +28,10 @@ describe('DiffViewer', () => {
     const viewer = screen.getByTestId('diff-viewer')
     expect(viewer).toBeInTheDocument()
     // Check that addition lines have green background
-    const additionLines = viewer.querySelectorAll('.bg-green-100')
+    const additionLines = viewer.querySelectorAll('.bg-status-succeeded-bg')
     expect(additionLines.length).toBe(2)
     // Check that deletion lines have red background
-    const deletionLines = viewer.querySelectorAll('.bg-red-100')
+    const deletionLines = viewer.querySelectorAll('.bg-status-failed-bg')
     expect(deletionLines.length).toBe(1)
   })
 
@@ -44,7 +44,7 @@ describe('DiffViewer', () => {
   it('renders hunk headers with blue styling', () => {
     render(<DiffViewer diff={sampleDiff} />)
     const viewer = screen.getByTestId('diff-viewer')
-    const hunkHeaders = viewer.querySelectorAll('.bg-blue-50')
+    const hunkHeaders = viewer.querySelectorAll('.bg-status-running-bg')
     expect(hunkHeaders.length).toBe(1)
   })
 

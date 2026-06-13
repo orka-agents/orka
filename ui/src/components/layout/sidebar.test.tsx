@@ -57,8 +57,16 @@ describe('Sidebar', () => {
     const user = userEvent.setup()
     render(<Sidebar />)
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
-    const toggleButton = screen.getByText('←').closest('button')!
+    const toggleButton = screen.getByRole('button', { name: /collapse sidebar/i })
     await user.click(toggleButton)
     expect(useUIStore.getState().sidebarCollapsed).toBe(true)
+  })
+
+  it('collapse toggle exposes an accessible name reflecting its state', () => {
+    useUIStore.setState({ sidebarCollapsed: true })
+    render(<Sidebar />)
+    expect(
+      screen.getByRole('button', { name: /expand sidebar/i }),
+    ).toBeInTheDocument()
   })
 })
