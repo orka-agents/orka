@@ -105,7 +105,7 @@ Harness frames are mapped to existing Orka execution event types so task/session
 | `ApprovalRequested` | `ApprovalRequested` | Reuses durable approval event lifecycle. |
 | `TurnCompleted` | `AgentRuntimeCompleted` | Terminal turn metadata is included in content. |
 | `TurnFailed` | `AgentRuntimeFailed` | Severity is forced to `error`. |
-| `TurnCancelled` | `TaskCancelled` | Cancellation is terminal for the turn/task path. |
+| `TurnCancelled` | `AgentRuntimeCancelled` | Cancellation is terminal for the harness turn, but not controller-owned task cancellation. |
 | `RuntimeLog` | `AgentRuntimeCommandStarted` | Used as a safe diagnostic/log event. |
 | Unknown frame | `AgentRuntimeCommandStarted` warning | Does not panic; produces a safe diagnostic event. |
 
