@@ -896,7 +896,7 @@ func executeAgentLoopWithEvents(
 			common.WithEventSummary("model request completed"),
 			common.WithEventContent(eventContent(map[string]any{
 				"iteration":    iteration + 1,
-				"model":        firstNonEmpty(resp.Model, model),
+				"model":        firstNonBlankOriginal(resp.Model, model),
 				"provider":     provider.Name(),
 				"inputTokens":  resp.InputTokens,
 				"outputTokens": resp.OutputTokens,
@@ -1015,7 +1015,10 @@ func eventContent(values map[string]any) json.RawMessage {
 	return json.RawMessage(data)
 }
 
-func firstNonEmpty(values ...string) string {
+// firstNonBlankOriginal returns the original value for the first non-blank string.
+// Event metadata should preserve provider-supplied model IDs exactly while
+// still treating whitespace-only values as empty.
+func firstNonBlankOriginal(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
 			return value

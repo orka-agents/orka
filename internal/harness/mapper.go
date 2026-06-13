@@ -47,11 +47,11 @@ func (c EventMapContext) validate() error {
 	return nil
 }
 
-func MapFrameToExecutionEvent(frame HarnessEventFrame, ctx EventMapContext) (*store.ExecutionEvent, error) {
-	if err := ctx.validate(); err != nil {
+func MapFrameToExecutionEvent(frame HarnessEventFrame, mapCtx EventMapContext) (*store.ExecutionEvent, error) {
+	if err := mapCtx.validate(); err != nil {
 		return nil, err
 	}
-	ctx = ctx.normalized()
+	mapCtx = mapCtx.normalized()
 	if err := frame.ValidateRequired(); err != nil {
 		return nil, fmt.Errorf("invalid harness frame: %w", err)
 	}
@@ -73,14 +73,14 @@ func MapFrameToExecutionEvent(frame HarnessEventFrame, ctx EventMapContext) (*st
 	}
 
 	event := &store.ExecutionEvent{
-		Namespace:   ctx.Namespace,
+		Namespace:   mapCtx.Namespace,
 		StreamType:  store.ExecutionEventStreamTypeTask,
-		StreamID:    ctx.StreamID,
+		StreamID:    mapCtx.StreamID,
 		Type:        eventType,
 		Severity:    severity,
-		TaskName:    ctx.TaskName,
-		SessionName: ctx.SessionName,
-		AgentName:   ctx.AgentName,
+		TaskName:    mapCtx.TaskName,
+		SessionName: mapCtx.SessionName,
+		AgentName:   mapCtx.AgentName,
 		ToolName:    strings.TrimSpace(frame.ToolName),
 		ToolCallID:  strings.TrimSpace(frame.ToolCallID),
 		Summary:     summary,
