@@ -104,10 +104,6 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
-	ctx := c.Context()
-	if ctx == nil {
-		ctx = c.RequestCtx()
-	}
 	streamStore := h.executionEventStore
 	// SendStreamWriter outlives the Fiber handler, so clone strings derived
 	// from fiber.Ctx before Fiber can recycle request buffers.
@@ -120,6 +116,11 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		// Fiber recycles request contexts after the handler returns. Use a
+		// stream-owned context and rely on write/heartbeat failures to detect
+		// client disconnects.
+		ctx, cancelStream := context.WithCancel(context.Background())
+		defer cancelStream()
 		done := metrics.RecordExecutionEventStreamOpen("task", query.afterSeq > 0)
 		defer done()
 		lastSeq := query.afterSeq
@@ -322,10 +323,6 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = defaultEventStreamHeartbeatEvery
 	}
-	ctx := c.Context()
-	if ctx == nil {
-		ctx = c.RequestCtx()
-	}
 	streamStore := h.executionEventStore
 	// SendStreamWriter outlives the Fiber handler, so clone strings derived
 	// from fiber.Ctx before Fiber can recycle request buffers.
@@ -338,6 +335,11 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 	c.Set("X-Accel-Buffering", "no")
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		// Fiber recycles request contexts after the handler returns. Use a
+		// stream-owned context and rely on write/heartbeat failures to detect
+		// client disconnects.
+		ctx, cancelStream := context.WithCancel(context.Background())
+		defer cancelStream()
 		done := metrics.RecordExecutionEventStreamOpen("session", query.afterSeq > 0)
 		defer done()
 		lastSeq := query.afterSeq

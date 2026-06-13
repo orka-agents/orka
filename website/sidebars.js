@@ -40,9 +40,9 @@ const sidebars = {
       collapsed: false,
       items: [
         'reference/api-reference',
-        'reference/execution-events',
         'reference/cli',
         'reference/cli-commands',
+        'reference/execution-events',
         'reference/openai-compat',
         'reference/anthropic-compat',
       ],

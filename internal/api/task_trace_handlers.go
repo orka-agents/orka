@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,6 +21,10 @@ import (
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tasktrace"
 )
+
+const maxTaskTraceEvents = 5000
+
+var errTaskTraceTooLarge = errors.New("task trace exceeds event limit")
 
 // GetTaskTrace handles GET /api/v1/tasks/{id}/trace.
 func (h *Handlers) GetTaskTrace(c fiber.Ctx) error {
@@ -50,8 +55,11 @@ func (h *Handlers) GetTaskTrace(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get latest execution event sequence: %v", err))
 	}
-	listed, err := listAllTaskEventsThrough(c.Context(), h.executionEventStore, namespace, taskName, latestSeq)
+	listed, err := listAllTaskEventsThrough(c.Context(), h.executionEventStore, namespace, taskName, latestSeq, maxTaskTraceEvents)
 	if err != nil {
+		if errors.Is(err, errTaskTraceTooLarge) {
+			return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("task trace exceeds %d events", maxTaskTraceEvents))
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
 	trace := tasktrace.BuildTaskTrace(tasktrace.MetadataFromTask(task), listed, time.Now().UTC())
@@ -65,9 +73,13 @@ func listAllTaskEventsThrough(
 	namespace,
 	taskName string,
 	throughSeq int64,
+	maxEvents int,
 ) ([]store.ExecutionEvent, error) {
 	if throughSeq == 0 {
 		return nil, nil
+	}
+	if maxEvents <= 0 {
+		return nil, errTaskTraceTooLarge
 	}
 	var out []store.ExecutionEvent
 	var after int64
@@ -88,6 +100,9 @@ func listAllTaskEventsThrough(
 		for _, event := range batch {
 			if event.Seq > throughSeq {
 				return out, nil
+			}
+			if len(out) >= maxEvents {
+				return nil, errTaskTraceTooLarge
 			}
 			out = append(out, event)
 			after = event.Seq

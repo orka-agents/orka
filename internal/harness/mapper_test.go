@@ -19,7 +19,7 @@ func TestMapFrameToExecutionEventCoversFrozenFrameTypes(t *testing.T) {
 		FrameApprovalRequested:  events.ExecutionEventTypeApprovalRequested,
 		FrameTurnCompleted:      events.ExecutionEventTypeAgentRuntimeCompleted,
 		FrameTurnFailed:         events.ExecutionEventTypeAgentRuntimeFailed,
-		FrameTurnCancelled:      events.ExecutionEventTypeTaskCancelled,
+		FrameTurnCancelled:      events.ExecutionEventTypeAgentRuntimeCancelled,
 		FrameRuntimeLog:         events.ExecutionEventTypeAgentRuntimeCommandStarted,
 	}
 	for typ, want := range tests {

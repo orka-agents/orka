@@ -163,6 +163,96 @@ func TestGetTaskTraceAPI(t *testing.T) {
 	}
 }
 
+func TestGetTaskTraceAPIReadsFullEventStream(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "trace-long-task",
+		TaskName:   "trace-long-task",
+		Type:       events.ExecutionEventTypeTaskStarted,
+		Summary:    "first event must remain visible",
+	}); err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+	for i := range forkcontext.DefaultMaxEvents + 25 {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    "trace-long-task",
+			TaskName:    "trace-long-task",
+			Type:        events.ExecutionEventTypeModelMessage,
+			Summary:     fmt.Sprintf("model message %03d", i),
+			ContentText: fmt.Sprintf("message-%03d", i),
+		}); err != nil {
+			t.Fatalf("append model event %d: %v", i, err)
+		}
+	}
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "trace-long-task",
+		TaskName:   "trace-long-task",
+		Type:       events.ExecutionEventTypeTaskSucceeded,
+		Summary:    "terminal event",
+	}); err != nil {
+		t.Fatalf("append terminal event: %v", err)
+	}
+	task := testTask("default", "trace-long-task")
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Get("/api/v1/tasks/:id/trace", h.GetTaskTrace)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/trace-long-task/trace?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var trace tasktrace.TaskTrace
+	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if trace.LatestSeq != int64(forkcontext.DefaultMaxEvents+27) {
+		t.Fatalf("LatestSeq = %d", trace.LatestSeq)
+	}
+	if len(trace.Timeline) != forkcontext.DefaultMaxEvents+27 {
+		t.Fatalf("timeline length = %d, want full event count %d", len(trace.Timeline), forkcontext.DefaultMaxEvents+27)
+	}
+	if trace.Timeline[0].Seq != 1 || trace.Timeline[0].Summary != "first event must remain visible" {
+		t.Fatalf("first timeline event = %#v, want original first event", trace.Timeline[0])
+	}
+}
+
+func TestGetTaskTraceAPIRejectsTooManyEvents(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	for i := range maxTaskTraceEvents + 1 {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:  "default",
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   "trace-too-large-task",
+			TaskName:   "trace-too-large-task",
+			Type:       events.ExecutionEventTypeModelMessage,
+			Summary:    fmt.Sprintf("event %d", i),
+		}); err != nil {
+			t.Fatalf("append event %d: %v", i, err)
+		}
+	}
+	task := testTask("default", "trace-too-large-task")
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Get("/api/v1/tasks/:id/trace", h.GetTaskTrace)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/trace-too-large-task/trace?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr", "riskSummary": "opens a PR"})

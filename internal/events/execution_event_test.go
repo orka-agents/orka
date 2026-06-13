@@ -33,6 +33,7 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeAgentRuntimeCommandStarted,
 		ExecutionEventTypeAgentRuntimeCompleted,
 		ExecutionEventTypeAgentRuntimeFailed,
+		ExecutionEventTypeAgentRuntimeCancelled,
 		ExecutionEventTypeResultSubmitted,
 		ExecutionEventTypeArtifactUploadCompleted,
 		ExecutionEventTypeArtifactUploadFailed,

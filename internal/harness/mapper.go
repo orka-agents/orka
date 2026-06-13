@@ -112,7 +112,7 @@ func mapFrameType(frame HarnessEventFrame) (eventType, severity, summary string)
 	case FrameTurnFailed:
 		return events.ExecutionEventTypeAgentRuntimeFailed, events.ExecutionEventSeverityError, "harness turn failed"
 	case FrameTurnCancelled:
-		return events.ExecutionEventTypeTaskCancelled, events.ExecutionEventSeverityWarning, "harness turn cancelled"
+		return events.ExecutionEventTypeAgentRuntimeCancelled, events.ExecutionEventSeverityWarning, "harness turn cancelled"
 	case FrameRuntimeLog:
 		return events.ExecutionEventTypeAgentRuntimeCommandStarted, severity, "runtime log"
 	default:
