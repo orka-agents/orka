@@ -15,6 +15,7 @@ import { TaskExecutionPanel } from './task-execution-panel'
 import { TaskEventTimeline } from './task-event-timeline'
 import { TaskTracePanel } from './task-trace-panel'
 import { TaskApprovalPanel } from './task-approval-panel'
+import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
@@ -97,6 +98,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4">
+          <ForkProvenance annotations={task.metadata.annotations} />
           <Card>
             <CardHeader><CardTitle>Metadata</CardTitle></CardHeader>
             <CardContent className="grid gap-2 text-sm md:grid-cols-2">

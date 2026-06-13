@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { EventTimeline } from '@/components/events/event-timeline'
+import { ForkDialog } from './fork-dialog'
 import { useTaskEvents } from '@/hooks/use-execution-events'
 import { useExecutionEventStream } from '@/hooks/use-execution-event-stream'
 import { executionEventApi, mergeEventsBySeq, maxSeq } from '@/lib/execution-events'
@@ -15,14 +16,14 @@ function isRunning(phase?: TaskPhase): boolean {
 export interface TaskEventTimelineProps {
   taskId: string
   taskPhase?: TaskPhase
-  // Optional fork action, wired by the parent (task detail) in Phase 6.
-  onFork?: (event: ExecutionEvent) => void
 }
 
-export function TaskEventTimeline({ taskId, taskPhase, onFork }: TaskEventTimelineProps) {
+export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps) {
   const initial = useTaskEvents(taskId)
   // Default to following for in-flight tasks; user can toggle.
   const [following, setFollowing] = useState(() => isRunning(taskPhase))
+  // Fork-from-checkpoint dialog state, launched from an event row.
+  const [forkEvent, setForkEvent] = useState<ExecutionEvent | null>(null)
 
   const initialEvents = useMemo<ExecutionEvent[]>(
     () => initial.data?.events ?? [],
@@ -54,6 +55,10 @@ export function TaskEventTimeline({ taskId, taskPhase, onFork }: TaskEventTimeli
         ? stream.error
         : null
 
+  // Forking depends on the same execution-event storage; hide the action when it
+  // is unavailable so the UI never offers an endpoint the backend can't serve.
+  const forkAvailable = !notImplemented
+
   return (
     <Card>
       <CardContent className="pt-6">
@@ -67,8 +72,16 @@ export function TaskEventTimeline({ taskId, taskPhase, onFork }: TaskEventTimeli
           onRetry={() => initial.refetch()}
           following={following}
           onToggleFollow={() => setFollowing((v) => !v)}
-          onFork={onFork}
+          onFork={forkAvailable ? (event) => setForkEvent(event) : undefined}
           emptyMessage="No execution events recorded for this task yet."
+        />
+        <ForkDialog
+          taskId={taskId}
+          event={forkEvent}
+          open={forkEvent !== null}
+          onOpenChange={(open) => {
+            if (!open) setForkEvent(null)
+          }}
         />
       </CardContent>
     </Card>

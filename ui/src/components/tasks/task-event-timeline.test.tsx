@@ -1,12 +1,17 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { render, screen, waitFor } from '@/test/test-utils'
+import { render, screen, waitFor, within } from '@/test/test-utils'
+import userEvent from '@testing-library/user-event'
 import { server } from '@/test/mocks/server'
 import { useUIStore } from '@/stores/ui'
 import { makeEvent } from '@/test/fixtures/events'
 import type { UseExecutionEventStreamResult } from '@/hooks/use-execution-event-stream'
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual('@tanstack/react-router')
+  return { ...actual, Link: ({ children, ...props }: any) => <a {...props}>{children}</a> }
+})
 
 // Control the stream hook output so the container test is deterministic.
 const streamState: { current: Partial<UseExecutionEventStreamResult> } = { current: {} }
@@ -108,5 +113,35 @@ describe('TaskEventTimeline', () => {
     await waitFor(() =>
       expect(screen.getByText(/execution event storage is not enabled/i)).toBeInTheDocument(),
     )
+  })
+
+  it('opens the fork dialog from an event row', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 3,
+          events: [makeEvent({ seq: 3, type: 'ToolCallCompleted', summary: 'done' })],
+        }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(screen.getByText('done')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /fork from here/i }))
+    // The dialog opens, pre-seeded with the row's seq.
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/fork from checkpoint/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/#3/)).toBeInTheDocument()
+  })
+
+  it('does not offer fork when execution events are unsupported (501)', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () => new HttpResponse('not enabled', { status: 501 })),
+    )
+    render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() =>
+      expect(screen.getByText(/execution event storage is not enabled/i)).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('button', { name: /fork from here/i })).not.toBeInTheDocument()
   })
 })
