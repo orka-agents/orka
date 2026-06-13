@@ -61,14 +61,17 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
     }
   }
 
+  // Single close path so every dismissal — Escape, overlay, the X button, and the
+  // footer Close/Cancel buttons — resets form and result state. The dialog stays
+  // mounted under TaskEventTimeline, so skipping reset would reopen on a stale
+  // success screen or leftover input the next time a row is forked.
+  function handleOpenChange(next: boolean) {
+    if (!next) reset()
+    onOpenChange(next)
+  }
+
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) reset()
-        onOpenChange(next)
-      }}
-    >
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -88,7 +91,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
             <Link
               to="/tasks/$taskId"
               params={{ taskId: created.newTaskName }}
-              onClick={() => onOpenChange(false)}
+              onClick={() => handleOpenChange(false)}
               className="inline-flex items-center gap-1 rounded-md border bg-card px-3 py-2 text-sm font-medium text-primary hover:underline"
             >
               {created.newTaskName} <ArrowRight className="h-4 w-4" />
@@ -153,10 +156,10 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
 
         <DialogFooter>
           {created ? (
-            <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+            <Button variant="outline" onClick={() => handleOpenChange(false)}>Close</Button>
           ) : (
             <>
-              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={fork.isPending}>
+              <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={fork.isPending}>
                 Cancel
               </Button>
               <Button onClick={submit} disabled={fork.isPending}>

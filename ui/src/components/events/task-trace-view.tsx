@@ -60,13 +60,16 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
 
   // A trace with no derived groups and no timeline falls back to a clear empty
   // state; a trace with a timeline but no structured groups still shows the raw
-  // timeline so nothing is hidden.
+  // timeline so nothing is hidden. Errors and warnings render their own visible
+  // sections, so an error- or warning-only trace also counts as structured.
   const hasStructured =
     trace.modelRequests.length > 0 ||
     trace.toolCalls.length > 0 ||
     trace.childTasks.length > 0 ||
     trace.workspace.length > 0 ||
     trace.artifacts.length > 0 ||
+    trace.errors.length > 0 ||
+    trace.warnings.length > 0 ||
     approvalEvents.length > 0 ||
     forkEvents.length > 0
 

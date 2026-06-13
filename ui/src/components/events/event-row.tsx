@@ -107,7 +107,9 @@ export function EventRow({ event, showTask, taskLink, onFork, onCopy }: EventRow
                   onClick={() => setExpanded((v) => !v)}
                   className="inline-flex items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   aria-expanded={expanded}
-                  aria-controls={payloadId}
+                  // Only advertise the relationship while the region is mounted, so
+                  // assistive tech never follows a dangling IDREF when collapsed.
+                  aria-controls={expanded ? payloadId : undefined}
                 >
                   <ChevronRight className={`h-3 w-3 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden="true" />
                   {expanded ? 'Hide payload' : 'Show payload'}

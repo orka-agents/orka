@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { useState } from 'react'
 import { http, HttpResponse } from 'msw'
 import { render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
@@ -103,5 +104,44 @@ describe('ForkDialog', () => {
     await waitFor(() =>
       expect(screen.getByText(/afterSeq must be 0, latest, or an existing event sequence/i)).toBeInTheDocument(),
     )
+  })
+
+  it('resets state when closed, so reopening shows a fresh form (dialog stays mounted)', async () => {
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, () =>
+        HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-xyz', afterSeq: 4,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 4, events: [], truncated: false },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    // Mirror how TaskEventTimeline keeps the dialog mounted across open/close.
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>reopen</button>
+          <ForkDialog taskId="tk" event={makeEvent({ seq: 4 })} open={open} onOpenChange={setOpen} />
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<Harness />)
+    // Fork succeeds -> success screen with the new task link.
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-xyz/ })).toBeInTheDocument())
+    // Close via the footer Close button (distinct from the dialog's X, which is
+    // also labelled "Close"); pick the one with visible text.
+    const closeButtons = screen.getAllByRole('button', { name: 'Close' })
+    const footerClose = closeButtons.find((b) => b.textContent === 'Close')!
+    await user.click(footerClose)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    // Reopen -> fresh form, not the stale success screen.
+    await user.click(screen.getByRole('button', { name: 'reopen' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: /tk-fork-xyz/ })).not.toBeInTheDocument()
   })
 })

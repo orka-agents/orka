@@ -137,4 +137,24 @@ describe('TaskTraceView', () => {
     render(<TaskTraceView trace={makeTrace()} />)
     expect(screen.getByText(/no execution events recorded/i)).toBeInTheDocument()
   })
+
+  it('treats an error-only trace as structured, not empty', () => {
+    const trace = makeTrace({
+      task: { namespace: 'default', name: 'tk', phase: 'Failed', resultAvailable: false },
+      errors: [{ seq: 1, type: 'TaskFailed', severity: 'error', message: 'it broke' }],
+    })
+    render(<TaskTraceView trace={trace} />)
+    // The Errors section renders and the misleading empty fallback does not.
+    expect(screen.getByText('it broke')).toBeInTheDocument()
+    expect(screen.queryByText(/no execution events recorded/i)).not.toBeInTheDocument()
+  })
+
+  it('treats a warning-only trace as structured, not empty', () => {
+    const trace = makeTrace({
+      warnings: [{ seq: 1, type: 'ToolCallStarted', message: 'tool call never completed' }],
+    })
+    render(<TaskTraceView trace={trace} />)
+    expect(screen.getByText('tool call never completed')).toBeInTheDocument()
+    expect(screen.queryByText(/no execution events recorded/i)).not.toBeInTheDocument()
+  })
 })

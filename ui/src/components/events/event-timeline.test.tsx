@@ -165,18 +165,25 @@ describe('EventTimeline', () => {
     expect(parsed.content).toEqual({ ok: true })
   })
 
-  it('disclosure toggle is keyboard operable and wires aria-controls', async () => {
+  it('disclosure toggle is keyboard operable and wires aria-controls only while expanded', async () => {
     const user = userEvent.setup()
     render(<EventTimeline events={[makeEvent({ seq: 1, type: 'ToolCallCompleted', content: { x: 1 } })]} />)
     const toggle = screen.getByRole('button', { name: /show payload/i })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(toggle).toHaveAttribute('aria-controls')
+    // Collapsed: no dangling aria-controls IDREF (the target is not mounted yet).
+    expect(toggle).not.toHaveAttribute('aria-controls')
     toggle.focus()
     expect(toggle).toHaveFocus()
     // Activate via keyboard (Enter), as a keyboard-only user would.
     await user.keyboard('{Enter}')
-    expect(screen.getByTestId('event-payload')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /hide payload/i })).toHaveAttribute('aria-expanded', 'true')
+    const payload = screen.getByTestId('event-payload')
+    expect(payload).toBeInTheDocument()
+    const expandedToggle = screen.getByRole('button', { name: /hide payload/i })
+    expect(expandedToggle).toHaveAttribute('aria-expanded', 'true')
+    // Expanded: aria-controls now resolves to the mounted payload region.
+    const controls = expandedToggle.getAttribute('aria-controls')
+    expect(controls).toBeTruthy()
+    expect(document.getElementById(controls!)).toContainElement(payload)
   })
 
   it('the event list and filters expose accessible labels', () => {
