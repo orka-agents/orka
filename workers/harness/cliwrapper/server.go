@@ -330,6 +330,7 @@ func (s *Server) runTurn(turn *turnState) {
 	}
 
 	turn.appendFrame(s.frame(turn, harness.FrameTurnStarted, "turn started", nil))
+	ClearTurnArtifacts()
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
@@ -360,17 +361,15 @@ func (s *Server) runTurn(turn *turnState) {
 			runErr = parseErr
 		}
 	}
+	finalizedWorkDir := ""
 	if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
-		if finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result); finalizeErr == nil {
-			parsed.Result = string(finalized)
-		} else {
-			turn.appendFrame(s.runtimeLogTextFrame(
-				turn,
-				"result-finalize",
-				finalizeErr.Error(),
-				events.ExecutionEventSeverityWarning,
-			))
+		finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
+		if finalizeErr != nil {
+			turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
+			return
 		}
+		parsed.Result = string(finalized)
+		finalizedWorkDir = turnCtx.WorkDir
 	}
 	switch {
 	case run.Cancelled:
@@ -401,6 +400,13 @@ func (s *Server) runTurn(turn *turnState) {
 				events.ExecutionEventSeverityWarning,
 			))
 		}
+		if finalizedWorkDir != "" {
+			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
+				turn.appendFrame(s.failedFrame(turn, "workdir_cleanup_failed", cleanErr.Error(), false))
+				return
+			}
+		}
+		ClearTurnArtifacts()
 		turn.appendFrame(s.completedFrame(turn, parsed))
 	}
 }

@@ -532,10 +532,28 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if taskHasHarnessWrapperTurn(task) {
+		if task.Status.Attempts == 0 {
+			if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				if t.Status.Attempts == 0 {
+					t.Status.Attempts = 1
+				}
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return r.finishHarnessWrapperTask(ctx, task)
 	}
 	if taskHasPlannedHarnessWrapperTurn(task) {
-		return r.runHarnessWrapperTask(ctx, task, nil)
+		agent, err := r.resolveAgent(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to resolve agent for harness runtime recovery")
+			return r.failTask(ctx, task, err.Error())
+		}
+		if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+			log.Error(err, "task-agent compatibility validation failed for harness runtime recovery")
+			return r.failTask(ctx, task, err.Error())
+		}
+		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
 
 	// Check session lock if session is referenced
