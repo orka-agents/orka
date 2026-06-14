@@ -12,13 +12,11 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/workers/harness/cliwrapper"
 )
 
 func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
-	t.Setenv(harnessWrapperFeatureGateEnv, "true")
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	server, err := cliwrapper.NewServer(cfg, cliwrapper.NewFakeAdapter(cliwrapper.FakeBehaviorSuccess))
@@ -36,7 +34,7 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 		t.Fatalf("phase = %s, want Succeeded (message=%s)", updated.Status.Phase, updated.Status.Message)
 	}
 	if updated.Status.JobName != "" {
-		t.Fatalf("JobName = %q, want no legacy job", updated.Status.JobName)
+		t.Fatalf("JobName = %q, want no worker job", updated.Status.JobName)
 	}
 	if updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
 		t.Fatalf("ResultRef = %#v, want available result reference", updated.Status.ResultRef)
@@ -58,7 +56,6 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 }
 
 func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
-	t.Setenv(harnessWrapperFeatureGateEnv, "true")
 	t.Setenv(harnessWrapperAuthValueEnv, "controller-auth-value")
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AuthValue = "controller-auth-value"
@@ -88,8 +85,7 @@ func TestHarnessWrapperStartTurnUsesComputedAttemptForTurnID(t *testing.T) {
 	}
 }
 
-func TestHarnessWrapperRunningTaskFinishesWhenFeatureGateDisabledAfterStart(t *testing.T) {
-	t.Setenv(harnessWrapperFeatureGateEnv, "true")
+func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	server, err := cliwrapper.NewServer(cfg, cliwrapper.NewFakeAdapter(cliwrapper.FakeBehaviorSuccess))
@@ -105,7 +101,6 @@ func TestHarnessWrapperRunningTaskFinishesWhenFeatureGateDisabledAfterStart(t *t
 	if _, err := r.handlePending(context.Background(), task); err != nil {
 		t.Fatalf("handlePending: %v", err)
 	}
-	t.Setenv(harnessWrapperFeatureGateEnv, "false")
 	var running corev1alpha1.Task
 	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &running); err != nil {
 		t.Fatalf("get running task: %v", err)
@@ -122,26 +117,7 @@ func TestHarnessWrapperRunningTaskFinishesWhenFeatureGateDisabledAfterStart(t *t
 	}
 }
 
-func TestHarnessWrapperFeatureGateDisabledUsesLegacyJobPath(t *testing.T) {
-	task, agent := harnessWrapperTaskAndAgent()
-	r := newUnitReconciler(newTestScheme(), task, agent)
-	if _, err := r.handlePending(context.Background(), task); err != nil {
-		t.Fatalf("handlePending: %v", err)
-	}
-	var updated corev1alpha1.Task
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
-		t.Fatalf("get task: %v", err)
-	}
-	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		t.Fatalf("phase = %s, want Running legacy job", updated.Status.Phase)
-	}
-	if updated.Status.JobName == "" {
-		t.Fatal("JobName empty, want legacy job created when feature gate disabled")
-	}
-}
-
-func TestHarnessWrapperMissingEndpointFailsWhenEnabled(t *testing.T) {
-	t.Setenv(harnessWrapperFeatureGateEnv, "true")
+func TestHarnessRuntimeMissingEndpointFailsAgentTask(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	if _, err := r.handlePending(context.Background(), task); err != nil {
@@ -182,12 +158,8 @@ func runHarnessWrapperTaskToCompletion(t *testing.T, r *TaskReconciler, task *co
 }
 
 func harnessWrapperTaskAndAgent() (*corev1alpha1.Task, *corev1alpha1.Agent) {
-	annotations := map[string]string{
-		labels.AnnotationHarnessWrapper:        "true",
-		labels.AnnotationHarnessWrapperRuntime: "generic",
-	}
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "harness-task", Namespace: "default", UID: types.UID("uid-harness-task"), Annotations: annotations},
+		ObjectMeta: metav1.ObjectMeta{Name: "harness-task", Namespace: "default", UID: types.UID("uid-harness-task")},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &corev1alpha1.AgentReference{Name: "harness-agent"},

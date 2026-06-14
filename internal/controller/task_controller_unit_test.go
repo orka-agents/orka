@@ -446,6 +446,26 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskUnsupportedRuntime(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil {
+		t.Fatal("expected error for unsupported harness runtime")
+	}
+	if !strings.Contains(err.Error(), "does not have a harness adapter") {
+		t.Fatalf("error = %q, want harness adapter guidance", err.Error())
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -454,7 +474,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime:     &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime:     &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			ProviderRef: &corev1alpha1.ProviderReference{Name: "p1"},
 		},
 	}
@@ -471,7 +491,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskAgentExecutionWorkspace(t *test
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Execution: &corev1alpha1.ExecutionSpec{
 				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
 			},
@@ -494,7 +514,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndModelProvider(t *test
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Model:   &corev1alpha1.ModelConfig{Provider: "openai"},
 		},
 	}
@@ -511,7 +531,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoPrompt(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err == nil {
@@ -527,7 +547,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskValid(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {

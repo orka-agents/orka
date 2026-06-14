@@ -18,12 +18,9 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
-	harnessWrapperFeatureGateEnv    = "ORKA_ENABLE_HARNESS_WRAPPER"
 	harnessWrapperEndpointEnv       = "ORKA_HARNESS_WRAPPER_ENDPOINT"
 	harnessWrapperAuthValueEnv      = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
 	harnessWrapperAuthValueFileEnv  = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
@@ -35,18 +32,11 @@ const (
 	harnessWrapperStreamPollTimeout = 2 * time.Second
 )
 
-func taskRequestsHarnessWrapper(task *corev1alpha1.Task) bool {
-	if task == nil || task.Annotations == nil {
-		return false
-	}
-	return workerenv.IsTrue(task.Annotations[labels.AnnotationHarnessWrapper])
-}
-
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
 	if task == nil || task.Annotations == nil {
 		return false
 	}
-	return workerenv.IsTrue(task.Annotations[harnessWrapperStartedAnno]) &&
+	return strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnno]), "true") &&
 		taskHasPlannedHarnessWrapperTurn(task)
 }
 
@@ -57,10 +47,6 @@ func taskHasPlannedHarnessWrapperTurn(task *corev1alpha1.Task) bool {
 	return strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) != "" &&
 		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) != "" &&
 		strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]) != ""
-}
-
-func harnessWrapperFeatureEnabled() bool {
-	return workerenv.IsTrue(os.Getenv(harnessWrapperFeatureGateEnv))
 }
 
 func harnessWrapperEndpoint() string {
@@ -77,14 +63,21 @@ func harnessWrapperAuthValue() string {
 	return strings.TrimSpace(os.Getenv(harnessWrapperAuthValueEnv))
 }
 
-func (r *TaskReconciler) shouldRunHarnessWrapper(task *corev1alpha1.Task) bool {
-	return taskRequestsHarnessWrapper(task) && harnessWrapperFeatureEnabled()
-}
-
 func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
+	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
+	if err != nil {
+		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+	}
+	if workspaceRequest != nil {
+		return r.failTask(ctx, task, "execution workspace is not supported by harness runtime yet")
+	}
+
 	endpoint := harnessWrapperEndpoint()
 	if endpoint == "" {
-		return r.failTask(ctx, task, fmt.Sprintf("%s is required when harness wrapper mode is enabled", harnessWrapperEndpointEnv))
+		return r.failTask(ctx, task, fmt.Sprintf("%s is required when agent harness runtime is enabled", harnessWrapperEndpointEnv))
 	}
 	if r.ExecutionEventStore == nil {
 		return r.failTask(ctx, task, "execution event store is required for harness wrapper mode")
@@ -140,7 +133,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	log := logf.FromContext(ctx)
 	endpoint := harnessWrapperEndpoint()
 	if endpoint == "" {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("%s is required when harness wrapper mode is enabled", harnessWrapperEndpointEnv))
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("%s is required when agent harness runtime is enabled", harnessWrapperEndpointEnv))
 	}
 	if r.ExecutionEventStore == nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "execution event store is required for harness wrapper mode")
@@ -283,12 +276,9 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
-	runtimeName := strings.TrimSpace(task.Annotations[labels.AnnotationHarnessWrapperRuntime])
-	if runtimeName == "" && agent != nil && agent.Spec.Runtime != nil {
+	runtimeName := "generic"
+	if agent != nil && agent.Spec.Runtime != nil {
 		runtimeName = string(agent.Spec.Runtime.Type)
-	}
-	if runtimeName == "" {
-		runtimeName = "generic"
 	}
 	turnID := harnessWrapperTurnID(task, attempts)
 	correlationID := string(task.UID)
@@ -323,11 +313,31 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 func harnessWrapperTurnID(task *corev1alpha1.Task, attempts int32) harness.HarnessTurnID {
 	identity := fmt.Sprintf("%s/%s/%s/%d", task.Namespace, task.Name, task.UID, attempts)
 	sum := sha256.Sum256([]byte(identity))
-	prefix := labels.SelectorValue(task.Name)
-	if prefix == "" {
-		prefix = "turn"
-	}
+	prefix := harnessWrapperTurnIDPrefix(task.Name)
 	return harness.HarnessTurnID(fmt.Sprintf("%s-%s-%d", prefix, hex.EncodeToString(sum[:])[:12], attempts))
+}
+
+func harnessWrapperTurnIDPrefix(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var out strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			out.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			out.WriteRune(r)
+		default:
+			out.WriteByte('-')
+		}
+		if out.Len() >= 40 {
+			break
+		}
+	}
+	prefix := strings.Trim(out.String(), "-_.")
+	if prefix == "" {
+		return "turn"
+	}
+	return prefix
 }
 
 func harnessWrapperSessionName(task *corev1alpha1.Task) string {

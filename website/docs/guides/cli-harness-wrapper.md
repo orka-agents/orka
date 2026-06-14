@@ -1,14 +1,8 @@
 # CLI harness wrapper
 
-The CLI harness wrapper is an opt-in bridge for existing agent CLIs. It lets Orka speak the `orka.harness.v1` turn protocol while the underlying runtime still runs as a normal per-turn subprocess.
+The CLI harness runtime is the agent execution path for CLI-backed runtimes. It lets Orka speak the `orka.harness.v1` turn protocol while the underlying runtime can still run as a normal per-turn subprocess.
 
-Legacy agent workers remain the default path:
-
-```text
-Task -> Job -> agent worker -> CLI subprocess -> result POST -> Job exits
-```
-
-Wrapper mode uses the harness protocol around the CLI invocation:
+Agent tasks use the harness protocol around the CLI invocation:
 
 ```text
 Task -> harness provider -> CLI harness wrapper -> CLI subprocess per turn -> harness frames -> Orka execution events
@@ -40,8 +34,8 @@ The CLI subprocess is **per turn**. The wrapper process can stay up and accept m
 Current adapters:
 
 - `generic` — runs a configured command.
-- `codex` — proof-of-bridge adapter for the Codex CLI using the same high-level argument contract as the legacy Codex worker.
-- `claude` and `copilot` — reserved names, rejected at wrapper startup until adapters are implemented. Legacy workers remain the path for these runtimes.
+- `codex` — adapter for the Codex CLI using Orka runtime settings.
+- `claude` and `copilot` — reserved names, rejected at wrapper startup until adapters are implemented.
 
 ## Generic command example
 
@@ -68,18 +62,15 @@ Result extraction modes:
 - `stdout` (default)
 - `file` via `ORKA_HARNESS_WRAPPER_RESULT_FILE`
 
-## Kubernetes opt-in
+## Kubernetes configuration
 
-Legacy workers are still the default. The controller only uses the harness wrapper path when the operator enables the feature gate and the task opts in with annotations. The first provider path targets an operator-configured wrapper HTTP endpoint (for example, a trusted Service, sidecar, port-forwarded local wrapper, or test server). Configure the controller with `ORKA_HARNESS_WRAPPER_ENDPOINT` and then opt in individual tasks with annotations:
+Agent tasks always use the harness runtime path. The first provider path targets an operator-configured wrapper HTTP endpoint (for example, a trusted Service, sidecar, port-forwarded local wrapper, or test server). Configure the controller with `ORKA_HARNESS_WRAPPER_ENDPOINT`; tasks select agents normally:
 
 ```yaml
 apiVersion: orka.io/v1alpha1
 kind: Task
 metadata:
   name: codex-wrapper-smoke
-  annotations:
-    orka.ai/harness-wrapper: "true"
-    orka.ai/harness-wrapper-runtime: "codex"
 spec:
   type: agent
   agentRef:
@@ -90,19 +81,18 @@ spec:
     allowBash: true
 ```
 
-Operators must set `ORKA_ENABLE_HARNESS_WRAPPER=true` and `ORKA_HARNESS_WRAPPER_ENDPOINT=<trusted wrapper URL>` on the controller before these annotations take effect. If the wrapper requires bearer auth (the default), configure the same auth value for the controller with `ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE` or `ORKA_HARNESS_WRAPPER_BEARER_TOKEN`. With the gate disabled, agent tasks continue to use their existing legacy worker images and job path.
+Operators must set `ORKA_HARNESS_WRAPPER_ENDPOINT=<trusted wrapper URL>` on the controller for agent tasks. If the wrapper requires bearer auth (the default), configure the same auth value for the controller with `ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE` or `ORKA_HARNESS_WRAPPER_BEARER_TOKEN`.
 
-## Legacy compatibility notes
+## Compatibility notes
 
-The wrapper path is intended to be behaviorally compatible with the legacy agent worker path, with these MVP differences:
-
-- The wrapper emits harness turn frames first; the controller maps those frames into normal Orka execution events.
-- The selected endpoint is operator-configured with `ORKA_HARNESS_WRAPPER_ENDPOINT`; the Task only opts in and selects the runtime metadata.
+- The runtime emits harness turn frames first; the controller maps those frames into normal Orka execution events.
+- The selected endpoint is operator-configured with `ORKA_HARNESS_WRAPPER_ENDPOINT`; tasks do not supply runtime endpoints.
 - Completed turns are retained in wrapper memory only for the configured retention TTL, so controller recovery must resume promptly or the task fails instead of silently duplicating work.
 - Terminal result frames are size-bounded to stay within the harness SSE envelope. Results that exceed the limit fail explicitly instead of being stored partially.
-- `claude` and `copilot` wrapper adapters are not enabled yet; their legacy workers remain the supported path.
+- `claude` and `copilot` wrapper adapters are not enabled yet.
+- Durable execution workspaces are validated but not yet launched by the harness runtime path.
 
-The focused test matrix covers generic command success, result-file extraction, non-zero failure, timeout, cancellation including process-group cleanup, redaction, event-stream cursoring, harness conformance, Codex fake-CLI success/failure, and feature-gated controller routing.
+The focused test matrix covers generic command success, result-file extraction, non-zero failure, timeout, cancellation including process-group cleanup, redaction, event-stream cursoring, harness conformance, Codex fake-CLI success/failure, and controller routing through the harness runtime.
 
 ## Cancellation
 
@@ -114,7 +104,7 @@ The focused test matrix covers generic command success, result-file extraction, 
 - Wrapper frames must not include raw environment dumps, API keys, TxTokens, service-account tokens, cookies, or authorization headers.
 - Stdout/stderr previews are redacted and truncated before becoming frames.
 - Prompt-file mode uses per-turn temp files and removes wrapper-created temp files after the command is parsed.
-- Observed-mode wrappers cannot prove what an opaque CLI did internally; use least-privilege credentials and runtime sandboxing exactly as with legacy workers.
+- Observed-mode wrappers cannot prove what an opaque CLI did internally; use least-privilege credentials and runtime sandboxing exactly as for CLI-backed runtimes.
 
 ## Substrate relationship
 

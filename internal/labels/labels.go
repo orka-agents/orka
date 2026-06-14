@@ -88,8 +88,6 @@ const (
 	AnnotationAgentReadOnly                 = "orka.ai/agent-read-only"
 	AnnotationWorkspaceInitContainer        = "orka.ai/workspace-init-container"
 	AnnotationDisableCoordinationToolInject = "orka.ai/disable-coordination-tool-injection"
-	AnnotationHarnessWrapper                = "orka.ai/harness-wrapper"
-	AnnotationHarnessWrapperRuntime         = "orka.ai/harness-wrapper-runtime"
 )
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.

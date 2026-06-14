@@ -600,7 +600,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
-	if r.shouldRunHarnessWrapper(task) {
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
 
@@ -1493,6 +1493,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 
 	if taskHasHarnessWrapperTurn(task) {
 		return r.finishHarnessWrapperTask(ctx, task)
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
+		return r.failTask(ctx, task, "harness runtime turn identity is missing")
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks
@@ -2669,6 +2672,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		// Agent must have runtime configured
 		if agent.Spec.Runtime == nil {
 			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
+		}
+		if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeCodex {
+			return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
 		}
 		if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
 			return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
