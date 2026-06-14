@@ -89,8 +89,8 @@ func TestWebhookNotifier_Notify_Success(t *testing.T) {
 	if receivedPayload.TaskName != "test-task" {
 		t.Errorf("TaskName = %s, want test-task", receivedPayload.TaskName)
 	}
-	if receivedPayload.TaskNamespace != "default" {
-		t.Errorf("TaskNamespace = %s, want default", receivedPayload.TaskNamespace)
+	if receivedPayload.TaskNamespace != defaultNS {
+		t.Errorf("TaskNamespace = %s, want %s", receivedPayload.TaskNamespace, defaultNS)
 	}
 	if receivedPayload.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Errorf("Phase = %s, want Succeeded", receivedPayload.Phase)

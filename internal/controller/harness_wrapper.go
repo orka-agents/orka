@@ -1,0 +1,368 @@
+package controller
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
+)
+
+const (
+	harnessWrapperFeatureGateEnv    = "ORKA_ENABLE_HARNESS_WRAPPER"
+	harnessWrapperEndpointEnv       = "ORKA_HARNESS_WRAPPER_ENDPOINT"
+	harnessWrapperAuthValueEnv      = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
+	harnessWrapperAuthValueFileEnv  = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
+	harnessWrapperTurnIDAnnotation  = "orka.ai/harness-wrapper-turn-id"
+	harnessWrapperRuntimeAnnotation = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperCorrelationIDAnno = "orka.ai/harness-wrapper-correlation-id"
+	harnessWrapperLastFrameSeqAnno  = "orka.ai/harness-wrapper-last-frame-seq"
+	harnessWrapperStartedAnno       = "orka.ai/harness-wrapper-started"
+	harnessWrapperStreamPollTimeout = 2 * time.Second
+)
+
+func taskRequestsHarnessWrapper(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return workerenv.IsTrue(task.Annotations[labels.AnnotationHarnessWrapper])
+}
+
+func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return workerenv.IsTrue(task.Annotations[harnessWrapperStartedAnno]) &&
+		taskHasPlannedHarnessWrapperTurn(task)
+}
+
+func taskHasPlannedHarnessWrapperTurn(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) != "" &&
+		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) != "" &&
+		strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]) != ""
+}
+
+func harnessWrapperFeatureEnabled() bool {
+	return workerenv.IsTrue(os.Getenv(harnessWrapperFeatureGateEnv))
+}
+
+func harnessWrapperEndpoint() string {
+	return strings.TrimSpace(os.Getenv(harnessWrapperEndpointEnv))
+}
+
+func harnessWrapperAuthValue() string {
+	if path := strings.TrimSpace(os.Getenv(harnessWrapperAuthValueFileEnv)); path != "" {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return strings.TrimSpace(os.Getenv(harnessWrapperAuthValueEnv))
+}
+
+func (r *TaskReconciler) shouldRunHarnessWrapper(task *corev1alpha1.Task) bool {
+	return taskRequestsHarnessWrapper(task) && harnessWrapperFeatureEnabled()
+}
+
+func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
+	endpoint := harnessWrapperEndpoint()
+	if endpoint == "" {
+		return r.failTask(ctx, task, fmt.Sprintf("%s is required when harness wrapper mode is enabled", harnessWrapperEndpointEnv))
+	}
+	if r.ExecutionEventStore == nil {
+		return r.failTask(ctx, task, "execution event store is required for harness wrapper mode")
+	}
+
+	now := metav1.Now()
+	attempts := task.Status.Attempts + 1
+	request := r.harnessWrapperStartTurnRequest(task, agent, now.Time, attempts)
+	if taskHasPlannedHarnessWrapperTurn(task) {
+		request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
+		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
+		request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
+	} else {
+		if err := r.patchHarnessWrapperPlannedTurn(ctx, task, request); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+	if err != nil {
+		return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
+	}
+	if _, err := client.StartTurn(ctx, request); err != nil {
+		message := err.Error()
+		switch {
+		case strings.Contains(message, "turn already exists"):
+			// Treat a duplicate turn ID as idempotent recovery after the wrapper
+			// accepted the planned turn before Running status was persisted.
+		case strings.Contains(message, "maximum concurrent turns"):
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		default:
+			return r.failTask(ctx, task, events.RedactExecutionEventText(message))
+		}
+	}
+	if err := r.patchHarnessWrapperStarted(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhaseRunning
+		t.Status.StartTime = &now
+		t.Status.Attempts = attempts
+		t.Status.JobName = ""
+		t.Status.Message = "harness wrapper turn running"
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeTaskStarted, events.ExecutionEventSeverityInfo, "harness wrapper task started")
+	return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+}
+
+//nolint:gocyclo // Handles stream polling, event mapping, and terminal task classification in one reconcile step.
+func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	endpoint := harnessWrapperEndpoint()
+	if endpoint == "" {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("%s is required when harness wrapper mode is enabled", harnessWrapperEndpointEnv))
+	}
+	if r.ExecutionEventStore == nil {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "execution event store is required for harness wrapper mode")
+	}
+	turnID := harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
+	runtimeSessionID := harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
+	correlationID := strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
+	if turnID == "" || runtimeSessionID == "" || correlationID == "" {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn identity is missing")
+	}
+	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+	if err != nil {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
+	}
+	result := harness.TurnRunResult{}
+	mapCtx := harness.EventMapContext{
+		Namespace:   task.Namespace,
+		TaskName:    task.Name,
+		SessionName: harnessWrapperSessionName(task),
+		AgentName:   harnessWrapperTaskAgentName(task),
+	}
+	afterSeq := harnessWrapperLastFrameSeq(task)
+	lastFrameSeq := afterSeq
+	streamCtx, cancel := context.WithTimeout(ctx, harnessWrapperStreamPollTimeout)
+	defer cancel()
+	err = client.StreamFrames(streamCtx, turnID, afterSeq, func(frame harness.HarnessEventFrame) error {
+		if frame.RuntimeSessionID != runtimeSessionID || frame.TurnID != turnID || frame.CorrelationID != correlationID {
+			return fmt.Errorf("harness frame identity does not match running turn")
+		}
+		mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
+		if err != nil {
+			return err
+		}
+		appended, err := r.ExecutionEventStore.AppendExecutionEvent(streamCtx, mapped)
+		if err != nil {
+			return fmt.Errorf("append mapped harness event: %w", err)
+		}
+		result.Frames = append(result.Frames, frame)
+		result.Events = append(result.Events, *appended)
+		if frame.Seq > lastFrameSeq {
+			lastFrameSeq = frame.Seq
+		}
+		switch frame.Type {
+		case harness.FrameTurnCompleted:
+			result.Completed = frame.Completed
+		case harness.FrameTurnFailed:
+			result.Failed = frame.Failed
+		case harness.FrameTurnCancelled:
+			result.Cancelled = true
+		}
+		return nil
+	})
+	terminalFrameSeen := result.Completed != nil || result.Failed != nil || result.Cancelled
+	if lastFrameSeq > afterSeq && !terminalFrameSeen {
+		if patchErr := r.patchHarnessWrapperLastFrameSeq(ctx, task, lastFrameSeq); patchErr != nil {
+			return ctrl.Result{}, patchErr
+		}
+	}
+	if err != nil && result.Completed == nil && result.Failed == nil && !result.Cancelled {
+		if harnessWrapperStreamErrorIsTerminal(err) {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(err.Error()))
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if result.Completed != nil && r.ResultStore != nil {
+		if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte(result.Completed.Result)); saveErr != nil {
+			log.Error(saveErr, "failed to save harness wrapper result")
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to save harness wrapper result: %v", saveErr))
+		}
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	}
+	if result.Cancelled {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, "harness wrapper turn cancelled")
+	}
+	if result.Failed != nil {
+		message := strings.TrimSpace(result.Failed.Message)
+		if message == "" {
+			message = strings.TrimSpace(result.Failed.Reason)
+		}
+		if message == "" && err != nil {
+			message = err.Error()
+		}
+		if message == "" {
+			message = "harness wrapper turn failed"
+		}
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(message))
+	}
+	if result.Completed == nil {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn ended without result")
+	}
+	return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "harness wrapper task completed successfully")
+}
+
+func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	request harness.StartTurnRequest,
+) error {
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[harnessWrapperTurnIDAnnotation] = string(request.TurnID)
+	task.Annotations[harnessWrapperRuntimeAnnotation] = string(request.RuntimeSessionID)
+	task.Annotations[harnessWrapperCorrelationIDAnno] = request.CorrelationID
+	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
+	task.Annotations[harnessWrapperStartedAnno] = "false"
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *corev1alpha1.Task) error {
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[harnessWrapperStartedAnno] = "true"
+	return r.Patch(ctx, task, patch)
+}
+
+func harnessWrapperStreamErrorIsTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	for _, marker := range []string{"(401)", "(403)", "(404)", "(410)", "turn not found", "unauthorized"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *TaskReconciler) harnessWrapperStartTurnRequest(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	now time.Time,
+	attempts int32,
+) harness.StartTurnRequest {
+	deadline := now.Add(time.Hour)
+	if task.Spec.Timeout != nil {
+		deadline = now.Add(task.Spec.Timeout.Duration)
+	}
+	runtimeName := strings.TrimSpace(task.Annotations[labels.AnnotationHarnessWrapperRuntime])
+	if runtimeName == "" && agent != nil && agent.Spec.Runtime != nil {
+		runtimeName = string(agent.Spec.Runtime.Type)
+	}
+	if runtimeName == "" {
+		runtimeName = "generic"
+	}
+	turnID := harnessWrapperTurnID(task, attempts)
+	correlationID := string(task.UID)
+	if strings.TrimSpace(correlationID) == "" {
+		correlationID = task.Namespace + "/" + task.Name
+	}
+	prompt := task.Spec.Prompt
+	if prompt == "" && task.Spec.AI != nil {
+		prompt = task.Spec.AI.Prompt
+	}
+	return harness.StartTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        task.Namespace,
+		TaskName:         task.Name,
+		SessionName:      harnessWrapperSessionName(task),
+		RuntimeSessionID: harness.RuntimeSessionID(task.Namespace + ":" + harnessWrapperSessionName(task) + ":" + runtimeName),
+		TurnID:           turnID,
+		CorrelationID:    correlationID,
+		Deadline:         deadline.UTC(),
+		AuthIdentity: harness.AuthIdentity{
+			Subject: "task:" + task.Namespace + "/" + task.Name,
+		},
+		Input:             harness.TurnInput{Prompt: prompt},
+		ToolExecutionMode: harness.ToolExecutionModeObserved,
+		Metadata: map[string]string{
+			"runtime": runtimeName,
+			"wrapper": "cli",
+		},
+	}
+}
+
+func harnessWrapperTurnID(task *corev1alpha1.Task, attempts int32) harness.HarnessTurnID {
+	identity := fmt.Sprintf("%s/%s/%s/%d", task.Namespace, task.Name, task.UID, attempts)
+	sum := sha256.Sum256([]byte(identity))
+	prefix := labels.SelectorValue(task.Name)
+	if prefix == "" {
+		prefix = "turn"
+	}
+	return harness.HarnessTurnID(fmt.Sprintf("%s-%s-%d", prefix, hex.EncodeToString(sum[:])[:12], attempts))
+}
+
+func harnessWrapperSessionName(task *corev1alpha1.Task) string {
+	if task != nil && task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" {
+		return strings.TrimSpace(task.Spec.SessionRef.Name)
+	}
+	if task != nil {
+		return task.Name
+	}
+	return "default"
+}
+
+func harnessWrapperTaskAgentName(task *corev1alpha1.Task) string {
+	if task != nil && task.Spec.AgentRef != nil {
+		return task.Spec.AgentRef.Name
+	}
+	return ""
+}
+
+func harnessWrapperLastFrameSeq(task *corev1alpha1.Task) int64 {
+	if task == nil || task.Annotations == nil {
+		return 0
+	}
+	seq, err := strconv.ParseInt(strings.TrimSpace(task.Annotations[harnessWrapperLastFrameSeqAnno]), 10, 64)
+	if err != nil || seq < 0 {
+		return 0
+	}
+	return seq
+}
+
+func (r *TaskReconciler) patchHarnessWrapperLastFrameSeq(ctx context.Context, task *corev1alpha1.Task, seq int64) error {
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[harnessWrapperLastFrameSeqAnno] = strconv.FormatInt(seq, 10)
+	return r.Patch(ctx, task, patch)
+}

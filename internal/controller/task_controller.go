@@ -527,6 +527,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleScheduledTask(ctx, task)
 	}
 
+	if taskHasHarnessWrapperTurn(task) {
+		return r.finishHarnessWrapperTask(ctx, task)
+	}
+
 	// Check session lock if session is referenced
 	if task.Spec.SessionRef != nil {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
@@ -591,6 +595,13 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if err != nil {
 		log.Error(err, "failed to resolve provider")
 		return r.failTask(ctx, task, err.Error())
+	}
+
+	if taskHasPlannedHarnessWrapperTurn(task) {
+		return r.runHarnessWrapperTask(ctx, task, agent)
+	}
+	if r.shouldRunHarnessWrapper(task) {
+		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
@@ -1478,6 +1489,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			return r.failTask(ctx, task, "task timed out")
 		}
+	}
+
+	if taskHasHarnessWrapperTurn(task) {
+		return r.finishHarnessWrapperTask(ctx, task)
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks

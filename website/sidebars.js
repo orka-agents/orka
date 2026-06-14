@@ -28,6 +28,7 @@ const sidebars = {
         'guides/multi-agent-coordination',
         'guides/autonomous-tasks',
         'guides/kontxt-quickstart',
+        'guides/cli-harness-wrapper',
         'guides/repository-security-scanning',
         'guides/repository-monitors',
         'guides/github-label-triggers',

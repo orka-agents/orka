@@ -19,9 +19,10 @@ import (
 )
 
 type Client struct {
-	baseURL        *url.URL
-	httpClient     *http.Client
-	controlTimeout time.Duration
+	baseURL         *url.URL
+	httpClient      *http.Client
+	controlTimeout  time.Duration
+	authBearerValue string
 }
 
 const maxHarnessSSEFrameBytes = 1 << 20
@@ -43,6 +44,12 @@ func WithControlTimeout(timeout time.Duration) ClientOption {
 		if timeout > 0 {
 			c.controlTimeout = timeout
 		}
+	}
+}
+
+func WithBearerToken(token string) ClientOption {
+	return func(c *Client) {
+		c.authBearerValue = strings.TrimSpace(token)
 	}
 }
 
@@ -164,6 +171,7 @@ func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSe
 		return safeClientError("stream_frames", 0, err.Error())
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return safeClientError("stream_frames", 0, err.Error())
@@ -183,6 +191,7 @@ func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
 		return safeClientError("get", 0, err.Error())
 	}
 	req.Header.Set("Accept", "application/json")
+	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return safeClientError("get", 0, err.Error())
@@ -209,6 +218,7 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 		return safeClientError("post", 0, err.Error())
 	}
 	req.Header.Set("Accept", "application/json")
+	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -222,6 +232,13 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 		return safeClientError("post", resp.StatusCode, err.Error())
 	}
 	return nil
+}
+
+func (c *Client) setAuthHeader(req *http.Request) {
+	if c == nil || req == nil || c.authBearerValue == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+c.authBearerValue)
 }
 
 func (c *Client) controlContext(ctx context.Context) (context.Context, context.CancelFunc) {
