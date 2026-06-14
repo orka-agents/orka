@@ -97,6 +97,7 @@ func (a *GenericAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 		if !filepath.IsAbs(resultFile) && dir != "" {
 			resultFile = filepath.Join(dir, resultFile)
 		}
+		_ = os.Remove(resultFile)
 		spec.ResultFile = resultFile
 	}
 	return spec, nil

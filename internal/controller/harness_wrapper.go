@@ -124,6 +124,14 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		}
 	}
 	if !startedPlannedTurn {
+		latest := &corev1alpha1.Task{}
+		if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return ctrl.Result{}, err
+		}
+		if latest.Status.Phase != corev1alpha1.TaskPhasePending {
+			task.Status = latest.Status
+			return ctrl.Result{}, nil
+		}
 		client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
 		if err != nil {
 			return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
@@ -154,14 +162,22 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		}
 	}
 
+	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if t.Status.Phase != corev1alpha1.TaskPhasePending && t.Status.Phase != corev1alpha1.TaskPhaseRunning {
+			return
+		}
 		t.Status.Phase = corev1alpha1.TaskPhaseRunning
 		t.Status.StartTime = &now
 		t.Status.Attempts = attempts
 		t.Status.JobName = ""
 		t.Status.Message = "harness wrapper turn running"
+		transitionedToRunning = true
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if !transitionedToRunning {
+		return ctrl.Result{}, nil
 	}
 	if err := r.recordTaskLifecycleEvent(
 		ctx,
