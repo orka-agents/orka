@@ -53,10 +53,7 @@ func ShouldFinalizeWorkDir(workDir string) bool {
 	if workDir == "" {
 		return false
 	}
-	if _, err := os.Stat(filepath.Join(workDir, ".git")); err == nil {
-		return true
-	}
-	return false
+	return exec.Command("git", "-C", workDir, "rev-parse", "--show-toplevel").Run() == nil
 }
 
 func CleanFinalizedWorkDir(workDir string) error {

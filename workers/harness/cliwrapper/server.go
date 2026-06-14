@@ -331,6 +331,13 @@ func (s *Server) runTurn(turn *turnState) {
 
 	turn.appendFrame(s.frame(turn, harness.FrameTurnStarted, "turn started", nil))
 	ClearTurnArtifacts()
+	preparedWorkspace, err := prepareTurnWorkspace(ctx, turnCtx)
+	if err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	defer preparedWorkspace.cleanup()
+	turnCtx.WorkDir = preparedWorkspace.workDir
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
@@ -362,15 +369,6 @@ func (s *Server) runTurn(turn *turnState) {
 		}
 	}
 	finalizedWorkDir := ""
-	if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
-		finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
-		if finalizeErr != nil {
-			turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
-			return
-		}
-		parsed.Result = string(finalized)
-		finalizedWorkDir = turnCtx.WorkDir
-	}
 	switch {
 	case run.Cancelled:
 		turn.appendFrame(s.frame(turn, harness.FrameTurnCancelled, "turn cancelled", nil))
@@ -383,6 +381,15 @@ func (s *Server) runTurn(turn *turnState) {
 		}
 		turn.appendFrame(s.failedFrame(turn, "command_failed", msg, false))
 	default:
+		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
+			finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
+			if finalizeErr != nil {
+				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
+				return
+			}
+			parsed.Result = string(finalized)
+			finalizedWorkDir = turnCtx.WorkDir
+		}
 		if len([]byte(parsed.Result)) > maxTerminalResultBytes {
 			turn.appendFrame(s.failedFrame(
 				turn,
