@@ -80,9 +80,6 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	if workspaceRequest != nil {
 		return r.failTask(ctx, task, "execution workspace is not supported by harness runtime yet")
 	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		return r.failTask(ctx, task, "agent runtime workspace is not supported by harness runtime yet")
-	}
 
 	endpoint := harnessWrapperEndpoint()
 	if endpoint == "" {
@@ -521,6 +518,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	}, nil
 }
 
+//nolint:gocyclo // Collects runtime metadata from Agent and Task defaults in one place.
 func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -580,6 +578,21 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		allowBash = *task.Spec.AgentRuntime.AllowBash
 	}
 	metadata["allowBash"] = strconv.FormatBool(allowBash)
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
+		ws := task.Spec.AgentRuntime.Workspace
+		if strings.TrimSpace(ws.GitRepo) != "" {
+			metadata["gitRepo"] = strings.TrimSpace(ws.GitRepo)
+		}
+		if strings.TrimSpace(ws.Branch) != "" {
+			metadata["gitBranch"] = strings.TrimSpace(ws.Branch)
+		}
+		if strings.TrimSpace(ws.Ref) != "" {
+			metadata["gitRef"] = strings.TrimSpace(ws.Ref)
+		}
+		if strings.TrimSpace(ws.SubPath) != "" {
+			metadata["workspaceSubPath"] = strings.TrimSpace(ws.SubPath)
+		}
+	}
 	return metadata, nil
 }
 

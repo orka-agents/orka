@@ -194,3 +194,24 @@ func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
 		t.Fatalf("AllowedTools = %#v, want empty intersection", cfg.AllowedTools)
 	}
 }
+
+func TestValidateWorkspaceRepoURLRejectsLocalInputs(t *testing.T) {
+	for _, repo := range []string{
+		"/tmp/repo",
+		"file:///tmp/repo",
+		"https://localhost/repo.git",
+		"https://127.0.0.1/repo.git",
+		"https://token@github.com/sozercan/orka.git",
+		"https://github.com/sozercan/orka.git?access_token=value",
+	} {
+		if err := validateWorkspaceRepoURL(repo); err == nil {
+			t.Fatalf("validateWorkspaceRepoURL(%q) error = nil, want rejection", repo)
+		}
+	}
+}
+
+func TestValidateWorkspaceRepoURLAllowsHTTPSRemote(t *testing.T) {
+	if err := validateWorkspaceRepoURL("https://github.com/sozercan/orka.git"); err != nil {
+		t.Fatalf("validateWorkspaceRepoURL() error = %v", err)
+	}
+}
