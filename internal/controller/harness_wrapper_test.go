@@ -79,7 +79,10 @@ func TestHarnessWrapperStartTurnUsesComputedAttemptForTurnID(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Status.Attempts = 1
 	r := newUnitReconciler(newTestScheme(), task, agent)
-	request := r.harnessWrapperStartTurnRequest(task, agent, time.Now(), 2)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 2)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
 	if !strings.HasPrefix(string(request.TurnID), "harness-task-") || !strings.HasSuffix(string(request.TurnID), "-2") {
 		t.Fatalf("TurnID = %q, want namespaced/UID-scoped attempt 2 turn ID", request.TurnID)
 	}
