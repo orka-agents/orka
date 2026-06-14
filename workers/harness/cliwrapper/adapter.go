@@ -142,8 +142,10 @@ func agentConfigFromEnv(defaultMaxTurns int) *agentEnvConfig {
 		Model:           os.Getenv(workerenv.Model),
 		SystemPrompt:    os.Getenv(workerenv.SystemPrompt),
 		AllowedTools:    splitCSV(os.Getenv(workerenv.AllowedTools)),
+		AllowedToolsSet: strings.TrimSpace(os.Getenv(workerenv.AllowedTools)) != "",
 		DisallowedTools: splitCSV(os.Getenv(workerenv.DisallowedTools)),
 		MaxTurns:        defaultMaxTurns,
+		AllowBash:       workerenv.IsTrue(os.Getenv(workerenv.AllowBash)),
 	}
 	if v := strings.TrimSpace(os.Getenv(workerenv.MaxTurns)); v != "" {
 		var parsed int
@@ -155,6 +157,39 @@ func agentConfigFromEnv(defaultMaxTurns int) *agentEnvConfig {
 	return cfg
 }
 
+func agentConfigFromTurn(turn TurnContext) *agentEnvConfig {
+	cfg := agentConfigFromEnv(50)
+	if value := strings.TrimSpace(turn.Metadata["model"]); value != "" {
+		cfg.Model = value
+	}
+	if value := strings.TrimSpace(turn.Metadata["systemPrompt"]); value != "" {
+		cfg.SystemPrompt = value
+	}
+	if value := strings.TrimSpace(turn.Metadata["maxTurns"]); value != "" {
+		var parsed int
+		_, _ = fmt.Sscanf(value, "%d", &parsed)
+		if parsed > 0 {
+			cfg.MaxTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(turn.Metadata["allowedTools"]); value != "" {
+		metadataAllowed := splitCSV(value)
+		if cfg.AllowedToolsSet {
+			cfg.AllowedTools = intersectTools(cfg.AllowedTools, metadataAllowed)
+		} else {
+			cfg.AllowedTools = metadataAllowed
+		}
+		cfg.AllowedToolsSet = true
+	}
+	if value := strings.TrimSpace(turn.Metadata["disallowedTools"]); value != "" {
+		cfg.DisallowedTools = unionTools(cfg.DisallowedTools, splitCSV(value))
+	}
+	if value := strings.TrimSpace(turn.Metadata["allowBash"]); value != "" {
+		cfg.AllowBash = cfg.AllowBash && strings.EqualFold(value, "true")
+	}
+	return cfg
+}
+
 type agentEnvConfig struct {
 	TaskName        string
 	TaskNamespace   string
@@ -162,8 +197,51 @@ type agentEnvConfig struct {
 	Model           string
 	SystemPrompt    string
 	AllowedTools    []string
+	AllowedToolsSet bool
 	DisallowedTools []string
 	MaxTurns        int
+	AllowBash       bool
+}
+
+func intersectTools(left, right []string) []string {
+	rightSet := map[string]struct{}{}
+	for _, tool := range right {
+		rightSet[normalizeToolName(tool)] = struct{}{}
+	}
+	out := make([]string, 0, len(left))
+	seen := map[string]struct{}{}
+	for _, tool := range left {
+		normalized := normalizeToolName(tool)
+		if _, ok := rightSet[normalized]; !ok {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, strings.TrimSpace(tool))
+	}
+	return out
+}
+
+func unionTools(left, right []string) []string {
+	out := make([]string, 0, len(left)+len(right))
+	seen := map[string]struct{}{}
+	for _, tools := range [][]string{left, right} {
+		for _, tool := range tools {
+			tool = strings.TrimSpace(tool)
+			if tool == "" {
+				continue
+			}
+			normalized := normalizeToolName(tool)
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 func splitCSV(value string) []string {

@@ -144,3 +144,53 @@ func validWrapperStartTurnRequest() harness.StartTurnRequest {
 func containsEnv(env []string, want string) bool {
 	return slices.Contains(env, want)
 }
+
+func TestLoadConfigFromEnvUnvalidatedAllowsFlagOnlyAuth(t *testing.T) {
+	t.Setenv(EnvRuntime, RuntimeGeneric)
+	t.Setenv(EnvCommand, testEchoCommand)
+	cfg, err := LoadConfigFromEnvUnvalidated()
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnvUnvalidated() error = %v", err)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want missing auth before flag override")
+	}
+	cfg.AllowUnauthenticated = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() after flag override = %v", err)
+	}
+}
+
+func TestAgentConfigFromTurnNarrowsWorkerToolPolicy(t *testing.T) {
+	t.Setenv("ORKA_ALLOWED_TOOLS", "web_search,file_read")
+	t.Setenv("ORKA_DISALLOWED_TOOLS", "shell")
+	cfg := agentConfigFromTurn(TurnContext{Metadata: map[string]string{
+		"allowedTools":    "web_search,code_exec",
+		"disallowedTools": "web_search",
+	}})
+	if strings.Join(cfg.AllowedTools, ",") != "web_search" {
+		t.Fatalf("AllowedTools = %#v, want intersection with worker allowlist", cfg.AllowedTools)
+	}
+	if !slices.Contains(cfg.DisallowedTools, "shell") || !slices.Contains(cfg.DisallowedTools, "web_search") {
+		t.Fatalf("DisallowedTools = %#v, want worker+turn union", cfg.DisallowedTools)
+	}
+}
+
+func TestAgentConfigFromTurnCannotBroadenWorkerAllowBash(t *testing.T) {
+	t.Setenv("ORKA_ALLOW_BASH", "false")
+	cfg := agentConfigFromTurn(TurnContext{Metadata: map[string]string{"allowBash": "true"}})
+	if cfg.AllowBash {
+		t.Fatal("AllowBash = true, want worker env to remain hard upper bound")
+	}
+}
+
+func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
+	t.Setenv("ORKA_ALLOWED_TOOLS", "file_read")
+	cfg := agentConfigFromTurn(TurnContext{Metadata: map[string]string{"allowedTools": "web_search"}})
+	if !cfg.AllowedToolsSet {
+		t.Fatal("AllowedToolsSet = false, want explicit deny-all state")
+	}
+	if len(cfg.AllowedTools) != 0 {
+		t.Fatalf("AllowedTools = %#v, want empty intersection", cfg.AllowedTools)
+	}
+}

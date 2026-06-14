@@ -348,8 +348,14 @@ func (s *Server) runTurn(turn *turnState) {
 		turn.appendFrame(s.runtimeLogTextFrame(turn, "stderr", run.Stderr, events.ExecutionEventSeverityWarning))
 	}
 	parsed, parseErr := s.adapter.ParseResult(ctx, turnCtx, run)
-	if parseErr != nil && runErr == nil {
-		runErr = parseErr
+	if parseErr != nil {
+		if strings.Contains(parseErr.Error(), "terminal frame limit") {
+			turn.appendFrame(s.failedFrame(turn, "result_too_large", parseErr.Error(), false))
+			return
+		}
+		if runErr == nil {
+			runErr = parseErr
+		}
 	}
 	if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
 		if finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result); finalizeErr == nil {

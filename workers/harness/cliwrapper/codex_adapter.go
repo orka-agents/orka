@@ -26,7 +26,8 @@ func NewCodexAdapter(config CodexAdapterConfig) *CodexAdapter { return &CodexAda
 func (a *CodexAdapter) Name() string { return RuntimeCodex }
 
 func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
-	if !workerenv.IsTrue(os.Getenv(workerenv.AllowBash)) {
+	agentCfg := agentConfigFromTurn(turn)
+	if !agentCfg.AllowBash {
 		return nil, fmt.Errorf(
 			"codex runtime requires %s=true because the Codex CLI cannot disable shell execution",
 			workerenv.AllowBash,
@@ -43,7 +44,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		return nil, fmt.Errorf("close codex output temp file: %w", err)
 	}
 
-	instructionsPath, cleanupInstructions, err := writeCodexInstructionsFile(agentConfigFromEnv(defaultCodexMaxTurns))
+	instructionsPath, cleanupInstructions, err := writeCodexInstructionsFile(agentCfg)
 	if err != nil {
 		_ = os.Remove(outputPath)
 		return nil, err
@@ -70,7 +71,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
-		Args:       buildCodexArgs(outputPath, instructionsPath, false),
+		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false),
 		Env:        buildCodexEnv(turn.Env),
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
@@ -89,7 +90,7 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 	return TurnResult{Result: run.Stdout, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
 }
 
-func buildCodexArgs(outputPath, instructionsPath string, bypassSandbox bool) []string {
+func buildCodexArgs(cfg *agentEnvConfig, outputPath, instructionsPath string, bypassSandbox bool) []string {
 	args := []string{
 		"exec",
 		"--skip-git-repo-check",
@@ -108,8 +109,8 @@ func buildCodexArgs(outputPath, instructionsPath string, bypassSandbox bool) []s
 			args = append(args, "--config", "sandbox_workspace_write.network_access=true")
 		}
 	}
-	if model := strings.TrimSpace(os.Getenv(workerenv.Model)); model != "" {
-		args = append(args, "--model", model)
+	if cfg != nil && strings.TrimSpace(cfg.Model) != "" {
+		args = append(args, "--model", strings.TrimSpace(cfg.Model))
 	}
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
@@ -117,7 +118,7 @@ func buildCodexArgs(outputPath, instructionsPath string, bypassSandbox bool) []s
 	if baseURL := strings.TrimSpace(os.Getenv(workerenv.OpenAIBaseURL)); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
-	if webSearchSetting, ok := codexWebSearchSetting(agentConfigFromEnv(defaultCodexMaxTurns)); ok {
+	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
 		args = append(args, "--config", "web_search="+webSearchSetting)
 	}
 	args = append(args, "-")
@@ -157,16 +158,19 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 	if cfg.MaxTurns > 0 {
 		guidance = append(guidance, fmt.Sprintf("Try to complete this task within %d turns.", cfg.MaxTurns))
 	}
-	if !workerenv.IsTrue(os.Getenv(workerenv.AllowBash)) {
+	if !cfg.AllowBash {
 		guidance = append(guidance,
 			"Do not use shell commands unless absolutely necessary. "+
 				"Prefer built-in file inspection and editing tools.",
 		)
 	}
-	if len(trimmedTools(cfg.AllowedTools)) > 0 {
+	allowedTools := trimmedTools(cfg.AllowedTools)
+	if cfg.AllowedToolsSet && len(allowedTools) == 0 {
+		guidance = append(guidance, "Do not use runtime tools for this task.")
+	} else if len(allowedTools) > 0 {
 		guidance = append(guidance, fmt.Sprintf(
 			"Respect this requested tool allowlist when possible: %s.",
-			strings.Join(trimmedTools(cfg.AllowedTools), ", "),
+			strings.Join(allowedTools, ", "),
 		))
 	}
 	if len(trimmedTools(cfg.DisallowedTools)) > 0 {
@@ -220,7 +224,7 @@ func codexWebSearchSetting(cfg *agentEnvConfig) (string, bool) {
 	if hasWebSearchTool(cfg.DisallowedTools) {
 		return codexWebSearchDisabled, true
 	}
-	if len(cfg.AllowedTools) > 0 {
+	if cfg.AllowedToolsSet {
 		if hasWebSearchTool(cfg.AllowedTools) {
 			return "live", true
 		}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,6 +32,7 @@ const (
 	harnessWrapperLastFrameSeqAnno  = "orka.ai/harness-wrapper-last-frame-seq"
 	harnessWrapperStartedAnno       = "orka.ai/harness-wrapper-started"
 	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
+	harnessWrapperMetadataAnno      = "orka.ai/harness-wrapper-metadata"
 	harnessWrapperStreamPollTimeout = 2 * time.Second
 	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
 	harnessWrapperNoTimeoutDuration = time.Hour * 24 * 365 * 100
@@ -77,6 +80,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	if workspaceRequest != nil {
 		return r.failTask(ctx, task, "execution workspace is not supported by harness runtime yet")
 	}
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
+		return r.failTask(ctx, task, "agent runtime workspace is not supported by harness runtime yet")
+	}
 
 	endpoint := harnessWrapperEndpoint()
 	if endpoint == "" {
@@ -88,46 +94,64 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 
 	now := metav1.Now()
 	attempts := task.Status.Attempts + 1
-	request := r.harnessWrapperStartTurnRequest(task, agent, now.Time, attempts)
+	var request harness.StartTurnRequest
+	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
-		if !taskHasHarnessWrapperTurn(task) && harnessWrapperPlannedTurnExpired(task, now.Time) {
-			return r.failTask(ctx, task, "planned harness runtime turn expired before start was confirmed")
+		if !taskHasHarnessWrapperTurn(task) {
+			if harnessWrapperPlannedTurnExpired(task, now.Time) {
+				return r.failTask(ctx, task, "planned harness runtime turn expired before start was confirmed")
+			}
+			var err error
+			request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
+			if err != nil {
+				return r.failTask(ctx, task, err.Error())
+			}
+		} else {
+			startedPlannedTurn = true
+			request = r.plannedHarnessWrapperStartTurnRequest(task, agent, now.Time)
 		}
 		request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
 		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
 		request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
 	} else {
+		var err error
+		request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
+		if err != nil {
+			return r.failTask(ctx, task, err.Error())
+		}
 		if err := r.patchHarnessWrapperPlannedTurn(ctx, task, request); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
-	if err != nil {
-		return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
-	}
-	if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
-		return r.failTask(ctx, task, err.Error())
-	}
-	if _, err := client.StartTurn(ctx, request); err != nil {
-		message := err.Error()
-		switch {
-		case strings.Contains(message, "turn already exists"):
-			// Treat a duplicate turn ID as idempotent recovery after the wrapper
-			// accepted the planned turn before Running status was persisted.
-		case strings.Contains(message, "maximum concurrent turns"):
-			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
-				return ctrl.Result{}, clearErr
-			}
-			if releaseErr := r.releaseHarnessWrapperSessionLock(ctx, task); releaseErr != nil {
-				return ctrl.Result{}, releaseErr
-			}
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		default:
-			return r.failTask(ctx, task, events.RedactExecutionEventText(message))
+	if !startedPlannedTurn {
+		client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+		if err != nil {
+			return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
 		}
-	}
-	if err := r.patchHarnessWrapperStarted(ctx, task); err != nil {
-		return ctrl.Result{}, err
+		if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
+			return r.failTask(ctx, task, err.Error())
+		}
+		if _, err := client.StartTurn(ctx, request); err != nil {
+			message := err.Error()
+			switch {
+			case strings.Contains(message, "turn already exists"):
+				// Treat a duplicate turn ID as idempotent recovery after the wrapper
+				// accepted the planned turn before Running status was persisted.
+			case strings.Contains(message, "maximum concurrent turns"):
+				if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
+					return ctrl.Result{}, clearErr
+				}
+				if releaseErr := r.releaseHarnessWrapperSessionLock(ctx, task); releaseErr != nil {
+					return ctrl.Result{}, releaseErr
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			default:
+				return r.failTask(ctx, task, events.RedactExecutionEventText(message))
+			}
+		}
+		if err := r.patchHarnessWrapperStarted(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
@@ -263,6 +287,18 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	plannedMetadata := make(map[string]string, len(request.Metadata))
+	for key, value := range request.Metadata {
+		if key == "systemPrompt" {
+			continue
+		}
+		plannedMetadata[key] = value
+	}
+	metadata, err := json.Marshal(plannedMetadata)
+	if err != nil {
+		return err
+	}
+	task.Annotations[harnessWrapperMetadataAnno] = string(metadata)
 	return r.Patch(ctx, task, patch)
 }
 
@@ -273,6 +309,23 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 	}
 	task.Annotations[harnessWrapperStartedAnno] = "true"
 	return r.Patch(ctx, task, patch)
+}
+
+func harnessWrapperPlannedMetadata(task *corev1alpha1.Task, runtimeName string) map[string]string {
+	metadata := map[string]string{}
+	if task != nil && task.Annotations != nil {
+		_ = json.Unmarshal([]byte(task.Annotations[harnessWrapperMetadataAnno]), &metadata)
+	}
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if strings.TrimSpace(metadata["runtime"]) == "" {
+		metadata["runtime"] = runtimeName
+	}
+	if strings.TrimSpace(metadata["wrapper"]) == "" {
+		metadata["wrapper"] = "cli"
+	}
+	return metadata
 }
 
 func harnessWrapperPlannedTurnExpired(task *corev1alpha1.Task, now time.Time) bool {
@@ -318,6 +371,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperLastFrameSeqAnno)
 		delete(task.Annotations, harnessWrapperStartedAnno)
 		delete(task.Annotations, harnessWrapperPlannedAtAnno)
+		delete(task.Annotations, harnessWrapperMetadataAnno)
 	}
 	return r.Patch(ctx, task, patch)
 }
@@ -360,12 +414,47 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 	return err
 }
 
+func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	now time.Time,
+) harness.StartTurnRequest {
+	deadline := now.Add(harnessWrapperNoTimeoutDuration)
+	if task.Spec.Timeout != nil {
+		deadline = now.Add(task.Spec.Timeout.Duration)
+	}
+	runtimeName := "generic"
+	if agent != nil && agent.Spec.Runtime != nil {
+		runtimeName = string(agent.Spec.Runtime.Type)
+	}
+	metadata := harnessWrapperPlannedMetadata(task, runtimeName)
+	prompt := task.Spec.Prompt
+	if prompt == "" && task.Spec.AI != nil {
+		prompt = task.Spec.AI.Prompt
+	}
+	return harness.StartTurnRequest{
+		Version:           harness.ProtocolVersion,
+		Namespace:         task.Namespace,
+		TaskName:          task.Name,
+		SessionName:       harnessWrapperSessionName(task),
+		RuntimeSessionID:  harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation])),
+		TurnID:            harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])),
+		CorrelationID:     strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
+		Deadline:          deadline.UTC(),
+		AuthIdentity:      harness.AuthIdentity{Subject: "task:" + task.Namespace + "/" + task.Name},
+		Input:             harness.TurnInput{Prompt: prompt},
+		ToolExecutionMode: harness.ToolExecutionModeObserved,
+		Metadata:          metadata,
+	}
+}
+
 func (r *TaskReconciler) harnessWrapperStartTurnRequest(
+	ctx context.Context,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	now time.Time,
 	attempts int32,
-) harness.StartTurnRequest {
+) (harness.StartTurnRequest, error) {
 	deadline := now.Add(harnessWrapperNoTimeoutDuration)
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
@@ -383,6 +472,10 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
 	}
+	metadata, err := r.harnessWrapperTurnMetadata(ctx, task, agent, runtimeName)
+	if err != nil {
+		return harness.StartTurnRequest{}, err
+	}
 	return harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
 		Namespace:        task.Namespace,
@@ -397,11 +490,89 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 		},
 		Input:             harness.TurnInput{Prompt: prompt},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
-		Metadata: map[string]string{
-			"runtime": runtimeName,
-			"wrapper": "cli",
-		},
+		Metadata:          metadata,
+	}, nil
+}
+
+func (r *TaskReconciler) harnessWrapperTurnMetadata(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	runtimeName string,
+) (map[string]string, error) {
+	metadata := map[string]string{
+		"runtime": runtimeName,
+		"wrapper": "cli",
 	}
+	if agent != nil {
+		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
+			metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
+		}
+		if agent.Spec.SystemPrompt != nil {
+			systemPrompt := strings.TrimSpace(agent.Spec.SystemPrompt.Inline)
+			if systemPrompt == "" && agent.Spec.SystemPrompt.ConfigMapRef != nil {
+				resolved, err := r.resolveHarnessWrapperConfigMapValue(
+					ctx,
+					agent.Namespace,
+					agent.Spec.SystemPrompt.ConfigMapRef,
+				)
+				if err != nil {
+					return nil, err
+				}
+				systemPrompt = strings.TrimSpace(resolved)
+			}
+			if systemPrompt != "" {
+				metadata["systemPrompt"] = systemPrompt
+			}
+		}
+	}
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
+		metadata["maxTurns"] = strconv.FormatInt(int64(*agent.Spec.Runtime.DefaultMaxTurns), 10)
+	}
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
+		metadata["maxTurns"] = strconv.FormatInt(int64(*task.Spec.AgentRuntime.MaxTurns), 10)
+	}
+	allowedTools := []string(nil)
+	if agent != nil && agent.Spec.Runtime != nil {
+		allowedTools = agent.Spec.Runtime.DefaultAllowedTools
+	}
+	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
+		allowedTools = task.Spec.AgentRuntime.AllowedTools
+	}
+	if len(allowedTools) > 0 {
+		metadata["allowedTools"] = strings.Join(allowedTools, ",")
+	}
+	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+		metadata["disallowedTools"] = strings.Join(task.Spec.AgentRuntime.DisallowedTools, ",")
+	}
+	allowBash := true
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
+		allowBash = *agent.Spec.Runtime.DefaultAllowBash
+	}
+	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
+		allowBash = *task.Spec.AgentRuntime.AllowBash
+	}
+	metadata["allowBash"] = strconv.FormatBool(allowBash)
+	return metadata, nil
+}
+
+func (r *TaskReconciler) resolveHarnessWrapperConfigMapValue(
+	ctx context.Context,
+	namespace string,
+	ref *corev1alpha1.ConfigMapKeySelector,
+) (string, error) {
+	if ref == nil {
+		return "", nil
+	}
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: ref.Name, Namespace: namespace}, cm); err != nil {
+		return "", fmt.Errorf("resolve harness runtime system prompt ConfigMap %s/%s: %w", namespace, ref.Name, err)
+	}
+	value, ok := cm.Data[ref.Key]
+	if !ok {
+		return "", fmt.Errorf("resolve harness runtime system prompt ConfigMap %s/%s key %q: key not found", namespace, ref.Name, ref.Key)
+	}
+	return value, nil
 }
 
 func harnessWrapperTurnID(task *corev1alpha1.Task, attempts int32) harness.HarnessTurnID {

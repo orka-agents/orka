@@ -3,6 +3,7 @@ package cliwrapper
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,13 +115,29 @@ func (a *GenericAdapter) ParseResult(_ context.Context, _ TurnContext, run Comma
 		if path == "" {
 			return TurnResult{}, fmt.Errorf("result file path is required")
 		}
-		data, err := os.ReadFile(path)
+		data, err := readBoundedResultFile(path)
 		if err != nil {
-			return TurnResult{Result: result}, fmt.Errorf("read result file: %w", err)
+			return TurnResult{Result: result}, err
 		}
-		result = string(data)
+		result = data
 	}
 	return TurnResult{Result: result}, nil
+}
+
+func readBoundedResultFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("read result file: %w", err)
+	}
+	defer file.Close() //nolint:errcheck
+	data, err := io.ReadAll(io.LimitReader(file, int64(maxTerminalResultBytes)+1))
+	if err != nil {
+		return "", fmt.Errorf("read result file: %w", err)
+	}
+	if len(data) > maxTerminalResultBytes {
+		return "", fmt.Errorf("result file exceeds harness terminal frame limit")
+	}
+	return string(data), nil
 }
 
 func firstNonEmpty(values ...string) string {

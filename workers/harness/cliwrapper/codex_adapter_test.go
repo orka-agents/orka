@@ -147,3 +147,10 @@ func stringifyFrames(t *testing.T, frames []harness.HarnessEventFrame) string {
 	}
 	return string(data)
 }
+
+func TestCodexInstructionsDenyAllWhenAllowlistIntersectionEmpty(t *testing.T) {
+	instructions := buildCodexInstructions(&agentEnvConfig{AllowedToolsSet: true, MaxTurns: defaultCodexMaxTurns})
+	if !strings.Contains(instructions, "Do not use runtime tools") {
+		t.Fatalf("instructions = %q, want deny-all tool guidance", instructions)
+	}
+}
