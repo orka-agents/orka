@@ -29,7 +29,7 @@ func main() {
 }
 
 func run(args []string) error {
-	cfg, err := cliwrapper.LoadConfigFromEnv()
+	cfg, err := cliwrapper.LoadConfigFromEnvUnvalidated()
 	if err != nil {
 		return err
 	}

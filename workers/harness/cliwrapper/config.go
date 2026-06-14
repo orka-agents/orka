@@ -98,6 +98,14 @@ func DefaultConfig() Config {
 }
 
 func LoadConfigFromEnv() (Config, error) {
+	cfg, err := LoadConfigFromEnvUnvalidated()
+	if err != nil {
+		return Config{}, err
+	}
+	return cfg, cfg.Validate()
+}
+
+func LoadConfigFromEnvUnvalidated() (Config, error) {
 	cfg := DefaultConfig()
 	if v := strings.TrimSpace(os.Getenv(EnvListenAddr)); v != "" {
 		cfg.ListenAddr = v
@@ -185,7 +193,7 @@ func LoadConfigFromEnv() (Config, error) {
 		}
 		cfg.TurnRetention = parsed
 	}
-	return cfg, cfg.Validate()
+	return cfg, nil
 }
 
 func (c Config) Validate() error {

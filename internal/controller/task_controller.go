@@ -1487,6 +1487,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if elapsed > task.Spec.Timeout.Duration {
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
+				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
+			}
 			return r.failTask(ctx, task, "task timed out")
 		}
 	}

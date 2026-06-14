@@ -29,7 +29,10 @@ const (
 	harnessWrapperCorrelationIDAnno = "orka.ai/harness-wrapper-correlation-id"
 	harnessWrapperLastFrameSeqAnno  = "orka.ai/harness-wrapper-last-frame-seq"
 	harnessWrapperStartedAnno       = "orka.ai/harness-wrapper-started"
+	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
 	harnessWrapperStreamPollTimeout = 2 * time.Second
+	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
+	harnessWrapperNoTimeoutDuration = time.Hour * 24 * 365 * 100
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -87,6 +90,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	attempts := task.Status.Attempts + 1
 	request := r.harnessWrapperStartTurnRequest(task, agent, now.Time, attempts)
 	if taskHasPlannedHarnessWrapperTurn(task) {
+		if !taskHasHarnessWrapperTurn(task) && harnessWrapperPlannedTurnExpired(task, now.Time) {
+			return r.failTask(ctx, task, "planned harness runtime turn expired before start was confirmed")
+		}
 		request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
 		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
 		request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
@@ -99,6 +105,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	if err != nil {
 		return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
 	}
+	if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
+		return r.failTask(ctx, task, err.Error())
+	}
 	if _, err := client.StartTurn(ctx, request); err != nil {
 		message := err.Error()
 		switch {
@@ -106,6 +115,12 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			// Treat a duplicate turn ID as idempotent recovery after the wrapper
 			// accepted the planned turn before Running status was persisted.
 		case strings.Contains(message, "maximum concurrent turns"):
+			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
+				return ctrl.Result{}, clearErr
+			}
+			if releaseErr := r.releaseHarnessWrapperSessionLock(ctx, task); releaseErr != nil {
+				return ctrl.Result{}, releaseErr
+			}
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		default:
 			return r.failTask(ctx, task, events.RedactExecutionEventText(message))
@@ -209,6 +224,12 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, "harness wrapper turn cancelled")
 	}
 	if result.Failed != nil {
+		if r.shouldRetry(task) {
+			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
+				return ctrl.Result{}, clearErr
+			}
+			return r.retryTask(ctx, task)
+		}
 		message := strings.TrimSpace(result.Failed.Message)
 		if message == "" {
 			message = strings.TrimSpace(result.Failed.Reason)
@@ -241,6 +262,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperCorrelationIDAnno] = request.CorrelationID
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
+	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
 	return r.Patch(ctx, task, patch)
 }
 
@@ -250,6 +272,53 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 		task.Annotations = map[string]string{}
 	}
 	task.Annotations[harnessWrapperStartedAnno] = "true"
+	return r.Patch(ctx, task, patch)
+}
+
+func harnessWrapperPlannedTurnExpired(task *corev1alpha1.Task, now time.Time) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	plannedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[harnessWrapperPlannedAtAnno]))
+	if err != nil {
+		return false
+	}
+	return now.Sub(plannedAt) > harnessWrapperPlannedTurnTTL
+}
+
+func (r *TaskReconciler) validateHarnessWrapperCapabilities(
+	ctx context.Context,
+	client *harness.Client,
+	request harness.StartTurnRequest,
+) error {
+	capabilities, err := client.Capabilities(ctx)
+	if err != nil {
+		return fmt.Errorf("read harness runtime capabilities: %w", err)
+	}
+	wantRuntime := strings.TrimSpace(request.Metadata["runtime"])
+	if wantRuntime != "" && capabilities.RuntimeName != wantRuntime {
+		return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
+	}
+	return nil
+}
+
+func (r *TaskReconciler) releaseHarnessWrapperSessionLock(ctx context.Context, task *corev1alpha1.Task) error {
+	if task.Spec.SessionRef == nil || r.SessionManager == nil {
+		return nil
+	}
+	return r.SessionManager.ReleaseLock(ctx, task)
+}
+
+func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task *corev1alpha1.Task) error {
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations != nil {
+		delete(task.Annotations, harnessWrapperTurnIDAnnotation)
+		delete(task.Annotations, harnessWrapperRuntimeAnnotation)
+		delete(task.Annotations, harnessWrapperCorrelationIDAnno)
+		delete(task.Annotations, harnessWrapperLastFrameSeqAnno)
+		delete(task.Annotations, harnessWrapperStartedAnno)
+		delete(task.Annotations, harnessWrapperPlannedAtAnno)
+	}
 	return r.Patch(ctx, task, patch)
 }
 
@@ -266,13 +335,38 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 	return false
 }
 
+func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *corev1alpha1.Task, reason string) error {
+	if !taskHasHarnessWrapperTurn(task) {
+		return nil
+	}
+	endpoint := harnessWrapperEndpoint()
+	if endpoint == "" {
+		return nil
+	}
+	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+	if err != nil {
+		return err
+	}
+	_, err = client.CancelTurn(ctx, harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        task.Namespace,
+		TaskName:         task.Name,
+		SessionName:      harnessWrapperSessionName(task),
+		RuntimeSessionID: harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation])),
+		TurnID:           harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])),
+		CorrelationID:    strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
+		Reason:           reason,
+	})
+	return err
+}
+
 func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	now time.Time,
 	attempts int32,
 ) harness.StartTurnRequest {
-	deadline := now.Add(time.Hour)
+	deadline := now.Add(harnessWrapperNoTimeoutDuration)
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}

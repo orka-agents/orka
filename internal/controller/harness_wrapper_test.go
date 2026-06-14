@@ -19,7 +19,7 @@ import (
 func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	server, err := cliwrapper.NewServer(cfg, cliwrapper.NewFakeAdapter(cliwrapper.FakeBehaviorSuccess))
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
 	t.Setenv(harnessWrapperAuthValueEnv, "controller-auth-value")
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AuthValue = "controller-auth-value"
-	server, err := cliwrapper.NewServer(cfg, cliwrapper.NewFakeAdapter(cliwrapper.FakeBehaviorSuccess))
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestHarnessWrapperStartTurnUsesComputedAttemptForTurnID(t *testing.T) {
 func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	server, err := cliwrapper.NewServer(cfg, cliwrapper.NewFakeAdapter(cliwrapper.FakeBehaviorSuccess))
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
