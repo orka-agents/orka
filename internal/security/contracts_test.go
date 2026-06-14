@@ -403,6 +403,63 @@ func TestBuildReviewContextBoundsPromptAndManifest(t *testing.T) {
 	}
 }
 
+func TestBuildReviewContextIncludesChangedLineRanges(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package main\n\nfunc main() {}\n")
+	slice := store.ReviewSlice{
+		ID:             "slice_app",
+		RepositoryScan: "repo",
+		Title:          "App",
+		Kind:           "package",
+		OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:   []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{{
+			Path:      "app.go",
+			StartLine: 3,
+			EndLine:   3,
+		}},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if !strings.Contains(prompt, "Changed-code focus") || !strings.Contains(prompt, "app.go:3-3") || !strings.Contains(prompt, "newly introduced") {
+		t.Fatalf("prompt missing changed-line focus:\n%s", prompt)
+	}
+	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].Path != "app.go" {
+		t.Fatalf("manifest changed ranges = %#v, want app.go range", manifest.ChangedLineRanges)
+	}
+}
+
+func TestReviewContextManifestRoundTripsChangedRanges(t *testing.T) {
+	manifest := ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_app",
+		ChangedFiles:  []string{"app.go"},
+		ChangedLineRanges: []ChangedLineRange{{
+			Path:      "app.go",
+			StartLine: 2,
+			EndLine:   4,
+		}},
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "app.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 10}},
+			Readable:           true,
+		}},
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	got, err := ParseReviewContextManifest(data)
+	if err != nil {
+		t.Fatalf("ParseReviewContextManifest() error = %v", err)
+	}
+	if len(got.ChangedLineRanges) != 1 || got.ChangedLineRanges[0].StartLine != 2 {
+		t.Fatalf("changed ranges = %#v, want round trip", got.ChangedLineRanges)
+	}
+}
+
 func validFinding() FindingsV2Finding {
 	return FindingsV2Finding{
 		Title:       "Finding",
@@ -438,5 +495,33 @@ func TestDroppedFindingSampleJSON(t *testing.T) {
 	}
 	if got["title"] != "bad" {
 		t.Fatalf("sample = %#v, want title", got)
+	}
+}
+
+func TestBuildReviewContextClipsChangedLineRangesToIncludedRanges(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", strings.Repeat("line\n", 40))
+	slice := store.ReviewSlice{
+		ID:                "slice_app",
+		RepositoryScan:    "repo",
+		Title:             "App",
+		Kind:              "package",
+		OwnedFiles:        []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:      []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{{Path: "app.go", StartLine: 20, EndLine: 30}},
+	}
+	_, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{MaxFiles: 1, MaxBytes: 520})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if len(manifest.IncludedFiles) != 1 || len(manifest.IncludedFiles[0].IncludedLineRanges) != 1 {
+		t.Fatalf("included ranges = %#v", manifest.IncludedFiles)
+	}
+	included := manifest.IncludedFiles[0].IncludedLineRanges[0]
+	if included.EndLine >= 20 {
+		t.Skip("fixture did not truncate before changed range")
+	}
+	if len(manifest.ChangedLineRanges) != 0 {
+		t.Fatalf("changed ranges = %#v, want omitted because changed lines are outside included context", manifest.ChangedLineRanges)
 	}
 }

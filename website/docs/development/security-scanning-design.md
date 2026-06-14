@@ -261,13 +261,44 @@ evidence model: artifact blobs are stored separately, the UI mainly needs struct
 metadata plus artifact filenames, and JSON keeps the store API and migrations manageable.
 
 Review slices store JSON arrays for entrypoints, owned files, context files, tests, tags,
-and trust boundaries. Dropped finding diagnostics store only a reason and compact sample
-JSON; they must not contain secrets, raw tokens, raw transcripts, or full request contexts.
+trust boundaries, changed files, and changed line ranges. Dropped finding diagnostics store
+only a layer, reason, and compact sample JSON; they must not contain secrets, raw tokens,
+raw transcripts, or full request contexts.
 
 > **Threat-model history:** although `security_threat_models` carries a `version` column,
 > `SaveThreatModel` is currently replace-only — it deletes existing rows for the repository
 > before inserting the new model, so only the latest threat model is retained. The versioned
 > schema leaves room to preserve history later, but no prior versions are kept today.
+
+## Scanner Quality Policy
+
+The default scanner policy is explicit and versioned. Review and validation prompts require
+concrete exploitability: attacker-controlled source, trust boundary crossed, sensitive sink
+or privileged operation, missing or insufficient control, exploitation path, impact, and why
+existing controls/tests do not already cover the issue. Prompt/tool injection remains in
+scope for Orka when it can affect privileged tools, credentials, memory, artifacts, task
+specs/status, patch generation, or PR creation.
+
+Quality metrics to observe per scan run are accepted findings, dropped findings, dropped
+findings by layer (`validation`, `filter`, `cap`, `policy` when future policy loaders add
+new gates), dropped findings by reason, accepted findings by severity/confidence, and
+validation outcomes (`validated`, `failed`, `skipped`).
+
+### ConfigMap-backed custom policy
+
+`RepositoryScanSpec.customScanInstructionsRef` and `falsePositivePolicyRef` point to
+same-namespace ConfigMap keys. Referenced ConfigMaps must carry the label or annotation
+`orka.ai/security-policy: "true"`, so direct CRD users cannot make the controller dereference
+arbitrary same-namespace ConfigMaps. The controller and API never read ConfigMaps from
+another namespace for scan policy. Missing ConfigMaps/keys, values larger than 32 KiB, and
+content that appears to contain credentials are rejected before a scan task is created. Custom scan
+instructions are appended to threat/review/validation prompts as additive context; custom
+false-positive policy is prompt and provenance metadata only. Deterministic hard exclusions
+still run before persistence and cannot be disabled by ConfigMap content.
+
+Scan runs and tasks record policy provenance with `scannerPolicyVersion`, `policyDigest`,
+`ORKA_SECURITY_POLICY_DIGEST`, and `ORKA_SECURITY_POLICY_PROVENANCE`; the full policy text is
+not copied into SQLite.
 
 ## Artifact Contract
 
@@ -335,6 +366,8 @@ bounded review prompt:
 {
   "schemaVersion": 1,
   "sliceId": "slice_...",
+  "changedFiles": ["internal/security/security.go"],
+  "changedLineRanges": [{"path": "internal/security/security.go", "startLine": 120, "endLine": 148}],
   "includedFiles": [
     {
       "path": "internal/security/security.go",
@@ -372,6 +405,8 @@ Review output uses schema version 2 and must cite evidence from the review conte
   "scan": {
     "mode": "initial",
     "sliceId": "slice_...",
+  "changedFiles": ["internal/security/security.go"],
+  "changedLineRanges": [{"path": "internal/security/security.go", "startLine": 120, "endLine": 148}],
     "summary": "Reviewed one bounded slice."
   },
   "findings": [
@@ -405,14 +440,51 @@ Review output uses schema version 2 and must cite evidence from the review conte
 
 Controller ingestion validates v2 findings independently. A valid finding is stored with an
 Orka-owned fingerprint derived from namespace, repository scan, repo URL, branch, subPath,
-slice ID, category, normalized title, and canonical sorted evidence refs. Invalid findings
-are dropped individually and recorded in `security_dropped_findings` plus
-`security-dropped-findings.json`.
+slice ID, category, normalized title, and canonical sorted evidence refs. Candidate findings
+then pass through the deterministic false-positive filter before the per-run cap is applied.
+Invalid or filtered findings are dropped individually and recorded in
+`security_dropped_findings` plus `security-dropped-findings.json`.
+
+Finding lifecycle:
+
+1. model writes `security-findings.v2.json`,
+2. schema validation,
+3. evidence validation against `security-review-context-<slice-id>.json`,
+4. deterministic false-positive filtering,
+5. max-findings cap,
+6. persisted open finding,
+7. optional validation task,
+8. human-triggered patch proposal and PR creation.
 
 Validation rejects missing required fields, empty evidence, unsafe/path-traversal evidence,
 evidence files omitted from the context manifest, inverted or stale line ranges, line
 ranges outside included manifest ranges, and quote mismatches when workspace content is
-available for quote verification.
+available for quote verification. The false-positive filter drops deterministic noise such
+as docs-only findings, test-only findings, generic rate limiting, generic DoS/resource
+exhaustion, dependency-version findings, client-only auth complaints, React XSS without
+unsafe HTML sinks, shell injection without an untrusted input path, non-sensitive logging,
+and generic prompt injection without a privileged Orka effect. It keeps Orka-specific
+exceptions when there is a concrete exploit path across Kubernetes RBAC, pod/task isolation,
+workspace write boundaries, artifact ingestion, Git credential/PR flows, context-token or
+TxToken handling, tenant/namespace isolation, raw token persistence, or privileged
+AI-agent prompt/tool/memory/artifact behavior.
+
+Dropped diagnostics use stable layers: `validation`, `filter`, and `cap`. Samples include
+bounded title/category/file/severity/confidence metadata only and are redacted before
+persistence. Scan run summaries expose accepted and dropped counts plus the scanner policy
+version (`2026-06-orka-fp-policy-v1`) so precision changes can be audited over time.
+
+Validation mode semantics are enforced as follows: `off` creates no validation tasks but the
+schema/evidence/filter stages still run; `light` validates up to the configured cap for
+findings that meet either the minimum severity or confidence threshold; `full` validates all
+kept findings that meet both thresholds. `validationStatus=failed` findings are excluded
+from recommended patch queues, and validated findings rank higher than unvalidated findings
+within the same severity.
+
+Run idempotency keys are derived from namespace, repository scan name, mode, base/head SHA,
+subPath, policy digest, and scanner policy version. The controller uses the key to avoid
+starting duplicate active scheduled/incremental scan runs while still allowing intentional
+manual reruns.
 
 ### `security-patch-<finding-id>.json`
 

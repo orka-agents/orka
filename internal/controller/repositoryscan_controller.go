@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,6 +50,7 @@ const (
 	scanRunPhaseFailed    = "failed"
 
 	scanModeIncremental = "incremental"
+	scanModeManual      = "manual"
 	confidenceHigh      = "high"
 
 	reviewSliceStatusPending   = "pending"
@@ -63,6 +65,9 @@ const (
 	findingValidationStatusPending   = "pending"
 	findingValidationStatusValidated = "validated"
 	findingValidationStatusFailed    = "failed"
+	validationModeOff                = "off"
+	validationModeFull               = "full"
+	validationThresholdLow           = "low"
 
 	scanSummaryRunning            = "scan is running"
 	scanSummaryThreatModelPending = "Threat model generated; deterministic mapper pending"
@@ -73,6 +78,8 @@ const (
 	repositoryScanConditionMessageLimit  = 32 * 1024
 	repositoryScanConditionMessageSuffix = "\n...[truncated]"
 )
+
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 
 // RepositoryScanReconciler reconciles RepositoryScan resources.
 type RepositoryScanReconciler struct {
@@ -322,6 +329,7 @@ func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context
 	return false, nil
 }
 
+//nolint:unparam // headCommit is usually mapper-resolved but kept for explicit scan ranges.
 func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit string) error {
 	var threatModel string
 	if r.SecurityStore != nil {
@@ -333,8 +341,18 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		}
 	}
 
+	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
+	if err != nil {
+		return err
+	}
 	taskName := security.ScanStageTaskName(scan.Name, mode, security.StageThreatModel, "")
 	scanID := security.ScanRunID(taskName)
+	idempotencyKey := security.ScanRunIdempotencyKey(scan.Namespace, scan.Name, mode, baseCommit, headCommit, scan.Spec.SubPath, policy.Digest)
+	if duplicate, err := r.hasActiveScanRunWithIdempotencyKey(ctx, scan, idempotencyKey); err != nil {
+		return err
+	} else if duplicate {
+		return nil
+	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
 
@@ -354,13 +372,16 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &scan.Spec.AnalysisAgentRef,
-			Prompt:   security.BuildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel),
+			Prompt:   security.BuildThreatModelPrompt(scan, mode, baseCommit, headCommit, threatModel, policy.PromptPolicy()),
 			Timeout:  &timeout,
 			Priority: &priority,
 			Env: []corev1.EnvVar{
 				{Name: security.EnvRepositoryScanName, Value: scan.Name},
 				{Name: security.EnvStage, Value: security.StageThreatModel},
 				{Name: security.EnvScanID, Value: scanID},
+				{Name: security.EnvScannerPolicyVersion, Value: security.ScannerPolicyVersion},
+				{Name: security.EnvPolicyDigest, Value: policy.Digest},
+				{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 				Workspace: &corev1alpha1.WorkspaceConfig{
@@ -383,15 +404,18 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 	}
 
 	if err := r.ensureScanRunRecord(ctx, &store.ScanRun{
-		ID:             scanID,
-		Namespace:      scan.Namespace,
-		RepositoryScan: scan.Name,
-		TaskName:       taskName,
-		Mode:           mode,
-		Phase:          scanRunPhasePending,
-		BaseCommit:     baseCommit,
-		HeadCommit:     headCommit,
-		StartedAt:      time.Now(),
+		ID:                   scanID,
+		Namespace:            scan.Namespace,
+		RepositoryScan:       scan.Name,
+		TaskName:             taskName,
+		Mode:                 mode,
+		Phase:                scanRunPhasePending,
+		BaseCommit:           baseCommit,
+		HeadCommit:           headCommit,
+		ScannerPolicyVersion: security.ScannerPolicyVersion,
+		PolicyDigest:         policy.Digest,
+		IdempotencyKey:       idempotencyKey,
+		StartedAt:            time.Now(),
 	}); err != nil {
 		return err
 	}
@@ -409,6 +433,29 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 			ObservedGeneration: s.Generation,
 		})
 	})
+}
+
+func (r *RepositoryScanReconciler) hasActiveScanRunWithIdempotencyKey(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	key string,
+) (bool, error) {
+	if r.SecurityStore == nil || strings.TrimSpace(key) == "" {
+		return false, nil
+	}
+	runs, _, err := r.SecurityStore.ListScanRuns(ctx, scan.Namespace, scan.Name, 100, "")
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if run.IdempotencyKey != key {
+			continue
+		}
+		if run.Phase == scanRunPhasePending || run.Phase == scanRunPhaseRunning {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *RepositoryScanReconciler) ensureScanRunRecord(ctx context.Context, run *store.ScanRun) error {
@@ -439,7 +486,32 @@ func (r *RepositoryScanReconciler) ensureScanRunRecord(ctx context.Context, run 
 	return nil
 }
 
+func activeScanRunPhase(phase string) bool {
+	return phase == scanRunPhasePending || phase == scanRunPhaseRunning
+}
+
+func ensureScanRunPolicyDigest(run *store.ScanRun, policy security.ScannerPolicy) error {
+	if run == nil {
+		return nil
+	}
+	if run.PolicyDigest == "" {
+		run.PolicyDigest = policy.Digest
+		return nil
+	}
+	if policy.Digest != "" && run.PolicyDigest != policy.Digest {
+		return fmt.Errorf("scanner policy digest changed during scan run: recorded %s current %s", run.PolicyDigest, policy.Digest)
+	}
+	return nil
+}
+
 func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
+	if err != nil {
+		return err
+	}
+	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+		return err
+	}
 	timeout := metav1.Duration{Duration: 30 * time.Minute}
 	priority := int32(690)
 	taskName := security.ScanStageTaskName(scan.Name, run.Mode, security.StageMapper, "")
@@ -465,6 +537,9 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 				{Name: security.EnvRepositoryScanName, Value: scan.Name},
 				{Name: security.EnvStage, Value: security.StageMapper},
 				{Name: security.EnvScanID, Value: run.ID},
+				{Name: security.EnvScannerPolicyVersion, Value: security.ScannerPolicyVersion},
+				{Name: security.EnvPolicyDigest, Value: policy.Digest},
+				{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 				{Name: security.EnvScanBaseCommit, Value: run.BaseCommit},
 				{Name: security.EnvScanHeadCommit, Value: run.HeadCommit},
 			},
@@ -569,6 +644,85 @@ func normalizeRepoPath(value string) string {
 	return strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
 }
 
+func attachChangedMetadataToReviewSlice(slice *store.ReviewSlice, changedFiles []string, changedLineRanges []security.ChangedLineRange) {
+	if slice == nil {
+		return
+	}
+	slicePaths := reviewSlicePathSet(*slice)
+	slice.ChangedFiles = reviewSliceChangedFiles(changedFiles, slicePaths)
+	slice.ChangedLineRanges = reviewSliceChangedLineRanges(changedLineRanges, slicePaths)
+}
+
+func reviewSlicePathSet(slice store.ReviewSlice) map[string]struct{} {
+	paths := map[string]struct{}{}
+	for _, file := range slice.Entrypoints {
+		if normalized := normalizeRepoPath(file.Path); security.SafeRepoPath(normalized) {
+			paths[normalized] = struct{}{}
+		}
+	}
+	for _, file := range slice.OwnedFiles {
+		if normalized := normalizeRepoPath(file.Path); security.SafeRepoPath(normalized) {
+			paths[normalized] = struct{}{}
+		}
+	}
+	for _, file := range slice.ContextFiles {
+		if normalized := normalizeRepoPath(file.Path); security.SafeRepoPath(normalized) {
+			paths[normalized] = struct{}{}
+		}
+	}
+	for _, test := range slice.Tests {
+		if normalized := normalizeRepoPath(test.Path); security.SafeRepoPath(normalized) {
+			paths[normalized] = struct{}{}
+		}
+	}
+	return paths
+}
+
+func reviewSliceChangedFiles(changedFiles []string, slicePaths map[string]struct{}) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(changedFiles))
+	for _, file := range changedFiles {
+		file = normalizeRepoPath(file)
+		if !security.SafeRepoPath(file) {
+			continue
+		}
+		if _, ok := slicePaths[file]; !ok {
+			continue
+		}
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
+		out = append(out, file)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func reviewSliceChangedLineRanges(changedLineRanges []security.ChangedLineRange, slicePaths map[string]struct{}) []security.ChangedLineRange {
+	out := make([]security.ChangedLineRange, 0, len(changedLineRanges))
+	for _, lineRange := range changedLineRanges {
+		lineRange.Path = normalizeRepoPath(lineRange.Path)
+		if !security.SafeRepoPath(lineRange.Path) || lineRange.StartLine <= 0 || lineRange.EndLine < lineRange.StartLine {
+			continue
+		}
+		if _, ok := slicePaths[lineRange.Path]; !ok {
+			continue
+		}
+		out = append(out, lineRange)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		if out[i].StartLine != out[j].StartLine {
+			return out[i].StartLine < out[j].StartLine
+		}
+		return out[i].EndLine < out[j].EndLine
+	})
+	return out
+}
+
 func changedFileSet(files []string) map[string]struct{} {
 	out := make(map[string]struct{}, len(files))
 	for _, file := range files {
@@ -605,6 +759,13 @@ func trustedFindingsBranch(scan *corev1alpha1.RepositoryScan) string {
 }
 
 func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {
+	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
+	if err != nil {
+		return err
+	}
+	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+		return err
+	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
 	for _, reviewSlice := range reviewSlices {
@@ -630,7 +791,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 			Spec: corev1alpha1.TaskSpec{
 				Type:     corev1alpha1.TaskTypeAgent,
 				AgentRef: &scan.Spec.AnalysisAgentRef,
-				Prompt:   security.BuildReviewPrompt(scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice),
+				Prompt:   security.BuildReviewPrompt(scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice, policy.PromptPolicy()),
 				Timeout:  &timeout,
 				Priority: &priority,
 				Env: []corev1.EnvVar{
@@ -638,6 +799,9 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 					{Name: security.EnvRepositoryScanName, Value: scan.Name},
 					{Name: security.EnvStage, Value: security.StageReview},
 					{Name: security.EnvScanID, Value: run.ID},
+					{Name: security.EnvScannerPolicyVersion, Value: security.ScannerPolicyVersion},
+					{Name: security.EnvPolicyDigest, Value: policy.Digest},
+					{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 					{Name: security.EnvSliceID, Value: reviewSlice.ID},
 				},
 				AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -1559,17 +1723,34 @@ func (r *RepositoryScanReconciler) keepScanRunningForPendingReviewSlices(
 	return nil
 }
 
-func (r *RepositoryScanReconciler) shouldAutoValidateFinding(scan *corev1alpha1.RepositoryScan, finding *store.Finding, createdForTask int) bool {
-	switch security.EffectiveValidationMode(scan) {
-	case "off":
+func (r *RepositoryScanReconciler) shouldAutoValidateFinding(scan *corev1alpha1.RepositoryScan, finding *store.Finding, createdForRun int) bool {
+	if finding == nil {
+		return false
+	}
+	minSeverity := security.EffectiveValidationMinSeverity(scan)
+	minConfidence := security.EffectiveValidationMinConfidence(scan)
+	mode := security.EffectiveValidationMode(scan)
+	if mode == validationModeFull {
+		if scan.Spec.ValidationMinSeverity == "" {
+			minSeverity = validationThresholdLow
+		}
+		if scan.Spec.ValidationMinConfidence == "" {
+			minConfidence = validationThresholdLow
+		}
+	}
+	severityOK := security.SeverityMeetsMinimum(finding.Severity, minSeverity)
+	confidenceOK := security.ConfidenceMeetsMinimum(finding.Confidence, minConfidence)
+	switch mode {
+	case validationModeOff:
 		return false
 	case "full":
-		return true
+		return severityOK && confidenceOK
 	default:
-		if createdForTask >= 2 {
+		limit := int(security.EffectiveValidationMaxFindingsPerRun(scan))
+		if limit <= 0 || createdForRun >= limit {
 			return false
 		}
-		return finding.Severity == "critical" || finding.Severity == confidenceHigh || finding.Confidence == confidenceHigh
+		return severityOK || confidenceOK
 	}
 }
 
@@ -1600,6 +1781,21 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 	if r.Client == nil {
 		return nil
 	}
+	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
+	if err != nil {
+		return err
+	}
+	if r.SecurityStore != nil && strings.TrimSpace(finding.ScanRunID) != "" {
+		run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, finding.ScanRunID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if run != nil && activeScanRunPhase(run.Phase) {
+			if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+				return err
+			}
+		}
+	}
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
 	priority := int32(725)
 	taskName := security.ScanStageTaskName(scan.Name, "validation", security.StageValidation, finding.ID)
@@ -1621,13 +1817,15 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
 			AgentRef: &scan.Spec.AnalysisAgentRef,
-			Prompt:   security.BuildValidationPrompt(scan, finding),
+			Prompt:   security.BuildValidationPrompt(scan, finding, policy.PromptPolicy()),
 			Timeout:  &timeout,
 			Priority: &priority,
 			Env: []corev1.EnvVar{
 				{Name: security.EnvRepositoryScanName, Value: scan.Name},
 				{Name: security.EnvStage, Value: security.StageValidation},
 				{Name: security.EnvScanID, Value: finding.ScanRunID},
+				{Name: security.EnvPolicyDigest, Value: policy.Digest},
+				{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 				{Name: security.EnvFindingID, Value: finding.ID},
 			},
 			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
@@ -1736,6 +1934,7 @@ func (r *RepositoryScanReconciler) persistDroppedFindingDiagnostics(
 			TaskName:       task.Name,
 			SliceID:        sliceID,
 			Reason:         diagnostic.Reason,
+			Layer:          diagnostic.Layer,
 			SampleJSON:     security.DroppedFindingSampleJSON(diagnostic),
 		}
 		if err := r.SecurityStore.CreateDroppedFinding(ctx, dropped); err != nil {
@@ -1758,10 +1957,40 @@ func (r *RepositoryScanReconciler) persistDroppedFindingDiagnostics(
 	return nil
 }
 
+func (r *RepositoryScanReconciler) validationTaskCountForScanRun(ctx context.Context, scan *corev1alpha1.RepositoryScan, scanRunID string) (int, error) {
+	if r.Client == nil || strings.TrimSpace(scanRunID) == "" {
+		return 0, nil
+	}
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+			labels.LabelSecurityStage:  security.StageValidation,
+			labels.LabelSecurityScanID: scanRunID,
+		}),
+	); err != nil {
+		return 0, err
+	}
+	return len(tasks.Items), nil
+}
+
 func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, findings []*store.Finding) error {
-	created := 0
+	createdByRun := map[string]int{}
 	for _, finding := range findings {
-		if finding == nil || !r.shouldAutoValidateFinding(scan, finding, created) {
+		if finding == nil {
+			continue
+		}
+		created, ok := createdByRun[finding.ScanRunID]
+		if !ok {
+			existing, err := r.validationTaskCountForScanRun(ctx, scan, finding.ScanRunID)
+			if err != nil {
+				return err
+			}
+			created = existing
+		}
+		if !r.shouldAutoValidateFinding(scan, finding, created) {
+			createdByRun[finding.ScanRunID] = created
 			continue
 		}
 		if finding.ValidationStatus == findingValidationStatusValidated ||
@@ -1779,6 +2008,7 @@ func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Contex
 			return err
 		}
 		created++
+		createdByRun[finding.ScanRunID] = created
 	}
 	return nil
 }
@@ -1900,6 +2130,14 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		TrustedRepository:    trustedRepo,
 		UseTrustedRepository: true,
 	})
+	filterResult := security.FilterFindings(partition.Accepted, security.FindingFilterOptions{
+		RepositoryScan: scan.Name,
+		ScanRunID:      run.ID,
+		TaskName:       task.Name,
+		SliceID:        sliceID,
+	})
+	partition.Accepted = filterResult.Kept
+	partition.Dropped = append(partition.Dropped, filterResult.Dropped...)
 	var capDrops []security.DroppedFindingDiagnostic
 	partition.Accepted, capDrops = capAcceptedFindingsForRun(scan, run, partition.Accepted)
 	partition.Dropped = append(partition.Dropped, capDrops...)
@@ -1972,7 +2210,7 @@ func cappedFindingDiagnostic(index int, finding *store.Finding, limit int) secur
 		Index:  index,
 		Reason: fmt.Sprintf("maxFindingsPerRun limit %d reached", limit),
 		Sample: sample,
-		Layer:  "controller",
+		Layer:  "cap",
 	}
 }
 
@@ -2009,12 +2247,16 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 		} else if artifact != nil {
 			changedFiles := changedFileSet(artifact.ChangedFiles)
 			incrementalSelection := run.Mode == scanModeIncremental && artifact.ChangedFilesComputed
+			annotateChangedMetadata := artifact.ChangedFilesComputed && (run.Mode == scanModeIncremental || run.Mode == scanModeManual)
 			skippedSlices := 0
 			for i := range artifact.Slices {
 				slice := artifact.Slices[i]
 				slice.Namespace = scan.Namespace
 				slice.RepositoryScan = scan.Name
 				slice.LastScanRunID = run.ID
+				if annotateChangedMetadata {
+					attachChangedMetadataToReviewSlice(&slice, artifact.ChangedFiles, artifact.ChangedLineRanges)
+				}
 				if incrementalSelection {
 					if reviewSliceMatchesChangedFiles(slice, changedFiles) {
 						slice.Status = reviewSliceStatusPending
@@ -2036,6 +2278,12 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 			}
 			if artifact.HeadCommit != "" {
 				run.HeadCommit = artifact.HeadCommit
+			}
+			if run.PolicyDigest == "" {
+				run.PolicyDigest = security.ScannerPolicyDigest(security.ScannerPolicy{})
+			}
+			if run.IdempotencyKey == "" {
+				run.IdempotencyKey = security.ScanRunIdempotencyKey(scan.Namespace, scan.Name, run.Mode, run.BaseCommit, run.HeadCommit, scan.Spec.SubPath, run.PolicyDigest)
 			}
 			run.SliceCount = len(artifact.Slices)
 			run.SkippedSliceCount = skippedSlices

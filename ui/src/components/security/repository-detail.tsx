@@ -25,6 +25,16 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
   const reviewSlices = useReviewSlices(repositoryName)
   const droppedFindings = useDroppedFindings(repositoryName, repo?.status?.lastScanID)
   const runScan = useRunSecurityScan(repositoryName)
+  const latestDropped = droppedFindings.data?.items ?? []
+  const droppedByLayer = latestDropped.reduce<Record<string, number>>((acc, item) => {
+    const layer = item.layer || 'unknown'
+    acc[layer] = (acc[layer] ?? 0) + 1
+    return acc
+  }, {})
+  const topDroppedReasons = Object.entries(latestDropped.reduce<Record<string, number>>((acc, item) => {
+    acc[item.reason] = (acc[item.reason] ?? 0) + 1
+    return acc
+  }, {})).sort((a, b) => b[1] - a[1]).slice(0, 3)
 
   if (isLoading) {
     return <Skeleton className="h-96 w-full" />
@@ -106,9 +116,41 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
           <CardContent>
             <div className="text-2xl font-bold">{droppedFindings.data?.items?.length ?? scanRuns.data?.items?.[0]?.droppedFindings ?? 0}</div>
             <div className="mt-1 text-xs text-muted-foreground">Rejected model findings with diagnostics</div>
+            <div className="mt-2 flex flex-wrap gap-1 text-xs">
+              {Object.entries(droppedByLayer).map(([layer, count]) => (
+                <Badge key={layer} variant="outline">{count} {layer}</Badge>
+              ))}
+            </div>
           </CardContent>
         </Card>
       </div>
+
+      {latestDropped.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Scan Quality Diagnostics</CardTitle></CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div className="text-muted-foreground">Latest scan dropped findings by validation, filter, or cap layer. Samples are sanitized server-side.</div>
+            <div className="grid gap-2 md:grid-cols-3">
+              {latestDropped.slice(0, 6).map((item) => (
+                <div key={item.id} className="rounded-md border border-border p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Badge variant="secondary">{item.layer || 'unknown'}</Badge>
+                    <span className="text-xs text-muted-foreground">{timeAgo(item.createdAt)}</span>
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">{item.reason}</div>
+                </div>
+              ))}
+            </div>
+            {topDroppedReasons.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {topDroppedReasons.map(([reason, count]) => (
+                  <Badge key={reason} variant="outline">{count}× {reason}</Badge>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <ThreatModelEditor repositoryName={repositoryName} />
       <RecommendedFindings repositoryName={repositoryName} />
@@ -141,7 +183,7 @@ export function RepositoryDetail({ repositoryName }: { repositoryName: string })
                   </div>
                   <div className="mt-1 text-muted-foreground">{run.summary || run.taskName}</div>
                   <div className="mt-2 text-xs text-muted-foreground">
-                    Started {timeAgo(run.startedAt)} · Commits {run.commitCount ?? 0} · Slices {run.sliceCount ?? 0} · Dropped {run.droppedFindings ?? 0}
+                    Started {timeAgo(run.startedAt)} · Commits {run.commitCount ?? 0} · Slices {run.sliceCount ?? 0} · Accepted {run.acceptedFindings ?? 0} · Dropped {run.droppedFindings ?? 0} · Policy {run.scannerPolicyVersion || 'default'}
                   </div>
                 </div>
               ))}

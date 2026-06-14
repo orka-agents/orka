@@ -309,6 +309,66 @@ func EffectiveValidationMode(scan *corev1alpha1.RepositoryScan) string {
 	return "light"
 }
 
+// EffectiveValidationMaxFindingsPerRun returns the automatic validation cap for light mode.
+func EffectiveValidationMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int32 {
+	if scan.Spec.ValidationMaxFindingsPerRun != nil && *scan.Spec.ValidationMaxFindingsPerRun >= 0 {
+		return *scan.Spec.ValidationMaxFindingsPerRun
+	}
+	return 2
+}
+
+// EffectiveValidationMinSeverity returns the minimum severity eligible for automatic validation.
+func EffectiveValidationMinSeverity(scan *corev1alpha1.RepositoryScan) string {
+	if scan.Spec.ValidationMinSeverity != "" {
+		return strings.ToLower(strings.TrimSpace(scan.Spec.ValidationMinSeverity))
+	}
+	return findingLevelHigh
+}
+
+// EffectiveValidationMinConfidence returns the minimum confidence eligible for automatic validation.
+func EffectiveValidationMinConfidence(scan *corev1alpha1.RepositoryScan) string {
+	if scan.Spec.ValidationMinConfidence != "" {
+		return strings.ToLower(strings.TrimSpace(scan.Spec.ValidationMinConfidence))
+	}
+	return findingLevelHigh
+}
+
+func SeverityMeetsMinimum(value, minimum string) bool {
+	return severityRank(value) >= severityRank(minimum)
+}
+
+func ConfidenceMeetsMinimum(value, minimum string) bool {
+	return confidenceRank(value) >= confidenceRank(minimum)
+}
+
+func severityRank(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical":
+		return 4
+	case findingLevelHigh:
+		return 3
+	case findingLevelMedium:
+		return 2
+	case findingLevelLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func confidenceRank(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case findingLevelHigh:
+		return 3
+	case findingLevelMedium:
+		return 2
+	case findingLevelLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // EffectiveHistoryDays returns the configured history window or a conservative default.
 func EffectiveHistoryDays(scan *corev1alpha1.RepositoryScan) int32 {
 	if scan.Spec.HistoryDays != nil && *scan.Spec.HistoryDays > 0 {
@@ -383,7 +443,7 @@ func ArtifactWorkspacePath(subPath string) string {
 }
 
 // BuildThreatModelPrompt returns the prompt for the threat-model-first stage of a scan run.
-func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string) string {
+func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, policies ...PromptPolicy) string {
 	var prompt strings.Builder
 	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	hasExistingThreatModel := strings.TrimSpace(threatModel) != ""
@@ -417,6 +477,7 @@ func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit,
 		prompt.WriteString("- Include a short section on security-relevant change analysis for the commits in scope and explain what changed versus what remains unchanged.\n")
 	}
 	prompt.WriteString("- Call out important uncertainties explicitly instead of inventing details.\n")
+	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 	if hasExistingThreatModel {
 		prompt.WriteString("- Treat the existing threat model as baseline context to refine and extend. Do not replace it with a shorter version unless the repository is genuinely tiny.\n")
 	}
@@ -434,7 +495,7 @@ func BuildThreatModelPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit,
 }
 
 // BuildReviewPrompt returns the prompt for one deterministic review slice.
-func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, slice store.ReviewSlice) string {
+func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, slice store.ReviewSlice, policies ...PromptPolicy) string {
 	var prompt strings.Builder
 	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 	contextArtifact := ReviewContextArtifactName(slice.ID)
@@ -462,6 +523,15 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 	prompt.WriteString("Prefer a small number of high-signal findings over broad speculation. If you cannot support a claim from the included slice files, omit it.\n")
 	prompt.WriteString("Every finding must cite repo-relative file evidence with startLine and endLine from the files recorded in the review context manifest.\n")
 	prompt.WriteString("Quote fields are optional; use them only when you can copy the cited file text exactly.\n")
+	prompt.WriteString("\n")
+	prompt.WriteString(ScannerFindingQualityPolicy())
+	prompt.WriteString("\n")
+	if len(slice.ChangedFiles) > 0 || len(slice.ChangedLineRanges) > 0 {
+		prompt.WriteString("\n")
+		prompt.WriteString(incrementalChangedRiskPolicy())
+		prompt.WriteString("\n")
+	}
+	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 
 	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
 	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactFindingsV2)
@@ -490,7 +560,7 @@ func BuildReviewPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, head
 }
 
 // BuildValidationPrompt returns the prompt for the dedicated validator/repro stage for a finding.
-func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding) string {
+func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
 	artifactDir := ArtifactWorkspacePath(scan.Spec.SubPath)
 
@@ -516,7 +586,12 @@ func BuildValidationPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Fin
 	prompt.WriteString("2. Prefer safe, focused reproduction steps. Do not perform destructive actions.\n")
 	prompt.WriteString("3. Tighten or lower confidence when the code or environment does not support the original claim.\n")
 	prompt.WriteString("4. Capture a concrete attack-path analysis for how the issue could be exploited, what assumptions it depends on, and which controls already limit it.\n")
-	prompt.WriteString("5. Do not edit code, commit, or push during validation.\n")
+	prompt.WriteString("5. Fail the finding when it is theoretical, stale, docs-only, test-only, client-only, or lacks an attacker-controlled path to a sensitive sink.\n")
+	prompt.WriteString("6. Do not edit code, commit, or push during validation.\n")
+	prompt.WriteString("\n")
+	prompt.WriteString(ScannerValidationQualityPolicy())
+	prompt.WriteString("\n")
+	appendCustomPolicyPrompt(&prompt, firstPromptPolicy(policies))
 
 	fmt.Fprintf(&prompt, "\nWrite these artifacts under %s/:\n", artifactDir)
 	fmt.Fprintf(&prompt, "- %s/%s\n", artifactDir, ArtifactValidation)

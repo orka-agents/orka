@@ -73,6 +73,36 @@ spec:
                 description: Branch is the base branch to scan. Defaults to the literal
                   main branch when omitted.
                 type: string
+              customScanInstructionsRef:
+                description: CustomScanInstructionsRef references additive scanner
+                  instructions in a same-namespace ConfigMap.
+                properties:
+                  key:
+                    description: Key is the ConfigMap data key. Defaults to "policy"
+                      when omitted.
+                    type: string
+                  name:
+                    description: Name is the ConfigMap name.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              falsePositivePolicyRef:
+                description: FalsePositivePolicyRef references additive false-positive
+                  policy in a same-namespace ConfigMap.
+                properties:
+                  key:
+                    description: Key is the ConfigMap data key. Defaults to "policy"
+                      when omitted.
+                    type: string
+                  name:
+                    description: Name is the ConfigMap name.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               forkRepo:
                 description: ForkRepo is the writable fork repository URL used for
                   patch proposals.
@@ -147,6 +177,29 @@ spec:
                 type: boolean
               timeZone:
                 description: TimeZone is the IANA time zone for the schedule.
+                type: string
+              validationMaxFindingsPerRun:
+                description: ValidationMaxFindingsPerRun bounds automatic validation
+                  tasks for light mode.
+                format: int32
+                minimum: 0
+                type: integer
+              validationMinConfidence:
+                description: ValidationMinConfidence is the minimum confidence eligible
+                  for automatic validation.
+                enum:
+                - high
+                - medium
+                - low
+                type: string
+              validationMinSeverity:
+                description: ValidationMinSeverity is the minimum severity eligible
+                  for automatic validation.
+                enum:
+                - critical
+                - high
+                - medium
+                - low
                 type: string
               validationMode:
                 default: light

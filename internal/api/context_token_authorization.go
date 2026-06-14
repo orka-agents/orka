@@ -106,6 +106,7 @@ type ContextTokenAuthorizationConfig struct {
 	MonitorOperateScopes          []string
 	SkillReadScopes               []string
 	SkillWriteScopes              []string
+	ConfigMapReadScopes           []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
@@ -134,6 +135,7 @@ type ContextTokenAuthorizationConfigOptions struct {
 	MonitorOperateScopes       string
 	SkillReadScopes            string
 	SkillWriteScopes           string
+	ConfigMapReadScopes        string
 }
 
 // NewContextTokenAuthorizationConfig builds context-token authorization config.
@@ -170,6 +172,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	monitorOperate := defaultScopes(opts.MonitorOperateScopes, ContextTokenScopeMonitorsOperate)
 	skillRead := defaultScopes(opts.SkillReadScopes, ContextTokenScopeSkillsRead)
 	skillWrite := defaultScopes(opts.SkillWriteScopes, ContextTokenScopeSkillsWrite)
+	configMapRead := defaultScopes(opts.ConfigMapReadScopes, ContextTokenScopeConfigMapsRead)
 	return ContextTokenAuthorizationConfig{
 		Mode:                          mode,
 		TaskCreateScopes:              createScopes,
@@ -194,6 +197,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,
+		ConfigMapReadScopes:           configMapRead,
 	}, nil
 }
 
@@ -212,6 +216,10 @@ func (c ContextTokenAuthorizationConfig) SecretReadScopes() []string {
 
 func (c ContextTokenAuthorizationConfig) SecretCredentialReadScopes() []string {
 	return c.SecretCredentialReadScopeList
+}
+
+func (c ContextTokenAuthorizationConfig) ConfigMapReadScopeList() []string {
+	return c.ConfigMapReadScopes
 }
 
 type contextTokenTaskCreateAuthorizationContext struct {
@@ -420,6 +428,51 @@ func authorizeContextTokenToolAgentDelete(token *ContextToken, cfg ContextTokenA
 		return nil
 	}
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func authorizeContextTokenConfigMapRead(token *ContextToken, cfg ContextTokenAuthorizationConfig, action, namespace, configMapName string) error {
+	if !cfg.Enabled() || token == nil {
+		return nil
+	}
+	failures := []string{}
+	requiredScopes := cfg.ConfigMapReadScopeList()
+	if !hasAnyScope(token.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ",")))
+	}
+	if want, ok := contextString(token.TransactionContext, "namespace"); ok && strings.TrimSpace(namespace) != "" && namespace != want {
+		failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+	}
+	if want, ok := contextString(token.TransactionContext, "configMap"); ok && strings.TrimSpace(configMapName) != "" && configMapName != want {
+		failures = append(failures, fmt.Sprintf("configMap %q does not match token context %q", configMapName, want))
+	}
+	if len(failures) == 0 {
+		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
+		return nil
+	}
+	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
+}
+
+func (h *Handlers) authorizeContextTokenPolicyConfigMapName(c fiber.Ctx, action, namespace, configMapName string) error {
+	configMapName = strings.TrimSpace(configMapName)
+	if configMapName == "" || !h.contextTokenAuthorization.Enabled() {
+		return nil
+	}
+	ui := GetUserInfo(c)
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	return authorizeContextTokenConfigMapRead(ui.ContextToken, h.contextTokenAuthorization, action, namespace, configMapName)
+}
+
+func authorizeContextTokenPolicyConfigMapForUser(ui *UserInfo, cfg ContextTokenAuthorizationConfig, action, namespace, configMapName string) error {
+	configMapName = strings.TrimSpace(configMapName)
+	if configMapName == "" || !cfg.Enabled() {
+		return nil
+	}
+	if ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	return authorizeContextTokenConfigMapRead(ui.ContextToken, cfg, action, namespace, configMapName)
 }
 
 func authorizeContextTokenSecretRead(token *ContextToken, cfg ContextTokenAuthorizationConfig, action, namespace, secretName string) error {
