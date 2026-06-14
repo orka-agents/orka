@@ -163,7 +163,15 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
-	r.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeTaskStarted, events.ExecutionEventSeverityInfo, "harness wrapper task started")
+	if err := r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		events.ExecutionEventTypeTaskStarted,
+		events.ExecutionEventSeverityInfo,
+		"harness wrapper task started",
+	); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 }
 
