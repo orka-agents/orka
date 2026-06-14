@@ -729,6 +729,19 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 	}
 
 	if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
+		if strings.Contains(err.Error(), "already locked") {
+			session, getErr := r.SessionManager.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+			if getErr != nil {
+				return ctrl.Result{}, getErr, true
+			}
+			if session.ActiveTask == task.Name {
+				return ctrl.Result{}, nil, false
+			}
+			if session.ActiveTask == "" {
+				return ctrl.Result{RequeueAfter: time.Second}, nil, true
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+		}
 		log.Error(err, "failed to acquire session lock")
 		if errors.Is(err, store.ErrNotFound) {
 			result, failErr := r.failTask(ctx, task, err.Error())
@@ -2722,6 +2735,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		// Agent with runtime must not have a model provider set
 		if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 			return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
+		}
+		if len(task.Spec.Env) > 0 {
+			return fmt.Errorf("task env is not supported by harness runtime yet")
 		}
 		// Prompt is required for agent tasks
 		if task.Spec.Prompt == "" {
