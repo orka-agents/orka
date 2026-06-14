@@ -475,6 +475,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
+		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
+			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
+		}
+
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
@@ -529,6 +533,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 
 	if taskHasHarnessWrapperTurn(task) {
 		return r.finishHarnessWrapperTask(ctx, task)
+	}
+	if taskHasPlannedHarnessWrapperTurn(task) {
+		return r.runHarnessWrapperTask(ctx, task, nil)
 	}
 
 	// Check session lock if session is referenced
@@ -1906,6 +1913,11 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
+	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
+			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
+		}
+	}
 
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {

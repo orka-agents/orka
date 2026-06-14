@@ -336,6 +336,9 @@ func (s *Server) runTurn(turn *turnState) {
 		return
 	}
 	defer removeTempFiles(spec.TempFiles)
+	if spec.Dir != "" {
+		turnCtx.WorkDir = spec.Dir
+	}
 	turn.appendFrame(s.runtimeLogFrame(turn, "runtime command started", map[string]any{
 		"runtime": s.adapter.Name(),
 		"command": path.Base(spec.Path),
@@ -390,7 +393,7 @@ func (s *Server) runTurn(turn *turnState) {
 			))
 			return
 		}
-		if artifactErr := UploadTurnArtifacts(); artifactErr != nil {
+		if artifactErr := UploadTurnArtifacts(turnCtx); artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
 				"artifact-upload",
