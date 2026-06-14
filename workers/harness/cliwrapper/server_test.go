@@ -389,3 +389,26 @@ func TestServerFailsOversizedCompletedResult(t *testing.T) {
 		t.Fatalf("last frame = %#v, want result_too_large failure", last)
 	}
 }
+
+func TestServerRedactsCommandStderrFrames(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = "/bin/sh"
+	cfg.Generic.Args = []string{"-c", "printf 'Authorization: Bearer redaction-value-1234567890' >&2; exit 7"}
+	adapter := NewGenericAdapter(cfg.Generic)
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	encoded, _ := json.Marshal(frames)
+	if strings.Contains(string(encoded), "redaction-value") || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("stderr frames leaked secret or missed redaction: %s", encoded)
+	}
+}

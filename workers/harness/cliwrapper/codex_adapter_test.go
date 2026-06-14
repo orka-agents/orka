@@ -108,7 +108,7 @@ func TestCodexAdapterFailurePath(t *testing.T) {
 	dir := t.TempDir()
 	fakeCodex := filepath.Join(dir, "codex-fail.sh")
 	failingScript := "#!/bin/sh\n" +
-		"echo 'Authorization: Bearer redaction-value-1234567890' >&2\n" +
+		"echo 'Authorization: Bearer redaction-value-1234567890'\n" +
 		"exit 42\n"
 	if err := os.WriteFile(fakeCodex, []byte(failingScript), 0o700); err != nil {
 		t.Fatal(err)
