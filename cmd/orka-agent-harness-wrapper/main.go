@@ -69,10 +69,8 @@ func run(args []string) error {
 		cfg.Generic.Env = append(cfg.Generic.Env, extraEnv...)
 		cfg.CommandEnv = append(cfg.CommandEnv, extraEnv...)
 	}
-	if cfg.Generic.WorkDir == "" {
+	if cfg.WorkDir != "" {
 		cfg.Generic.WorkDir = cfg.WorkDir
-	}
-	if cfg.Codex.WorkDir == "" {
 		cfg.Codex.WorkDir = cfg.WorkDir
 	}
 	adapter, err := cliwrapper.NewRuntimeAdapter(cfg)

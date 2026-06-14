@@ -2709,6 +2709,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeCodex {
 			return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
 		}
+		if taskRequestsReadOnlyAgent(task) && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex {
+			return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
+		}
 		if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
 			return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 		}

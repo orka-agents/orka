@@ -82,9 +82,12 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 
 func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run CommandResult) (TurnResult, error) {
 	if strings.TrimSpace(run.ResultFile) != "" {
-		data, err := os.ReadFile(run.ResultFile)
-		if err == nil && len(data) > 0 {
-			return TurnResult{Result: string(data), Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+		data, err := readBoundedResultFile(run.ResultFile)
+		if err != nil {
+			return TurnResult{Result: run.Stdout}, err
+		}
+		if data != "" {
+			return TurnResult{Result: data, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
 		}
 	}
 	return TurnResult{Result: run.Stdout, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil

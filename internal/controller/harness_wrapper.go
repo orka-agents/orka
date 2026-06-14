@@ -272,9 +272,12 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, "harness wrapper turn cancelled")
 	}
 	if result.Failed != nil {
-		if r.shouldRetry(task) {
+		if result.Failed.Retryable && r.shouldRetry(task) {
 			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
 				return ctrl.Result{}, clearErr
+			}
+			if releaseErr := r.releaseHarnessWrapperSessionLock(ctx, task); releaseErr != nil {
+				return ctrl.Result{}, releaseErr
 			}
 			return r.retryTask(ctx, task)
 		}
