@@ -531,31 +531,6 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleScheduledTask(ctx, task)
 	}
 
-	if taskHasHarnessWrapperTurn(task) {
-		if task.Status.Attempts == 0 {
-			if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-				if t.Status.Attempts == 0 {
-					t.Status.Attempts = 1
-				}
-			}); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return r.finishHarnessWrapperTask(ctx, task)
-	}
-	if taskHasPlannedHarnessWrapperTurn(task) {
-		agent, err := r.resolveAgent(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to resolve agent for harness runtime recovery")
-			return r.failTask(ctx, task, err.Error())
-		}
-		if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
-			log.Error(err, "task-agent compatibility validation failed for harness runtime recovery")
-			return r.failTask(ctx, task, err.Error())
-		}
-		return r.runHarnessWrapperTask(ctx, task, agent)
-	}
-
 	// Check session lock if session is referenced
 	if task.Spec.SessionRef != nil {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
@@ -2719,7 +2694,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent.Spec.Runtime == nil {
 			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 		}
-		if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeCodex {
+		switch agent.Spec.Runtime.Type {
+		case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+		default:
 			return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
 		}
 		if taskRequestsReadOnlyAgent(task) && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex {
@@ -2736,8 +2713,11 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 			return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
 		}
-		if len(task.Spec.Env) > 0 {
-			return fmt.Errorf("task env is not supported by harness runtime yet")
+		if task.Spec.Transaction != nil {
+			return fmt.Errorf("transaction-scoped tasks are not supported by harness runtime yet")
+		}
+		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
+			return err
 		}
 		// Prompt is required for agent tasks
 		if task.Spec.Prompt == "" {

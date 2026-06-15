@@ -584,7 +584,6 @@ deploy_orka() {
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--controller-url=http://orka-api.orka-system.svc:8080",
-                  "--codex-worker-image=" + $codex_image,
                   "--execution-workspace-default-provider=substrate",
                   "--agent-sandbox-enabled=false",
                   "--substrate-enabled=true",
@@ -1212,7 +1211,7 @@ main() {
   fi
   registry_addr="localhost:${KIND_REGISTRY_PORT}"
   controller_image="${registry_addr}/orka/controller:${IMAGE_TAG}"
-  codex_image="${registry_addr}/orka/agent-worker-codex:${IMAGE_TAG}"
+  codex_image="${registry_addr}/orka/agent-harness-wrapper:${IMAGE_TAG}"
   workspace_push_image="${registry_addr}/orka/workspace-agent-root:${IMAGE_TAG}"
   workspace_actor_image="${registry_ip}:5000/orka/workspace-agent-root:${IMAGE_TAG}"
   mcp_push_image="${registry_addr}/orka/mcp-e2e-server:${IMAGE_TAG}"
@@ -1221,7 +1220,7 @@ main() {
 
   log "Building and pushing Orka images"
   docker build -t "${controller_image}" -f "${ROOT_DIR}/Dockerfile" "${ROOT_DIR}"
-  docker build -t "${codex_image}" -f "${ROOT_DIR}/workers/agent/codex/Dockerfile.substrate-e2e" "${ROOT_DIR}"
+  docker build -t "${codex_image}" -f "${ROOT_DIR}/workers/harness/Dockerfile" "${ROOT_DIR}"
   docker build -t "${workspace_push_image}" -f "${ROOT_DIR}/cmd/orka-workspace-agent/Dockerfile" "${ROOT_DIR}"
   docker build -t "${mcp_push_image}" -f "${ROOT_DIR}/cmd/orka-mcp-e2e-server/Dockerfile" "${ROOT_DIR}"
   docker build -t "${tool_client_image}" -f "${ROOT_DIR}/cmd/orka-tool-e2e-client/Dockerfile" "${ROOT_DIR}"

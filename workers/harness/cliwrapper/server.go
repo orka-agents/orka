@@ -29,6 +29,10 @@ type Server struct {
 	activeTurns int
 }
 
+type RuntimeSupportProvider interface {
+	SupportedRuntimes() []string
+}
+
 type ServerOption func(*Server)
 
 func WithClock(now func() time.Time) ServerOption {
@@ -157,11 +161,21 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		SupportsCancel:          true,
 		SupportsRuntimeSessions: true,
 		MaxConcurrentTurns:      1,
-		Metadata: map[string]string{
-			"wrapper": "cli",
-			"mode":    "observed",
-		},
+		Metadata:                s.capabilitiesMetadata(),
 	})
+}
+
+func (s *Server) capabilitiesMetadata() map[string]string {
+	metadata := map[string]string{
+		"wrapper": "cli",
+		"mode":    "observed",
+	}
+	if provider, ok := s.adapter.(RuntimeSupportProvider); ok {
+		if runtimes := provider.SupportedRuntimes(); len(runtimes) > 0 {
+			metadata["supportedRuntimes"] = strings.Join(runtimes, ",")
+		}
+	}
+	return metadata
 }
 
 func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +345,7 @@ func (s *Server) runTurn(turn *turnState) {
 
 	turn.appendFrame(s.frame(turn, harness.FrameTurnStarted, "turn started", nil))
 	ClearTurnArtifacts()
+	defer ClearTurnArtifacts()
 	preparedWorkspace, err := prepareTurnWorkspace(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
@@ -338,6 +353,11 @@ func (s *Server) runTurn(turn *turnState) {
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
+	if err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
@@ -358,16 +378,6 @@ func (s *Server) runTurn(turn *turnState) {
 	if strings.TrimSpace(run.Stderr) != "" {
 		turn.appendFrame(s.runtimeLogTextFrame(turn, "stderr", run.Stderr, events.ExecutionEventSeverityWarning))
 	}
-	parsed, parseErr := s.adapter.ParseResult(ctx, turnCtx, run)
-	if parseErr != nil {
-		if strings.Contains(parseErr.Error(), "terminal frame limit") {
-			turn.appendFrame(s.failedFrame(turn, "result_too_large", parseErr.Error(), false))
-			return
-		}
-		if runErr == nil {
-			runErr = parseErr
-		}
-	}
 	finalizedWorkDir := ""
 	switch {
 	case run.Cancelled:
@@ -381,6 +391,23 @@ func (s *Server) runTurn(turn *turnState) {
 		}
 		turn.appendFrame(s.failedFrame(turn, "command_failed", msg, false))
 	default:
+		restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
+		defer restoreTurnEnv()
+		parsed, parseErr := s.adapter.ParseResult(ctx, turnCtx, run)
+		if parseErr != nil {
+			if strings.Contains(parseErr.Error(), "terminal frame limit") {
+				turn.appendFrame(s.failedFrame(turn, "result_too_large", parseErr.Error(), false))
+				return
+			}
+			turn.appendFrame(s.failedFrame(turn, "result_parse_failed", parseErr.Error(), false))
+			return
+		}
+		if result, artifactErr := EnsureTurnRequiredSecurityArtifacts(ctx, agentCfg, parsed.Result); artifactErr != nil {
+			turn.appendFrame(s.failedFrame(turn, "required_security_artifacts_missing", artifactErr.Error(), false))
+			return
+		} else {
+			parsed.Result = result
+		}
 		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
 			finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
 			if finalizeErr != nil {
@@ -413,7 +440,6 @@ func (s *Server) runTurn(turn *turnState) {
 				return
 			}
 		}
-		ClearTurnArtifacts()
 		turn.appendFrame(s.completedFrame(turn, parsed))
 	}
 }

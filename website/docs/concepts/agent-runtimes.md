@@ -31,15 +31,15 @@ This coverage is about Orka's runtime wiring and task/session/workspace behavior
 ```bash
 # For Codex CLI
 kubectl create secret generic codex-api-key \
-  --from-literal=OPENAI_API_KEY=sk-proj-...
+  --from-literal=OPENAI_API_KEY=<openai-api-key>
 
 # For Claude Code CLI
 kubectl create secret generic claude-api-key \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+  --from-literal=ANTHROPIC_API_KEY=<anthropic-api-key>
 
 # For GitHub Copilot CLI
 kubectl create secret generic copilot-token \
-  --from-literal=GITHUB_TOKEN=ghp_...
+  --from-literal=GITHUB_TOKEN=<github-token>
 ```
 
 ### Azure AI Foundry
@@ -63,7 +63,7 @@ kubectl create secret generic claude-credentials \
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | Optional Haiku deployment name |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | No | Optional Opus deployment name |
 
-All secret keys are injected as environment variables into the worker pod via `envFrom`, so any Claude Code CLI environment variable can be passed through the secret.
+All secret keys are injected as environment variables into the harness wrapper pod via `envFrom`, so any Claude Code CLI environment variable can be passed through the secret.
 
 ### 2. Create an Agent
 
@@ -117,7 +117,7 @@ spec:
 kubectl get task refactor-task
 # Get the result via the REST API
 curl http://localhost:8080/api/v1/tasks/refactor-task/result \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer <service-account-token>"
 ```
 
 ## Agent Configuration
@@ -160,7 +160,7 @@ spec:
   secretRef:
     name: claude-api-key
 
-  # execution: default runtime and placement settings for worker pods
+  # execution: default runtime and placement settings for harness wrapper pods
   execution:
     runtimeClassName: gvisor
     nodeSelector:
@@ -183,7 +183,7 @@ spec:
   model:
     name: "claude-sonnet-4-20250514"
 
-  # resources: compute resources for worker pods
+  # resources: compute resources for harness wrapper pods
   resources:
     requests:
       memory: "256Mi"
@@ -289,7 +289,7 @@ Agent.spec.runtime (defaults)
 
 ### Runtime Isolation
 
-Agent worker pods can opt into stronger sandboxing through Kubernetes `RuntimeClass` using the shared `spec.execution` field on both Agents and Tasks.
+Agent harness wrapper pods can opt into stronger sandboxing through Kubernetes `RuntimeClass` using the shared `spec.execution` field on both Agents and Tasks.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -320,13 +320,13 @@ spec:
 
 ### Durable Agent Sandbox Workspaces (Experimental)
 
-For durable or retained coding environments, agent Tasks can request `Task.spec.execution.workspace`. That request is separate from the git checkout settings in `Task.spec.agentRuntime.workspace` below. When the controller feature is enabled, Orka validates the request, passes the resolved sandbox settings to the agent worker Job, and the worker wrapper claims an upstream `agent-sandbox` workspace before running the configured agent runtime inside it. For `reusePolicy: session`, Orka derives a deterministic sandbox claim name so separate worker Jobs in the same namespaced session/template scope can reattach when the workspace is retained.
+For durable or retained coding environments, agent Tasks can request `Task.spec.execution.workspace`. That request is separate from the git checkout settings in `Task.spec.agentRuntime.workspace` below. When the controller feature is enabled, Orka validates the request, passes the resolved sandbox settings to the harness wrapper turn, and the worker wrapper claims an upstream `agent-sandbox` workspace before running the configured agent runtime inside it. For `reusePolicy: session`, Orka derives a deterministic sandbox claim name so separate worker Jobs in the same namespaced session/template scope can reattach when the workspace is retained.
 
 See [Agent Sandbox Workspaces](agent-sandbox.md) for the supported fields, controller flags, Helm values, and current limitations.
 
 ## Workspace Management
 
-Agent tasks can clone a git repository into the worker pod's `/workspace` directory.
+Agent tasks can clone a git repository into the harness wrapper pod's `/workspace` directory.
 
 ### Public Repositories
 
@@ -344,7 +344,7 @@ Create a Secret with git credentials, then reference it:
 ```bash
 kubectl create secret generic git-credentials \
   --from-literal=username=oauth2 \
-  --from-literal=password=ghp_your_token
+  --from-literal=password=<github-token>
 ```
 
 ```yaml
@@ -358,7 +358,7 @@ agentRuntime:
 
 > **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
 
-> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the worker fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
+> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the wrapper fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
 
 ### SubPath
 
@@ -407,7 +407,7 @@ Sessions enable multi-turn conversations across tasks. Session data is stored in
 - Agent-specific metadata (token counts, message counts) is tracked in the session record
 - Full agent transcripts are logged to pod stdout but **not stored** in the session (keep sessions focused)
 - Sessions enforce **serial execution**: only one task can hold a session lock at a time
-- Session transcripts are delivered to worker pods via an **init container** that fetches from the controller's internal API
+- Session transcripts are delivered to harness wrapper pods via an **init container** that fetches from the controller's internal API
 
 ### Using Sessions
 
@@ -436,7 +436,7 @@ Sessions are stored in the controller's SQLite database with a normalized schema
 
 ## Security
 
-All agent worker pods run with a hardened security context:
+All agent harness wrapper pods run with a hardened security context:
 
 | Setting | Value |
 |---------|-------|
@@ -446,7 +446,7 @@ All agent worker pods run with a hardened security context:
 | Seccomp profile | RuntimeDefault |
 | Privilege escalation | Disabled |
 
-If `spec.execution.runtimeClassName` is set, the worker pod is also routed through the selected Kubernetes `RuntimeClass` while keeping the same pod and container security defaults.
+If `spec.execution.runtimeClassName` is set, the harness wrapper pod is also routed through the selected Kubernetes `RuntimeClass` while keeping the same pod and container security defaults.
 
 Writable directories are provided via `emptyDir` volumes:
 
@@ -480,35 +480,25 @@ API keys are injected as environment variables from Kubernetes Secrets. They are
 ```bash
 # Claude runtime
 kubectl create secret generic claude-api-key \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+  --from-literal=ANTHROPIC_API_KEY=<anthropic-api-key>
 
 # Codex runtime
 kubectl create secret generic codex-api-key \
-  --from-literal=OPENAI_API_KEY=sk-proj-...
+  --from-literal=OPENAI_API_KEY=<openai-api-key>
 
 # Copilot runtime
 kubectl create secret generic copilot-token \
-  --from-literal=GITHUB_TOKEN=ghp_...
+  --from-literal=GITHUB_TOKEN=<github-token>
 ```
 
 ## Controller Configuration
 
-The controller accepts flags to configure agent worker images:
+Agent Tasks run exclusively through the CLI harness wrapper. The controller needs:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Container image for Copilot agent workers |
-| `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Container image for Claude agent workers |
-| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Container image for Codex agent workers |
+- `ORKA_HARNESS_WRAPPER_ENDPOINT`, pointing at the wrapper HTTP endpoint.
+- `ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE` or `ORKA_HARNESS_WRAPPER_BEARER_TOKEN` when the wrapper requires bearer auth.
 
-Example:
-
-```bash
-orka-controller \
-  --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:v1.0.0 \
-  --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:v1.0.0 \
-  --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:v1.0.0
-```
+The default kustomize deployment includes an `agent-harness-wrapper` Deployment and Service. Per-runtime agent-worker image flags are not supported.
 
 ## Optimizing Agent Performance
 
@@ -535,7 +525,7 @@ Complete sample manifests are available in [`config/samples/`](https://github.co
 ```bash
 # 1. Create the API key secret
 kubectl create secret generic claude-api-key \
-  --from-literal=ANTHROPIC_API_KEY=sk-ant-your-key
+  --from-literal=ANTHROPIC_API_KEY=<anthropic-api-key>
 
 # 2. Create the Agent
 kubectl apply -f - <<EOF
@@ -588,9 +578,9 @@ kubectl get task fix-tests -w
 
 # 5. Get the result
 curl http://localhost:8080/api/v1/tasks/fix-tests/result \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer <service-account-token>"
 
-# 6. Check worker pod logs for full transcript
+# 6. Check harness wrapper pod logs for full transcript
 kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobName}')
 ```
 
@@ -605,7 +595,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 - **Session locked**: Another task may hold the session lock. Check via the REST API:
   ```bash
   curl http://localhost:8080/api/v1/sessions/<name> \
-    -H "Authorization: Bearer $(kubectl create token orka-client)"
+    -H "Authorization: Bearer <service-account-token>"
   ```
 - **Agent not found**: Verify the Agent exists and has `runtime` configured:
   ```bash
@@ -616,7 +606,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 
 - **Type mismatch**: `type: agent` tasks require an Agent with `runtime` configured. `type: ai` tasks cannot use Agents with `runtime`.
 - **Invalid runtime type**: `runtime.type` must be `copilot`, `claude`, or `codex`.
-- **Worker image not available**: Check that the worker image is accessible from your cluster:
+- **Worker image not available**: Check that the harness wrapper image is accessible from your cluster:
   ```bash
   kubectl describe pod -l orka.ai/worker-type=agent
   ```
@@ -638,4 +628,4 @@ Task results are stored in SQLite, which has no practical size limit. If the age
   kubectl logs <pod-name> --previous
   ```
 - Verify the API key is valid and has sufficient permissions
-- Ensure the worker image includes the expected CLI binary
+- Ensure the harness wrapper image includes the expected CLI binary

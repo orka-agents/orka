@@ -12,7 +12,10 @@ import (
 	"github.com/sozercan/orka/internal/harness"
 )
 
-const testEchoCommand = "echo"
+const (
+	testEchoCommand = "echo"
+	testTurnPrompt  = "hello"
+)
 
 func TestNewRuntimeAdapterSelection(t *testing.T) {
 	cfg := DefaultConfig()
@@ -41,13 +44,13 @@ func TestNewRuntimeAdapterSelection(t *testing.T) {
 }
 
 func TestGenericAdapterBuildCommandPromptModes(t *testing.T) {
-	turn := TurnContext{Prompt: "hello", WorkDir: t.TempDir()}
+	turn := TurnContext{Prompt: testTurnPrompt, WorkDir: t.TempDir()}
 	adapter := NewGenericAdapter(GenericAdapterConfig{Command: "cat", PromptMode: PromptModeStdin})
 	spec, err := adapter.BuildCommand(context.Background(), turn)
 	if err != nil {
 		t.Fatalf("BuildCommand(stdin): %v", err)
 	}
-	if string(spec.Stdin) != "hello" {
+	if string(spec.Stdin) != testTurnPrompt {
 		t.Fatalf("stdin = %q, want prompt", string(spec.Stdin))
 	}
 
@@ -60,11 +63,15 @@ func TestGenericAdapterBuildCommandPromptModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommand(env): %v", err)
 	}
-	if !containsEnv(spec.Env, "PROMPT_VALUE=hello") {
+	if !containsEnv(spec.Env, "PROMPT_VALUE="+testTurnPrompt) {
 		t.Fatalf("env = %#v, want prompt env", spec.Env)
 	}
 
-	adapter = NewGenericAdapter(GenericAdapterConfig{Command: "cat", PromptMode: PromptModeFile, PromptEnv: "PROMPT_FILE"})
+	adapter = NewGenericAdapter(GenericAdapterConfig{
+		Command:    "cat",
+		PromptMode: PromptModeFile,
+		PromptEnv:  "PROMPT_FILE",
+	})
 	spec, err = adapter.BuildCommand(context.Background(), turn)
 	if err != nil {
 		t.Fatalf("BuildCommand(file): %v", err)
@@ -76,7 +83,7 @@ func TestGenericAdapterBuildCommandPromptModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read prompt temp file: %v", err)
 	}
-	if string(data) != "hello" {
+	if string(data) != testTurnPrompt {
 		t.Fatalf("prompt file = %q, want prompt", string(data))
 	}
 	removeTempFiles(spec.TempFiles)
@@ -137,7 +144,7 @@ func validWrapperStartTurnRequest() harness.StartTurnRequest {
 		CorrelationID:    "corr-a",
 		Deadline:         time.Now().UTC().Add(time.Minute),
 		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
-		Input:            harness.TurnInput{Prompt: "hello"},
+		Input:            harness.TurnInput{Prompt: testTurnPrompt},
 	}
 }
 
@@ -201,8 +208,8 @@ func TestValidateWorkspaceRepoURLRejectsLocalInputs(t *testing.T) {
 		"file:///tmp/repo",
 		"https://localhost/repo.git",
 		"https://127.0.0.1/repo.git",
-		"https://token@github.com/sozercan/orka.git",
-		"https://github.com/sozercan/orka.git?access_token=value",
+		"https://user@github.com/sozercan/orka.git",
+		"https://github.com/sozercan/orka.git?credential=value",
 	} {
 		if err := validateWorkspaceRepoURL(repo); err == nil {
 			t.Fatalf("validateWorkspaceRepoURL(%q) error = nil, want rejection", repo)

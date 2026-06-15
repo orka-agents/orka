@@ -446,7 +446,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoRuntime(t *testing.T) {
 	}
 }
 
-func TestValidateTaskAgentCompatibility_AgentTaskUnsupportedRuntime(t *testing.T) {
+func TestValidateTaskAgentCompatibility_AgentTaskCopilotRuntime(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
@@ -458,11 +458,8 @@ func TestValidateTaskAgentCompatibility_AgentTaskUnsupportedRuntime(t *testing.T
 		},
 	}
 	err := r.validateTaskAgentCompatibility(task, agent)
-	if err == nil {
-		t.Fatal("expected error for unsupported harness runtime")
-	}
-	if !strings.Contains(err.Error(), "does not have a harness adapter") {
-		t.Fatalf("error = %q, want harness adapter guidance", err.Error())
+	if err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for copilot harness runtime", err)
 	}
 }
 

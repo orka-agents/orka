@@ -7,12 +7,14 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/harness/cliwrapper"
 )
 
@@ -184,4 +186,62 @@ func hasExecutionEventType(eventsList []store.ExecutionEvent, typ string) bool {
 		}
 	}
 	return false
+}
+
+func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.PRBaseSHA, Value: "base-sha"}, {Name: "ORKA_SECURITY_STAGE", Value: "review"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		GitRepo:      "https://github.com/sozercan/orka",
+		Branch:       "main",
+		SubPath:      "docs",
+		ForkRepo:     "https://github.com/sozercan/orka-fork",
+		PRBaseBranch: "contract",
+		PushBranch:   "agent/test-branch",
+	}}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	r.JobBuilder = &JobBuilder{ControllerURL: "http://orka-api.test:8080"}
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	for key, want := range map[string]string{
+		"gitRepo":          "https://github.com/sozercan/orka",
+		"gitBranch":        "main",
+		"workspaceSubPath": "docs",
+		"forkRepo":         "https://github.com/sozercan/orka-fork",
+		"prBaseBranch":     "contract",
+		"pushBranch":       "agent/test-branch",
+		"prBaseSHA":        "base-sha",
+	} {
+		if got := request.Metadata[key]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q", key, got, want)
+		}
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	for key, want := range map[string]string{
+		workerenv.ControllerURL:  "http://orka-api.test:8080",
+		workerenv.ResultEndpoint: "http://orka-api.test:8080/internal/v1/results/default/harness-task",
+		workerenv.PRBaseSHA:      "base-sha",
+		"ORKA_SECURITY_STAGE":    "review",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("env[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestValidateHarnessWrapperTaskEnvRejectsSecretAndValueFrom(t *testing.T) {
+	if err := validateHarnessWrapperTaskEnv([]corev1.EnvVar{{Name: "ORKA_SECURITY_STAGE", Value: "review"}}); err != nil {
+		t.Fatalf("safe env rejected: %v", err)
+	}
+	if err := validateHarnessWrapperTaskEnv([]corev1.EnvVar{{Name: "API_TOKEN", Value: "secret"}}); err == nil {
+		t.Fatal("expected secret-shaped env name to be rejected")
+	}
+	if err := validateHarnessWrapperTaskEnv([]corev1.EnvVar{{Name: "SAFE", ValueFrom: &corev1.EnvVarSource{}}}); err == nil {
+		t.Fatal("expected valueFrom env to be rejected")
+	}
 }

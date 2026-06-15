@@ -52,13 +52,14 @@ func validateWorkspaceRepoURL(rawRepo string) error {
 
 type preparedWorkspace struct {
 	workDir string
+	rootDir string
 	cleanup func()
 }
 
 func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorkspace, error) {
 	repo := strings.TrimSpace(turn.Metadata["gitRepo"])
 	if repo == "" {
-		return preparedWorkspace{workDir: turn.WorkDir, cleanup: func() {}}, nil
+		return preparedWorkspace{workDir: turn.WorkDir, rootDir: turn.WorkDir, cleanup: func() {}}, nil
 	}
 	if err := validateWorkspaceRepoURL(repo); err != nil {
 		return preparedWorkspace{}, err
@@ -90,6 +91,18 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 			return preparedWorkspace{}, gitCommandError("checkout turn workspace ref", err, out, repo)
 		}
 	}
+	pushBranch := strings.TrimSpace(turn.Metadata["pushBranch"])
+	gitRef := strings.TrimSpace(turn.Metadata["gitRef"])
+	if pushBranch != "" && gitRef == "" {
+		checkoutArgs := []string{"-C", cloneDir, "checkout", "-B", pushBranch}
+		if branch := strings.TrimSpace(turn.Metadata["gitBranch"]); branch != "" {
+			checkoutArgs = append(checkoutArgs, "origin/"+branch)
+		}
+		if out, err := workspaceGitCommand(ctx, checkoutArgs...).CombinedOutput(); err != nil {
+			cleanup()
+			return preparedWorkspace{}, gitCommandError("checkout workspace push branch", err, out, repo)
+		}
+	}
 	if err := scrubWorkspaceRemote(ctx, cloneDir, repo); err != nil {
 		cleanup()
 		return preparedWorkspace{}, err
@@ -108,7 +121,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		cleanup()
 		return preparedWorkspace{}, err
 	}
-	return preparedWorkspace{workDir: contained, cleanup: cleanup}, nil
+	return preparedWorkspace{workDir: contained, rootDir: cloneDir, cleanup: cleanup}, nil
 }
 
 func gitCommandError(operation string, err error, output []byte, rawRepo string) error {

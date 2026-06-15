@@ -50,7 +50,7 @@ orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
 e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
-fake_claude_image="${ORKA_FAKE_CLAUDE_WORKER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
+fake_claude_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 agent_name="${ORKA_AGENT_SANDBOX_AGENT:-orka-agent-sandbox-e2e-agent}"
@@ -277,7 +277,7 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./workers/agent/claude
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
 package main
@@ -583,7 +583,6 @@ patch_controller_for_agent_sandbox() {
       .spec.template.spec.containers |= map(
         if .name == "manager" then
           .imagePullPolicy = "IfNotPresent"
-          | .args = ((.args // []) | upsert_arg("--claude-worker-image"; $claudeImage))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-enabled"; "true"))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-router-url"; $routerURL))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-default-template"; $template))

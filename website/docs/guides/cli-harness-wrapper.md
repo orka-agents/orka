@@ -35,7 +35,9 @@ Current adapters:
 
 - `generic` — runs a configured command.
 - `codex` — adapter for the Codex CLI using Orka runtime settings.
-- `claude` and `copilot` — reserved names, rejected at wrapper startup until adapters are implemented.
+- `claude` — adapter for the Claude Code CLI using Orka runtime settings.
+- `copilot` — adapter for GitHub Copilot through the Copilot SDK helper subprocess.
+- `generic` — simple command adapter for tests and bring-your-own commands.
 
 ## Generic command example
 
@@ -89,7 +91,7 @@ Operators must set `ORKA_HARNESS_WRAPPER_ENDPOINT=<trusted wrapper URL>` on the 
 - The selected endpoint is operator-configured with `ORKA_HARNESS_WRAPPER_ENDPOINT`; tasks do not supply runtime endpoints.
 - Completed turns are retained in wrapper memory only for the configured retention TTL, so controller recovery must resume promptly or the task fails instead of silently duplicating work.
 - Terminal result frames are size-bounded to stay within the harness SSE envelope. Results that exceed the limit fail explicitly instead of being stored partially.
-- `claude` and `copilot` wrapper adapters are not enabled yet.
+- `codex`, `claude`, and `copilot` all run through the wrapper; there are no per-runtime agent-worker images.
 - Durable execution workspaces are validated but not yet launched by the harness runtime path.
 
 The focused test matrix covers generic command success, result-file extraction, non-zero failure, timeout, cancellation including process-group cleanup, redaction, event-stream cursoring, harness conformance, Codex fake-CLI success/failure, and controller routing through the harness runtime.

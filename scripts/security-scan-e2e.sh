@@ -47,7 +47,7 @@ api_pf_pid=""
 e2e_run_id="$(sanitize_image_tag "${ORKA_SECURITY_SCAN_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:security-scan-e2e-${e2e_run_id}}"
 general_worker_image="${ORKA_GENERAL_WORKER_IMAGE:-orka-general-worker:security-scan-e2e-${e2e_run_id}}"
-fake_codex_image="${ORKA_FAKE_CODEX_WORKER_IMAGE:-orka-security-fake-codex:security-scan-e2e-${e2e_run_id}}"
+fake_codex_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-security-fake-codex:security-scan-e2e-${e2e_run_id}}"
 
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/security-scan-e2e.XXXXXX")"
 kind_config="${ORKA_SECURITY_SCAN_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
@@ -287,7 +287,7 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./workers/agent/codex
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
 
 FROM node:22-slim
 
@@ -548,7 +548,6 @@ patch_controller_images() {
       .spec.template.spec.containers |= map(
         if .name == "manager" then
           .imagePullPolicy = "IfNotPresent"
-          | .args = ((.args // []) | upsert_arg("--codex-worker-image"; $codexImage))
           | .args = ((.args // []) | upsert_arg("--general-worker-image"; $generalImage))
         else . end
       )

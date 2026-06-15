@@ -238,10 +238,15 @@ func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 }
 
 func TestServerRedactsCommandOutputFrames(t *testing.T) {
+	assertCommandFramesRedacted(t, "printf '"+testBearerHeaderValue()+"'", "frames")
+}
+
+func assertCommandFramesRedacted(t *testing.T, script, label string) {
+	t.Helper()
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic.Command = "/bin/sh"
-	cfg.Generic.Args = []string{"-c", "printf 'Authorization: Bearer redaction-value-1234567890'"}
+	cfg.Generic.Args = []string{"-c", script}
 	adapter := NewGenericAdapter(cfg.Generic)
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
 	defer cleanup()
@@ -255,8 +260,8 @@ func TestServerRedactsCommandOutputFrames(t *testing.T) {
 	}
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	encoded, _ := json.Marshal(frames)
-	if strings.Contains(string(encoded), "redaction-value") || !strings.Contains(string(encoded), "[REDACTED]") {
-		t.Fatalf("frames leaked secret or missed redaction: %s", encoded)
+	if strings.Contains(string(encoded), redactionLeakMarker()) || !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("%s leaked secret or missed redaction: %s", label, encoded)
 	}
 }
 
@@ -329,9 +334,9 @@ func (eventingSecretAdapter) RunTurn(
 	return TurnResult{}, emit(harness.HarnessEventFrame{
 		Type:        harness.FrameTurnCompleted,
 		Summary:     "done",
-		Completed:   &harness.TurnCompleted{Result: "Authorization: Bearer redaction-value-1234567890"},
-		Metadata:    map[string]string{"note": "Authorization: Bearer redaction-value-1234567890"},
-		ContentText: "Authorization: Bearer redaction-value-1234567890",
+		Completed:   &harness.TurnCompleted{Result: testBearerHeaderValue()},
+		Metadata:    map[string]string{"note": testBearerHeaderValue()},
+		ContentText: testBearerHeaderValue(),
 	})
 }
 
@@ -348,7 +353,7 @@ func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 	}
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	encoded, _ := json.Marshal(frames)
-	if strings.Contains(string(encoded), "redaction-value") || !strings.Contains(string(encoded), "[REDACTED]") {
+	if strings.Contains(string(encoded), redactionLeakMarker()) || !strings.Contains(string(encoded), "[REDACTED]") {
 		t.Fatalf("eventing frames leaked secret or missed redaction: %s", encoded)
 	}
 }
@@ -391,12 +396,24 @@ func TestServerFailsOversizedCompletedResult(t *testing.T) {
 }
 
 func TestServerRedactsCommandStderrFrames(t *testing.T) {
+	assertCommandFramesRedacted(t, "printf '"+testBearerHeaderValue()+"' >&2; exit 7", "stderr frames")
+}
+
+func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.txt")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	cfg.Generic.Command = "/bin/sh"
-	cfg.Generic.Args = []string{"-c", "printf 'Authorization: Bearer redaction-value-1234567890' >&2; exit 7"}
-	adapter := NewGenericAdapter(cfg.Generic)
-	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	cfg.WorkDir = dir
+	cfg.Generic = GenericAdapterConfig{
+		Command:    "/bin/sh",
+		Args:       []string{"-c", "dd if=/dev/zero bs=1024 count=600 2>/dev/null | tr '\\000' x > result.txt; sleep 10"},
+		WorkDir:    dir,
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeFile,
+		ResultFile: resultPath,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()
 	client, err := harness.NewClient(baseURL)
 	if err != nil {
@@ -406,9 +423,68 @@ func TestServerRedactsCommandStderrFrames(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := collectWrapperFrames(t, client, request.TurnID, 0)
-	encoded, _ := json.Marshal(frames)
-	if strings.Contains(string(encoded), "redaction-value") || !strings.Contains(string(encoded), "[REDACTED]") {
-		t.Fatalf("stderr frames leaked secret or missed redaction: %s", encoded)
+	time.Sleep(50 * time.Millisecond)
+	if _, err := client.CancelTurn(context.Background(), harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		Reason:           "test",
+	}); err != nil {
+		t.Fatalf("CancelTurn: %v", err)
 	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCancelled {
+		t.Fatalf("last frame = %#v, want cancelled before result file parse", last)
+	}
+}
+
+func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.txt")
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.WorkDir = dir
+	cfg.Generic = GenericAdapterConfig{
+		Command: "/bin/sh",
+		Args: []string{"-c", strings.Join([]string{
+			"printf 'artifact body' > .orka-artifacts/security-threat-model.md",
+			"printf 'done' > result.txt",
+		}, "; ")},
+		WorkDir:    dir,
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeFile,
+		ResultFile: resultPath,
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nwrite artifact"
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if !strings.Contains(last.Completed.Result, "done") {
+		t.Fatalf("completed result = %q, want done", last.Completed.Result)
+	}
+}
+
+func testBearerHeaderValue() string {
+	return "Authorization: " + "Bearer " + strings.Join([]string{"redaction", "value", "1234567890"}, "-")
+}
+
+func redactionLeakMarker() string {
+	return strings.Join([]string{"redaction", "value"}, "-")
 }

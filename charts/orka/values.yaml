@@ -156,25 +156,16 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
 
-  copilot:
+  harnessWrapper:
     image:
-      repository: ghcr.io/sozercan/orka/agent-worker-copilot
+      repository: ghcr.io/sozercan/orka/agent-harness-wrapper
       tag: latest
       pullPolicy: IfNotPresent
-
-  claude:
-    image:
-      repository: ghcr.io/sozercan/orka/agent-worker-claude
-      tag: latest
-      pullPolicy: IfNotPresent
-
-  codex:
-    image:
-      repository: ghcr.io/sozercan/orka/agent-worker-codex
-      tag: latest
-      pullPolicy: IfNotPresent
-    # Optional Codex CLI sandbox mode passed to Codex worker pods (e.g. danger-full-access)
-    sandboxMode: ""
+    auth:
+      # Existing Secret containing the shared wrapper bearer token. Create it separately.
+      existingSecret: ""
+      tokenKey: token
+    resources: {}
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.

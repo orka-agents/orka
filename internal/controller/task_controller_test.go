@@ -1361,7 +1361,7 @@ var _ = Describe("Task Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("does not have a runtime configured"))
 		})
 
-		It("should fail for agent tasks when runtime has no harness adapter", func() {
+		It("should allow agent tasks with copilot harness runtime", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{
 				Spec: corev1alpha1.TaskSpec{
@@ -1375,9 +1375,7 @@ var _ = Describe("Task Controller", func() {
 					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
 				},
 			}
-			err := r.validateTaskAgentCompatibility(task, agent)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("does not have a harness adapter"))
+			Expect(r.validateTaskAgentCompatibility(task, agent)).To(Succeed())
 		})
 
 		It("should fail for agent tasks when agent has both runtime and providerRef", func() {

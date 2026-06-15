@@ -97,9 +97,7 @@ Orka uses seven CRDs:
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
 | **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in core, coordination, GitHub, agent-management, planning, memory, transcript, chat, session, and task-management tools |
-| **Copilot Agent Worker** (`workers/agent/copilot/`) | Runs tasks via GitHub Copilot CLI using the Go SDK |
-| **Claude Agent Worker** (`workers/agent/claude/`) | Runs tasks via Claude Code CLI |
-| **Codex Agent Worker** (`workers/agent/codex/`) | Runs tasks via OpenAI Codex CLI |
+| **CLI Harness Wrapper** (`workers/harness/cliwrapper/`) | Runs Codex, Claude, Copilot, or generic CLI turns through the `orka.harness.v1` protocol |
 
 ## Design Decisions
 
@@ -113,7 +111,7 @@ Orka uses seven CRDs:
 | **Security Scan Storage** | SQLite stores repository scan runs, threat models, findings, and patch proposals. | Provides durable repository-security history without an external database. |
 | **API Authentication** | Kubernetes ServiceAccount tokens plus optional OIDC JWT and generic context-token validation. | Native K8s auth by default; OIDC and `kontxt` TxTokens support external/request-scoped API clients. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
-| **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker pods. |
+| **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker/harness pods. |
 | **Observability** | Prometheus metrics, structured logs, optional OpenTelemetry tracing. | Standard K8s metrics/logging with opt-in distributed tracing. |
 | **AI Tools** | Built-in + extensible via CRDs | Ship with categorized built-in tools and can be extended via Tool CRDs. |
 | **Failure Policy** | Configurable retry with backoff | `spec.retryPolicy` with max retries and exponential backoff. |
@@ -146,9 +144,7 @@ orka/
 │   ├── ai/                 # AI worker (LLM agent with tools)
 │   ├── general/            # General worker (container commands)
 │   └── agent/
-│       ├── copilot/        # Copilot CLI agent worker
-│       ├── claude/         # Claude Code CLI agent worker
-│       └── codex/          # Codex CLI agent worker
+│       └── harness/        # CLI harness wrapper adapters
 ├── ui/                     # React SPA (Vite + TanStack Router + shadcn/ui)
 ├── config/                 # Kustomize manifests (CRDs, RBAC, samples)
 ├── charts/orka/          # Helm chart
@@ -285,7 +281,7 @@ Key behaviors:
 - **Token tracking**: Input/output token counts tracked in the session record
 - **Cross-runtime**: Sessions store user/assistant messages only, enabling cross-runtime continuation (AI ↔ agent tasks)
 - **No size limit**: SQLite storage removes the old ConfigMap 1MB constraint
-- **Init container delivery**: Session transcripts are delivered to worker pods via an init container that fetches from the controller's internal API
+- **Init container delivery**: Session transcripts are delivered to worker/harness pods via an init container that fetches from the controller's internal API
 
 ## Memory Model
 

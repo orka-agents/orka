@@ -41,15 +41,6 @@ const (
 	// DefaultGeneralWorkerImage is the default image for container tasks
 	DefaultGeneralWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
 
-	// DefaultCopilotWorkerImage is the default image for Copilot agent tasks
-	DefaultCopilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
-
-	// DefaultClaudeWorkerImage is the default image for Claude agent tasks
-	DefaultClaudeWorkerImage = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
-
-	// DefaultCodexWorkerImage is the default image for Codex agent tasks
-	DefaultCodexWorkerImage = "ghcr.io/sozercan/orka/agent-worker-codex:latest"
-
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
 
@@ -96,10 +87,6 @@ type JobBuilder struct {
 	client.Client
 	AIWorkerImage                string
 	GeneralWorkerImage           string
-	CopilotWorkerImage           string
-	ClaudeWorkerImage            string
-	CodexWorkerImage             string
-	CodexSandboxMode             string
 	InitImage                    string
 	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
 	ContextTokenTTSURL           string
@@ -126,9 +113,6 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 		Client:             c,
 		AIWorkerImage:      DefaultAIWorkerImage,
 		GeneralWorkerImage: DefaultGeneralWorkerImage,
-		CopilotWorkerImage: DefaultCopilotWorkerImage,
-		ClaudeWorkerImage:  DefaultClaudeWorkerImage,
-		CodexWorkerImage:   DefaultCodexWorkerImage,
 		InitImage:          DefaultInitImage,
 		directSecrets: directRuntimeSecretPolicy{
 			providerSecrets: envFlagEnabled(directProviderSecretsEnvVar),
@@ -301,6 +285,9 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 // BuildWithOptions creates a Job for the given Task using additional resolved options.
 func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
+	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		return nil, fmt.Errorf("agent tasks execute through the harness wrapper and do not use worker Jobs")
+	}
 	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
 		return nil, err
 	}
@@ -462,9 +449,7 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			container.Args = workerArgs
 		}
 	case corev1alpha1.TaskTypeAgent:
-		container.Image = b.getAgentWorkerImage(agent)
-		container.Command = []string{"/worker"}
-		container.Args = []string{"--mode=agent"}
+		// Agent tasks are executed through the harness wrapper path, not worker Jobs.
 	}
 
 	// Add tmp volume mount for read-only root filesystem
@@ -629,7 +614,6 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		if taskUsesWorkspaceInitContainer(task) {
 			envVars = setControllerEnv(envVars, workerenv.WorkspacePrepared, scheduledRunLabelValue)
 		}
-		envVars = b.addCodexSandboxEnvVars(envVars, task, agent)
 		workspaceRequest := opts.ExecutionWorkspace
 		if workspaceRequest == nil {
 			workspaceRequest = opts.AgentSandboxWorkspace
@@ -1410,23 +1394,6 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	)
 }
 
-// getAgentWorkerImage returns the worker image for the given agent runtime type
-func (b *JobBuilder) getAgentWorkerImage(agent *corev1alpha1.Agent) string {
-	if agent == nil || agent.Spec.Runtime == nil {
-		return b.ClaudeWorkerImage // fallback
-	}
-	switch agent.Spec.Runtime.Type {
-	case corev1alpha1.AgentRuntimeCopilot:
-		return b.CopilotWorkerImage
-	case corev1alpha1.AgentRuntimeClaude:
-		return b.ClaudeWorkerImage
-	case corev1alpha1.AgentRuntimeCodex:
-		return b.CodexWorkerImage
-	default:
-		return b.ClaudeWorkerImage
-	}
-}
-
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
 	if value == "" {
 		return removeControllerEnv(envVars, name)
@@ -1466,26 +1433,6 @@ func envVarExists(envVars []corev1.EnvVar, name string) bool {
 		}
 	}
 	return false
-}
-
-func isCodexAgent(agent *corev1alpha1.Agent) bool {
-	return agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex
-}
-
-// addCodexSandboxEnvVars injects controller-configured Codex sandbox mode when set.
-func (b *JobBuilder) addCodexSandboxEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent) []corev1.EnvVar {
-	if !isCodexAgent(agent) {
-		return envVars
-	}
-	if taskRequestsReadOnlyAgent(task) {
-		envVars = removeControllerEnv(envVars, workerenv.CodexSandboxMode)
-		return append(envVars, corev1.EnvVar{Name: workerenv.CodexSandboxMode, Value: "read-only"})
-	}
-	if b.CodexSandboxMode == "" || envVarExists(envVars, workerenv.CodexSandboxMode) {
-		return envVars
-	}
-
-	return append(envVars, corev1.EnvVar{Name: workerenv.CodexSandboxMode, Value: b.CodexSandboxMode})
 }
 
 // addAgentEnvVars adds agent-runtime-specific environment variables

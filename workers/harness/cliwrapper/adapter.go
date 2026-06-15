@@ -85,7 +85,7 @@ type TurnResult struct {
 }
 
 func SupportedRuntimeAdapters() []string {
-	return []string{RuntimeGeneric, RuntimeCodex}
+	return []string{RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeMulti}
 }
 
 func NewRuntimeAdapter(cfg Config) (RuntimeAdapter, error) {
@@ -102,8 +102,12 @@ func NewRuntimeAdapter(cfg Config) (RuntimeAdapter, error) {
 		return adapter, nil
 	case RuntimeCodex:
 		return NewCodexAdapter(cfg.Codex), nil
-	case RuntimeClaude, RuntimeCopilot:
-		return nil, fmt.Errorf("runtime adapter %q is reserved but not implemented", runtime)
+	case RuntimeClaude:
+		return NewClaudeAdapter(cfg.Claude), nil
+	case RuntimeCopilot:
+		return NewCopilotAdapter(cfg.Copilot), nil
+	case RuntimeMulti:
+		return NewMultiAdapter(cfg), nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported runtime adapter %q (supported: %s)",
@@ -118,6 +122,7 @@ func turnContextFromRequest(runtimeName string, cfg Config, request harness.Star
 	metadata := make(map[string]string, len(request.Metadata)+4)
 	maps.Copy(metadata, request.Metadata)
 	metadata["toolExecutionMode"] = string(request.ToolExecutionMode)
+	env := turnEnvFromRequest(cfg, request, metadata)
 	return TurnContext{
 		RuntimeName:      runtimeName,
 		Namespace:        request.Namespace,
@@ -128,10 +133,61 @@ func turnContextFromRequest(runtimeName string, cfg Config, request harness.Star
 		CorrelationID:    request.CorrelationID,
 		Prompt:           request.Input.Prompt,
 		WorkDir:          workDir,
-		Env:              cfg.CommandEnv,
+		Env:              env,
 		Deadline:         request.Deadline,
 		Metadata:         metadata,
 	}
+}
+
+func turnEnvFromRequest(cfg Config, request harness.StartTurnRequest, metadata map[string]string) []string {
+	env := append([]string(nil), cfg.CommandEnv...)
+	for _, item := range request.Input.Env {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		env = setEnv(env, name, item.Value)
+	}
+	env = setEnv(env, workerenv.TaskName, request.TaskName)
+	env = setEnv(env, workerenv.TaskNamespace, request.Namespace)
+	env = setEnv(env, workerenv.Prompt, request.Input.Prompt)
+	metadataEnv := map[string]string{
+		"model":            workerenv.Model,
+		"systemPrompt":     workerenv.SystemPrompt,
+		"maxTurns":         workerenv.MaxTurns,
+		"allowedTools":     workerenv.AllowedTools,
+		"disallowedTools":  workerenv.DisallowedTools,
+		"gitRepo":          workerenv.GitRepo,
+		"gitBranch":        workerenv.GitBranch,
+		"gitRef":           workerenv.GitRef,
+		"workspaceSubPath": workerenv.WorkspaceSubpath,
+		"forkRepo":         workerenv.ForkRepo,
+		"prBaseBranch":     workerenv.PRBaseBranch,
+		"prBaseRepo":       workerenv.PRBaseRepo,
+		"prBaseSHA":        workerenv.PRBaseSHA,
+		"pushBranch":       workerenv.PushBranch,
+	}
+	for key, envName := range metadataEnv {
+		if value := strings.TrimSpace(metadata[key]); value != "" {
+			env = setEnv(env, envName, value)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(metadata["allowBash"]), "true") {
+		env = setEnv(env, workerenv.AllowBash, "true")
+	}
+	if strings.TrimSpace(metadata["pushBranch"]) != "" {
+		env = setEnv(env, workerenv.RequirePushBranch, "true")
+	}
+	if strings.EqualFold(strings.TrimSpace(metadata["claudeBare"]), "true") {
+		env = setEnv(env, workerenv.ClaudeBare, "true")
+	}
+	if strings.EqualFold(strings.TrimSpace(metadata["claudeDisableSettingSources"]), "true") {
+		env = setEnv(env, workerenv.ClaudeDisableSettingSources, "true")
+	}
+	if value := strings.TrimSpace(metadata["claudePermissionMode"]); value != "" {
+		env = setEnv(env, workerenv.ClaudePermissionMode, value)
+	}
+	return env
 }
 
 func agentConfigFromEnv(defaultMaxTurns int) *agentEnvConfig {

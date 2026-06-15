@@ -28,6 +28,8 @@ const (
 	EnvAuthValueFile        = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
 	EnvAllowUnauthenticated = "ORKA_HARNESS_WRAPPER_ALLOW_UNAUTHENTICATED"
 	EnvTurnRetention        = "ORKA_HARNESS_WRAPPER_TURN_RETENTION"
+	EnvCopilotCLIPath       = "ORKA_HARNESS_WRAPPER_COPILOT_CLI_PATH"
+	EnvCopilotHelperPath    = "ORKA_HARNESS_WRAPPER_COPILOT_HELPER_PATH"
 )
 
 const (
@@ -45,6 +47,7 @@ const (
 	DefaultCancelGrace      = 2 * time.Second
 	DefaultTurnRetention    = 5 * time.Minute
 	DefaultPromptEnv        = "ORKA_TURN_PROMPT"
+	DefaultWrapperWorkDir   = "/workspace"
 )
 
 type Config struct {
@@ -61,6 +64,8 @@ type Config struct {
 	TurnRetention        time.Duration
 	Generic              GenericAdapterConfig
 	Codex                CodexAdapterConfig
+	Claude               ClaudeAdapterConfig
+	Copilot              CopilotAdapterConfig
 }
 
 type GenericAdapterConfig struct {
@@ -79,6 +84,17 @@ type CodexAdapterConfig struct {
 	Path        string
 	WorkDir     string
 	BypassProbe bool
+}
+
+type ClaudeAdapterConfig struct {
+	Path    string
+	WorkDir string
+}
+
+type CopilotAdapterConfig struct {
+	Path       string
+	HelperPath string
+	WorkDir    string
 }
 
 func DefaultConfig() Config {
@@ -105,6 +121,7 @@ func LoadConfigFromEnv() (Config, error) {
 	return cfg, cfg.Validate()
 }
 
+//nolint:gocyclo // Centralized env parsing keeps wrapper configuration ownership in one module.
 func LoadConfigFromEnvUnvalidated() (Config, error) {
 	cfg := DefaultConfig()
 	if v := strings.TrimSpace(os.Getenv(EnvListenAddr)); v != "" {
@@ -117,6 +134,7 @@ func LoadConfigFromEnvUnvalidated() (Config, error) {
 		cfg.WorkDir = v
 		cfg.Generic.WorkDir = v
 		cfg.Codex.WorkDir = v
+		cfg.Claude.WorkDir = v
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvCommand)); v != "" {
 		cfg.Generic.Command = v
@@ -193,6 +211,12 @@ func LoadConfigFromEnvUnvalidated() (Config, error) {
 		}
 		cfg.TurnRetention = parsed
 	}
+	if v := strings.TrimSpace(os.Getenv(EnvCopilotCLIPath)); v != "" {
+		cfg.Copilot.Path = v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvCopilotHelperPath)); v != "" {
+		cfg.Copilot.HelperPath = v
+	}
 	return cfg, nil
 }
 
@@ -216,7 +240,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("auth token is required unless %s=true", EnvAllowUnauthenticated)
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Runtime)) {
-	case "", RuntimeGeneric, RuntimeCodex:
+	case "", RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeMulti:
 		return nil
 	default:
 		return fmt.Errorf("unsupported runtime adapter %q", c.Runtime)

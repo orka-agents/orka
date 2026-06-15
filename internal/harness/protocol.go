@@ -99,6 +99,15 @@ type PolicyRef struct {
 type TurnInput struct {
 	Prompt      string       `json:"prompt,omitempty"`
 	ContextRefs []ContextRef `json:"contextRefs,omitempty"`
+	Env         []TurnEnvVar `json:"env,omitempty"`
+}
+
+// TurnEnvVar is a resolved, literal environment variable passed to the
+// wrapper subprocess. It intentionally does not model SecretKeyRef/ValueFrom;
+// controller-side validation must reject unresolved or secret-backed values.
+type TurnEnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
 }
 
 type ContextRef struct {
@@ -269,6 +278,14 @@ func (r StartTurnRequest) Validate() error {
 	if r.ApprovalPolicyRef != nil && strings.TrimSpace(r.ApprovalPolicyRef.Name) == "" {
 		return fmt.Errorf("approval policy ref name is required")
 	}
+	for i, env := range r.Input.Env {
+		if strings.TrimSpace(env.Name) == "" {
+			return fmt.Errorf("input env %d name is required", i)
+		}
+		if !isValidTurnEnvName(env.Name) {
+			return fmt.Errorf("input env %d name %q is invalid", i, env.Name)
+		}
+	}
 	for i, ref := range r.Input.ContextRefs {
 		if strings.TrimSpace(ref.Kind) == "" {
 			return fmt.Errorf("context ref %d kind is required", i)
@@ -281,6 +298,22 @@ func (r StartTurnRequest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func isValidTurnEnvName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (r CancelTurnRequest) Validate() error {

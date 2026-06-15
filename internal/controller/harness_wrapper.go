@@ -20,6 +20,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -42,7 +44,7 @@ func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
 	if task == nil || task.Annotations == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnno]), "true") &&
+	return strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnno]), scheduledRunLabelValue) &&
 		taskHasPlannedHarnessWrapperTurn(task)
 }
 
@@ -145,9 +147,6 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			case strings.Contains(message, "maximum concurrent turns"):
 				if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
 					return ctrl.Result{}, clearErr
-				}
-				if releaseErr := r.releaseHarnessWrapperSessionLock(ctx, task); releaseErr != nil {
-					return ctrl.Result{}, releaseErr
 				}
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			default:
@@ -328,7 +327,7 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 	if task.Annotations == nil {
 		task.Annotations = map[string]string{}
 	}
-	task.Annotations[harnessWrapperStartedAnno] = "true"
+	task.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
 	return r.Patch(ctx, task, patch)
 }
 
@@ -370,17 +369,15 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 		return fmt.Errorf("read harness runtime capabilities: %w", err)
 	}
 	wantRuntime := strings.TrimSpace(request.Metadata["runtime"])
-	if wantRuntime != "" && capabilities.RuntimeName != wantRuntime {
-		return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
-	}
-	return nil
-}
-
-func (r *TaskReconciler) releaseHarnessWrapperSessionLock(ctx context.Context, task *corev1alpha1.Task) error {
-	if task.Spec.SessionRef == nil || r.SessionManager == nil {
+	if wantRuntime == "" || capabilities.RuntimeName == wantRuntime {
 		return nil
 	}
-	return r.SessionManager.ReleaseLock(ctx, task)
+	for runtime := range strings.SplitSeq(capabilities.Metadata["supportedRuntimes"], ",") {
+		if strings.TrimSpace(runtime) == wantRuntime {
+			return nil
+		}
+	}
+	return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
 }
 
 func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task *corev1alpha1.Task) error {
@@ -463,7 +460,7 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 		CorrelationID:     strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Deadline:          deadline.UTC(),
 		AuthIdentity:      harness.AuthIdentity{Subject: "task:" + task.Namespace + "/" + task.Name},
-		Input:             harness.TurnInput{Prompt: prompt},
+		Input:             harness.TurnInput{Prompt: prompt, Env: r.harnessWrapperTurnEnv(task)},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata:          metadata,
 	}
@@ -509,7 +506,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 		AuthIdentity: harness.AuthIdentity{
 			Subject: "task:" + task.Namespace + "/" + task.Name,
 		},
-		Input:             harness.TurnInput{Prompt: prompt},
+		Input:             harness.TurnInput{Prompt: prompt, Env: r.harnessWrapperTurnEnv(task)},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata:          metadata,
 	}, nil
@@ -561,11 +558,22 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
 		allowedTools = task.Spec.AgentRuntime.AllowedTools
 	}
+	disallowedTools := []string(nil)
+	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+		disallowedTools = append(disallowedTools, task.Spec.AgentRuntime.DisallowedTools...)
+	}
+	if taskRequestsReadOnlyAgent(task) {
+		allowedTools = readOnlyAgentAllowedTools()
+		disallowedTools = append(disallowedTools, readOnlyAgentDisallowedTools()...)
+		metadata["claudeBare"] = scheduledRunLabelValue
+		metadata["claudeDisableSettingSources"] = scheduledRunLabelValue
+		metadata["claudePermissionMode"] = "dontAsk"
+	}
 	if len(allowedTools) > 0 {
 		metadata["allowedTools"] = strings.Join(allowedTools, ",")
 	}
-	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
-		metadata["disallowedTools"] = strings.Join(task.Spec.AgentRuntime.DisallowedTools, ",")
+	if len(disallowedTools) > 0 {
+		metadata["disallowedTools"] = strings.Join(disallowedTools, ",")
 	}
 	allowBash := true
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
@@ -574,9 +582,11 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
 		allowBash = *task.Spec.AgentRuntime.AllowBash
 	}
+	if taskRequestsReadOnlyAgent(task) {
+		allowBash = false
+	}
 	metadata["allowBash"] = strconv.FormatBool(allowBash)
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.Workspace != nil {
-		ws := task.Spec.AgentRuntime.Workspace
+	if ws := effectiveWorkspace(task); ws != nil {
 		if strings.TrimSpace(ws.GitRepo) != "" {
 			metadata["gitRepo"] = strings.TrimSpace(ws.GitRepo)
 		}
@@ -589,8 +599,105 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		if strings.TrimSpace(ws.SubPath) != "" {
 			metadata["workspaceSubPath"] = strings.TrimSpace(ws.SubPath)
 		}
+		if strings.TrimSpace(ws.ForkRepo) != "" {
+			metadata["forkRepo"] = strings.TrimSpace(ws.ForkRepo)
+		}
+		if strings.TrimSpace(ws.PRBaseBranch) != "" {
+			metadata["prBaseBranch"] = strings.TrimSpace(ws.PRBaseBranch)
+		}
+		if strings.TrimSpace(ws.PushBranch) != "" {
+			metadata["pushBranch"] = strings.TrimSpace(ws.PushBranch)
+		}
+	}
+	for _, env := range task.Spec.Env {
+		switch env.Name {
+		case workerenv.PRBaseRepo:
+			metadata["prBaseRepo"] = strings.TrimSpace(env.Value)
+		case workerenv.PRBaseSHA:
+			metadata["prBaseSHA"] = strings.TrimSpace(env.Value)
+		}
 	}
 	return metadata, nil
+}
+
+func (r *TaskReconciler) harnessWrapperTurnEnv(task *corev1alpha1.Task) []harness.TurnEnvVar {
+	if task == nil {
+		return nil
+	}
+	env := make([]harness.TurnEnvVar, 0, len(task.Spec.Env)+4)
+	for _, item := range task.Spec.Env {
+		if strings.TrimSpace(item.Name) == "" {
+			continue
+		}
+		env = append(env, harness.TurnEnvVar{Name: item.Name, Value: item.Value})
+	}
+	if r != nil && r.JobBuilder != nil && strings.TrimSpace(r.JobBuilder.ControllerURL) != "" {
+		controllerURL := strings.TrimSpace(r.JobBuilder.ControllerURL)
+		env = append(env,
+			harness.TurnEnvVar{Name: workerenv.ControllerURL, Value: controllerURL},
+			harness.TurnEnvVar{
+				Name:  workerenv.ResultEndpoint,
+				Value: fmt.Sprintf("%s/internal/v1/results/%s/%s", controllerURL, task.Namespace, task.Name),
+			},
+		)
+	}
+	if task.Spec.PriorTaskRef != nil {
+		env = append(env, harness.TurnEnvVar{Name: workerenv.PriorTask, Value: task.Spec.PriorTaskRef.Name})
+		priorNS := task.Spec.PriorTaskRef.Namespace
+		if strings.TrimSpace(priorNS) == "" {
+			priorNS = task.Namespace
+		}
+		env = append(env, harness.TurnEnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
+	}
+	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
+		env = append(env, harness.TurnEnvVar{Name: workerenv.ParentTask, Value: parentTask})
+	}
+	return env
+}
+
+func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {
+	for i, item := range env {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			return fmt.Errorf("task env %d name is required", i)
+		}
+		if !harnessWrapperEnvNameValid(name) {
+			return fmt.Errorf("task env %q has an invalid name", name)
+		}
+		if item.ValueFrom != nil {
+			return fmt.Errorf("task env %q uses valueFrom, which is not supported by harness runtime yet", name)
+		}
+		if strings.HasPrefix(name, "ORKA_HARNESS_WRAPPER_") || harnessWrapperEnvNameLooksSecret(name) {
+			return fmt.Errorf("task env %q is not supported by harness runtime", name)
+		}
+	}
+	return nil
+}
+
+func harnessWrapperEnvNameValid(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func harnessWrapperEnvNameLooksSecret(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	for _, marker := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL", "AUTHORIZATION"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *TaskReconciler) resolveHarnessWrapperConfigMapValue(

@@ -1,10 +1,12 @@
 package cliwrapper
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sozercan/orka/internal/workerenv"
@@ -25,12 +27,94 @@ func ClearTurnArtifacts() {
 }
 
 func UploadTurnArtifacts(turn TurnContext) error {
+	restoreTurnEnv := setTemporaryEnvEntries(turn.Env)
+	defer restoreTurnEnv()
 	restoreTaskName := setTemporaryEnv(workerenv.TaskName, turn.TaskName)
 	defer restoreTaskName()
 	restoreTaskNamespace := setTemporaryEnv(workerenv.TaskNamespace, turn.Namespace)
 	defer restoreTaskNamespace()
 	err := common.UploadArtifacts()
 	return err
+}
+
+func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot string) (*common.AgentConfig, error) {
+	if turn == nil {
+		return nil, nil
+	}
+	cfg := agentConfigForTurn(*turn)
+	root := strings.TrimSpace(workspaceRoot)
+	if root == "" {
+		root = strings.TrimSpace(turn.WorkDir)
+	}
+	if root != "" {
+		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
+			return cfg, err
+		}
+		if err := common.PreparePullRequestReviewContext(root, cfg); err != nil {
+			return cfg, err
+		}
+	}
+	restoreEnv := setTemporaryEnvEntries(turn.Env)
+	defer restoreEnv()
+	if root != "" {
+		if err := common.PrepareSecurityReviewContext(root, cfg); err != nil {
+			return cfg, err
+		}
+	}
+	turn.Prompt = cfg.Prompt
+	turn.Env = setEnv(turn.Env, workerenv.Prompt, cfg.Prompt)
+	return cfg, nil
+}
+
+func EnsureTurnRequiredSecurityArtifacts(ctx context.Context, cfg *common.AgentConfig, result string) (string, error) {
+	return common.EnsureRequiredSecurityArtifacts(ctx, cfg, result, nil)
+}
+
+func agentConfigForTurn(turn TurnContext) *common.AgentConfig {
+	maxTurns := 50
+	maxTurnsValue := firstNonEmpty(turn.Metadata["maxTurns"], envEntryValue(turn.Env, workerenv.MaxTurns))
+	if parsed, err := strconv.Atoi(maxTurnsValue); err == nil && parsed > 0 {
+		maxTurns = parsed
+	}
+	return &common.AgentConfig{
+		TaskName:      turn.TaskName,
+		TaskNamespace: turn.Namespace,
+		Prompt:        turn.Prompt,
+		Model:         firstNonEmpty(turn.Metadata["model"], envEntryValue(turn.Env, workerenv.Model)),
+		SystemPrompt:  firstNonEmpty(turn.Metadata["systemPrompt"], envEntryValue(turn.Env, workerenv.SystemPrompt)),
+		MaxTurns:      maxTurns,
+		AllowedTools: splitCSV(firstNonEmpty(
+			turn.Metadata["allowedTools"],
+			envEntryValue(turn.Env, workerenv.AllowedTools),
+		)),
+		DisallowedTools: splitCSV(firstNonEmpty(
+			turn.Metadata["disallowedTools"],
+			envEntryValue(turn.Env, workerenv.DisallowedTools),
+		)),
+		GitRepo:      firstNonEmpty(turn.Metadata["gitRepo"], envEntryValue(turn.Env, workerenv.GitRepo)),
+		GitBranch:    firstNonEmpty(turn.Metadata["gitBranch"], envEntryValue(turn.Env, workerenv.GitBranch)),
+		GitRef:       firstNonEmpty(turn.Metadata["gitRef"], envEntryValue(turn.Env, workerenv.GitRef)),
+		PRBaseBranch: firstNonEmpty(turn.Metadata["prBaseBranch"], envEntryValue(turn.Env, workerenv.PRBaseBranch)),
+		PRBaseRepo:   firstNonEmpty(turn.Metadata["prBaseRepo"], envEntryValue(turn.Env, workerenv.PRBaseRepo)),
+		PRBaseSHA:    firstNonEmpty(turn.Metadata["prBaseSHA"], envEntryValue(turn.Env, workerenv.PRBaseSHA)),
+		SubPath:      firstNonEmpty(turn.Metadata["workspaceSubPath"], envEntryValue(turn.Env, workerenv.WorkspaceSubpath)),
+	}
+}
+
+func setTemporaryEnvEntries(entries []string) func() {
+	restores := make([]func(), 0, len(entries))
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		restores = append(restores, setTemporaryEnv(strings.TrimSpace(key), value))
+	}
+	return func() {
+		for i := len(restores) - 1; i >= 0; i-- {
+			restores[i]()
+		}
+	}
 }
 
 func setTemporaryEnv(key, value string) func() {

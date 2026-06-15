@@ -57,7 +57,7 @@ func (a *GenericAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 		return nil, err
 	}
 	cfg := a.config
-	dir := firstNonEmpty(cfg.WorkDir, turn.WorkDir)
+	dir := firstNonEmpty(turn.WorkDir, cfg.WorkDir)
 	spec := &CommandSpec{
 		Path: cfg.Command,
 		Args: append([]string(nil), cfg.Args...),

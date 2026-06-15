@@ -29,6 +29,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "copilot-turn" {
+		return cliwrapper.RunCopilotTurnCLI(context.Background(), os.Stdin, os.Stdout)
+	}
 	cfg, err := cliwrapper.LoadConfigFromEnvUnvalidated()
 	if err != nil {
 		return err
@@ -38,7 +41,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("orka-agent-harness-wrapper", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "HTTP listen address")
-	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "runtime adapter: generic, codex, claude, copilot")
+	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "runtime adapter: generic, codex, claude, copilot, multi")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "default command working directory")
 	fs.StringVar(&cfg.Generic.Command, "command", cfg.Generic.Command, "generic adapter command path")
 	fs.Var(&extraArgs, "arg", "generic adapter command argument (repeatable)")
@@ -52,6 +55,13 @@ func run(args []string) error {
 	fs.Int64Var(&cfg.StderrLimitBytes, "stderr-limit-bytes", cfg.StderrLimitBytes, "stderr capture limit")
 	fs.DurationVar(&cfg.CancelGrace, "cancel-grace-period", cfg.CancelGrace, "SIGTERM to SIGKILL grace period")
 	fs.DurationVar(&cfg.TurnRetention, "turn-retention", cfg.TurnRetention, "completed turn in-memory retention TTL")
+	fs.StringVar(&cfg.Copilot.Path, "copilot-cli-path", cfg.Copilot.Path, "Copilot CLI path for the copilot adapter")
+	fs.StringVar(
+		&cfg.Copilot.HelperPath,
+		"copilot-helper-path",
+		cfg.Copilot.HelperPath,
+		"helper executable path for the copilot adapter",
+	)
 	fs.StringVar(&cfg.AuthValue, "bearer-token", cfg.AuthValue, "required bearer token for turn/event/cancel endpoints")
 	fs.BoolVar(
 		&cfg.AllowUnauthenticated,
@@ -72,6 +82,8 @@ func run(args []string) error {
 	if cfg.WorkDir != "" {
 		cfg.Generic.WorkDir = cfg.WorkDir
 		cfg.Codex.WorkDir = cfg.WorkDir
+		cfg.Claude.WorkDir = cfg.WorkDir
+		cfg.Copilot.WorkDir = cfg.WorkDir
 	}
 	adapter, err := cliwrapper.NewRuntimeAdapter(cfg)
 	if err != nil {

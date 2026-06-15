@@ -55,9 +55,9 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		_ = cleanupInstructions // cleanup is represented by TempFiles for the command runner.
 	}
 
-	dir := firstNonEmpty(a.config.WorkDir, turn.WorkDir)
+	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
 	if dir == "" {
-		dir = "/workspace"
+		dir = DefaultWrapperWorkDir
 	}
 	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
 		if err != nil && !os.IsNotExist(err) {
