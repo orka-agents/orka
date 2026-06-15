@@ -148,6 +148,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
 		}
 		if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
+			if harnessWrapperCapabilitiesErrorIsRetryable(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return r.failTask(ctx, task, err.Error())
 		}
 		if _, err := client.StartTurn(ctx, request); err != nil {
