@@ -665,11 +665,17 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
 	env := r.harnessWrapperBaseTurnEnv(task)
-	secretEnv, err := r.harnessWrapperAgentSecretEnv(ctx, agent)
+	agentSecretEnv, err := r.harnessWrapperAgentSecretEnv(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
-	return append(env, secretEnv...), nil
+	taskSecretEnv, err := r.harnessWrapperTaskSecretEnv(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	env = append(env, agentSecretEnv...)
+	env = append(env, taskSecretEnv...)
+	return env, nil
 }
 
 func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
@@ -679,8 +685,14 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return nil, nil
 	}
+	return r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace})
+}
+
+func (r *TaskReconciler) harnessWrapperSecretEnv(
+	ctx context.Context,
+	key ctrlclient.ObjectKey,
+) ([]harness.TurnEnvVar, error) {
 	secret := &corev1.Secret{}
-	key := ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace}
 	if err := r.Get(ctx, key, secret); err != nil {
 		return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
@@ -691,7 +703,12 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 			continue
 		}
 		if !harnessWrapperEnvNameValid(name) {
-			return nil, fmt.Errorf("agent secret %q key %q has an invalid env name", key.Name, name)
+			return nil, fmt.Errorf(
+				"harness runtime credential Secret %s/%s key %q has an invalid env name",
+				key.Namespace,
+				key.Name,
+				name,
+			)
 		}
 		if len(raw) == 0 {
 			continue
@@ -699,6 +716,20 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 		env = append(env, harness.TurnEnvVar{Name: name, Value: string(raw)})
 	}
 	return env, nil
+}
+
+func (r *TaskReconciler) harnessWrapperTaskSecretEnv(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) ([]harness.TurnEnvVar, error) {
+	if task == nil || task.Spec.SecretRef == nil || strings.TrimSpace(task.Spec.SecretRef.Name) == "" {
+		return nil, nil
+	}
+	namespace := strings.TrimSpace(task.Spec.SecretRef.Namespace)
+	if namespace == "" {
+		namespace = task.Namespace
+	}
+	return r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: task.Spec.SecretRef.Name, Namespace: namespace})
 }
 
 func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {

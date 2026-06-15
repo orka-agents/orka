@@ -39,6 +39,7 @@ command -v jq      >/dev/null 2>&1 || die "missing required command: jq"
 
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
+harness_wrapper_deployment="${ORKA_HARNESS_WRAPPER_DEPLOYMENT:-orka-agent-harness-wrapper}"
 codex_image="${DEMO_HARNESS_WRAPPER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/agent-harness-wrapper:demo}"
 ai_image="${DEMO_AI_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/ai-worker:demo}"
 general_image="${DEMO_GENERAL_WORKER_IMAGE:-localhost:${KIND_REGISTRY_PORT:-5001}/orka/general-worker:demo}"
@@ -55,7 +56,7 @@ require_image_source() {
     die "${label} build is disabled but ${image_var} is not set to an existing image"
   fi
 }
-require_image_source "codex worker" "${DEMO_BUILD_CODEX_IMAGE:-1}" DEMO_HARNESS_WRAPPER_IMAGE
+require_image_source "harness wrapper" "${DEMO_BUILD_CODEX_IMAGE:-1}" DEMO_HARNESS_WRAPPER_IMAGE
 require_image_source "AI worker" "${DEMO_BUILD_AI_IMAGE:-1}" DEMO_AI_WORKER_IMAGE
 require_image_source "general worker" "${DEMO_BUILD_GENERAL_IMAGE:-1}" DEMO_GENERAL_WORKER_IMAGE
 if [[ "${needs_docker}" == "1" ]]; then
@@ -161,7 +162,7 @@ build_and_repoint_worker() {
 }
 if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_CODEX_IMAGE:-1}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
-  log "Building git-capable codex worker image ${codex_image} (arch ${node_arch})"
+  log "Building harness wrapper image ${codex_image} (arch ${node_arch})"
 	docker build --platform "linux/${node_arch}" -t "${codex_image}" \
 	  -f "${repo_root}/workers/harness/Dockerfile" "${repo_root}"
 	publish_worker_image "${codex_image}"

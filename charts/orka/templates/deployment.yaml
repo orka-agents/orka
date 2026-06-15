@@ -320,6 +320,9 @@ spec:
         - name: harness-wrapper-auth
           secret:
             secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            items:
+              - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
+                path: token
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:
