@@ -712,9 +712,13 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
 	env := r.harnessWrapperBaseTurnEnv(task)
-	workspaceGitEnv, err := r.harnessWrapperWorkspaceGitSecretEnv(ctx, task)
-	if err != nil {
-		return nil, err
+	var workspaceGitEnv []harness.TurnEnvVar
+	if !taskRequestsReadOnlyAgent(task) {
+		var err error
+		workspaceGitEnv, err = r.harnessWrapperWorkspaceGitSecretEnv(ctx, task)
+		if err != nil {
+			return nil, err
+		}
 	}
 	agentSecretEnv, err := r.harnessWrapperAgentSecretEnv(ctx, task, agent)
 	if err != nil {

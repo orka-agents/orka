@@ -154,11 +154,30 @@ build_and_repoint_worker() {
   if command -v docker >/dev/null 2>&1 && [[ "${do_build}" == "1" ]]; then
     local node_arch
     node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
-	  log "Building ${label} image ${image} (arch ${node_arch})"
-	  docker build --platform "linux/${node_arch}" -t "${image}" \
-	    -f "${repo_root}/${dockerfile}" "${repo_root}"
-	  publish_worker_image "${image}"
-	fi
+    log "Building ${label} image ${image} (arch ${node_arch})"
+    docker build --platform "linux/${node_arch}" -t "${image}" \
+      -f "${repo_root}/${dockerfile}" "${repo_root}"
+    publish_worker_image "${image}"
+  fi
+  if kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" >/dev/null 2>&1; then
+    log "Repointing ${controller_deployment} --${flag} -> ${image}"
+    kubectl -n "${orka_namespace}" get deployment "${controller_deployment}" -o json \
+      | jq --arg name "--${flag}" --arg value "${image}" '
+          def upsert_arg($name; $value):
+            if any(.[]; startswith($name + "=")) then
+              map(if startswith($name + "=") then $name + "=" + $value else . end)
+            else
+              . + [$name + "=" + $value]
+            end;
+          .spec.template.spec.containers |= map(
+            if .name == "manager" then
+              .args = ((.args // []) | upsert_arg($name; $value))
+            else . end
+          )
+        ' \
+      | kubectl apply -f -
+    kubectl -n "${orka_namespace}" rollout status "deployment/${controller_deployment}" --timeout=300s
+  fi
 }
 if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_CODEX_IMAGE:-1}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"

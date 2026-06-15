@@ -232,6 +232,10 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
 	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		GitRepo:      "https://github.com/sozercan/orka",
+		GitSecretRef: &corev1.LocalObjectReference{Name: "git-credentials"},
+	}}
 	agentSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: agent.Namespace},
 		Data: map[string][]byte{
@@ -244,7 +248,11 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: "task-runtime-secret", Namespace: task.Namespace},
 		Data:       map[string][]byte{workerenv.OpenAIAPIKey: []byte("task-openai-key")},
 	}
-	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret)
+	gitSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: task.Namespace},
+		Data:       map[string][]byte{"token": []byte("git-token")},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret, gitSecret)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err != nil {
 		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
@@ -261,6 +269,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	if env[workerenv.OpenAIAPIKey] == "task-openai-key" {
 		t.Fatalf("task secret credentials should not be sent to read-only harness turns")
+	}
+	if env[workerenv.GitToken] != "" || env[workerenv.GitHubToken] != "" {
+		t.Fatalf("workspace git credentials should not be sent to read-only harness turns")
 	}
 }
 
