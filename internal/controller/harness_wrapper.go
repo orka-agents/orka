@@ -460,7 +460,7 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 		CorrelationID:     strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Deadline:          deadline.UTC(),
 		AuthIdentity:      harness.AuthIdentity{Subject: "task:" + task.Namespace + "/" + task.Name},
-		Input:             harness.TurnInput{Prompt: prompt, Env: r.harnessWrapperTurnEnv(task)},
+		Input:             harness.TurnInput{Prompt: prompt, Env: r.harnessWrapperBaseTurnEnv(task)},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata:          metadata,
 	}
@@ -494,6 +494,10 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
+	turnEnv, err := r.harnessWrapperTurnEnv(ctx, task, agent)
+	if err != nil {
+		return harness.StartTurnRequest{}, err
+	}
 	return harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
 		Namespace:        task.Namespace,
@@ -506,7 +510,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 		AuthIdentity: harness.AuthIdentity{
 			Subject: "task:" + task.Namespace + "/" + task.Name,
 		},
-		Input:             harness.TurnInput{Prompt: prompt, Env: r.harnessWrapperTurnEnv(task)},
+		Input:             harness.TurnInput{Prompt: prompt, Env: turnEnv},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata:          metadata,
 	}, nil
@@ -620,7 +624,7 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	return metadata, nil
 }
 
-func (r *TaskReconciler) harnessWrapperTurnEnv(task *corev1alpha1.Task) []harness.TurnEnvVar {
+func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []harness.TurnEnvVar {
 	if task == nil {
 		return nil
 	}
@@ -653,6 +657,48 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(task *corev1alpha1.Task) []harnes
 		env = append(env, harness.TurnEnvVar{Name: workerenv.ParentTask, Value: parentTask})
 	}
 	return env
+}
+
+func (r *TaskReconciler) harnessWrapperTurnEnv(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) ([]harness.TurnEnvVar, error) {
+	env := r.harnessWrapperBaseTurnEnv(task)
+	secretEnv, err := r.harnessWrapperAgentSecretEnv(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	return append(env, secretEnv...), nil
+}
+
+func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
+	ctx context.Context,
+	agent *corev1alpha1.Agent,
+) ([]harness.TurnEnvVar, error) {
+	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return nil, nil
+	}
+	secret := &corev1.Secret{}
+	key := ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace}
+	if err := r.Get(ctx, key, secret); err != nil {
+		return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	env := make([]harness.TurnEnvVar, 0, len(secret.Data))
+	for name, raw := range secret.Data {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !harnessWrapperEnvNameValid(name) {
+			return nil, fmt.Errorf("agent secret %q key %q has an invalid env name", key.Name, name)
+		}
+		if len(raw) == 0 {
+			continue
+		}
+		env = append(env, harness.TurnEnvVar{Name: name, Value: string(raw)})
+	}
+	return env, nil
 }
 
 func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {

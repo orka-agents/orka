@@ -162,9 +162,11 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
     auth:
-      # Existing Secret containing the shared wrapper bearer token. Create it separately.
+      # When existingSecret is empty, the chart renders a development placeholder Secret.
+      # Replace token before production use, or point existingSecret at an externally managed Secret.
       existingSecret: ""
       tokenKey: token
+      token: dev-only-change-me
     resources: {}
 
 # GitHub webhook and label-trigger configuration.

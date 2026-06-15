@@ -235,6 +235,10 @@ spec:
               value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
+            - name: ORKA_HARNESS_WRAPPER_ENDPOINT
+              value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
+            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+              value: /var/run/orka/harness-wrapper/token
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:

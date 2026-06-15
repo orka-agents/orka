@@ -188,6 +188,33 @@ func hasExecutionEventType(eventsList []store.ExecutionEvent, typ string) bool {
 	return false
 }
 
+func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: agent.Namespace},
+		Data: map[string][]byte{
+			workerenv.OpenAIAPIKey: []byte("runtime-openai-key"),
+			workerenv.GitHubToken:  []byte("runtime-github-token"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIAPIKey] != "runtime-openai-key" {
+		t.Fatalf("%s = %q, want runtime credential", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+	if env[workerenv.GitHubToken] != "runtime-github-token" {
+		t.Fatalf("%s = %q, want runtime credential", workerenv.GitHubToken, env[workerenv.GitHubToken])
+	}
+}
+
 func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.PRBaseSHA, Value: "base-sha"}, {Name: "ORKA_SECURITY_STAGE", Value: "review"}}
