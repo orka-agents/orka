@@ -14,6 +14,7 @@ import (
 
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const maxTerminalResultBytes = 512 * 1024
@@ -355,6 +356,15 @@ func (s *Server) runTurn(turn *turnState) {
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	if strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") {
+		turnCtx.Env = removeTurnEnv(
+			turnCtx.Env,
+			workerenv.GitToken,
+			workerenv.GitHubToken,
+			workerenv.GitAskpass,
+			workerenv.GitUsername,
+		)
+	}
 	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
@@ -602,6 +612,29 @@ func redactAndTruncateBytes(value string, maxBytes int) string {
 	}
 	out.WriteRune('…')
 	return out.String()
+}
+
+func removeTurnEnv(env []string, names ...string) []string {
+	if len(env) == 0 || len(names) == 0 {
+		return env
+	}
+	remove := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		remove[strings.TrimSpace(name)] = struct{}{}
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			out = append(out, entry)
+			continue
+		}
+		if _, shouldRemove := remove[name]; shouldRemove {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func writeSafeError(w http.ResponseWriter, status int, message string) {

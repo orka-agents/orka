@@ -607,6 +607,7 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		disallowedTools = append(disallowedTools, task.Spec.AgentRuntime.DisallowedTools...)
 	}
 	if taskRequestsReadOnlyAgent(task) {
+		metadata["readOnly"] = scheduledRunLabelValue
 		allowedTools = readOnlyAgentAllowedTools()
 		disallowedTools = append(disallowedTools, readOnlyAgentDisallowedTools()...)
 		metadata["claudeBare"] = scheduledRunLabelValue

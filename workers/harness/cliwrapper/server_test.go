@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
@@ -487,4 +488,34 @@ func testBearerHeaderValue() string {
 
 func redactionLeakMarker() string {
 	return strings.Join([]string{"redaction", "value"}, "-")
+}
+
+func TestServerStripsGitCredentialsFromReadOnlyCommandEnv(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = "/bin/sh"
+	cfg.Generic.Args = []string{"-c", "printf 'github=%s git=%s' \"$GITHUB_TOKEN\" \"$GIT_TOKEN\""}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Metadata = map[string]string{"readOnly": "true"}
+	request.Input.Env = []harness.TurnEnvVar{
+		{Name: workerenv.GitHubToken, Value: "github-token"},
+		{Name: workerenv.GitToken, Value: "git-token"},
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if strings.Contains(last.Completed.Result, "token") {
+		t.Fatalf("read-only command received git credentials: %q", last.Completed.Result)
+	}
 }
