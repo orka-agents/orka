@@ -72,6 +72,7 @@ func harnessWrapperAuthValue() string {
 	return strings.TrimSpace(os.Getenv(harnessWrapperAuthValueEnv))
 }
 
+//nolint:gocyclo // Coordinates idempotent turn planning, wrapper start, and Running transition.
 func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
 	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
 	if err != nil {
@@ -81,7 +82,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
 	}
 	if workspaceRequest != nil {
-		return r.failTask(ctx, task, "execution workspace is not supported by harness runtime yet")
+		err := fmt.Errorf("execution workspace is not supported by harness runtime yet")
+		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return r.failTask(ctx, task, err.Error())
 	}
 
 	endpoint := harnessWrapperEndpoint()
@@ -656,6 +661,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	return metadata, nil
 }
 
+// harnessWrapperBaseTurnEnv copies only literal Task env after validateTaskAgentCompatibility
+// has rejected valueFrom entries and secret-looking task env names. Runtime credentials
+// are resolved separately from Agent/Task SecretRefs and are never persisted in annotations.
 func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []harness.TurnEnvVar {
 	if task == nil {
 		return nil
@@ -691,6 +699,9 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []ha
 	return env
 }
 
+// harnessWrapperTurnEnv intentionally does not accept a Provider: type: agent tasks with
+// Agent.providerRef are rejected by validateTaskAgentCompatibility. CLI runtime
+// credentials come from Agent.spec.secretRef and Task.spec.secretRef.
 func (r *TaskReconciler) harnessWrapperTurnEnv(
 	ctx context.Context,
 	task *corev1alpha1.Task,
