@@ -162,11 +162,11 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
     auth:
-      # When existingSecret is empty, the chart renders a development placeholder Secret.
-      # Replace token before production use, or point existingSecret at an externally managed Secret.
+      # Existing Secret containing the shared wrapper bearer token.
+      # When existingSecret and token are both empty, Helm generates a release-local token.
       existingSecret: ""
       tokenKey: token
-      token: dev-only-change-me
+      token: ""
     resources: {}
 
 # GitHub webhook and label-trigger configuration.

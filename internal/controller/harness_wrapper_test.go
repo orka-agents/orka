@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/harness/cliwrapper"
@@ -225,6 +227,69 @@ func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
+	agentSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: agent.Namespace},
+		Data: map[string][]byte{
+			workerenv.AnthropicAPIKey: []byte("runtime-anthropic-key"),
+			workerenv.GitHubToken:     []byte("runtime-github-token"),
+		},
+	}
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret"}
+	taskSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-runtime-secret", Namespace: task.Namespace},
+		Data:       map[string][]byte{workerenv.OpenAIAPIKey: []byte("task-openai-key")},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
+		t.Fatalf("%s = %q, want runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
+	}
+	if _, ok := env[workerenv.GitHubToken]; ok {
+		t.Fatalf("%s should be filtered for read-only harness turns", workerenv.GitHubToken)
+	}
+	if env[workerenv.OpenAIAPIKey] == "task-openai-key" {
+		t.Fatalf("task secret credentials should not be sent to read-only harness turns")
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsCrossNamespaceTaskSecret(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret", Namespace: "other"}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "does not match task namespace") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want namespace rejection", err)
+	}
+}
+
+func TestHarnessWrapperPlannedTurnMustMatchTaskIdentity(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: task.Namespace + ":" + harnessWrapperSessionName(task) + ":" + string(agent.Spec.Runtime.Type),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	if !harnessWrapperPlannedTurnMatchesTask(task, agent, 1) {
+		t.Fatal("expected planned turn to match task identity")
+	}
+	task.Annotations[harnessWrapperTurnIDAnnotation] = "other-turn"
+	if harnessWrapperPlannedTurnMatchesTask(task, agent, 1) {
+		t.Fatal("expected copied turn id to be rejected")
+	}
+}
+
 func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.PRBaseSHA, Value: "base-sha"}, {Name: "ORKA_SECURITY_STAGE", Value: "review"}}
@@ -280,5 +345,14 @@ func TestValidateHarnessWrapperTaskEnvRejectsSecretAndValueFrom(t *testing.T) {
 	}
 	if err := validateHarnessWrapperTaskEnv([]corev1.EnvVar{{Name: "SAFE", ValueFrom: &corev1.EnvVarSource{}}}); err == nil {
 		t.Fatal("expected valueFrom env to be rejected")
+	}
+}
+
+func TestHarnessWrapperCapabilitiesReadErrorRetryable(t *testing.T) {
+	if !harnessWrapperCapabilitiesErrorIsRetryable(fmt.Errorf("read harness runtime capabilities: boom")) {
+		t.Fatal("expected capabilities read error to be retryable")
+	}
+	if harnessWrapperCapabilitiesErrorIsRetryable(fmt.Errorf("harness runtime \"multi\" does not match task runtime \"codex\"")) {
+		t.Fatal("expected runtime mismatch to remain terminal")
 	}
 }
