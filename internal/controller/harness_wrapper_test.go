@@ -290,6 +290,39 @@ func TestHarnessWrapperPlannedTurnMustMatchTaskIdentity(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperTurnRequestCarriesWorkspaceGitSecretEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		GitRepo:      "https://github.com/sozercan/orka",
+		GitSecretRef: &corev1.LocalObjectReference{Name: "git-credentials"},
+	}}
+	gitSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			"token":    []byte("git-token-value"),
+			"username": []byte("git-user"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, gitSecret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.GitToken] != "git-token-value" || env[workerenv.GitHubToken] != "git-token-value" {
+		t.Fatalf("git token env missing or wrong: %#v", env)
+	}
+	if env[workerenv.GitUsername] != "git-user" {
+		t.Fatalf("git username env = %q, want git-user", env[workerenv.GitUsername])
+	}
+	if env[workerenv.GitAskpass] == "" {
+		t.Fatalf("%s missing from harness turn env", workerenv.GitAskpass)
+	}
+}
+
 func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.PRBaseSHA, Value: "base-sha"}, {Name: "ORKA_SECURITY_STAGE", Value: "review"}}

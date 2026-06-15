@@ -711,10 +711,15 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
 	env := r.harnessWrapperBaseTurnEnv(task)
+	workspaceGitEnv, err := r.harnessWrapperWorkspaceGitSecretEnv(ctx, task)
+	if err != nil {
+		return nil, err
+	}
 	agentSecretEnv, err := r.harnessWrapperAgentSecretEnv(ctx, task, agent)
 	if err != nil {
 		return nil, err
 	}
+	env = append(env, workspaceGitEnv...)
 	env = append(env, agentSecretEnv...)
 	if !taskRequestsReadOnlyAgent(task) {
 		taskSecretEnv, err := r.harnessWrapperTaskSecretEnv(ctx, task)
@@ -722,6 +727,40 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 			return nil, err
 		}
 		env = append(env, taskSecretEnv...)
+	}
+	return env, nil
+}
+
+func (r *TaskReconciler) harnessWrapperWorkspaceGitSecretEnv(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) ([]harness.TurnEnvVar, error) {
+	ws := effectiveWorkspace(task)
+	if ws == nil || ws.GitSecretRef == nil || strings.TrimSpace(ws.GitSecretRef.Name) == "" {
+		return nil, nil
+	}
+	secret := &corev1.Secret{}
+	key := ctrlclient.ObjectKey{Name: ws.GitSecretRef.Name, Namespace: task.Namespace}
+	if err := r.Get(ctx, key, secret); err != nil {
+		return nil, fmt.Errorf("resolve harness runtime git credential Secret %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	var token string
+	for _, key := range []string{"token", "password", workerenv.GitHubToken} {
+		if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+			token = value
+			break
+		}
+	}
+	if token == "" {
+		return nil, fmt.Errorf("workspace git secret %q must contain token, password, or %s", ws.GitSecretRef.Name, workerenv.GitHubToken)
+	}
+	env := []harness.TurnEnvVar{
+		{Name: workerenv.GitToken, Value: token},
+		{Name: workerenv.GitHubToken, Value: token},
+		{Name: workerenv.GitAskpass, Value: "/bin/echo-token"},
+	}
+	if username := strings.TrimSpace(string(secret.Data["username"])); username != "" {
+		env = append(env, harness.TurnEnvVar{Name: workerenv.GitUsername, Value: username})
 	}
 	return env, nil
 }

@@ -346,7 +346,9 @@ func (s *Server) runTurn(turn *turnState) {
 	turn.appendFrame(s.frame(turn, harness.FrameTurnStarted, "turn started", nil))
 	ClearTurnArtifacts()
 	defer ClearTurnArtifacts()
+	restoreWorkspaceEnv := setTemporaryEnvEntries(turnCtx.Env)
 	preparedWorkspace, err := prepareTurnWorkspace(ctx, turnCtx)
+	restoreWorkspaceEnv()
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return

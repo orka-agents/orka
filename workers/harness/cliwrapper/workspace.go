@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
@@ -24,6 +26,15 @@ func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 		"SSH_ASKPASS=/bin/false",
 		"HOME=/tmp/orka-empty-git-home",
 		"XDG_CONFIG_HOME=/tmp/orka-empty-git-config",
+	}
+	if token := strings.TrimSpace(os.Getenv(workerenv.GitToken)); token != "" {
+		env = setEnv(env, workerenv.GitToken, token)
+		env = setEnv(env, workerenv.GitHubToken, firstNonEmpty(os.Getenv(workerenv.GitHubToken), token))
+		env = setEnv(env, workerenv.GitAskpass, firstNonEmpty(os.Getenv(workerenv.GitAskpass), "/bin/echo-token"))
+		env = setEnv(env, "GIT_ASKPASS", envEntryValue(env, workerenv.GitAskpass))
+		if username := strings.TrimSpace(os.Getenv(workerenv.GitUsername)); username != "" {
+			env = setEnv(env, workerenv.GitUsername, username)
+		}
 	}
 	if path := strings.TrimSpace(os.Getenv("PATH")); path != "" {
 		env = append(env, "PATH="+path)
