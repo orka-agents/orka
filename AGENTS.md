@@ -41,6 +41,8 @@ make deploy IMG=<registry>/orka:tag
 
 UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/docs/development/development.md for full commands.
 
+For testing against a local Kubernetes cluster, use the `$kindctl` skill to manage repo/worktree-scoped kind clusters without touching the global kubeconfig.
+
 ## Verification
 
 Run after every change:
