@@ -29,14 +29,6 @@ func childCredentialIDs() (int, int, bool) {
 	return uid, gid, true
 }
 
-func chownPathForChild(path string) error {
-	uid, gid, ok := childCredentialIDs()
-	if !ok || strings.TrimSpace(path) == "" {
-		return nil
-	}
-	return os.Lchown(path, uid, gid)
-}
-
 func chownTreeForChild(path string) error {
 	uid, gid, ok := childCredentialIDs()
 	if !ok || strings.TrimSpace(path) == "" {
@@ -63,6 +55,24 @@ func prepareHomeForChild(path string) error {
 	}
 	if err := os.Lchown(path, uid, 0); err != nil {
 		_ = os.Chmod(path, 0o700)
+		return err
+	}
+	return nil
+}
+
+func prepareControlFileForChild(path string, mode os.FileMode) error {
+	uid, _, ok := childCredentialIDs()
+	if !ok {
+		return nil
+	}
+	if err := os.Lchown(path, 0, 0); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		return err
+	}
+	if err := os.Lchown(path, uid, 0); err != nil {
+		_ = os.Chmod(path, 0o600)
 		return err
 	}
 	return nil

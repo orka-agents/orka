@@ -43,7 +43,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		_ = os.Remove(outputPath)
 		return nil, fmt.Errorf("close codex output temp file: %w", err)
 	}
-	if err := chownPathForChild(outputPath); err != nil {
+	if err := prepareControlFileForChild(outputPath, 0o660); err != nil {
 		_ = os.Remove(outputPath)
 		return nil, fmt.Errorf("chown codex output temp file: %w", err)
 	}
@@ -55,7 +55,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 	}
 	tempFiles := []string{outputPath}
 	if instructionsPath != "" {
-		if err := chownPathForChild(instructionsPath); err != nil {
+		if err := prepareControlFileForChild(instructionsPath, 0o640); err != nil {
 			_ = os.Remove(outputPath)
 			cleanupInstructions()
 			return nil, fmt.Errorf("chown codex instructions temp file: %w", err)
