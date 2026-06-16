@@ -139,7 +139,9 @@ func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
 		safeDir = abs
 	}
 	gitArgs := append([]string{"-c", "safe.directory=" + safeDir, "-C", dir}, args...)
-	return exec.Command("git", gitArgs...)
+	cmd := exec.Command("git", gitArgs...)
+	cmd.SysProcAttr = commandSysProcAttr()
+	return cmd
 }
 
 func ShouldFinalizeWorkDir(workDir string) bool {

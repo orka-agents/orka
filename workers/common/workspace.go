@@ -620,6 +620,7 @@ func resetReservedWorkspacePaths(workDir string) {
 func execGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
+	cmd.SysProcAttr = gitCommandSysProcAttr()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -631,6 +632,7 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	stderr.limit = 64 * 1024
 	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
+	cmd.SysProcAttr = gitCommandSysProcAttr()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
