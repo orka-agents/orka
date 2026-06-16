@@ -15,6 +15,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
     go build -a -o /out/orka-workspace-agent ./cmd/orka-workspace-agent
 
+FROM --platform=$TARGETPLATFORM golang:1.26 AS target-go
+
 # Runtime stage with common CLI dependencies for generic, Codex, and Claude adapters.
 FROM node:22-slim
 
@@ -28,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @openai/codex @anthropic-ai/claude-code \
     && npm cache clean --force
 
-COPY --from=builder /usr/local/go /usr/local/go
+COPY --from=target-go /usr/local/go /usr/local/go
 COPY --from=builder /out/orka-agent-harness-wrapper /orka-agent-harness-wrapper
 COPY --from=builder /out/orka-workspace-agent /orka-workspace-agent
 

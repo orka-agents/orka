@@ -14,3 +14,7 @@ func chownTreeForChild(string) error { return nil }
 func prepareHomeForChild(string) error { return nil }
 
 func prepareControlFileForChild(string, uint32) error { return nil }
+
+func removeAllForChild(string) error { return nil }
+
+func suspendChildIdentity() func() { return func() {} }

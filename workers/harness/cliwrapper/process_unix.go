@@ -10,6 +10,8 @@ import (
 
 func commandSysProcAttr() *syscall.SysProcAttr {
 	attr := &syscall.SysProcAttr{Setpgid: true}
+	childIdentityMu.Lock()
+	defer childIdentityMu.Unlock()
 	if uid, gid, ok := childCredentialIDs(); ok {
 		attr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
 	}

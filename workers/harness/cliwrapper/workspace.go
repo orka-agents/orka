@@ -75,7 +75,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		if err != nil {
 			return preparedWorkspace{}, fmt.Errorf("create isolated turn workspace: %w", err)
 		}
-		cleanup := func() { _ = os.RemoveAll(root) }
+		cleanup := func() { _ = removeAllForChild(root); _ = os.RemoveAll(root) }
 		workDir := filepath.Join(root, "workspace")
 		if err := os.MkdirAll(workDir, 0o700); err != nil {
 			cleanup()
@@ -90,8 +90,8 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 	if err != nil {
 		return preparedWorkspace{}, fmt.Errorf("create turn workspace: %w", err)
 	}
-	cleanup := func() { _ = os.RemoveAll(root) }
 	cloneDir := filepath.Join(root, "repo")
+	cleanup := func() { _ = removeAllForChild(cloneDir); _ = os.RemoveAll(root) }
 	args := []string{"clone", "--depth=1"}
 	if branch := strings.TrimSpace(turn.Metadata["gitBranch"]); branch != "" {
 		args = append(args, "--branch", branch)

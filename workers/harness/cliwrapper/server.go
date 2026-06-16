@@ -388,7 +388,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	restoreChildIdentity := suspendChildIdentity()
 	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
+	restoreChildIdentity()
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return

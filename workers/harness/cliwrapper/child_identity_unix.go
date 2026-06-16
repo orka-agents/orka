@@ -4,15 +4,19 @@ package cliwrapper
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
 	EnvChildUID = "ORKA_HARNESS_WRAPPER_CHILD_UID"
 	EnvChildGID = "ORKA_HARNESS_WRAPPER_CHILD_GID"
 )
+
+var childIdentityMu sync.Mutex
 
 func childCredentialIDs() (int, int, bool) {
 	if os.Geteuid() != 0 {
@@ -76,4 +80,37 @@ func prepareControlFileForChild(path string, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func removeAllForChild(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if _, _, ok := childCredentialIDs(); !ok {
+		return os.RemoveAll(path)
+	}
+	cmd := exec.Command("rm", "-rf", "--", path)
+	cmd.SysProcAttr = commandSysProcAttr()
+	return cmd.Run()
+}
+
+func suspendChildIdentity() func() {
+	childIdentityMu.Lock()
+	uid, hadUID := os.LookupEnv(EnvChildUID)
+	gid, hadGID := os.LookupEnv(EnvChildGID)
+	_ = os.Unsetenv(EnvChildUID)
+	_ = os.Unsetenv(EnvChildGID)
+	return func() {
+		defer childIdentityMu.Unlock()
+		if hadUID {
+			_ = os.Setenv(EnvChildUID, uid)
+		} else {
+			_ = os.Unsetenv(EnvChildUID)
+		}
+		if hadGID {
+			_ = os.Setenv(EnvChildGID, gid)
+		} else {
+			_ = os.Unsetenv(EnvChildGID)
+		}
+	}
 }
