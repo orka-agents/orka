@@ -387,10 +387,6 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	defer preparedWorkspace.cleanup()
-	if err := chownTreeForChild(preparedWorkspace.rootDir); err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-		return
-	}
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
 	if err != nil {
@@ -398,6 +394,10 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	if err := ensureWorkspaceArtifactsWritableForChild(preparedWorkspace.rootDir, turnCtx.WorkDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	if err := chownTreeForChild(preparedWorkspace.rootDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
