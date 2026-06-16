@@ -231,6 +231,8 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
 	task.Spec.Env = []corev1.EnvVar{
+		{Name: workerenv.AgentReadOnly, Value: "false"},
+		{Name: workerenv.ResultStdout, Value: "false"},
 		{Name: workerenv.AllowBash, Value: scheduledRunLabelValue},
 		{Name: workerenv.AllowedTools, Value: "Bash,Write"},
 	}
@@ -276,6 +278,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	if env[workerenv.AllowBash] != "" || env[workerenv.AllowedTools] == "Bash,Write" {
 		t.Fatalf("read-only task env should not override runtime permissions: %#v", env)
+	}
+	if env[workerenv.AgentReadOnly] != scheduledRunLabelValue || env[workerenv.ResultStdout] != scheduledRunLabelValue {
+		t.Fatalf("read-only control env not forced: %#v", env)
 	}
 	if env[workerenv.GitToken] != "" || env[workerenv.GitHubToken] != "" {
 		t.Fatalf("workspace git credentials should not be sent to read-only harness turns")
@@ -429,5 +434,32 @@ func TestHarnessWrapperRuntimeSessionIDUsesUIDWithoutExplicitSession(t *testing.
 	got = string(harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)))
 	if strings.Contains(got, string(task.UID)) || !strings.Contains(got, "shared-session") {
 		t.Fatalf("runtime session id = %q, want explicit shared session without UID", got)
+	}
+}
+
+func TestCancelHarnessWrapperPlannedMissingTurnIsIgnored(t *testing.T) {
+	cfg := cliwrapper.DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+	task, agent := harnessWrapperTaskAndAgent()
+	request, err := (&TaskReconciler{}).harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
+		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
+		harnessWrapperCorrelationIDAnno: request.CorrelationID,
+		harnessWrapperStartedAnno:       "false",
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	if err := r.cancelHarnessWrapperTurn(context.Background(), task, "test"); err != nil {
+		t.Fatalf("cancelHarnessWrapperTurn() error = %v, want nil for missing planned turn", err)
 	}
 }

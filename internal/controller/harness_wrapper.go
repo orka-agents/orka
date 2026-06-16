@@ -453,7 +453,7 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 }
 
 func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *corev1alpha1.Task, reason string) error {
-	if !taskHasHarnessWrapperTurn(task) {
+	if !taskHasPlannedHarnessWrapperTurn(task) {
 		return nil
 	}
 	endpoint := harnessWrapperEndpoint()
@@ -474,6 +474,9 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 		CorrelationID:    strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Reason:           reason,
 	})
+	if err != nil && !taskHasHarnessWrapperTurn(task) && harnessWrapperStreamErrorIsMissingTurn(err) {
+		return nil
+	}
 	return err
 }
 
@@ -709,6 +712,10 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []ha
 	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		env = append(env, harness.TurnEnvVar{Name: workerenv.ParentTask, Value: parentTask})
 	}
+	if taskRequestsReadOnlyAgent(task) {
+		env = setHarnessTurnEnv(env, workerenv.AgentReadOnly, scheduledRunLabelValue)
+		env = setHarnessTurnEnv(env, workerenv.ResultStdout, scheduledRunLabelValue)
+	}
 	return env
 }
 
@@ -865,9 +872,21 @@ func filterHarnessTurnEnv(env []harness.TurnEnvVar, allowedKeys []string) []harn
 	return out
 }
 
+func setHarnessTurnEnv(env []harness.TurnEnvVar, name, value string) []harness.TurnEnvVar {
+	for i, item := range env {
+		if item.Name == name {
+			env[i].Value = value
+			return env
+		}
+	}
+	return append(env, harness.TurnEnvVar{Name: name, Value: value})
+}
+
 func harnessWrapperReadOnlyEnvBlocked(name string) bool {
 	switch strings.TrimSpace(name) {
-	case workerenv.AllowBash,
+	case workerenv.AgentReadOnly,
+		workerenv.ResultStdout,
+		workerenv.AllowBash,
 		workerenv.AllowedTools,
 		workerenv.DisallowedTools,
 		workerenv.ClaudeBare,
