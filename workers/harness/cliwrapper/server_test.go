@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -476,6 +478,54 @@ func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
 	last := frames[len(frames)-1]
 	if last.Type != harness.FrameTurnCancelled {
 		t.Fatalf("last frame = %#v, want cancelled before result file parse", last)
+	}
+}
+
+func TestServerPassesSecurityStageEnvToCodexAdapter(t *testing.T) {
+	artifactDir := "/tmp/artifacts"
+	_ = os.RemoveAll(artifactDir)
+	t.Cleanup(func() { _ = os.RemoveAll(artifactDir) })
+	dir := t.TempDir()
+	fakeCodex := filepath.Join(dir, "codex-security.sh")
+	script := `#!/bin/sh
+set -eu
+mkdir -p /tmp/artifacts
+if [ "${ORKA_SECURITY_STAGE:-}" = "threat-model" ]; then
+  printf '# threat model\n' > /tmp/artifacts/security-threat-model.md
+fi
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+if [ -n "$out" ]; then printf 'done' > "$out"; fi
+printf 'done'
+`
+	if err := os.WriteFile(fakeCodex, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.AllowBash, "true")
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Runtime = RuntimeCodex
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nwrite artifact"
+	request.Input.Env = []harness.TurnEnvVar{{Name: "ORKA_SECURITY_STAGE", Value: "threat-model"}}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
 	}
 }
 

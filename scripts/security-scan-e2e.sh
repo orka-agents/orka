@@ -309,6 +309,7 @@ const path = require('path');
 const childProcess = require('child_process');
 
 const artifactDir = '/tmp/artifacts';
+const prompt = fs.readFileSync(0, 'utf8');
 fs.mkdirSync(artifactDir, { recursive: true });
 
 function argValue(name) {
@@ -492,7 +493,10 @@ function emitValidation() {
 }
 
 function main() {
-  const stage = process.env.ORKA_SECURITY_STAGE || '';
+  let stage = process.env.ORKA_SECURITY_STAGE || '';
+  if (!stage && /^REQUIRED_SECURITY_ARTIFACTS:.*\bsecurity-threat-model\.md\b/m.test(prompt)) {
+    stage = 'threat-model';
+  }
   if (stage === 'threat-model') {
     emitThreatModel();
     return;
