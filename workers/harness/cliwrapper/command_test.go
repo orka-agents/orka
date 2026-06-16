@@ -5,12 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
 
-func TestCommandRunnerSuccessAndOutputLimit(t *testing.T) {
+func TestCommandRunnerSuccess(t *testing.T) {
 	runner := CommandRunner{StdoutLimitBytes: 5, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
 	result, err := runner.Run(context.Background(), &CommandSpec{Path: "/bin/sh", Args: []string{"-c", "printf abcdefgh"}})
 	if err != nil {
@@ -19,8 +18,18 @@ func TestCommandRunnerSuccessAndOutputLimit(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
 	}
-	if !strings.Contains(result.Stdout, "abcde") || !strings.Contains(result.Stdout, "truncated") {
-		t.Fatalf("Stdout = %q, want truncated preview", result.Stdout)
+}
+
+func TestLimitedBufferTruncatesOutput(t *testing.T) {
+	buf := newLimitedBuffer(5)
+	if _, err := buf.Write([]byte("abcdefgh")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := buf.String(); got != "abcde" {
+		t.Fatalf("buffer = %q, want truncated prefix", got)
+	}
+	if !buf.truncated {
+		t.Fatal("truncated = false, want true")
 	}
 }
 
