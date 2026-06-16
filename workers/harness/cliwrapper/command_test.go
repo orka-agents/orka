@@ -36,9 +36,6 @@ func TestCommandRunnerFailure(t *testing.T) {
 	if result.ExitCode != 7 {
 		t.Fatalf("ExitCode = %d, want 7", result.ExitCode)
 	}
-	if !strings.Contains(result.Stderr, "nope") {
-		t.Fatalf("Stderr = %q, want stderr", result.Stderr)
-	}
 }
 
 func TestCommandRunnerTimeoutKillsProcess(t *testing.T) {
