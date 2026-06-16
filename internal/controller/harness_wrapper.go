@@ -215,6 +215,9 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	if turnID == "" || runtimeSessionID == "" || correlationID == "" {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn identity is missing")
 	}
+	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn identity does not match task")
+	}
 	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
 	if err != nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
@@ -366,6 +369,28 @@ func harnessWrapperPlannedMetadata(task *corev1alpha1.Task, runtimeName string) 
 	return metadata
 }
 
+func harnessWrapperCurrentAttempt(task *corev1alpha1.Task) int32 {
+	if task == nil || task.Status.Attempts <= 0 {
+		return 1
+	}
+	return task.Status.Attempts
+}
+
+func harnessWrapperTurnAnnotationsMatchTaskAttempt(task *corev1alpha1.Task, attempts int32) bool {
+	if !taskHasPlannedHarnessWrapperTurn(task) {
+		return false
+	}
+	correlationID := ""
+	if task != nil {
+		correlationID = string(task.UID)
+		if strings.TrimSpace(correlationID) == "" {
+			correlationID = task.Namespace + "/" + task.Name
+		}
+	}
+	return strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == string(harnessWrapperTurnID(task, attempts)) &&
+		strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]) == correlationID
+}
+
 func harnessWrapperPlannedTurnMatchesTask(task *corev1alpha1.Task, agent *corev1alpha1.Agent, attempts int32) bool {
 	if !taskHasPlannedHarnessWrapperTurn(task) {
 		return false
@@ -454,6 +479,9 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 
 func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *corev1alpha1.Task, reason string) error {
 	if !taskHasPlannedHarnessWrapperTurn(task) {
+		return nil
+	}
+	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
 		return nil
 	}
 	endpoint := harnessWrapperEndpoint()

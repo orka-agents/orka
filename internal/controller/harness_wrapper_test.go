@@ -463,3 +463,20 @@ func TestCancelHarnessWrapperPlannedMissingTurnIsIgnored(t *testing.T) {
 		t.Fatalf("cancelHarnessWrapperTurn() error = %v, want nil for missing planned turn", err)
 	}
 }
+
+func TestHarnessWrapperTurnAnnotationsMustMatchCurrentAttempt(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	task.Status.Attempts = 2
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 2)),
+		harnessWrapperRuntimeAnnotation: "attacker-controlled",
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, 2) {
+		t.Fatal("expected current task/attempt turn annotations to match")
+	}
+	task.Annotations[harnessWrapperTurnIDAnnotation] = string(harnessWrapperTurnID(task, 1))
+	if harnessWrapperTurnAnnotationsMatchTaskAttempt(task, 2) {
+		t.Fatal("expected stale/copied turn id to be rejected")
+	}
+}
