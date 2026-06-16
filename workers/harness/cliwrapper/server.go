@@ -383,11 +383,9 @@ func (s *Server) runTurn(turn *turnState) {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	if turnCtx.WorkDir != preparedWorkspace.rootDir {
-		if err := common.EnsureWorkspaceArtifactsLink(turnCtx.WorkDir); err != nil {
-			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-			return
-		}
+	if err := ensureWorkspaceArtifactsWritableForChild(preparedWorkspace.rootDir, turnCtx.WorkDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
 	}
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
@@ -482,6 +480,19 @@ func (s *Server) runTurn(turn *turnState) {
 		}
 		turn.appendFrame(s.completedFrame(turn, parsed))
 	}
+}
+
+func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir string) error {
+	if err := chownTreeForChild("/tmp/artifacts"); err != nil {
+		return err
+	}
+	if workDir == "" || workDir == rootDir {
+		return nil
+	}
+	if err := common.EnsureWorkspaceArtifactsLink(workDir); err != nil {
+		return err
+	}
+	return chownTreeForChild("/tmp/artifacts")
 }
 
 func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, terminal any) harness.HarnessEventFrame {

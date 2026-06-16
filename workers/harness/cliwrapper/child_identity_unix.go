@@ -29,6 +29,14 @@ func childCredentialIDs() (int, int, bool) {
 	return uid, gid, true
 }
 
+func chownPathForChild(path string) error {
+	uid, gid, ok := childCredentialIDs()
+	if !ok || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return os.Lchown(path, uid, gid)
+}
+
 func chownTreeForChild(path string) error {
 	uid, gid, ok := childCredentialIDs()
 	if !ok || strings.TrimSpace(path) == "" {
@@ -38,6 +46,6 @@ func chownTreeForChild(path string) error {
 		if err != nil {
 			return err
 		}
-		return os.Chown(p, uid, gid)
+		return os.Lchown(p, uid, gid)
 	})
 }

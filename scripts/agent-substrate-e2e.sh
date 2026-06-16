@@ -547,6 +547,10 @@ deploy_orka() {
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
+  (
+    cd "${tmp_config}/config/harness-wrapper"
+    "${ROOT_DIR}/bin/kustomize" edit set image "ghcr.io/sozercan/orka/agent-harness-wrapper=${codex_image}"
+  )
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
 
   local patch

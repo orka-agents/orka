@@ -43,6 +43,10 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		_ = os.Remove(outputPath)
 		return nil, fmt.Errorf("close codex output temp file: %w", err)
 	}
+	if err := chownPathForChild(outputPath); err != nil {
+		_ = os.Remove(outputPath)
+		return nil, fmt.Errorf("chown codex output temp file: %w", err)
+	}
 
 	instructionsPath, cleanupInstructions, err := writeCodexInstructionsFile(agentCfg)
 	if err != nil {
@@ -51,6 +55,11 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 	}
 	tempFiles := []string{outputPath}
 	if instructionsPath != "" {
+		if err := chownPathForChild(instructionsPath); err != nil {
+			_ = os.Remove(outputPath)
+			cleanupInstructions()
+			return nil, fmt.Errorf("chown codex instructions temp file: %w", err)
+		}
 		tempFiles = append(tempFiles, instructionsPath)
 		_ = cleanupInstructions // cleanup is represented by TempFiles for the command runner.
 	}
