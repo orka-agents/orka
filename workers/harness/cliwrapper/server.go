@@ -392,6 +392,15 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
+	if err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	if err := ensureWorkspaceArtifactsWritableForChild(preparedWorkspace.rootDir, turnCtx.WorkDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
 	turnRoot := firstNonEmpty(preparedWorkspace.baseDir, preparedWorkspace.rootDir)
 	if turnRoot != preparedWorkspace.rootDir {
 		if err := os.Chmod(turnRoot, 0o711); err != nil {
@@ -417,15 +426,6 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			workerenv.GitAskpass,
 			workerenv.GitUsername,
 		)
-	}
-	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
-	if err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-		return
-	}
-	if err := ensureWorkspaceArtifactsWritableForChild(preparedWorkspace.rootDir, turnCtx.WorkDir); err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-		return
 	}
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
