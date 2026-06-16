@@ -162,7 +162,8 @@ func normalizeWorkspaceBranchRef(ref string) (string, error) {
 	branch := strings.TrimSpace(ref)
 	branch = strings.TrimPrefix(branch, "refs/heads/")
 	branch = strings.TrimPrefix(branch, "origin/")
-	if branch == "" || strings.HasPrefix(branch, "-") || strings.Contains(branch, "..") || strings.ContainsAny(branch, " ~^:?*[\\") {
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.Contains(branch, "..") ||
+		strings.ContainsAny(branch, " ~^:?*[\\") {
 		return "", fmt.Errorf("checkout turn workspace ref: invalid ref %q", ref)
 	}
 	return branch, nil

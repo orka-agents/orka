@@ -71,7 +71,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
-		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, turn.Env),
+		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false),
 		Env:        buildCodexEnv(turn.Env),
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
@@ -98,7 +98,6 @@ func buildCodexArgs(
 	outputPath string,
 	instructionsPath string,
 	bypassSandbox bool,
-	env []string,
 ) []string {
 	args := []string{
 		"exec",

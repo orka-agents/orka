@@ -10,7 +10,7 @@ import (
 )
 
 func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
-	_, cloneDir, _ := newWorkspaceGitFixture(t)
+	cloneDir, _ := newWorkspaceGitFixture(t)
 	before := testGitOutput(t, cloneDir, "rev-parse", "HEAD")
 
 	err := fetchAndCheckoutWorkspaceRef(context.Background(), cloneDir, "README.md", "https://github.com/example/repo.git")
@@ -27,22 +27,30 @@ func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
 }
 
 func TestFetchWorkspaceRemoteBranchRedactsRawRepoURL(t *testing.T) {
-	_, cloneDir, _ := newWorkspaceGitFixture(t)
+	cloneDir, _ := newWorkspaceGitFixture(t)
 	rawRepo := "https://user:token@example.invalid/private/repo.git?secret=value#frag"
 	err := fetchWorkspaceRemoteBranch(context.Background(), cloneDir, "missing", rawRepo)
 	if err == nil {
 		t.Fatal("fetchWorkspaceRemoteBranch error = nil, want fetch failure")
 	}
 	message := err.Error()
-	if strings.Contains(message, "user:token") || strings.Contains(message, "secret=value") || strings.Contains(message, "#frag") {
+	if strings.Contains(message, "user:token") ||
+		strings.Contains(message, "secret=value") ||
+		strings.Contains(message, "#frag") {
 		t.Fatalf("fetchWorkspaceRemoteBranch error leaked raw repo URL: %v", err)
 	}
 }
 
 func TestFetchAndCheckoutWorkspaceRefFallbackChecksOutRemoteBranchCommit(t *testing.T) {
-	_, cloneDir, featureCommit := newWorkspaceGitFixture(t)
+	cloneDir, featureCommit := newWorkspaceGitFixture(t)
 
-	if err := fetchAndCheckoutWorkspaceRef(context.Background(), cloneDir, "origin/feature", "https://github.com/example/repo.git"); err != nil {
+	err := fetchAndCheckoutWorkspaceRef(
+		context.Background(),
+		cloneDir,
+		"origin/feature",
+		"https://github.com/example/repo.git",
+	)
+	if err != nil {
 		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
 	}
 	actual := testGitOutput(t, cloneDir, "rev-parse", "HEAD")
@@ -51,7 +59,7 @@ func TestFetchAndCheckoutWorkspaceRefFallbackChecksOutRemoteBranchCommit(t *test
 	}
 }
 
-func newWorkspaceGitFixture(t *testing.T) (originDir, cloneDir, featureCommit string) {
+func newWorkspaceGitFixture(t *testing.T) (cloneDir, featureCommit string) {
 	t.Helper()
 	root := t.TempDir()
 	sourceDir := filepath.Join(root, "source")
@@ -76,11 +84,11 @@ func newWorkspaceGitFixture(t *testing.T) (originDir, cloneDir, featureCommit st
 	featureCommit = testGitOutput(t, sourceDir, "rev-parse", "HEAD")
 	testGit(t, sourceDir, "checkout", "main")
 
-	originDir = filepath.Join(root, "origin.git")
+	originDir := filepath.Join(root, "origin.git")
 	testGit(t, root, "clone", "--bare", sourceDir, originDir)
 	cloneDir = filepath.Join(root, "clone")
 	testGit(t, root, "clone", originDir, cloneDir)
-	return originDir, cloneDir, featureCommit
+	return cloneDir, featureCommit
 }
 
 func testGit(t *testing.T, dir string, args ...string) {
