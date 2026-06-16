@@ -508,3 +508,12 @@ func TestCancelHarnessWrapperStartedMissingTurnIsIgnored(t *testing.T) {
 		t.Fatalf("cancelHarnessWrapperTurn() error = %v, want nil for missing started turn", err)
 	}
 }
+
+func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
+	if !harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("post failed: connection refused")) {
+		t.Fatal("expected transport start error to be retryable")
+	}
+	if harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("start_turn failed (401): unauthorized")) {
+		t.Fatal("expected auth start error to remain terminal")
+	}
+}

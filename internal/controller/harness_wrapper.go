@@ -437,6 +437,19 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 	return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
 }
 
+func harnessWrapperStartTurnErrorIsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	for _, marker := range []string{"(400)", "(401)", "(403)", "unsupported version", "harness did not accept"} {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 func harnessWrapperCapabilitiesErrorIsRetryable(err error) bool {
 	if err == nil {
 		return false
