@@ -190,6 +190,7 @@ fi
   if kubectl -n "${orka_namespace}" get deployment "${harness_wrapper_deployment}" >/dev/null 2>&1; then
     log "Repointing ${harness_wrapper_deployment} image -> ${codex_image}"
     kubectl -n "${orka_namespace}" set image "deployment/${harness_wrapper_deployment}" "wrapper=${codex_image}"
+    kubectl -n "${orka_namespace}" set env "deployment/${harness_wrapper_deployment}" "ORKA_CODEX_SANDBOX_MODE=${DEMO_CODEX_SANDBOX_MODE:-danger-full-access}"
     kubectl -n "${orka_namespace}" rollout status "deployment/${harness_wrapper_deployment}" --timeout=300s
   fi
 

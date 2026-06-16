@@ -9,7 +9,11 @@ import (
 )
 
 func commandSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setpgid: true}
+	attr := &syscall.SysProcAttr{Setpgid: true}
+	if uid, gid, ok := childCredentialIDs(); ok {
+		attr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)}
+	}
+	return attr
 }
 
 func terminateProcessGroup(process *os.Process, grace time.Duration) {

@@ -21,10 +21,8 @@ spec:
     spec:
       automountServiceAccountToken: false
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 0
+        runAsGroup: 0
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -44,6 +42,10 @@ spec:
               value: /var/run/orka/harness-wrapper/token
             - name: ORKA_ALLOW_BASH
               value: "true"
+            - name: ORKA_HARNESS_WRAPPER_CHILD_UID
+              value: "1000"
+            - name: ORKA_HARNESS_WRAPPER_CHILD_GID
+              value: "1000"
             {{- if .Values.workers.harnessWrapper.codexSandboxMode }}
             - name: ORKA_CODEX_SANDBOX_MODE
               value: {{ .Values.workers.harnessWrapper.codexSandboxMode | quote }}
@@ -57,6 +59,8 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsGroup: 0
             capabilities:
               drop:
                 - ALL
@@ -80,6 +84,7 @@ spec:
         - name: auth
           secret:
             secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            defaultMode: 0400
             items:
               - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
                 path: token

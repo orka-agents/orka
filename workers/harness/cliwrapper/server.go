@@ -357,6 +357,10 @@ func (s *Server) runTurn(turn *turnState) {
 		return
 	}
 	defer preparedWorkspace.cleanup()
+	if err := chownTreeForChild(preparedWorkspace.rootDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	turnHome := filepath.Join(preparedWorkspace.rootDir, "home")
 	if err := os.MkdirAll(turnHome, 0o700); err != nil {
