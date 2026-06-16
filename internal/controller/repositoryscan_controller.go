@@ -1081,12 +1081,32 @@ func threatModelLooksLikeToolTranscript(content string) bool {
 	return false
 }
 
+func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
+	var lastErr error
+	for range 5 {
+		data, _, err := r.ArtifactStore.GetArtifact(ctx, namespace, taskName, filename)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return nil, lastErr
+}
+
 func (r *RepositoryScanReconciler) loadThreatModelArtifact(ctx context.Context, task *corev1alpha1.Task) (string, string, error) {
 	if r.ArtifactStore == nil {
 		return "", "", nil
 	}
 
-	threatModelData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
+	threatModelData, err := r.getArtifactWithRetry(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
 	switch {
 	case err == nil:
 		content := strings.TrimSpace(string(threatModelData))
