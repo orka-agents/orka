@@ -45,6 +45,8 @@ spec:
               key: token
         - name: ORKA_ALLOW_BASH
           value: "true"
+        - name: ORKA_CODEX_SANDBOX_MODE
+          value: danger-full-access
         volumeMounts:
         - name: tmp
           mountPath: /tmp

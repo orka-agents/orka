@@ -45,6 +45,10 @@ spec:
                   key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
             - name: ORKA_ALLOW_BASH
               value: "true"
+            {{- if .Values.workers.harnessWrapper.codexSandboxMode }}
+            - name: ORKA_CODEX_SANDBOX_MODE
+              value: {{ .Values.workers.harnessWrapper.codexSandboxMode | quote }}
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

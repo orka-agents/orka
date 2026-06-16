@@ -502,7 +502,7 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 		CorrelationID:    strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Reason:           reason,
 	})
-	if err != nil && !taskHasHarnessWrapperTurn(task) && harnessWrapperStreamErrorIsMissingTurn(err) {
+	if err != nil && harnessWrapperStreamErrorIsMissingTurn(err) {
 		return nil
 	}
 	return err

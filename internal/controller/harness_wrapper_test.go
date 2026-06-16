@@ -480,3 +480,31 @@ func TestHarnessWrapperTurnAnnotationsMustMatchCurrentAttempt(t *testing.T) {
 		t.Fatal("expected stale/copied turn id to be rejected")
 	}
 }
+
+func TestCancelHarnessWrapperStartedMissingTurnIsIgnored(t *testing.T) {
+	cfg := cliwrapper.DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Status.Attempts = 1
+	request, err := (&TaskReconciler{}).harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
+		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
+		harnessWrapperCorrelationIDAnno: request.CorrelationID,
+		harnessWrapperStartedAnno:       scheduledRunLabelValue,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	if err := r.cancelHarnessWrapperTurn(context.Background(), task, "test"); err != nil {
+		t.Fatalf("cancelHarnessWrapperTurn() error = %v, want nil for missing started turn", err)
+	}
+}

@@ -167,6 +167,8 @@ workers:
       existingSecret: ""
       tokenKey: token
       token: ""
+    # Optional Codex CLI sandbox mode for the Codex adapter.
+    codexSandboxMode: ""
     resources: {}
 
 # GitHub webhook and label-trigger configuration.
