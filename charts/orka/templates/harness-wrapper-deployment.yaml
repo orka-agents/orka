@@ -81,7 +81,3 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: workspace
-          emptyDir: {}
-        - name: home
-          emptyDir: {}

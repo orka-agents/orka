@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -200,18 +198,14 @@ func TestServerEvictsCompletedTurnsAfterRetention(t *testing.T) {
 }
 
 func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
-	dir := t.TempDir()
-	resultPath := filepath.Join(dir, "result.txt")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	cfg.WorkDir = dir
 	cfg.Generic = GenericAdapterConfig{
 		Command:    "/bin/sh",
 		Args:       []string{"-c", "cat > prompt.txt; printf result-from-file > result.txt"},
-		WorkDir:    dir,
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
-		ResultFile: resultPath,
+		ResultFile: "result.txt",
 	}
 	adapter := NewGenericAdapter(cfg.Generic)
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
@@ -232,9 +226,6 @@ func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	}
 	if !strings.Contains(last.Completed.Result, "result-from-file") {
 		t.Fatalf("completed result = %q, want result file content", last.Completed.Result)
-	}
-	if data, err := os.ReadFile(filepath.Join(dir, "prompt.txt")); err != nil || string(data) != "prompt value" {
-		t.Fatalf("prompt.txt = %q, %v", string(data), err)
 	}
 }
 
@@ -360,11 +351,8 @@ func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 }
 
 func TestServerFailsOversizedCompletedResult(t *testing.T) {
-	dir := t.TempDir()
-	resultPath := filepath.Join(dir, "result.txt")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	cfg.WorkDir = dir
 	largeResultScript := strings.Join([]string{
 		"python3 - <<'PY'",
 		"from pathlib import Path",
@@ -374,10 +362,9 @@ func TestServerFailsOversizedCompletedResult(t *testing.T) {
 	cfg.Generic = GenericAdapterConfig{
 		Command:    "/bin/sh",
 		Args:       []string{"-c", largeResultScript},
-		WorkDir:    dir,
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
-		ResultFile: resultPath,
+		ResultFile: "result.txt",
 	}
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()
@@ -402,17 +389,15 @@ func TestServerRedactsCommandStderrFrames(t *testing.T) {
 
 func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
 	dir := t.TempDir()
-	resultPath := filepath.Join(dir, "result.txt")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.WorkDir = dir
 	cfg.Generic = GenericAdapterConfig{
 		Command:    "/bin/sh",
 		Args:       []string{"-c", "dd if=/dev/zero bs=1024 count=600 2>/dev/null | tr '\\000' x > result.txt; sleep 10"},
-		WorkDir:    dir,
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
-		ResultFile: resultPath,
+		ResultFile: "result.txt",
 	}
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()
@@ -445,21 +430,17 @@ func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
 }
 
 func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testing.T) {
-	dir := t.TempDir()
-	resultPath := filepath.Join(dir, "result.txt")
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	cfg.WorkDir = dir
 	cfg.Generic = GenericAdapterConfig{
 		Command: "/bin/sh",
 		Args: []string{"-c", strings.Join([]string{
 			"printf 'artifact body' > .orka-artifacts/security-threat-model.md",
 			"printf 'done' > result.txt",
 		}, "; ")},
-		WorkDir:    dir,
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
-		ResultFile: resultPath,
+		ResultFile: "result.txt",
 	}
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()

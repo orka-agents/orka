@@ -37,6 +37,8 @@ func run(args []string) error {
 		return err
 	}
 	_ = os.Unsetenv(cliwrapper.EnvAuthValue)
+	authValueFromEnv := cfg.AuthValue
+	cfg.AuthValue = ""
 	var extraArgs repeatedString
 	var extraEnv repeatedString
 	fs := flag.NewFlagSet("orka-agent-harness-wrapper", flag.ContinueOnError)
@@ -75,6 +77,9 @@ func run(args []string) error {
 	}
 	if len(extraArgs) > 0 {
 		cfg.Generic.Args = append(cfg.Generic.Args, extraArgs...)
+	}
+	if cfg.AuthValue == "" {
+		cfg.AuthValue = authValueFromEnv
 	}
 	if len(extraEnv) > 0 {
 		cfg.Generic.Env = append(cfg.Generic.Env, extraEnv...)

@@ -197,7 +197,7 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 
 func buildCodexEnv(extra []string) []string {
 	env := append([]string(nil), extra...)
-	env = setEnv(env, "HOME", "/home/worker")
+	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
 	if os.Getenv(workerenv.CodexAPIKey) == "" {
 		if apiKey := strings.TrimSpace(os.Getenv(workerenv.OpenAIAPIKey)); apiKey != "" {
 			env = setEnv(env, workerenv.CodexAPIKey, apiKey)

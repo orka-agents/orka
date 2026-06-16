@@ -50,10 +50,6 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
-        - name: workspace
-          mountPath: /workspace
-        - name: home
-          mountPath: /home/worker
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -81,8 +77,4 @@ spec:
             memory: 2Gi
       volumes:
       - name: tmp
-        emptyDir: {}
-      - name: workspace
-        emptyDir: {}
-      - name: home
         emptyDir: {}

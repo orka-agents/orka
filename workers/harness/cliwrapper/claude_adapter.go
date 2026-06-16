@@ -100,7 +100,7 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
 
 func buildClaudeEnv(extra []string) []string {
 	env := append([]string(nil), extra...)
-	env = setEnv(env, "HOME", "/home/worker")
+	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
 	return env
 }
 

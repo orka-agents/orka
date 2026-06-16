@@ -52,7 +52,7 @@ func (a *CopilotAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 		}
 	}
 	env := append([]string(nil), turn.Env...)
-	env = setEnv(env, "HOME", "/home/worker")
+	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
 	if cliPath := strings.TrimSpace(a.config.Path); cliPath != "" {
 		env = setEnv(env, workerenv.CopilotCLIPath, cliPath)
 	}

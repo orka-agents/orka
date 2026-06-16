@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -356,6 +358,12 @@ func (s *Server) runTurn(turn *turnState) {
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	turnHome := filepath.Join(preparedWorkspace.rootDir, "home")
+	if err := os.MkdirAll(turnHome, 0o700); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	turnCtx.Env = setEnv(turnCtx.Env, "HOME", turnHome)
 	if strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") {
 		turnCtx.Env = removeTurnEnv(
 			turnCtx.Env,

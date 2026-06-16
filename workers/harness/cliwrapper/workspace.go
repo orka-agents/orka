@@ -70,7 +70,17 @@ type preparedWorkspace struct {
 func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorkspace, error) {
 	repo := strings.TrimSpace(turn.Metadata["gitRepo"])
 	if repo == "" {
-		return preparedWorkspace{workDir: turn.WorkDir, rootDir: turn.WorkDir, cleanup: func() {}}, nil
+		root, err := os.MkdirTemp("/tmp", "orka-harness-turn-*")
+		if err != nil {
+			return preparedWorkspace{}, fmt.Errorf("create isolated turn workspace: %w", err)
+		}
+		cleanup := func() { _ = os.RemoveAll(root) }
+		workDir := filepath.Join(root, "workspace")
+		if err := os.MkdirAll(workDir, 0o700); err != nil {
+			cleanup()
+			return preparedWorkspace{}, fmt.Errorf("create isolated turn workdir: %w", err)
+		}
+		return preparedWorkspace{workDir: workDir, rootDir: root, cleanup: cleanup}, nil
 	}
 	if err := validateWorkspaceRepoURL(repo); err != nil {
 		return preparedWorkspace{}, err
