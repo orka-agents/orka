@@ -8,6 +8,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: orka
@@ -38,16 +40,16 @@ spec:
           value: multi
         - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
           value: :8080
-        - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: harness-wrapper-auth
-              key: token
+        - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+          value: /var/run/orka/harness-wrapper/token
         - name: ORKA_ALLOW_BASH
           value: "true"
         - name: ORKA_CODEX_SANDBOX_MODE
           value: danger-full-access
         volumeMounts:
+        - name: auth
+          mountPath: /var/run/orka/harness-wrapper
+          readOnly: true
         - name: tmp
           mountPath: /tmp
         securityContext:
@@ -76,5 +78,8 @@ spec:
             cpu: "2"
             memory: 2Gi
       volumes:
+      - name: auth
+        secret:
+          secretName: harness-wrapper-auth
       - name: tmp
         emptyDir: {}

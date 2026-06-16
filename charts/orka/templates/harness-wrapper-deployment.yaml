@@ -7,6 +7,8 @@ metadata:
     app.kubernetes.io/component: agent-harness-wrapper
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "orka.selectorLabels" . | nindent 6 }}
@@ -38,11 +40,8 @@ spec:
               value: multi
             - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
               value: :8080
-            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
-                  key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
+            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+              value: /var/run/orka/harness-wrapper/token
             - name: ORKA_ALLOW_BASH
               value: "true"
             {{- if .Values.workers.harnessWrapper.codexSandboxMode }}
@@ -50,6 +49,9 @@ spec:
               value: {{ .Values.workers.harnessWrapper.codexSandboxMode | quote }}
             {{- end }}
           volumeMounts:
+            - name: auth
+              mountPath: /var/run/orka/harness-wrapper
+              readOnly: true
             - name: tmp
               mountPath: /tmp
           securityContext:
@@ -75,5 +77,11 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        - name: auth
+          secret:
+            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            items:
+              - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
+                path: token
         - name: tmp
           emptyDir: {}
