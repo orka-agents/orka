@@ -162,6 +162,8 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 					return ctrl.Result{}, clearErr
 				}
 				return ctrl.Result{RequeueAfter: time.Second}, nil
+			case harnessWrapperStartTurnErrorIsRetryable(err):
+				return ctrl.Result{RequeueAfter: time.Second}, nil
 			default:
 				return r.failTask(ctx, task, events.RedactExecutionEventText(message))
 			}
