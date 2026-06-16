@@ -49,3 +49,14 @@ func chownTreeForChild(path string) error {
 		return os.Lchown(p, uid, gid)
 	})
 }
+
+func prepareHomeForChild(path string) error {
+	uid, _, ok := childCredentialIDs()
+	if !ok {
+		return os.Chmod(path, 0o700)
+	}
+	if err := os.Lchown(path, uid, 0); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o770)
+}

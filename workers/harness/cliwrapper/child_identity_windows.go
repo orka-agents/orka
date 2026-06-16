@@ -12,3 +12,5 @@ func childCredentialIDs() (int, int, bool) { return 0, 0, false }
 func chownTreeForChild(string) error { return nil }
 
 func chownPathForChild(string) error { return nil }
+
+func prepareHomeForChild(string) error { return nil }
