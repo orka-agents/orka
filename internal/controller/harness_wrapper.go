@@ -372,7 +372,7 @@ func harnessWrapperPlannedTurnMatchesTask(task *corev1alpha1.Task, agent *corev1
 	if !taskHasPlannedHarnessWrapperTurn(task) {
 		return false
 	}
-	runtimeName := harnessWrapperRuntimeGeneric
+	runtimeName := string(corev1alpha1.AgentRuntimeClaude)
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtimeName = string(agent.Spec.Runtime.Type)
 	}
@@ -499,7 +499,7 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
-	runtimeName := harnessWrapperRuntimeGeneric
+	runtimeName := string(corev1alpha1.AgentRuntimeClaude)
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtimeName = string(agent.Spec.Runtime.Type)
 	}
@@ -535,7 +535,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
-	runtimeName := harnessWrapperRuntimeGeneric
+	runtimeName := string(corev1alpha1.AgentRuntimeClaude)
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtimeName = string(agent.Spec.Runtime.Type)
 	}
@@ -692,7 +692,11 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []ha
 	}
 	env := make([]harness.TurnEnvVar, 0, len(task.Spec.Env)+4)
 	for _, item := range task.Spec.Env {
-		if strings.TrimSpace(item.Name) == "" {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		if taskRequestsReadOnlyAgent(task) && harnessWrapperReadOnlyEnvBlocked(name) {
 			continue
 		}
 		env = append(env, harness.TurnEnvVar{Name: item.Name, Value: item.Value})
@@ -872,6 +876,22 @@ func filterHarnessTurnEnv(env []harness.TurnEnvVar, allowedKeys []string) []harn
 		}
 	}
 	return out
+}
+
+func harnessWrapperReadOnlyEnvBlocked(name string) bool {
+	switch strings.TrimSpace(name) {
+	case workerenv.AllowBash,
+		workerenv.AllowedTools,
+		workerenv.DisallowedTools,
+		workerenv.ClaudeBare,
+		workerenv.ClaudeDisableSettingSources,
+		workerenv.ClaudePermissionMode,
+		workerenv.CodexDisableSandbox,
+		workerenv.CodexSandboxMode:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {

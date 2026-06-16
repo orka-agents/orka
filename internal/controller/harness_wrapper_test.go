@@ -230,6 +230,10 @@ func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
 func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
+	task.Spec.Env = []corev1.EnvVar{
+		{Name: workerenv.AllowBash, Value: scheduledRunLabelValue},
+		{Name: workerenv.AllowedTools, Value: "Bash,Write"},
+	}
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
 	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
@@ -269,6 +273,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	if env[workerenv.OpenAIAPIKey] == "task-openai-key" {
 		t.Fatalf("task secret credentials should not be sent to read-only harness turns")
+	}
+	if env[workerenv.AllowBash] != "" || env[workerenv.AllowedTools] == "Bash,Write" {
+		t.Fatalf("read-only task env should not override runtime permissions: %#v", env)
 	}
 	if env[workerenv.GitToken] != "" || env[workerenv.GitHubToken] != "" {
 		t.Fatalf("workspace git credentials should not be sent to read-only harness turns")
