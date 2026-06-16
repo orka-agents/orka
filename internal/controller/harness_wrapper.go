@@ -155,6 +155,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			message := err.Error()
 			switch {
 			case strings.Contains(message, "turn already exists"):
+				turnAccepted = true
 				// Treat a duplicate turn ID as idempotent recovery after the wrapper
 				// accepted the planned turn before Running status was persisted.
 			case strings.Contains(message, "maximum concurrent turns"):
