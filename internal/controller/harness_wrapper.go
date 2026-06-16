@@ -91,9 +91,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 
 	now := metav1.Now()
 	attempts := task.Status.Attempts + 1
-	if taskHasPlannedHarnessWrapperTurn(task) &&
-		(!harnessWrapperPlannedTurnMatchesTask(task, agent, attempts) ||
-			(!taskHasHarnessWrapperTurn(task) && harnessWrapperPlannedTurnExpired(task, now.Time))) {
+	if taskHasPlannedHarnessWrapperTurn(task) && !harnessWrapperPlannedTurnMatchesTask(task, agent, attempts) {
 		if err := r.clearHarnessWrapperTurnState(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -380,21 +378,10 @@ func harnessWrapperPlannedTurnMatchesTask(task *corev1alpha1.Task, agent *corev1
 	if strings.TrimSpace(correlationID) == "" {
 		correlationID = task.Namespace + "/" + task.Name
 	}
-	expectedRuntimeSessionID := task.Namespace + ":" + harnessWrapperSessionName(task) + ":" + runtimeName
+	expectedRuntimeSessionID := string(harnessWrapperRuntimeSessionID(task, runtimeName))
 	return strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == string(harnessWrapperTurnID(task, attempts)) &&
 		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) == expectedRuntimeSessionID &&
 		strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]) == correlationID
-}
-
-func harnessWrapperPlannedTurnExpired(task *corev1alpha1.Task, now time.Time) bool {
-	if task == nil || task.Annotations == nil {
-		return false
-	}
-	plannedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[harnessWrapperPlannedAtAnno]))
-	if err != nil {
-		return false
-	}
-	return now.Sub(plannedAt) > harnessWrapperPlannedTurnTTL
 }
 
 func (r *TaskReconciler) validateHarnessWrapperCapabilities(
@@ -561,7 +548,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 		Namespace:        task.Namespace,
 		TaskName:         task.Name,
 		SessionName:      harnessWrapperSessionName(task),
-		RuntimeSessionID: harness.RuntimeSessionID(task.Namespace + ":" + harnessWrapperSessionName(task) + ":" + runtimeName),
+		RuntimeSessionID: harnessWrapperRuntimeSessionID(task, runtimeName),
 		TurnID:           turnID,
 		CorrelationID:    correlationID,
 		Deadline:         deadline.UTC(),
@@ -986,6 +973,23 @@ func harnessWrapperTurnIDPrefix(value string) string {
 		return "turn"
 	}
 	return prefix
+}
+
+func harnessWrapperRuntimeSessionID(task *corev1alpha1.Task, runtimeName string) harness.RuntimeSessionID {
+	parts := []string{"default", "default", strings.TrimSpace(runtimeName)}
+	if task != nil {
+		parts[0] = task.Namespace
+		if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" {
+			parts[1] = strings.TrimSpace(task.Spec.SessionRef.Name)
+		} else {
+			identity := strings.TrimSpace(string(task.UID))
+			if identity == "" {
+				identity = task.Name
+			}
+			parts[1] = task.Name + ":" + identity
+		}
+	}
+	return harness.RuntimeSessionID(strings.Join(parts, ":"))
 }
 
 func harnessWrapperSessionName(task *corev1alpha1.Task) string {

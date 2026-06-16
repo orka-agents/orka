@@ -296,7 +296,7 @@ func TestHarnessWrapperPlannedTurnMustMatchTaskIdentity(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{
 		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
-		harnessWrapperRuntimeAnnotation: task.Namespace + ":" + harnessWrapperSessionName(task) + ":" + string(agent.Spec.Runtime.Type),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, string(agent.Spec.Runtime.Type))),
 		harnessWrapperCorrelationIDAnno: string(task.UID),
 	}
 	if !harnessWrapperPlannedTurnMatchesTask(task, agent, 1) {
@@ -408,37 +408,6 @@ func TestHarnessWrapperCapabilitiesReadErrorRetryable(t *testing.T) {
 	}
 }
 
-func TestHarnessWrapperExpiredPlannedTurnIsClearedForReplan(t *testing.T) {
-	task, agent := harnessWrapperTaskAndAgent()
-	request, err := (&TaskReconciler{}).harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
-	if err != nil {
-		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
-	}
-	task.Annotations = map[string]string{
-		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
-		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
-		harnessWrapperCorrelationIDAnno: request.CorrelationID,
-		harnessWrapperStartedAnno:       "false",
-		harnessWrapperPlannedAtAnno:     time.Now().Add(-harnessWrapperPlannedTurnTTL - time.Second).UTC().Format(time.RFC3339Nano),
-	}
-	r := newUnitReconciler(newTestScheme(), task, agent)
-	task.Status.Phase = corev1alpha1.TaskPhasePending
-	result, err := r.runHarnessWrapperTask(context.Background(), task, agent)
-	if err != nil {
-		t.Fatalf("runHarnessWrapperTask: %v", err)
-	}
-	if result.RequeueAfter != 100*time.Millisecond {
-		t.Fatalf("RequeueAfter = %v, want replan delay", result.RequeueAfter)
-	}
-	updated := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
-		t.Fatalf("Get task: %v", err)
-	}
-	if taskHasPlannedHarnessWrapperTurn(updated) {
-		t.Fatalf("expired planned turn annotations were not cleared: %#v", updated.Annotations)
-	}
-}
-
 func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
 	for _, message := range []string{"stream_frames failed (404): turn not found", "stream_frames failed (410): gone"} {
 		if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
@@ -447,5 +416,18 @@ func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
 	}
 	if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (401): unauthorized")) {
 		t.Fatal("unauthorized stream error should not be classified as missing turn")
+	}
+}
+
+func TestHarnessWrapperRuntimeSessionIDUsesUIDWithoutExplicitSession(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	got := string(harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)))
+	if !strings.Contains(got, string(task.UID)) {
+		t.Fatalf("runtime session id = %q, want task UID", got)
+	}
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "shared-session"}
+	got = string(harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)))
+	if strings.Contains(got, string(task.UID)) || !strings.Contains(got, "shared-session") {
+		t.Fatalf("runtime session id = %q, want explicit shared session without UID", got)
 	}
 }
