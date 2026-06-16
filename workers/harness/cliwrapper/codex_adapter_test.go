@@ -155,6 +155,33 @@ func TestCodexInstructionsDenyAllWhenAllowlistIntersectionEmpty(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterIgnoresTurnEnvOpenAIBaseURL(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIBaseURL, "https://operator.example.invalid/v1")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt: "do work",
+		Env:    []string{workerenv.OpenAIBaseURL + "=https://turn.example.invalid/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if strings.Contains(joined, "https://turn.example.invalid/v1") {
+		t.Fatalf("args = %q, want turn env base URL ignored", joined)
+	}
+	if !strings.Contains(joined, "openai_base_url=https://operator.example.invalid/v1") {
+		t.Fatalf("args = %q, want operator base URL", joined)
+	}
+	if containsEnv(spec.Env, workerenv.OpenAIBaseURL+"=https://turn.example.invalid/v1") {
+		t.Fatalf("env = %#v, want turn env base URL removed", spec.Env)
+	}
+	if !containsEnv(spec.Env, workerenv.OpenAIBaseURL+"=https://operator.example.invalid/v1") {
+		t.Fatalf("env = %#v, want operator base URL", spec.Env)
+	}
+}
+
 func TestCodexAdapterIgnoresTurnEnvSandboxPolicy(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.CodexSandboxMode, "")

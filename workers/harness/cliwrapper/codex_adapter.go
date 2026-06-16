@@ -125,10 +125,7 @@ func buildCodexArgs(
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
 	}
-	baseURL := strings.TrimSpace(firstNonEmpty(
-		envEntryValue(env, workerenv.OpenAIBaseURL),
-		os.Getenv(workerenv.OpenAIBaseURL),
-	))
+	baseURL := codexOpenAIBaseURL()
 	if baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
@@ -207,14 +204,21 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 }
 
 func buildCodexEnv(extra []string) []string {
-	env := append([]string(nil), extra...)
+	env := removeTurnEnv(append([]string(nil), extra...), workerenv.OpenAIBaseURL)
 	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
+	if baseURL := codexOpenAIBaseURL(); baseURL != "" {
+		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)
+	}
 	if os.Getenv(workerenv.CodexAPIKey) == "" {
 		if apiKey := strings.TrimSpace(os.Getenv(workerenv.OpenAIAPIKey)); apiKey != "" {
 			env = setEnv(env, workerenv.CodexAPIKey, apiKey)
 		}
 	}
 	return env
+}
+
+func codexOpenAIBaseURL() string {
+	return strings.TrimSpace(os.Getenv(workerenv.OpenAIBaseURL))
 }
 
 func codexAutoCompactTokenLimit() string {
