@@ -122,7 +122,11 @@ printf 'claude:%s' "$last"
 	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
 		t.Fatalf("last frame = %#v, want completed", last)
 	}
-	if got := strings.TrimSpace(last.Completed.Result); got != "claude:hello claude" {
+	data, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "claude:hello claude" {
 		t.Fatalf("result = %q, want fake claude output", got)
 	}
 }

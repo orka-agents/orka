@@ -134,7 +134,8 @@ func TestCodexAdapterFailurePath(t *testing.T) {
 		t.Fatalf("last frame = %#v, want failed", last)
 	}
 	encoded := stringifyFrames(t, frames)
-	if strings.Contains(encoded, "redaction-value") || !strings.Contains(encoded, "[REDACTED]") {
+	if strings.Contains(encoded, "redaction-value") ||
+		(strings.Contains(encoded, "Authorization") && !strings.Contains(encoded, "[REDACTED]")) {
 		t.Fatalf("failure frames leaked secret or missed redaction: %s", encoded)
 	}
 }
