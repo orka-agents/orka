@@ -50,9 +50,14 @@ spec:
             - name: ORKA_CODEX_SANDBOX_MODE
               value: {{ .Values.workers.harnessWrapper.codexSandboxMode | quote }}
             {{- end }}
+            - name: ORKA_SA_TOKEN_PATH
+              value: /var/run/orka/upload-token/token
           volumeMounts:
             - name: auth
               mountPath: /var/run/orka/harness-wrapper
+              readOnly: true
+            - name: upload-token
+              mountPath: /var/run/orka/upload-token
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -85,6 +90,12 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        - name: upload-token
+          projected:
+            defaultMode: 0400
+            sources:
+              - serviceAccountToken:
+                  path: token
         - name: auth
           secret:
             secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
