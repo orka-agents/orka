@@ -401,14 +401,25 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	turnRoot := firstNonEmpty(preparedWorkspace.baseDir, preparedWorkspace.rootDir)
-	if turnRoot != preparedWorkspace.rootDir {
-		if err := os.Chmod(turnRoot, 0o711); err != nil {
+	if preparedWorkspace.baseDir != "" && preparedWorkspace.baseDir != preparedWorkspace.rootDir {
+		if err := os.Chmod(preparedWorkspace.baseDir, 0o711); err != nil {
 			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 			return
 		}
 	}
-	turnHome := filepath.Join(turnRoot, "home")
+	turnHomeRoot, err := os.MkdirTemp("/tmp", "orka-harness-home-*")
+	if err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	defer func() { _ = os.RemoveAll(turnHomeRoot) }()
+	if _, _, ok := childCredentialIDs(); ok {
+		if err := os.Chmod(turnHomeRoot, 0o711); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
+	}
+	turnHome := filepath.Join(turnHomeRoot, "home")
 	if err := os.MkdirAll(turnHome, 0o700); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
