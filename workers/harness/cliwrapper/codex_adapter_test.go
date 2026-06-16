@@ -155,6 +155,26 @@ func TestCodexInstructionsDenyAllWhenAllowlistIntersectionEmpty(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterPreservesExplicitCodexAPIKey(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIAPIKey, "operator-openai-key")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt: "do work",
+		Env:    []string{workerenv.CodexAPIKey + "=explicit-codex-key"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if !containsEnv(spec.Env, workerenv.CodexAPIKey+"=explicit-codex-key") {
+		t.Fatalf("env = %#v, want explicit Codex API key preserved", spec.Env)
+	}
+	if containsEnv(spec.Env, workerenv.CodexAPIKey+"=operator-openai-key") {
+		t.Fatalf("env = %#v, want OpenAI fallback not to overwrite explicit Codex key", spec.Env)
+	}
+}
+
 func TestCodexAdapterIgnoresTurnEnvOpenAIBaseURL(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.OpenAIBaseURL, "https://operator.example.invalid/v1")
