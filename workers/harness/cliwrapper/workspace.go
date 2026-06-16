@@ -141,25 +141,43 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 
 func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo string) error {
 	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", ref)
-	if out, err := fetch.CombinedOutput(); err == nil {
+	if _, err := fetch.CombinedOutput(); err == nil {
 		return checkoutWorkspaceCommit(ctx, cloneDir, "FETCH_HEAD", repo)
-	} else if headsErr := fetchWorkspaceRemoteHeads(ctx, cloneDir); headsErr != nil {
-		return gitCommandError("fetch turn workspace ref", err, out, repo)
 	}
-	commit, err := resolveWorkspaceRemoteBranch(ctx, cloneDir, ref, repo)
+	branch, err := normalizeWorkspaceBranchRef(ref)
+	if err != nil {
+		return err
+	}
+	if err := fetchWorkspaceRemoteBranch(ctx, cloneDir, branch, repo); err != nil {
+		return err
+	}
+	commit, err := resolveWorkspaceRemoteBranch(ctx, cloneDir, branch, repo)
 	if err != nil {
 		return err
 	}
 	return checkoutWorkspaceCommit(ctx, cloneDir, commit, repo)
 }
 
-func resolveWorkspaceRemoteBranch(ctx context.Context, cloneDir, ref, repo string) (string, error) {
+func normalizeWorkspaceBranchRef(ref string) (string, error) {
 	branch := strings.TrimSpace(ref)
 	branch = strings.TrimPrefix(branch, "refs/heads/")
 	branch = strings.TrimPrefix(branch, "origin/")
-	if branch == "" || strings.HasPrefix(branch, "-") {
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.Contains(branch, "..") || strings.ContainsAny(branch, " ~^:?*[\\") {
 		return "", fmt.Errorf("checkout turn workspace ref: invalid ref %q", ref)
 	}
+	return branch, nil
+}
+
+func fetchWorkspaceRemoteBranch(ctx context.Context, cloneDir, branch, repo string) error {
+	refspec := "+refs/heads/" + branch + ":refs/remotes/origin/" + branch
+	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", refspec)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return gitCommandError("fetch turn workspace remote branch", err, out, repo)
+	}
+	return nil
+}
+
+func resolveWorkspaceRemoteBranch(ctx context.Context, cloneDir, branch, repo string) (string, error) {
 	remoteRef := "refs/remotes/origin/" + branch
 	verify := workspaceGitCommand(ctx, "-C", cloneDir, "rev-parse", "--verify", "--end-of-options", remoteRef+"^{commit}")
 	out, err := verify.CombinedOutput()
@@ -168,7 +186,7 @@ func resolveWorkspaceRemoteBranch(ctx context.Context, cloneDir, ref, repo strin
 	}
 	commit := strings.TrimSpace(string(out))
 	if commit == "" {
-		return "", fmt.Errorf("resolve turn workspace ref: empty commit for %q", ref)
+		return "", fmt.Errorf("resolve turn workspace ref: empty commit for %q", branch)
 	}
 	return commit, nil
 }
@@ -183,14 +201,6 @@ func checkoutWorkspaceCommit(ctx context.Context, cloneDir, ref, repo string) er
 	checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", "--detach", commit)
 	if out, err := checkout.CombinedOutput(); err != nil {
 		return gitCommandError("checkout turn workspace ref", err, out, repo)
-	}
-	return nil
-}
-
-func fetchWorkspaceRemoteHeads(ctx context.Context, cloneDir string) error {
-	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/*:refs/remotes/origin/*")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("fetch turn workspace remote heads: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

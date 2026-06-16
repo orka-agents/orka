@@ -17,12 +17,25 @@ func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("fetchAndCheckoutWorkspaceRef error = nil, want invalid pathspec ref rejected")
 	}
-	if !strings.Contains(err.Error(), "resolve turn workspace ref") {
-		t.Fatalf("fetchAndCheckoutWorkspaceRef error = %v, want resolve failure", err)
+	if !strings.Contains(err.Error(), "fetch turn workspace remote branch") {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef error = %v, want exact-branch fetch failure", err)
 	}
 	after := testGitOutput(t, cloneDir, "rev-parse", "HEAD")
 	if after != before {
 		t.Fatalf("HEAD = %s after invalid ref, want unchanged %s", after, before)
+	}
+}
+
+func TestFetchWorkspaceRemoteBranchRedactsRawRepoURL(t *testing.T) {
+	_, cloneDir, _ := newWorkspaceGitFixture(t)
+	rawRepo := "https://user:token@example.invalid/private/repo.git?secret=value#frag"
+	err := fetchWorkspaceRemoteBranch(context.Background(), cloneDir, "missing", rawRepo)
+	if err == nil {
+		t.Fatal("fetchWorkspaceRemoteBranch error = nil, want fetch failure")
+	}
+	message := err.Error()
+	if strings.Contains(message, "user:token") || strings.Contains(message, "secret=value") || strings.Contains(message, "#frag") {
+		t.Fatalf("fetchWorkspaceRemoteBranch error leaked raw repo URL: %v", err)
 	}
 }
 
