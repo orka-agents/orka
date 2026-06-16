@@ -456,7 +456,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.outputFrame(turn, "stdout", run.Stdout))
 	}
 	if strings.TrimSpace(run.Stderr) != "" {
-		turn.appendFrame(s.runtimeLogTextFrame(turn, "stderr", run.Stderr, events.ExecutionEventSeverityWarning))
+		turn.appendFrame(s.runtimeLogTextFrame(turn, "stderr", run.Stderr))
 	}
 	finalizedWorkDir := ""
 	switch {
@@ -474,7 +474,6 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				turn,
 				"artifact-upload",
 				artifactErr.Error(),
-				events.ExecutionEventSeverityWarning,
 			))
 		}
 		turn.appendFrame(s.failedFrame(turn, "command_failed", msg, false))
@@ -520,13 +519,15 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				turn,
 				"artifact-upload",
 				artifactErr.Error(),
-				events.ExecutionEventSeverityWarning,
 			))
 		}
 		if finalizedWorkDir != "" {
 			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
-				turn.appendFrame(s.failedFrame(turn, "workdir_cleanup_failed", cleanErr.Error(), false))
-				return
+				turn.appendFrame(s.runtimeLogTextFrame(
+					turn,
+					"workdir-cleanup",
+					cleanErr.Error(),
+				))
 			}
 		}
 		if frameErr := s.appendCompletedFrame(turn, parsed); frameErr != nil {
@@ -637,10 +638,10 @@ func (s *Server) runtimeLogFrame(turn *turnState, summary string, content map[st
 	return frame
 }
 
-func (s *Server) runtimeLogTextFrame(turn *turnState, stream, text, severity string) harness.HarnessEventFrame {
+func (s *Server) runtimeLogTextFrame(turn *turnState, stream, text string) harness.HarnessEventFrame {
 	frame := s.runtimeLogFrame(turn, "runtime "+stream, map[string]any{"stream": stream})
 	frame.ContentText = redactAndTruncate(text, events.MaxExecutionEventContentTextChars)
-	frame.Severity = events.NormalizeExecutionEventSeverity(severity)
+	frame.Severity = events.ExecutionEventSeverityWarning
 	return frame
 }
 
