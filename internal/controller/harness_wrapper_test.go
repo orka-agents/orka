@@ -517,3 +517,15 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 		t.Fatal("expected auth start error to remain terminal")
 	}
 }
+
+func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	if request.Metadata["maxTurns"] != "50" {
+		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+}

@@ -631,8 +631,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	runtimeName string,
 ) (map[string]string, error) {
 	metadata := map[string]string{
-		"runtime": runtimeName,
-		"wrapper": "cli",
+		"runtime":  runtimeName,
+		"wrapper":  "cli",
+		"maxTurns": "50",
 	}
 	if agent != nil {
 		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
