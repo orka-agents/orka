@@ -92,6 +92,9 @@ func (a *GenericAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 		if err := os.WriteFile(path, []byte(turn.Prompt), 0o600); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
+		if err := prepareControlFileForChild(path, 0o640); err != nil {
+			return nil, fmt.Errorf("chown prompt file: %w", err)
+		}
 		spec.TempFiles = appendUniqueString(spec.TempFiles, path)
 		spec.Env = setEnv(spec.Env, firstNonEmpty(cfg.PromptEnv, DefaultPromptEnv), path)
 	}

@@ -861,7 +861,10 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return nil, nil
 	}
-	env, err := r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: agent.Namespace})
+	if agent.Namespace != task.Namespace {
+		return nil, fmt.Errorf("agent runtime secretRef namespace %q does not match task namespace %q", agent.Namespace, task.Namespace)
+	}
+	env, err := r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: task.Namespace})
 	if err != nil {
 		return nil, err
 	}

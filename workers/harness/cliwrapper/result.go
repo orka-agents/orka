@@ -52,6 +52,9 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
 		}
+		if err := common.PrepareWorkspace(root); err != nil {
+			return cfg, err
+		}
 		if err := common.PreparePullRequestReviewContext(root, cfg); err != nil {
 			return cfg, err
 		}

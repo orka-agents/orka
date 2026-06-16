@@ -85,7 +85,7 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
 		args = append(args, "--tools", strings.Join(tools, ","))
 	}
 	for _, tool := range cfg.AllowedTools {
-		if tool = strings.TrimSpace(tool); tool != "" {
+		if tool = scopedClaudeTool(tool, turn.WorkDir); tool != "" {
 			args = append(args, "--allowedTools", tool)
 		}
 	}
@@ -141,4 +141,13 @@ func envEntryValue(env []string, key string) string {
 
 func envEntryIsTrue(env []string, key string) bool {
 	return strings.EqualFold(strings.TrimSpace(envEntryValue(env, key)), "true")
+}
+
+func scopedClaudeTool(tool, workDir string) string {
+	tool = strings.TrimSpace(tool)
+	workDir = strings.TrimSpace(workDir)
+	if tool == "" || workDir == "" {
+		return tool
+	}
+	return strings.ReplaceAll(tool, "/workspace", workDir)
 }

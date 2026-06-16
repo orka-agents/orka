@@ -105,8 +105,18 @@ func WriteArtifactFile(filename string, data []byte) error {
 // It is called after SubmitResult to persist any files the agent wrote.
 // Returns nil if the artifacts directory does not exist or is empty.
 func UploadArtifacts() error {
-	if _, err := os.Stat(artifactsDir); os.IsNotExist(err) {
+	info, err := os.Lstat(artifactsDir)
+	if os.IsNotExist(err) {
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect artifacts directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("artifacts directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("artifacts path is not a directory")
 	}
 
 	entries, err := os.ReadDir(artifactsDir)
