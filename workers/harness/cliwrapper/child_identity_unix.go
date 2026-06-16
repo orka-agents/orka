@@ -55,8 +55,15 @@ func prepareHomeForChild(path string) error {
 	if !ok {
 		return os.Chmod(path, 0o700)
 	}
-	if err := os.Lchown(path, uid, 0); err != nil {
+	if err := os.Lchown(path, 0, 0); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o770)
+	if err := os.Chmod(path, 0o770); err != nil {
+		return err
+	}
+	if err := os.Lchown(path, uid, 0); err != nil {
+		_ = os.Chmod(path, 0o700)
+		return err
+	}
+	return nil
 }
