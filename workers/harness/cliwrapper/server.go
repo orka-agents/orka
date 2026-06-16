@@ -392,7 +392,14 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	turnCtx.WorkDir = preparedWorkspace.workDir
-	turnHome := filepath.Join(filepath.Dir(preparedWorkspace.rootDir), "home")
+	turnRoot := firstNonEmpty(preparedWorkspace.baseDir, preparedWorkspace.rootDir)
+	if turnRoot != preparedWorkspace.rootDir {
+		if err := os.Chmod(turnRoot, 0o711); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
+	}
+	turnHome := filepath.Join(turnRoot, "home")
 	if err := os.MkdirAll(turnHome, 0o700); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return

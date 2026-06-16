@@ -64,6 +64,7 @@ func validateWorkspaceRepoURL(rawRepo string) error {
 type preparedWorkspace struct {
 	workDir string
 	rootDir string
+	baseDir string
 	cleanup func()
 }
 
@@ -80,7 +81,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 			cleanup()
 			return preparedWorkspace{}, fmt.Errorf("create isolated turn workdir: %w", err)
 		}
-		return preparedWorkspace{workDir: workDir, rootDir: root, cleanup: cleanup}, nil
+		return preparedWorkspace{workDir: workDir, rootDir: root, baseDir: root, cleanup: cleanup}, nil
 	}
 	if err := validateWorkspaceRepoURL(repo); err != nil {
 		return preparedWorkspace{}, err
@@ -136,7 +137,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		cleanup()
 		return preparedWorkspace{}, err
 	}
-	return preparedWorkspace{workDir: contained, rootDir: cloneDir, cleanup: cleanup}, nil
+	return preparedWorkspace{workDir: contained, rootDir: cloneDir, baseDir: root, cleanup: cleanup}, nil
 }
 
 func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo string) error {
