@@ -1,0 +1,933 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+KINDCTL_VERSION="0.1.0"
+
+kindctl_die() {
+  printf 'kindctl: error: %s\n' "$*" >&2
+  exit 1
+}
+
+kindctl_warn() {
+  printf 'kindctl: warning: %s\n' "$*" >&2
+}
+
+kindctl_info() {
+  printf 'kindctl: %s\n' "$*" >&2
+}
+
+kindctl_usage() {
+  cat <<'USAGE'
+kindctl — repo/worktree-scoped kind clusters without touching ~/.kube/config
+
+Usage:
+  kindctl create [--config FILE] [--tag TAG] [--k8s-version vX.Y.Z]
+  kindctl delete [--tag TAG]
+  kindctl exec [--tag TAG] -- <command> [args...]
+  kindctl kubectl [--tag TAG] <args...>
+  kindctl path [--tag TAG]
+  kindctl ctx [--tag TAG]
+  kindctl env [--tag TAG]
+  kindctl list [--workspace|--all]
+  kindctl load [--tag TAG] <image>
+  kindctl hibernate [--tag TAG]
+  kindctl resume [--tag TAG]
+  kindctl doctor
+  kindctl prune (--workspace|--dead) [--yes]
+  kindctl nuke [--yes]
+
+Golden rule: do not use bare kubectl/helm against kindctl clusters; use
+kindctl kubectl or kindctl exec so KUBECONFIG is scoped to this repo/worktree.
+USAGE
+}
+
+kindctl_store() {
+  printf '%s\n' "${KINDCTL_STORE:-$HOME/.kube/kind}"
+}
+
+kindctl_registry_path() {
+  printf '%s/registry.json\n' "$(kindctl_store)"
+}
+
+kindctl_shell_quote() {
+  # Single-quote for POSIX shells.
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"
+}
+
+kindctl_require_command() {
+  local missing=0 cmd
+  for cmd in "$@"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      printf 'kindctl: missing required command: %s\n' "$cmd" >&2
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] || kindctl_die "install missing required commands and retry"
+}
+
+kindctl_preflight_core() {
+  kindctl_require_command python3
+}
+
+kindctl_preflight_kind() {
+  kindctl_require_command python3 kind docker kubectl
+}
+
+kindctl_preflight_docker_daemon() {
+  if ! docker info >/dev/null 2>&1; then
+    kindctl_die "Docker daemon is not reachable; start Docker and retry"
+  fi
+}
+
+kindctl_sanitize_slug() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-//; s/-$//'
+}
+
+kindctl_hash6() {
+  printf '%s' "$1" | shasum -a 256 | cut -c1-6
+}
+
+kindctl_find_kind_marker_or_pwd() {
+  local dir
+  dir="$(pwd -P)"
+  while :; do
+    if [ -d "$dir/.kind" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    [ "$dir" = "/" ] && break
+    dir="$(dirname "$dir")"
+  done
+  pwd -P
+}
+
+kindctl_workspace_root() {
+  local root
+  if root="$(git rev-parse --show-toplevel 2>/dev/null)" && [ -n "$root" ]; then
+    (cd "$root" && pwd -P)
+  else
+    kindctl_find_kind_marker_or_pwd
+  fi
+}
+
+kindctl_normalize_tag() {
+  local raw tag tag_hash
+  raw="${1:-}"
+  if [ -z "$raw" ]; then
+    printf '\n'
+    return 0
+  fi
+  tag="$(kindctl_sanitize_slug "$raw")"
+  [ -n "$tag" ] || return 2
+  if [ "${#tag}" -gt 16 ]; then
+    tag_hash="$(kindctl_hash6 "$tag" | cut -c1-4)"
+    tag="$(printf '%s' "$tag" | cut -c1-11)-$tag_hash"
+  fi
+  printf '%s\n' "$tag"
+}
+
+# Sets KINDCTL_ROOT, KINDCTL_HASH, KINDCTL_TAG, KINDCTL_BASE, KINDCTL_NAME,
+# KINDCTL_CONTEXT, KINDCTL_KUBECONFIG, KINDCTL_STORE_DIR, KINDCTL_REGISTRY.
+
+kindctl_derive_name_for_root_tag() {
+  local root raw_tag hash tag suffix base_cap raw_base base
+  root="$1"; raw_tag="${2:-}"
+  hash="$(kindctl_hash6 "$root")"
+  if ! tag="$(kindctl_normalize_tag "$raw_tag")"; then
+    return 2
+  fi
+  suffix="-${hash}"
+  [ -n "$tag" ] && suffix="${suffix}-${tag}"
+  base_cap=$((50 - ${#suffix}))
+  [ "$base_cap" -gt 40 ] && base_cap=40
+  raw_base="$(basename "$root")"
+  base="$(kindctl_sanitize_slug "$raw_base" | cut -c1-"$base_cap")"
+  [ -n "$base" ] || base="repo"
+  printf '%s%s\n' "$base" "$suffix"
+}
+
+kindctl_derive() {
+  local raw_tag suffix base_cap raw_base base tag
+  raw_tag="${1:-}"
+  KINDCTL_ROOT="$(kindctl_workspace_root)"
+  KINDCTL_HASH="$(kindctl_hash6 "$KINDCTL_ROOT")"
+  if ! tag="$(kindctl_normalize_tag "$raw_tag")"; then
+    kindctl_die "--tag must contain at least one [a-z0-9] character after sanitization"
+  fi
+  KINDCTL_TAG="$tag"
+  suffix="-${KINDCTL_HASH}"
+  [ -n "$KINDCTL_TAG" ] && suffix="${suffix}-${KINDCTL_TAG}"
+  base_cap=$((50 - ${#suffix}))
+  [ "$base_cap" -gt 40 ] && base_cap=40
+  raw_base="$(basename "$KINDCTL_ROOT")"
+  base="$(kindctl_sanitize_slug "$raw_base" | cut -c1-"$base_cap")"
+  [ -n "$base" ] || base="repo"
+  KINDCTL_BASE="$base"
+  KINDCTL_NAME="${KINDCTL_BASE}${suffix}"
+  KINDCTL_CONTEXT="kind-${KINDCTL_NAME}"
+  KINDCTL_STORE_DIR="$(kindctl_store)"
+  KINDCTL_KUBECONFIG="${KINDCTL_STORE_DIR}/${KINDCTL_NAME}.kubeconfig"
+}
+
+kindctl_ensure_store_dir() {
+  local store
+  store="$(kindctl_store)"
+  mkdir -p "$store"
+  chmod 700 "$store" 2>/dev/null || true
+}
+
+kindctl_registry_init_unlocked() {
+  local reg tmp
+  kindctl_ensure_store_dir
+  reg="$(kindctl_registry_path)"
+  if [ ! -f "$reg" ]; then
+    tmp="${reg}.$$.$RANDOM.tmp"
+    printf '{"version":1,"clusters":{}}\n' > "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$reg"
+  fi
+  chmod 600 "$reg" 2>/dev/null || true
+}
+
+KINDCTL_LOCK_DIR=""
+kindctl_release_lock() {
+  if [ -n "${KINDCTL_LOCK_DIR:-}" ] && [ -d "$KINDCTL_LOCK_DIR" ]; then
+    rmdir "$KINDCTL_LOCK_DIR" 2>/dev/null || true
+    KINDCTL_LOCK_DIR=""
+  fi
+}
+
+kindctl_acquire_lock() {
+  local store lock attempts
+  kindctl_ensure_store_dir
+  store="$(kindctl_store)"
+  lock="$store/.lock"
+  attempts=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge "100" ]; then
+      kindctl_die "timed out waiting for registry lock: $lock"
+    fi
+    sleep 0.05
+  done
+  KINDCTL_LOCK_DIR="$lock"
+  trap kindctl_release_lock EXIT INT TERM
+}
+
+kindctl_registry_python_update() {
+  # Expects KINDCTL_REGISTRY_OP and operation-specific env vars.
+  python3 - <<'PY'
+import json, os, tempfile
+from pathlib import Path
+
+reg = Path(os.environ["KINDCTL_REGISTRY"])
+reg.parent.mkdir(parents=True, exist_ok=True)
+if reg.exists():
+    try:
+        data = json.loads(reg.read_text() or '{}')
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid registry JSON {reg}: {exc}")
+else:
+    data = {"version": 1, "clusters": {}}
+
+data.setdefault("version", 1)
+clusters = data.setdefault("clusters", {})
+op = os.environ["KINDCTL_REGISTRY_OP"]
+
+if op == "upsert":
+    name = os.environ["KINDCTL_NAME"]
+    old = clusters.get(name, {})
+    old.update({
+        "root": os.environ["KINDCTL_ROOT"],
+        "kubeconfig": os.environ["KINDCTL_KUBECONFIG"],
+        "context": os.environ["KINDCTL_CONTEXT"],
+        "tag": os.environ.get("KINDCTL_TAG", ""),
+        "git": os.environ.get("KINDCTL_GIT", "false") == "true",
+        "managed": os.environ.get("KINDCTL_MANAGED", "true") == "true",
+        "setup_status": os.environ.get("KINDCTL_SETUP_STATUS", old.get("setup_status", "ready")),
+        "updated": os.environ["KINDCTL_NOW"],
+    })
+    old.setdefault("created", os.environ["KINDCTL_NOW"])
+    clusters[name] = old
+elif op == "status":
+    name = os.environ["KINDCTL_NAME"]
+    if name not in clusters:
+        raise SystemExit(f"cluster not in registry: {name}")
+    clusters[name]["setup_status"] = os.environ["KINDCTL_SETUP_STATUS"]
+    clusters[name]["updated"] = os.environ["KINDCTL_NOW"]
+elif op == "delete":
+    clusters.pop(os.environ["KINDCTL_NAME"], None)
+else:
+    raise SystemExit(f"unknown registry op: {op}")
+
+fd, tmp = tempfile.mkstemp(prefix="registry.", suffix=".tmp", dir=str(reg.parent))
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, reg)
+finally:
+    try:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+kindctl_git_bool_for_root() {
+  if git -C "$1" rev-parse --show-toplevel >/dev/null 2>&1; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
+}
+
+kindctl_now_utc() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+kindctl_registry_upsert() {
+  local name root kubeconfig context tag status git_bool now managed
+  name="$1"; root="$2"; kubeconfig="$3"; context="$4"; tag="${5:-}"; status="${6:-ready}"; managed="${7:-true}"
+  kindctl_preflight_core
+  kindctl_acquire_lock
+  kindctl_registry_init_unlocked
+  git_bool="$(kindctl_git_bool_for_root "$root")"
+  now="$(kindctl_now_utc)"
+  KINDCTL_REGISTRY_OP=upsert \
+  KINDCTL_REGISTRY="$(kindctl_registry_path)" \
+  KINDCTL_NAME="$name" \
+  KINDCTL_ROOT="$root" \
+  KINDCTL_KUBECONFIG="$kubeconfig" \
+  KINDCTL_CONTEXT="$context" \
+  KINDCTL_TAG="$tag" \
+  KINDCTL_SETUP_STATUS="$status" \
+  KINDCTL_GIT="$git_bool" \
+  KINDCTL_MANAGED="$managed" \
+  KINDCTL_NOW="$now" \
+    kindctl_registry_python_update
+  kindctl_release_lock
+}
+
+kindctl_registry_set_status() {
+  local name status now
+  name="$1"; status="$2"
+  kindctl_preflight_core
+  kindctl_acquire_lock
+  kindctl_registry_init_unlocked
+  now="$(kindctl_now_utc)"
+  KINDCTL_REGISTRY_OP=status \
+  KINDCTL_REGISTRY="$(kindctl_registry_path)" \
+  KINDCTL_NAME="$name" \
+  KINDCTL_SETUP_STATUS="$status" \
+  KINDCTL_NOW="$now" \
+    kindctl_registry_python_update
+  kindctl_release_lock
+}
+
+kindctl_registry_delete() {
+  local name now
+  name="$1"
+  kindctl_preflight_core
+  kindctl_acquire_lock
+  kindctl_registry_init_unlocked
+  now="$(kindctl_now_utc)"
+  KINDCTL_REGISTRY_OP=delete \
+  KINDCTL_REGISTRY="$(kindctl_registry_path)" \
+  KINDCTL_NAME="$name" \
+  KINDCTL_NOW="$now" \
+    kindctl_registry_python_update
+  kindctl_release_lock
+}
+
+kindctl_registry_is_owned() {
+  local name reg
+  name="$1"
+  kindctl_preflight_core
+  kindctl_registry_init_unlocked
+  reg="$(kindctl_registry_path)"
+  KINDCTL_REGISTRY="$reg" KINDCTL_NAME="$name" python3 - <<'PY'
+import json, os, sys
+try:
+    data = json.load(open(os.environ["KINDCTL_REGISTRY"]))
+except FileNotFoundError:
+    sys.exit(1)
+entry = data.get("clusters", {}).get(os.environ["KINDCTL_NAME"])
+sys.exit(0 if entry and entry.get("managed") is True else 1)
+PY
+}
+
+kindctl_registry_get_context() {
+  local name reg
+  name="$1"
+  kindctl_registry_init_unlocked
+  reg="$(kindctl_registry_path)"
+  KINDCTL_REGISTRY="$reg" KINDCTL_NAME="$name" python3 - <<'PY'
+import json, os
+entry = json.load(open(os.environ["KINDCTL_REGISTRY"])).get("clusters", {}).get(os.environ["KINDCTL_NAME"], {})
+print(entry.get("context", ""))
+PY
+}
+
+kindctl_registry_tsv() {
+  kindctl_preflight_core
+  kindctl_registry_init_unlocked
+  KINDCTL_REGISTRY="$(kindctl_registry_path)" python3 - <<'PY'
+import json, os
+try:
+    data = json.load(open(os.environ["KINDCTL_REGISTRY"]))
+except FileNotFoundError:
+    data = {"clusters": {}}
+for name, entry in sorted(data.get("clusters", {}).items()):
+    print("\t".join([
+        name,
+        entry.get("root", ""),
+        entry.get("kubeconfig", ""),
+        entry.get("context", ""),
+        entry.get("tag", ""),
+        "true" if entry.get("managed") is True else "false",
+        entry.get("setup_status", "unknown"),
+    ]))
+PY
+}
+
+kindctl_guard_kind_context() {
+  case "$1" in
+    kind-*) return 0 ;;
+    *) kindctl_die "refusing destructive operation for non-kind context: $1" ;;
+  esac
+}
+
+kindctl_cluster_live() {
+  local name
+  name="$1"
+  kind get clusters 2>/dev/null | grep -Fx -- "$name" >/dev/null 2>&1
+}
+
+kindctl_require_owned_cluster() {
+  local name kubeconfig
+  name="$1"; kubeconfig="$2"
+  if ! kindctl_registry_is_owned "$name"; then
+    kindctl_die "cluster is missing or not registry-owned: $name; run: kindctl create or kindctl doctor"
+  fi
+  if ! kindctl_cluster_live "$name"; then
+    kindctl_die "cluster does not exist according to kind: $name; run: kindctl create or kindctl doctor"
+  fi
+  if [ ! -s "$kubeconfig" ]; then
+    kindctl_die "scoped kubeconfig is missing: $kubeconfig; run: kindctl doctor"
+  fi
+}
+
+kindctl_parse_tag_options() {
+  # Parses --tag from arbitrary command args. Emits sanitized tag on first line,
+  # then remaining args one per line. Use via command substitution with mapfile-less loops.
+  local raw_tag="" out=() arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"; shift
+    case "$arg" in
+      --tag)
+        [ "$#" -gt 0 ] || kindctl_die "--tag requires a value"
+        raw_tag="$1"; shift ;;
+      --tag=*)
+        raw_tag="${arg#--tag=}" ;;
+      *)
+        out+=("$arg") ;;
+    esac
+  done
+  printf '%s\n' "$raw_tag"
+  printf '%s\n' "${out[@]}"
+}
+
+kindctl_parse_common_tag_first() {
+  # Sets PARSED_TAG and PARSED_ARGS array.
+  local parsed line first=1
+  PARSED_TAG=""
+  PARSED_ARGS=()
+  parsed="$(kindctl_parse_tag_options "$@")"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$first" -eq 1 ]; then
+      PARSED_TAG="$line"
+      first=0
+    else
+      PARSED_ARGS+=("$line")
+    fi
+  done <<EOF_PARSE
+$parsed
+EOF_PARSE
+}
+
+kindctl_cmd_create() {
+  local raw_tag="" config="" k8s_version="" default_config setup status
+  local args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tag) [ "$#" -gt 1 ] || kindctl_die "--tag requires a value"; raw_tag="$2"; shift 2 ;;
+      --tag=*) raw_tag="${1#--tag=}"; shift ;;
+      --config) [ "$#" -gt 1 ] || kindctl_die "--config requires a value"; config="$2"; shift 2 ;;
+      --config=*) config="${1#--config=}"; shift ;;
+      --k8s-version) [ "$#" -gt 1 ] || kindctl_die "--k8s-version requires a value"; k8s_version="$2"; shift 2 ;;
+      --k8s-version=*) k8s_version="${1#--k8s-version=}"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown create argument: $1" ;;
+    esac
+  done
+  kindctl_preflight_kind
+  kindctl_preflight_docker_daemon
+  kindctl_derive "$raw_tag"
+  kindctl_registry_init_unlocked
+  if kindctl_cluster_live "$KINDCTL_NAME"; then
+    kindctl_die "cluster already exists: $KINDCTL_NAME; run kindctl doctor if recovering registry, kindctl delete if it is yours, or use --tag"
+  fi
+  default_config="$KINDCTL_ROOT/.kind/cluster.yaml"
+  if [ -z "$config" ] && [ -f "$default_config" ]; then
+    config="$default_config"
+  fi
+  args=(create cluster --name "$KINDCTL_NAME" --kubeconfig "$KINDCTL_KUBECONFIG")
+  [ -n "$config" ] && args+=(--config "$config")
+  [ -n "$k8s_version" ] && args+=(--image "kindest/node:$k8s_version")
+  kind "${args[@]}"
+  if [ -f "$KINDCTL_KUBECONFIG" ]; then
+    chmod 600 "$KINDCTL_KUBECONFIG" 2>/dev/null || true
+  fi
+  kindctl_registry_upsert "$KINDCTL_NAME" "$KINDCTL_ROOT" "$KINDCTL_KUBECONFIG" "$KINDCTL_CONTEXT" "$KINDCTL_TAG" pending true
+  setup="$KINDCTL_ROOT/.kind/setup.sh"
+  if [ -x "$setup" ]; then
+    status=ready
+    if ! (cd "$KINDCTL_ROOT" && KUBECONFIG="$KINDCTL_KUBECONFIG" KINDCTL_CLUSTER="$KINDCTL_NAME" KINDCTL_CONTEXT="$KINDCTL_CONTEXT" KINDCTL_ROOT="$KINDCTL_ROOT" "$setup"); then
+      status=failed
+      kindctl_registry_set_status "$KINDCTL_NAME" failed
+      kindctl_die "setup hook failed for $KINDCTL_NAME; cluster is preserved, run kindctl delete or debug with kindctl exec"
+    fi
+    kindctl_registry_set_status "$KINDCTL_NAME" "$status"
+  else
+    kindctl_registry_set_status "$KINDCTL_NAME" ready
+  fi
+  printf 'created %s\n' "$KINDCTL_NAME"
+}
+
+kindctl_cmd_delete_one() {
+  local name kubeconfig context
+  name="$1"; kubeconfig="$2"; context="$3"
+  kindctl_guard_kind_context "$context"
+  if ! kindctl_registry_is_owned "$name"; then
+    kindctl_die "refusing to delete non-registry-owned cluster: $name; run kindctl doctor if recovering registry"
+  fi
+  kind delete cluster --name "$name" --kubeconfig "$kubeconfig"
+  kindctl_registry_delete "$name"
+  rm -f -- "$kubeconfig"
+}
+
+kindctl_cmd_delete() {
+  local raw_tag="" context
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tag) [ "$#" -gt 1 ] || kindctl_die "--tag requires a value"; raw_tag="$2"; shift 2 ;;
+      --tag=*) raw_tag="${1#--tag=}"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown delete argument: $1" ;;
+    esac
+  done
+  kindctl_preflight_kind
+  kindctl_derive "$raw_tag"
+  context="$(kindctl_registry_get_context "$KINDCTL_NAME")"
+  [ -n "$context" ] || context="$KINDCTL_CONTEXT"
+  kindctl_cmd_delete_one "$KINDCTL_NAME" "$KINDCTL_KUBECONFIG" "$context"
+  printf 'deleted %s\n' "$KINDCTL_NAME"
+}
+
+kindctl_cmd_path_ctx_env() {
+  local mode raw_tag=""
+  mode="$1"; shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tag) [ "$#" -gt 1 ] || kindctl_die "--tag requires a value"; raw_tag="$2"; shift 2 ;;
+      --tag=*) raw_tag="${1#--tag=}"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown $mode argument: $1" ;;
+    esac
+  done
+  kindctl_preflight_kind
+  kindctl_derive "$raw_tag"
+  kindctl_require_owned_cluster "$KINDCTL_NAME" "$KINDCTL_KUBECONFIG"
+  case "$mode" in
+    path) printf '%s\n' "$KINDCTL_KUBECONFIG" ;;
+    ctx) printf -- '--kubeconfig %s\n' "$KINDCTL_KUBECONFIG" ;;
+    env) printf 'export KUBECONFIG=%s\n' "$(kindctl_shell_quote "$KINDCTL_KUBECONFIG")" ;;
+  esac
+}
+
+kindctl_cmd_exec() {
+  local raw_tag="" seen_sep=0 cmd=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tag) [ "$#" -gt 1 ] || kindctl_die "--tag requires a value"; raw_tag="$2"; shift 2 ;;
+      --tag=*) raw_tag="${1#--tag=}"; shift ;;
+      --) seen_sep=1; shift; cmd=("$@"); break ;;
+      *) kindctl_die "exec requires -- before the command" ;;
+    esac
+  done
+  [ "$seen_sep" -eq 1 ] || kindctl_die "exec requires -- before the command"
+  [ "${#cmd[@]}" -gt 0 ] || kindctl_die "exec requires a command"
+  kindctl_preflight_kind
+  kindctl_derive "$raw_tag"
+  kindctl_require_owned_cluster "$KINDCTL_NAME" "$KINDCTL_KUBECONFIG"
+  KUBECONFIG="$KINDCTL_KUBECONFIG" exec "${cmd[@]}"
+}
+
+kindctl_cmd_kubectl() {
+  kindctl_parse_common_tag_first "$@"
+  [ "${#PARSED_ARGS[@]}" -gt 0 ] || kindctl_die "kubectl requires arguments"
+  kindctl_preflight_kind
+  kindctl_derive "$PARSED_TAG"
+  kindctl_require_owned_cluster "$KINDCTL_NAME" "$KINDCTL_KUBECONFIG"
+  KUBECONFIG="$KINDCTL_KUBECONFIG" exec kubectl "${PARSED_ARGS[@]}"
+}
+
+kindctl_cmd_load() {
+  kindctl_parse_common_tag_first "$@"
+  [ "${#PARSED_ARGS[@]}" -eq 1 ] || kindctl_die "usage: kindctl load [--tag TAG] <image>"
+  kindctl_preflight_kind
+  kindctl_derive "$PARSED_TAG"
+  kindctl_require_owned_cluster "$KINDCTL_NAME" "$KINDCTL_KUBECONFIG"
+  kind load docker-image "${PARSED_ARGS[0]}" --name "$KINDCTL_NAME"
+}
+
+kindctl_docker_ids_for_cluster() {
+  docker ps -a -q --filter "label=io.x-k8s.kind.cluster=$1"
+}
+
+kindctl_cmd_hibernate_resume() {
+  local action raw_tag="" ids
+  action="$1"; shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tag) [ "$#" -gt 1 ] || kindctl_die "--tag requires a value"; raw_tag="$2"; shift 2 ;;
+      --tag=*) raw_tag="${1#--tag=}"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown $action argument: $1" ;;
+    esac
+  done
+  kindctl_preflight_kind
+  kindctl_derive "$raw_tag"
+  kindctl_require_owned_cluster "$KINDCTL_NAME" "$KINDCTL_KUBECONFIG"
+  ids="$(kindctl_docker_ids_for_cluster "$KINDCTL_NAME")"
+  [ -n "$ids" ] || kindctl_die "no Docker containers found for $KINDCTL_NAME"
+  if [ "$action" = "hibernate" ]; then
+    # shellcheck disable=SC2086 # Docker IDs are whitespace-separated, no shell metacharacters.
+    docker stop $ids
+  else
+    # shellcheck disable=SC2086
+    docker start $ids
+  fi
+}
+
+kindctl_kind_clusters() {
+  kind get clusters 2>/dev/null || true
+}
+
+kindctl_docker_cluster_status() {
+  local name running any
+  name="$1"
+  running="$(docker ps -q --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null || true)"
+  if [ -n "$running" ]; then
+    printf 'running\n'
+    return
+  fi
+  any="$(docker ps -a -q --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null || true)"
+  if [ -n "$any" ]; then
+    printf 'stopped\n'
+  else
+    printf 'dead-cluster\n'
+  fi
+}
+
+
+kindctl_name_looks_derived() {
+  printf '%s\n' "$1" | grep -E '^[a-z0-9][a-z0-9-]*-[0-9a-f]{6}(-[a-z0-9][a-z0-9-]*)?$' >/dev/null 2>&1
+}
+
+kindctl_unowned_status_word() {
+  if kindctl_name_looks_derived "$1"; then
+    printf 'unknown\n'
+  else
+    printf 'unmanaged\n'
+  fi
+}
+kindctl_line_in_text() {
+  printf '%s\n' "$2" | grep -Fx -- "$1" >/dev/null 2>&1
+}
+
+kindctl_cmd_list() {
+  local scope="workspace" live root_filter line name root kubeconfig context tag managed setup status printed_names=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workspace) scope="workspace"; shift ;;
+      --all) scope="all"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown list argument: $1" ;;
+    esac
+  done
+  kindctl_preflight_kind
+  kindctl_derive ""
+  root_filter="$KINDCTL_ROOT"
+  live="$(kindctl_kind_clusters)"
+  printf 'NAME\tSTATUS\tROOT\tKUBECONFIG\n'
+  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+    [ -n "$name" ] || continue
+    if [ "$scope" = "workspace" ] && [ "$root" != "$root_filter" ]; then
+      continue
+    fi
+    status="dead-cluster"
+    if kindctl_line_in_text "$name" "$live"; then
+      status="$(kindctl_docker_cluster_status "$name")"
+      [ "$setup" = "failed" ] && status="setup-failed"
+    fi
+    if [ -n "$root" ] && [ ! -d "$root" ]; then
+      status="dead-root"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$name" "$status" "$root" "$kubeconfig"
+    printed_names="${printed_names}${name}
+"
+  done <<EOF_REGISTRY
+$(kindctl_registry_tsv)
+EOF_REGISTRY
+  if [ "$scope" = "all" ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if ! kindctl_line_in_text "$name" "$printed_names"; then
+        printf '%s\t%s\t\t\n' "$name" "$(kindctl_unowned_status_word "$name")"
+      fi
+    done <<EOF_LIVE
+$live
+EOF_LIVE
+  fi
+}
+
+kindctl_confirm_targets() {
+  local yes="$1" title="$2" targets="$3" answer
+  if [ -z "$targets" ]; then
+    printf 'nothing to do\n'
+    return 1
+  fi
+  printf '%s\n%s\n' "$title" "$targets" >&2
+  if [ "$yes" = "true" ]; then
+    return 0
+  fi
+  printf 'Type yes to continue: ' >&2
+  IFS= read -r answer
+  [ "$answer" = "yes" ] || return 1
+}
+
+kindctl_delete_named_owned() {
+  local name root kubeconfig context tag managed setup
+  name="$1"
+  while IFS=$'\t' read -r r_name root kubeconfig context tag managed setup; do
+    [ "$r_name" = "$name" ] || continue
+    kindctl_cmd_delete_one "$r_name" "$kubeconfig" "$context"
+    return 0
+  done <<EOF_REGISTRY
+$(kindctl_registry_tsv)
+EOF_REGISTRY
+  kindctl_die "cluster not found in registry: $name"
+}
+
+kindctl_cmd_prune() {
+  local mode="" yes="false" live targets="" line name root kubeconfig context tag managed setup
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --workspace|--dead) mode="${1#--}"; shift ;;
+      --yes|-y) yes="true"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown prune argument: $1" ;;
+    esac
+  done
+  [ -n "$mode" ] || kindctl_die "usage: kindctl prune (--workspace|--dead) [--yes]"
+  kindctl_preflight_kind
+  kindctl_derive ""
+  live="$(kindctl_kind_clusters)"
+  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+    [ "$managed" = "true" ] || continue
+    case "$mode" in
+      workspace)
+        [ "$root" = "$KINDCTL_ROOT" ] || continue
+        targets="${targets}${name}
+" ;;
+      dead)
+        if ! kindctl_line_in_text "$name" "$live"; then
+          targets="${targets}${name}
+"
+        fi ;;
+    esac
+  done <<EOF_REGISTRY
+$(kindctl_registry_tsv)
+EOF_REGISTRY
+  if ! kindctl_confirm_targets "$yes" "kindctl prune targets:" "$targets"; then
+    kindctl_info "prune cancelled"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$mode" = "dead" ]; then
+      # Dead clusters are not live; remove only registry/kubeconfig.
+      while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+        if [ "$name" = "$line" ]; then
+          rm -f -- "$kubeconfig"
+          kindctl_registry_delete "$name"
+        fi
+      done <<EOF_DEAD
+$(kindctl_registry_tsv)
+EOF_DEAD
+    else
+      kindctl_delete_named_owned "$line"
+    fi
+  done <<EOF_TARGETS
+$targets
+EOF_TARGETS
+}
+
+kindctl_cmd_nuke() {
+  local yes="false" targets="" line name root kubeconfig context tag managed setup
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --yes|-y) yes="true"; shift ;;
+      -h|--help) kindctl_usage; return 0 ;;
+      *) kindctl_die "unknown nuke argument: $1" ;;
+    esac
+  done
+  kindctl_preflight_kind
+  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+    [ "$managed" = "true" ] || continue
+    targets="${targets}${name}
+"
+  done <<EOF_REGISTRY
+$(kindctl_registry_tsv)
+EOF_REGISTRY
+  if ! kindctl_confirm_targets "$yes" "kindctl nuke targets:" "$targets"; then
+    kindctl_info "nuke cancelled"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    kindctl_delete_named_owned "$line"
+  done <<EOF_TARGETS
+$targets
+EOF_TARGETS
+}
+
+kindctl_cmd_doctor() {
+  local missing=0 live name root kubeconfig context tag managed setup ports expected_name seen_expected_names=""
+  for cmd in python3 kind docker kubectl; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      printf 'missing: %s\n' "$cmd" >&2
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] || kindctl_die "doctor preflight failed"
+  kindctl_ensure_store_dir
+  kindctl_registry_init_unlocked
+  chmod 700 "$(kindctl_store)" 2>/dev/null || true
+  chmod 600 "$(kindctl_registry_path)" 2>/dev/null || true
+  if ! docker info >/dev/null 2>&1; then
+    kindctl_die "Docker daemon is not reachable"
+  fi
+  live="$(kindctl_kind_clusters)"
+  printf 'doctor: store=%s\n' "$(kindctl_store)"
+  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+    [ -n "$name" ] || continue
+    if [ -f "$kubeconfig" ]; then
+      chmod 600 "$kubeconfig" 2>/dev/null || true
+    fi
+    if [ -n "$root" ]; then
+      expected_name="$(kindctl_derive_name_for_root_tag "$root" "$tag" || true)"
+      if [ -n "$expected_name" ]; then
+        if [ "$expected_name" != "$name" ]; then
+          printf 'name-drift: %s expected=%s root=%s tag=%s\n' "$name" "$expected_name" "$root" "$tag"
+        fi
+        if kindctl_line_in_text "$expected_name" "$seen_expected_names"; then
+          printf 'hash-collision-or-duplicate: %s root=%s tag=%s\n' "$expected_name" "$root" "$tag"
+        fi
+        seen_expected_names="${seen_expected_names}${expected_name}
+"
+      fi
+    fi
+    if [ -n "$root" ] && [ ! -d "$root" ]; then
+      printf 'dead-root: %s %s\n' "$name" "$root"
+    fi
+    if kindctl_line_in_text "$name" "$live"; then
+      if [ ! -s "$kubeconfig" ]; then
+        printf 're-export kubeconfig: %s\n' "$name"
+        kind export kubeconfig --name "$name" --kubeconfig "$kubeconfig"
+        chmod 600 "$kubeconfig" 2>/dev/null || true
+      fi
+      if [ "$setup" = "failed" ]; then
+        printf 'setup-failed: %s\n' "$name"
+      fi
+    else
+      printf 'dead-cluster: %s\n' "$name"
+    fi
+  done <<EOF_REGISTRY
+$(kindctl_registry_tsv)
+EOF_REGISTRY
+
+  # Opportunistically re-register current workspace's exact derived live cluster.
+  kindctl_derive ""
+  if kindctl_line_in_text "$KINDCTL_NAME" "$live"; then
+    if ! kindctl_registry_is_owned "$KINDCTL_NAME"; then
+      printf 're-register current workspace: %s\n' "$KINDCTL_NAME"
+      kindctl_registry_upsert "$KINDCTL_NAME" "$KINDCTL_ROOT" "$KINDCTL_KUBECONFIG" "$KINDCTL_CONTEXT" "$KINDCTL_TAG" ready true
+      if [ ! -s "$KINDCTL_KUBECONFIG" ]; then
+        kind export kubeconfig --name "$KINDCTL_NAME" --kubeconfig "$KINDCTL_KUBECONFIG"
+        chmod 600 "$KINDCTL_KUBECONFIG" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! kindctl_registry_is_owned "$name"; then
+      printf '%s: %s\n' "$(kindctl_unowned_status_word "$name")" "$name"
+    fi
+  done <<EOF_LIVE
+$live
+EOF_LIVE
+
+  ports="$(docker ps --filter label=io.x-k8s.kind.cluster --format '{{.Names}} {{.Ports}}' 2>/dev/null || true)"
+  if [ -n "$ports" ]; then
+    printf 'host-ports:\n%s\n' "$ports"
+  fi
+  printf 'doctor: ok\n'
+}
+
+kindctl_main() {
+  local cmd
+  if [ "$#" -eq 0 ]; then
+    kindctl_usage
+    exit 1
+  fi
+  cmd="$1"; shift
+  case "$cmd" in
+    -h|--help|help) kindctl_usage ;;
+    --version|version) printf 'kindctl %s\n' "$KINDCTL_VERSION" ;;
+    create) kindctl_cmd_create "$@" ;;
+    delete) kindctl_cmd_delete "$@" ;;
+    exec) kindctl_cmd_exec "$@" ;;
+    kubectl) kindctl_cmd_kubectl "$@" ;;
+    path|ctx|env) kindctl_cmd_path_ctx_env "$cmd" "$@" ;;
+    list) kindctl_cmd_list "$@" ;;
+    load) kindctl_cmd_load "$@" ;;
+    hibernate|resume) kindctl_cmd_hibernate_resume "$cmd" "$@" ;;
+    doctor) kindctl_cmd_doctor "$@" ;;
+    prune) kindctl_cmd_prune "$@" ;;
+    nuke) kindctl_cmd_nuke "$@" ;;
+    *) kindctl_die "unknown command: $cmd" ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  kindctl_main "$@"
+fi
