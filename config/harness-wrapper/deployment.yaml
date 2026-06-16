@@ -42,6 +42,10 @@ spec:
           value: /var/run/orka/harness-wrapper/token
         - name: ORKA_ALLOW_BASH
           value: "true"
+        - name: ORKA_HARNESS_WRAPPER_CHILD_UID
+          value: "1000"
+        - name: ORKA_HARNESS_WRAPPER_CHILD_GID
+          value: "1000"
         - name: ORKA_CODEX_SANDBOX_MODE
           value: danger-full-access
         volumeMounts:
