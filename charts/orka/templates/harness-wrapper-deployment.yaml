@@ -64,6 +64,9 @@ spec:
             capabilities:
               drop:
                 - ALL
+              add:
+                - SETUID
+                - SETGID
           livenessProbe:
             httpGet:
               path: /v1/health

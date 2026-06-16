@@ -155,7 +155,6 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			message := err.Error()
 			switch {
 			case strings.Contains(message, "turn already exists"):
-				turnAccepted = true
 				// Treat a duplicate turn ID as idempotent recovery after the wrapper
 				// accepted the planned turn before Running status was persisted.
 			case strings.Contains(message, "maximum concurrent turns"):
@@ -167,6 +166,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 				return r.failTask(ctx, task, events.RedactExecutionEventText(message))
 			}
 		}
+		turnAccepted = true
 		if err := r.patchHarnessWrapperStarted(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -441,7 +441,16 @@ func harnessWrapperCapabilitiesErrorIsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "read harness runtime capabilities")
+	message := err.Error()
+	if !strings.Contains(message, "read harness runtime capabilities") {
+		return false
+	}
+	for _, marker := range []string{"(400)", "(401)", "(403)", "(404)", "unsupported version"} {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task *corev1alpha1.Task) error {

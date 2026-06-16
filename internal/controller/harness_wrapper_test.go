@@ -408,8 +408,8 @@ func TestHarnessWrapperCapabilitiesReadErrorRetryable(t *testing.T) {
 	if !harnessWrapperCapabilitiesErrorIsRetryable(fmt.Errorf("read harness runtime capabilities: boom")) {
 		t.Fatal("expected capabilities read error to be retryable")
 	}
-	if harnessWrapperCapabilitiesErrorIsRetryable(fmt.Errorf("harness runtime \"multi\" does not match task runtime \"codex\"")) {
-		t.Fatal("expected runtime mismatch to remain terminal")
+	if harnessWrapperCapabilitiesErrorIsRetryable(fmt.Errorf("read harness runtime capabilities: get failed (404): not found")) {
+		t.Fatal("expected permanent capabilities 404 to remain terminal")
 	}
 }
 
