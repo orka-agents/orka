@@ -43,7 +43,7 @@ const (
 
 const (
 	DefaultListenAddr       = ":8080"
-	DefaultOutputLimitBytes = 64 * 1024
+	DefaultOutputLimitBytes = maxTerminalResultBytes
 	DefaultCancelGrace      = 2 * time.Second
 	DefaultTurnRetention    = 5 * time.Minute
 	DefaultPromptEnv        = "ORKA_TURN_PROMPT"
