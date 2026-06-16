@@ -401,7 +401,7 @@ function emitThreatModel() {
     ].join('\n');
   }
   writeArtifact('security-threat-model.md', content);
-  writeLastMessage('security threat model artifact written');
+  writeLastMessage(content);
 }
 
 function emitReview() {
