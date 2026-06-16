@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const maxStoredResultBytes = 50 << 20
+
 type GenericAdapter struct {
 	config GenericAdapterConfig
 }
@@ -131,12 +133,12 @@ func readBoundedResultFile(path string) (string, error) {
 		return "", fmt.Errorf("read result file: %w", err)
 	}
 	defer file.Close() //nolint:errcheck
-	data, err := io.ReadAll(io.LimitReader(file, int64(maxTerminalResultBytes)+1))
+	data, err := io.ReadAll(io.LimitReader(file, int64(maxStoredResultBytes)+1))
 	if err != nil {
 		return "", fmt.Errorf("read result file: %w", err)
 	}
-	if len(data) > maxTerminalResultBytes {
-		return "", fmt.Errorf("result file exceeds harness terminal frame limit")
+	if len(data) > maxStoredResultBytes {
+		return "", fmt.Errorf("result file exceeds harness storage limit")
 	}
 	return string(data), nil
 }

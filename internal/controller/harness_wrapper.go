@@ -24,6 +24,8 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
+const cliwrapperLocalOutputRef = "cliwrapper-result-v1"
+
 const (
 	harnessWrapperEndpointEnv       = "ORKA_HARNESS_WRAPPER_ENDPOINT"
 	harnessWrapperAuthValueEnv      = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
@@ -288,7 +290,16 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if result.Completed != nil && r.ResultStore != nil {
-		if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, []byte(result.Completed.Result)); saveErr != nil {
+		resultBytes := []byte(result.Completed.Result)
+		if outputRef := strings.TrimSpace(result.Completed.OutputRef); outputRef == cliwrapperLocalOutputRef {
+			fetched, fetchErr := client.FetchTurnOutput(ctx, turnID, outputRef)
+			if fetchErr != nil {
+				log.Error(fetchErr, "failed to fetch harness wrapper result")
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to fetch harness wrapper result: %v", fetchErr))
+			}
+			resultBytes = fetched
+		}
+		if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, resultBytes); saveErr != nil {
 			log.Error(saveErr, "failed to save harness wrapper result")
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to save harness wrapper result: %v", saveErr))
 		}

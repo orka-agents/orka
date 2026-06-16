@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -20,7 +21,10 @@ import (
 	"github.com/sozercan/orka/workers/common"
 )
 
-const maxTerminalResultBytes = 512 * 1024
+const (
+	maxTerminalResultBytes = 512 * 1024
+	localOutputRef         = "cliwrapper-result-v1"
+)
 
 type Server struct {
 	config  Config
@@ -127,10 +131,11 @@ func (s *Server) evictTurn(turn *turnState) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if current := s.turns[turn.request.TurnID]; current == turn {
 		delete(s.turns, turn.request.TurnID)
 	}
+	s.mu.Unlock()
+	turn.cleanupOutput()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +271,12 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleCancel(w, r, turn)
+	case "output":
+		if r.Method != http.MethodGet {
+			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		s.handleOutput(w, r, turn)
 	default:
 		writeSafeError(w, http.StatusNotFound, "not found")
 	}
@@ -294,6 +305,24 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request, turn *turn
 		CorrelationID:    request.CorrelationID,
 		Message:          "cancel accepted",
 	})
+}
+
+func (s *Server) handleOutput(w http.ResponseWriter, r *http.Request, turn *turnState) {
+	if ref := strings.TrimSpace(r.URL.Query().Get("ref")); ref != localOutputRef {
+		writeSafeError(w, http.StatusNotFound, "output not found")
+		return
+	}
+	data, ok, err := turn.output()
+	if err != nil {
+		writeSafeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeSafeError(w, http.StatusNotFound, "output not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turnState) {
@@ -327,7 +356,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turn
 	}
 }
 
-func (s *Server) runTurn(turn *turnState) {
+func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	defer s.finishTurn(turn)
 	ctx := turn.ctx
 	if !turn.request.Deadline.IsZero() {
@@ -459,11 +488,11 @@ func (s *Server) runTurn(turn *turnState) {
 			parsed.Result = string(finalized)
 			finalizedWorkDir = turnCtx.WorkDir
 		}
-		if len([]byte(parsed.Result)) > maxTerminalResultBytes {
+		if len([]byte(parsed.Result)) > maxStoredResultBytes {
 			turn.appendFrame(s.failedFrame(
 				turn,
 				"result_too_large",
-				"runtime result exceeded harness terminal frame limit",
+				"runtime result exceeded harness storage limit",
 				false,
 			))
 			return
@@ -482,7 +511,10 @@ func (s *Server) runTurn(turn *turnState) {
 				return
 			}
 		}
-		turn.appendFrame(s.completedFrame(turn, parsed))
+		if frameErr := s.appendCompletedFrame(turn, parsed); frameErr != nil {
+			turn.appendFrame(s.failedFrame(turn, "result_store_failed", frameErr.Error(), false))
+			return
+		}
 	}
 }
 
@@ -602,10 +634,27 @@ func (s *Server) outputFrame(turn *turnState, stream, text string) harness.Harne
 	return frame
 }
 
-func (s *Server) completedFrame(turn *turnState, result TurnResult) harness.HarnessEventFrame {
+func (s *Server) appendCompletedFrame(turn *turnState, result TurnResult) error {
+	completed, err := s.completedFrame(turn, result)
+	if err != nil {
+		return err
+	}
+	turn.appendFrame(completed)
+	return nil
+}
+
+func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.HarnessEventFrame, error) {
+	outputRef := strings.TrimSpace(result.OutputRef)
+	if result.Result != "" && outputRef == "" {
+		var err error
+		outputRef, err = turn.storeOutput(result.Result)
+		if err != nil {
+			return harness.HarnessEventFrame{}, err
+		}
+	}
 	frame := s.frame(turn, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{
 		Result:        redactAndTruncateBytes(result.Result, maxTerminalResultBytes),
-		OutputRef:     events.RedactExecutionEventText(result.OutputRef),
+		OutputRef:     events.RedactExecutionEventText(outputRef),
 		RetainSession: false,
 	})
 	if len(result.Metadata) > 0 {
@@ -613,7 +662,7 @@ func (s *Server) completedFrame(turn *turnState, result TurnResult) harness.Harn
 			frame.Metadata[k] = events.RedactExecutionEventText(v)
 		}
 	}
-	return frame
+	return frame, nil
 }
 
 func (s *Server) failedFrame(turn *turnState, reason, message string, retryable bool) harness.HarnessEventFrame {
@@ -630,12 +679,15 @@ func redactAndTruncate(value string, maxChars int) string {
 }
 
 func redactAndTruncateBytes(value string, maxBytes int) string {
-	redacted := events.RedactExecutionEventText(value)
+	return truncateBytes(events.RedactExecutionEventText(value), maxBytes)
+}
+
+func truncateBytes(value string, maxBytes int) string {
 	if maxBytes <= 0 {
 		return ""
 	}
-	if len([]byte(redacted)) <= maxBytes {
-		return redacted
+	if len([]byte(value)) <= maxBytes {
+		return value
 	}
 	if maxBytes <= utf8.RuneLen('…') {
 		return "…"
@@ -643,7 +695,7 @@ func redactAndTruncateBytes(value string, maxBytes int) string {
 	limit := maxBytes - utf8.RuneLen('…')
 	var out strings.Builder
 	out.Grow(limit + utf8.RuneLen('…'))
-	for _, r := range redacted {
+	for _, r := range value {
 		w := utf8.RuneLen(r)
 		if w < 0 {
 			w = len(string(r))
@@ -720,15 +772,73 @@ type turnState struct {
 	cancel  context.CancelFunc
 	now     func() time.Time
 
-	mu       sync.Mutex
-	frames   []harness.HarnessEventFrame
-	terminal bool
-	closed   bool
+	mu         sync.Mutex
+	frames     []harness.HarnessEventFrame
+	terminal   bool
+	closed     bool
+	resultPath string
 }
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &turnState{request: request, ctx: ctx, cancel: cancel, now: now}
+}
+
+func (t *turnState) storeOutput(result string) (string, error) {
+	file, err := os.CreateTemp("", "harness-turn-output-*")
+	if err != nil {
+		return "", fmt.Errorf("create turn output file: %w", err)
+	}
+	outputPath := file.Name()
+	if _, err := file.WriteString(result); err != nil {
+		_ = file.Close()
+		_ = os.Remove(outputPath)
+		return "", fmt.Errorf("write turn output file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(outputPath)
+		return "", fmt.Errorf("close turn output file: %w", err)
+	}
+	t.mu.Lock()
+	oldPath := t.resultPath
+	t.resultPath = outputPath
+	t.mu.Unlock()
+	if oldPath != "" {
+		_ = os.Remove(oldPath)
+	}
+	return localOutputRef, nil
+}
+
+func (t *turnState) output() ([]byte, bool, error) {
+	t.mu.Lock()
+	outputPath := t.resultPath
+	t.mu.Unlock()
+	if outputPath == "" {
+		return nil, false, nil
+	}
+	file, err := os.Open(outputPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("open turn output file: %w", err)
+	}
+	defer file.Close() //nolint:errcheck
+	data, err := io.ReadAll(io.LimitReader(file, int64(maxStoredResultBytes)+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read turn output file: %w", err)
+	}
+	if len(data) > maxStoredResultBytes {
+		return nil, false, fmt.Errorf("turn output exceeds harness storage limit")
+	}
+	return data, true, nil
+}
+
+func (t *turnState) cleanupOutput() {
+	t.mu.Lock()
+	outputPath := t.resultPath
+	t.resultPath = ""
+	t.mu.Unlock()
+	if outputPath != "" {
+		_ = os.Remove(outputPath)
+	}
 }
 
 func (t *turnState) appendFrame(frame harness.HarnessEventFrame) {

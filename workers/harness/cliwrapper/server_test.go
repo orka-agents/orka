@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -229,6 +230,45 @@ func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	}
 }
 
+func TestServerPreservesCompletedResultBytes(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	sensitiveResult := "Authorization: Bearer " + "token-shaped-result-1234567890"
+	cfg.Generic = GenericAdapterConfig{
+		Command:    "/bin/sh",
+		Args:       []string{"-c", fmt.Sprintf("printf %q > result.txt", sensitiveResult)},
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeFile,
+		ResultFile: "result.txt",
+	}
+	adapter := NewGenericAdapter(cfg.Generic)
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if strings.Contains(last.Completed.Result, "token-shaped-result-1234567890") {
+		t.Fatalf("completed frame leaked exact token-shaped result: %q", last.Completed.Result)
+	}
+	data, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	if string(data) != sensitiveResult {
+		t.Fatalf("fetched output = %q, want exact result", string(data))
+	}
+}
+
 func TestServerRedactsCommandOutputFrames(t *testing.T) {
 	assertCommandFramesRedacted(t, "printf '"+testBearerHeaderValue()+"'", "frames")
 }
@@ -350,7 +390,7 @@ func TestServerRedactsEventingAdapterTerminalPayloads(t *testing.T) {
 	}
 }
 
-func TestServerFailsOversizedCompletedResult(t *testing.T) {
+func TestServerStoresOversizedCompletedResultOutOfBand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	largeResultScript := strings.Join([]string{
@@ -378,8 +418,18 @@ func TestServerFailsOversizedCompletedResult(t *testing.T) {
 	}
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	last := frames[len(frames)-1]
-	if last.Type != harness.FrameTurnFailed || last.Failed == nil || last.Failed.Reason != "result_too_large" {
-		t.Fatalf("last frame = %#v, want result_too_large failure", last)
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if len([]byte(last.Completed.Result)) > maxTerminalResultBytes {
+		t.Fatalf("completed preview length = %d, want <= %d", len([]byte(last.Completed.Result)), maxTerminalResultBytes)
+	}
+	data, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
+	if err != nil {
+		t.Fatalf("FetchTurnOutput: %v", err)
+	}
+	if len(data) != 600*1024 {
+		t.Fatalf("fetched output length = %d, want %d", len(data), 600*1024)
 	}
 }
 
