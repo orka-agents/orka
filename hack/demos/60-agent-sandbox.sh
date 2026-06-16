@@ -7,6 +7,8 @@
 # hard-asserts that all three turns landed on the SAME claim name.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
+#
+# Record (asciinema): hack/demos/record.sh 60 docs   (or: make demo-record DEMO=60)
 
 set -Eeuo pipefail
 
@@ -111,9 +113,9 @@ _sandbox_turn_status() {
         --sort-by=.metadata.creationTimestamp \
         -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
     fi
-    claim="$(kubectl get sandboxclaims -n "${sandbox_claim_namespace}" \
-      -l "orka.ai/session=${session}" --sort-by=.metadata.creationTimestamp \
-      -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
+    claim="$(kubectl get sandboxclaim -n "${sandbox_claim_namespace}" \
+      "$(sandbox_session_claim_name "${session}")" \
+      -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
 
     [[ -n "${job_name}" ]] && demo_announce_once "turn-${task_name}-job" \
       "🛠️ " "Job created for ${task_name} — pod scheduling on the cluster"
@@ -156,7 +158,11 @@ DEMO_WAIT_STATUS_HOOK=_sandbox_turn_status \
 wait_for_task_result_available  "${t1}" "${DEMO_SANDBOX_RESULT_TIMEOUT:-120}" >/dev/null
 capture_sandbox_claim "${t1}"
 demo_event "✅" "Turn 1 succeeded. SandboxClaim bound and warm — git checkout, deps cached, runtime booted."
-demo_pe "kubectl get sandboxclaims -n ${sandbox_claim_namespace} -l orka.ai/session=${session}"
+# The worker mints the claim as orka-session-<sha256> with NO orka.ai/session
+# label, so a label selector prints "No resources found" and hides the demo's
+# whole point. Show the deterministic claim by name instead.
+session_claim="$(sandbox_session_claim_name "${session}")"
+demo_pe "kubectl get sandboxclaim -n ${sandbox_claim_namespace} ${session_claim}"
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "Turn 2 reattaches the existing claim — sessionRef.create=false."

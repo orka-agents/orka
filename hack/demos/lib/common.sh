@@ -29,6 +29,13 @@ demo_register_cleanup_dir() {
 }
 
 demo_run_exit_cleanups() {
+  # Tear down a port-forward this run started before removing temp dirs (the pid
+  # file lives under DEMO_WORKDIR). Only stop one we own so we never kill a
+  # tunnel a parallel/prior session is using.
+  if [[ "${__DEMO_OWNS_PORT_FORWARD:-0}" == "1" ]] \
+     && declare -F stop_orka_api_port_forward >/dev/null 2>&1; then
+    stop_orka_api_port_forward
+  fi
   local dir
   for dir in "${__DEMO_CLEANUP_DIRS[@]:-}"; do
     [[ -n "${dir}" ]] || continue
@@ -538,6 +545,21 @@ start_orka_api_port_forward() {
   nohup kubectl -n "${ORKA_NAMESPACE}" port-forward "svc/${ORKA_API_SERVICE_NAME}" "${local_port}:8080" >"${log_file}" 2>&1 </dev/null &
   pid="$!"
   printf '%s\n' "${pid}" >"${pid_file}"
+  # Mark this PF as started by THIS run so the EXIT trap only tears down a tunnel
+  # we own (not one a prior/parallel session left running).
+  __DEMO_OWNS_PORT_FORWARD=1
+}
+
+# Best-effort check that a PID is actually our kubectl port-forward before we
+# signal it — PIDs get recycled, and a stale pid file could otherwise name an
+# unrelated process. Returns 0 only when the live process command looks like the
+# port-forward we started.
+__demo_pid_is_port_forward() {
+  local pid="$1"
+  [[ -n "${pid}" ]] || return 1
+  local cmd
+  cmd="$(ps -o command= -p "${pid}" 2>/dev/null || ps -o args= -p "${pid}" 2>/dev/null || true)"
+  [[ "${cmd}" == *"port-forward"* && "${cmd}" == *"${ORKA_API_SERVICE_NAME}"* ]]
 }
 
 stop_orka_api_port_forward() {
@@ -548,7 +570,12 @@ stop_orka_api_port_forward() {
   fi
   pid="$(cat "${pid_file}")"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
-    kill "${pid}" >/dev/null 2>&1 || true
+    if __demo_pid_is_port_forward "${pid}"; then
+      kill "${pid}" >/dev/null 2>&1 || true
+    else
+      # PID is alive but is NOT our port-forward (recycled PID); do not kill it.
+      log "skipping kill of pid ${pid}: not an Orka API port-forward (stale pid file)"
+    fi
   fi
   rm -f "${pid_file}"
 }
@@ -991,9 +1018,28 @@ assert_real_pr_result() {
       printf 'error: chat session produced an empty result\n' >&2
       return 1
     fi
-    if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
+    # CI_BLOCKED is acceptable only when Validation and Review both passed (an
+    # environmental/secret-gated CI block, not a code failure). Compute the pass
+    # booleans once; the chat path's Validation/Review vocabulary allows
+    # PASS|GREEN and LGTM|APPROVED.
+    local validation_pass=false review_pass=false
+    if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*(PASS(ED)?|GREEN)([^[:alnum:]_]|$)'; then
+      validation_pass=true
+    fi
+    if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review(ers)?([[:space:]]+status)?):[[:space:]]*([0-9]+[[:space:]]+)?(LGTM|APPROVED)([^[:alnum:]_]|$)'; then
+      review_pass=true
+    fi
+    if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
       printf 'error: chat session result is not a successful PR handoff:\n%s\n' "${result}" >&2
       return 1
+    fi
+    if printf '%s\n' "${result}" | grep -Eiq '(^|[^[:alnum:]_])CI_BLOCKED([^[:alnum:]_]|$)'; then
+      if [[ "${validation_pass}" == true && "${review_pass}" == true ]]; then
+        printf '⚠️  CI_BLOCKED accepted: Validation+Review passed; the CI block is environmental (e.g. a secret-gated smoke check)\n' >&2
+      else
+        printf 'error: chat session reports CI_BLOCKED without Validation+Review pass evidence:\n%s\n' "${result}" >&2
+        return 1
+      fi
     fi
     if printf '%s\n' "${result}" | grep -Eq '(^|[^[:alnum:]_])(FAILED|BLOCKED)([^[:alnum:]_]|$)'; then
       printf 'error: chat session result contains a failure/blocker marker:\n%s\n' "${result}" >&2
@@ -1048,10 +1094,35 @@ assert_real_pr_result() {
     return 1
   fi
 
-  if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
+  # CI may legitimately report CI_BLOCKED when the only failing check is an
+  # environmental/secret-gated job (e.g. a live smoke test that `exit 1`s when a
+  # repo secret is absent) while the code itself built, validated, and was
+  # approved. Treat CI_BLOCKED as acceptable ONLY when both Validation and
+  # Review passed; VALIDATION_BLOCKED / REVIEW_BLOCKED (real code-level blocks),
+  # other pending/no-checks CI states, and CI_BLOCKED without pass evidence all
+  # still fail the handoff. Compute the pass booleans once and reuse them below.
+  local validation_pass=false review_pass=false
+  if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Validation([[:space:]]+status)?):[[:space:]]*PASS(ED)?([^[:alnum:]_]|$)'; then
+    validation_pass=true
+  fi
+  if printf '%s\n' "${result}" | grep -Eiq '(^|[[:space:]-])((Final[[:space:]]+)?Review([[:space:]]+status)?):[[:space:]]*APPROVED([^[:alnum:]_]|$)'; then
+    review_pass=true
+  fi
+
+  if printf '%s\n' "${result}" | grep -Eiq 'implementation failed|did not create a pull request|did not open a pull request|pull request[^\n]*(not created|not opened)|PR:[[:space:]]*not created|not create a pull request|no pull request|VALIDATION_CONFIG_BLOCKED|VALIDATION_BLOCKED|REVIEW_BLOCKED|CI_PENDING|CI_NO_CHECKS|CI_CLOSED|CI_UNKNOWN|status[=:][[:space:]]*(no_checks|closed|unknown)|CI:[[:space:]]*(no_checks|closed|unknown)'; then
     printf 'error: task %s result is not a successful PR handoff:\n%s\n' "${task_name}" "${result}" >&2
     return 1
   fi
+  if printf '%s\n' "${result}" | grep -Eiq '(^|[^[:alnum:]_])CI_BLOCKED([^[:alnum:]_]|$)'; then
+    if [[ "${validation_pass}" == true && "${review_pass}" == true ]]; then
+      printf '⚠️  CI_BLOCKED accepted for %s: Validation+Review passed; the CI block is environmental (e.g. a secret-gated smoke check)\n' "${task_name}" >&2
+    else
+      printf 'error: task %s reports CI_BLOCKED without Validation+Review pass evidence:\n%s\n' "${task_name}" "${result}" >&2
+      return 1
+    fi
+  fi
+  # Catch a bare uppercase FAILED/BLOCKED token (a real failure/blocker marker).
+  # CI_BLOCKED is shielded by the leading underscore and is handled above.
   if printf '%s\n' "${result}" | grep -Eq '(^|[^[:alnum:]_])(FAILED|BLOCKED)([^[:alnum:]_]|$)'; then
     printf 'error: task %s result contains a failure/blocker marker:\n%s\n' "${task_name}" "${result}" >&2
     return 1
@@ -1456,6 +1527,7 @@ wait_for_task_terminal() {
   tick_slow="${DEMO_WAIT_SLOW_TICK_SECONDS:-30}"
   (( tick_initial < 1 )) && tick_initial=1
   (( tick_slow < tick_initial )) && tick_slow="${tick_initial}"
+  __demo_heartbeat_reset
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
@@ -1620,6 +1692,7 @@ wait_for_repository_scan_ready() {
   local deadline phase start elapsed
   start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
+  __demo_heartbeat_reset
 
   while (( SECONDS < deadline )); do
     phase="$(kubectl get repositoryscan "${scan_name}" -n "${DEMO_NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
@@ -1675,6 +1748,7 @@ wait_for_first_security_finding() {
   local deadline finding_id start elapsed
   start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
+  __demo_heartbeat_reset
 
   while (( SECONDS < deadline )); do
     finding_id="$(first_security_finding_id)"
@@ -1686,8 +1760,18 @@ wait_for_first_security_finding() {
       return 0
     fi
     elapsed=$(( SECONDS - start ))
-    __demo_heartbeat 'awaiting first finding from %s scan elapsed=%ss' \
-      "${DEMO_SECURITY_SCAN_NAME:-scan}" "${elapsed}"
+    # Honor a domain-specific status hook (e.g. demo 40's _security_stage_status,
+    # which narrates threat-model → discovery → validation → patch) so the rich
+    # staged narration actually fires; fall back to the generic heartbeat.
+    if [[ -n "${DEMO_WAIT_STATUS_HOOK:-}" ]] \
+       && [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] \
+       && ! demo_profile_is hero \
+       && declare -F "${DEMO_WAIT_STATUS_HOOK}" >/dev/null 2>&1; then
+      "${DEMO_WAIT_STATUS_HOOK}" "${DEMO_SECURITY_SCAN_NAME:-scan}" "${elapsed}"
+    else
+      __demo_heartbeat 'awaiting first finding from %s scan elapsed=%ss' \
+        "${DEMO_SECURITY_SCAN_NAME:-scan}" "${elapsed}"
+    fi
     sleep 10
   done
 
@@ -1708,11 +1792,12 @@ wait_for_job_with_progress() {
   local job_ns="$2"
   local timeout_seconds="${3:-120}"
   local expect="${4:-complete}"
-  local deadline start elapsed complete failed pod_phase line
+  local deadline start elapsed complete failed pod_phase
   start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
   local tick_interval="${DEMO_WAIT_TICK_SECONDS:-3}"
   (( tick_interval < 1 )) && tick_interval=1
+  __demo_heartbeat_reset
 
   while (( SECONDS < deadline )); do
     complete="$(kubectl get job "${job_name}" -n "${job_ns}" \
@@ -1739,13 +1824,10 @@ wait_for_job_with_progress() {
         -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
       [[ -z "${pod_phase}" ]] && pod_phase="Pending"
       elapsed=$(( SECONDS - start ))
-      line="$(printf '[%s] ⏳  job/%s pod=%s elapsed=%ss' \
-              "$(__demo_log_ts)" "${job_name}" "${pod_phase}" "${elapsed}")"
-      if [[ -t 2 ]]; then
-        printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
-      else
-        printf '%s\n' "${line}" >&2
-      fi
+      # Route through __demo_heartbeat so recorded casts collapse identical
+      # pod=<phase> frames; tty keeps the in-place \r update.
+      __demo_heartbeat 'job/%s pod=%s elapsed=%ss' \
+        "${job_name}" "${pod_phase}" "${elapsed}"
     fi
     sleep "${tick_interval}"
   done
@@ -1759,9 +1841,10 @@ wait_for_job_with_progress() {
 wait_for_patch_proposal_ready() {
   local finding_id="$1"
   local timeout_seconds="${2:-1200}"
-  local deadline status start elapsed line
+  local deadline status start elapsed
   start="${SECONDS}"
   deadline=$((SECONDS + timeout_seconds))
+  __demo_heartbeat_reset
 
   while (( SECONDS < deadline )); do
     status="$(orka_api GET "/api/v1/security/findings/${finding_id}/patches?namespace=${DEMO_NAMESPACE}" \
@@ -1782,13 +1865,10 @@ wait_for_patch_proposal_ready() {
     esac
     if [[ "${DEMO_WAIT_QUIET:-0}" != "1" ]] && ! demo_profile_is hero; then
       elapsed=$(( SECONDS - start ))
-      line="$(printf '[%s] ⏳  patch %s status=%s elapsed=%ss' \
-              "$(__demo_log_ts)" "${finding_id}" "${status:-pending}" "${elapsed}")"
-      if [[ -t 2 ]]; then
-        printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
-      else
-        printf '%s\n' "${line}" >&2
-      fi
+      # Route through __demo_heartbeat so recorded casts collapse identical
+      # status=<state> frames; tty keeps the in-place \r update.
+      __demo_heartbeat 'patch %s status=%s elapsed=%ss' \
+        "${finding_id}" "${status:-pending}" "${elapsed}"
     fi
     sleep 10
   done

@@ -6,6 +6,8 @@
 # a branch, and the branch becomes a human-reviewable pull request.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
+#
+# Record (asciinema): hack/demos/record.sh 40 docs   (or: make demo-record DEMO=40)
 
 set -Eeuo pipefail
 
@@ -33,7 +35,7 @@ render_security_repository_scan_manifest > "${DEMO_WORKDIR}/security-repositorys
 render_security_story_file               > "${DEMO_WORKDIR}/security-story.txt"
 
 demo_scenario "Security finding → real PR" \
-  "We have a Node.js app with known vulnerabilities. Orka scans the repo, ranks the findings, drafts a patch for the top one, and opens a real GitHub pull request — entirely through Kubernetes CRs. Watch what the cluster does as it does it."
+  "We point Orka at a repository with known code-level vulnerabilities. Orka scans the repo, ranks the findings, drafts a patch for the top one, and opens a real GitHub pull request — entirely through Kubernetes CRs. Watch what the cluster does as it does it."
 
 demo_event "📥" "Applying analysis + remediation Agents and the RepositoryScan…"
 kubectl apply -f "${DEMO_WORKDIR}/security-agents.yaml"          >/dev/null

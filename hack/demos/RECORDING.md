@@ -117,7 +117,10 @@ existing `p`/`pe` calls; scripts don't fork.
 
 ### Recording wrapper
 
-A new `hack/demos/record.sh <demo-number> <profile>` runs:
+`hack/demos/record.sh <demo-number> [profile] [out-dir]` (implemented; also
+`make demo-record DEMO=all PROFILE=docs`) runs, per demo, with the canonical
+idle/geometry pinned in one place (override via `DEMO_RECORD_IDLE`, default
+`1.5`):
 
 ```bash
 asciinema rec \

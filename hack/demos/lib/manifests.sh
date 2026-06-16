@@ -882,10 +882,10 @@ The threat-model step is the part that distinguishes this from running a static 
 (SCA / dependency scanners like Trivy and Snyk live one layer down — they flag CVEs in third-party packages. This demo is about flaws in first-party code.)
 
 THIS DEMO:
-A RepositoryScan inspects a known-vulnerable fork (nodejs-goof). Today's scan surfaces ~10 code-level findings, ranked by severity using the threat-model context. The demo picks the top-ranked one, hits /patch, and Orka opens a real PR for that single finding. In production you would loop the same /patch call over every finding above a severity threshold; the demo focuses on the one-finding mechanic for clarity.
+A RepositoryScan inspects a known-vulnerable target repo. The scan surfaces code-level findings, ranked by severity using the threat-model context. The demo picks the top-ranked one, hits /patch, and Orka opens a real PR for that single finding. In production you would loop the same /patch call over every finding above a severity threshold; the demo focuses on the one-finding mechanic for clarity.
 
 What to watch:
-- The analysis + remediation Agents are pre-applied; the discovery -> threat-model -> validation pipeline runs off-camera and surfaces code-level findings (hardcoded admin password, login bypass, reflected XSS, etc.).
+- The analysis + remediation Agents are pre-applied; the discovery -> threat-model -> validation pipeline runs off-camera and surfaces code-level findings ranked by the repo's own threat model.
 - Listing findings: severity-ranked using the threat-model context, replayable via the Orka REST API.
 - One POST against /api/v1/security/findings/<id>/patch creates a remediation Task.
 - The Task runs a coder Agent against the target repo; the result is a branch + PR with a structured 'Summary / Root cause / Remediation guidance' body.

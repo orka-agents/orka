@@ -24,6 +24,8 @@
 # model proxy (vekil), and the model + git Secrets.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
+#
+# Record (asciinema): hack/demos/record.sh 70 docs   (or: make demo-record DEMO=70)
 
 set -Eeuo pipefail
 
@@ -202,11 +204,13 @@ demo_event "1️⃣ " "provider=substrate, a fresh Actor. The agent clones ${pr_
 demo_show "${DEMO_WORKDIR}/substrate-cold.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-cold.yaml"
 demo_announce_reset "ws-${cold_task}-"
-demo_event "⏳" "Real model run — this takes a couple of minutes (clone, model reasoning, edit, push)."
+demo_event "⏳" "Real model run — clone, model reasoning, edit, push. Time depends on the model and repo size."
+cold_beat_start="${SECONDS}"
 DEMO_WAIT_STATUS_HOOK=_substrate_task_status \
   wait_for_task_succeeded        "${cold_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-900}" >/dev/null
 wait_for_task_result_available "${cold_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
-demo_event "✅" "Cold beat done — agent edited the file inside gVisor; Orka pushed branch ${push_branch}."
+cold_beat_secs=$(( SECONDS - cold_beat_start ))
+demo_event "✅" "Cold beat done in ${cold_beat_secs}s — agent cloned the repo inside gVisor, edited the file; Orka pushed branch ${push_branch}."
 
 # Chapter 4 ------------------------------------------------------------------
 narrate "Orka pushed the branch; the demo opens the pull request."
@@ -229,10 +233,20 @@ demo_event "2️⃣ " "Same sessionRef=${session}, create=false. Orka reattaches
 demo_show "${DEMO_WORKDIR}/substrate-warm.yaml"
 demo_pe "kubectl apply -f ${DEMO_WORKDIR}/substrate-warm.yaml"
 demo_announce_reset "ws-${warm_task}-"
+warm_beat_start="${SECONDS}"
 DEMO_WAIT_STATUS_HOOK=_substrate_task_status \
   wait_for_task_succeeded        "${warm_task}" "${DEMO_SUBSTRATE_TASK_TIMEOUT:-900}" >/dev/null
 wait_for_task_result_available "${warm_task}" "${DEMO_SUBSTRATE_RESULT_TIMEOUT:-120}" >/dev/null
-demo_event "⚡" "Warm beat done — status.executionWorkspace.reused=true. Orka pushed the follow-up commit to the same branch."
+warm_beat_secs=$(( SECONDS - warm_beat_start ))
+demo_event "⚡" "Warm beat done in ${warm_beat_secs}s — status.executionWorkspace.reused=true. Orka pushed the follow-up commit to the same branch."
+# Make the "no cold-start tax" claim visible: contrast the two wall-clock times.
+# The warm beat skips the clone, so it should land faster (or at least not pay
+# the clone cost again). Guard against a zero cold time (clock skew / cache).
+if (( cold_beat_secs > 0 && warm_beat_secs <= cold_beat_secs )); then
+  demo_event "📉" "Cold ${cold_beat_secs}s → warm ${warm_beat_secs}s: the warm Task reattached the retained workspace and skipped the clone — that delta is the cold-start tax you did NOT pay."
+else
+  demo_event "📉" "Cold ${cold_beat_secs}s vs warm ${warm_beat_secs}s — the warm Task reattached the retained workspace (reused=true) and skipped the clone."
+fi
 warm_pr_url="$(open_or_update_demo_pr)"
 [[ -n "${warm_pr_url}" ]] && demo_event "🔗" "PR updated with the warm-reuse commit: ${warm_pr_url}"
 _substrate_recap \

@@ -65,6 +65,47 @@ demo_profile_is() {
   [[ "$(demo_profile)" == "$1" ]]
 }
 
+# demo_dwell [kind] — hold a beat on screen so self-paced viewers can read it.
+#
+# Why a real `sleep` and not demo-magic's wait: recorded casts run non-tty and
+# DEMO_MAGIC_NO_WAIT=1, so the keypress-wait primitive early-returns and every
+# narration beat would otherwise flash past (the audit clocked Demo 50 at ~47
+# readable lines/sec). A dwell is the only thing that paces text in a cast that
+# has no interactive operator. Presenter (a human narrates live) and hero (no
+# prose) get zero; docs/social get a readable pause. `kind` selects the budget:
+#   card    — payoff cards + scenario banners (default, longest)
+#   chapter — chapter transitions
+#   text    — story-file prose blocks
+# Per-kind seconds are overridable via DEMO_CARD_DWELL / DEMO_CHAPTER_DWELL /
+# DEMO_TEXT_DWELL; set any to 0 to disable. Generalizes the presenter-only
+# DEMO_SUBSTRATE_BEAT_PAUSE precedent in 70-agent-substrate.sh.
+demo_dwell() {
+  local kind="${1:-card}"
+  case "$(demo_profile)" in
+    docs)   : ;;
+    social) : ;;
+    *)      return 0 ;;  # presenter / hero: no artificial dwell
+  esac
+  # Skip when explicitly running quiet (e.g. unit tests / CI fixtures).
+  [[ "${DEMO_DWELL_DISABLE:-0}" == "1" ]] && return 0
+  local secs
+  case "${kind}" in
+    chapter) secs="${DEMO_CHAPTER_DWELL:-1.5}" ;;
+    text)    secs="${DEMO_TEXT_DWELL:-2.5}" ;;
+    *)       secs="${DEMO_CARD_DWELL:-2.5}" ;;
+  esac
+  # social is a tighter cut — halve the budget if the caller didn't pin one.
+  if demo_profile_is social; then
+    case "${kind}" in
+      chapter) secs="${DEMO_CHAPTER_DWELL:-1}" ;;
+      text)    secs="${DEMO_TEXT_DWELL:-1.5}" ;;
+      *)       secs="${DEMO_CARD_DWELL:-1.5}" ;;
+    esac
+  fi
+  [[ "${secs}" == "0" ]] && return 0
+  sleep "${secs}" 2>/dev/null || true
+}
+
 # Wraps demo-magic's pe(). In presenter, behaves like pe (typewriter on).
 # In docs/social/hero, runs the command with TYPE_SPEED=0 so the prompt
 # renders instantly. Legacy `pe` calls keep working unchanged.
@@ -126,13 +167,26 @@ demo_show() {
 # demo_show_full renders the WHOLE file regardless of recording profile.
 # Use this for story files / scenario explanations where the content IS the
 # teaching, not for yaml/code where head + truncation is appropriate.
+#
+# Long prose lines are soft-wrapped to <=100 cols at render time so they don't
+# rely on the terminal's own wrap (which records as ragged continuation rows at
+# the canonical 110-col cast width). Wrapping happens HERE, not in
+# manifests.sh's emit_block, because emit_block also renders agent task prompts
+# sent to the model — injecting hard breaks there would corrupt model input.
+# `fold -s` breaks on spaces; lines without spaces (tables, box art) pass through.
 demo_show_full() {
   local path="$1"
   if [[ ! -f "${path}" ]]; then
     printf '%b[file not found: %s]%b\n' "${YELLOW}" "${path}" "${COLOR_RESET}"
     return 0
   fi
-  cat "${path}"
+  local width="${DEMO_SHOW_WRAP_COLS:-100}"
+  if [[ "${width}" != "0" ]] && command -v fold >/dev/null 2>&1; then
+    fold -s -w "${width}" "${path}"
+  else
+    cat "${path}"
+  fi
+  demo_dwell text
 }
 
 # ---------------------------------------------------------------------------
@@ -222,6 +276,7 @@ chapter() {
   fi
   printf '%b%s%b\n\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
   __DEMO_NARRATE_PENDING=""
+  demo_dwell chapter
 }
 
 # ---------------------------------------------------------------------------
@@ -325,6 +380,7 @@ demo_scenario() {
     fi
   fi
   printf '%b%s%b\n\n' "${CYAN}" "${bar}" "${COLOR_RESET}"
+  demo_dwell card
 }
 
 # Persistent activity event — timestamped, emoji-prefixed.
@@ -420,6 +476,18 @@ demo_announce_reset() {
 # all in-place updates visually consistent.
 #
 # Usage:  __demo_heartbeat "task=%s elapsed=%ss" "${name}" "${elapsed}"
+#
+# Render collapse (recording / non-tty only): a recorded cast is non-tty, so
+# each heartbeat becomes its own newline-terminated event. A long poll then
+# emits dozens of identical "phase=Running elapsed=Ns" lines that dominate
+# playback (the audit measured 84-96% of some casts). We therefore suppress a
+# heartbeat whose *state signature* — the body with the monotonic `elapsed=Ns`
+# counter stripped — matches the previously emitted one. The first occurrence
+# of every distinct state still prints (so viewers see when each phase began),
+# and the loops' own terminal output prints the final state, so no information
+# is lost. The live tty path is unchanged: `\r` overwrites in place, so the
+# ticking counter is desirable there and carries no scrollback cost.
+__DEMO_HEARTBEAT_LAST_SIG=""
 __demo_heartbeat() {
   local fmt="$1"
   shift || true
@@ -432,8 +500,23 @@ __demo_heartbeat() {
   if [[ -t 2 ]]; then
     printf '\r\033[2K%b%s%b' "${DIM}" "${line}" "${COLOR_RESET}" >&2
   else
+    # Non-tty (recording): collapse consecutive same-state frames. Strip the
+    # elapsed counter to form the signature; print only on a state change.
+    local sig
+    sig="$(printf '%s' "${body}" | sed -E 's/elapsed=[0-9]+s//g')"
+    if [[ "${sig}" == "${__DEMO_HEARTBEAT_LAST_SIG}" ]]; then
+      return 0
+    fi
+    __DEMO_HEARTBEAT_LAST_SIG="${sig}"
     printf '%s\n' "${line}" >&2
   fi
+}
+
+# Reset the heartbeat collapse signature. Wait loops call this before their
+# first tick so a new wait always emits at least one line, even when its
+# opening state happens to match the previous wait's final state.
+__demo_heartbeat_reset() {
+  __DEMO_HEARTBEAT_LAST_SIG=""
 }
 
 # ---------------------------------------------------------------------------
@@ -476,6 +559,10 @@ __card_bottom() {
   local fill
   fill="$(printf '─%.0s' $(seq 1 "${bar_width}"))"
   printf '%b╰%s╯%b\n' "${CYAN}" "${fill}" "${COLOR_RESET}"
+  # Hold on the finished payoff card so docs viewers can read it before the
+  # script moves on (or the recording ends). This is the most-remembered frame
+  # of each demo; in presenter/hero it is a no-op.
+  demo_dwell card
 }
 
 __card_blank() {
@@ -570,7 +657,16 @@ payoff_card_security() {
   __card_top "Security finding remediated"
   __card_kv "finding"   "${finding_id}"
   __card_kv "scan"      "${scan}"
-  __card_kv "scanPhase" "${phase}"
+  # Only surface scanPhase when it is a healthy terminal state. The
+  # RepositoryScan object can settle on "Error" even after the finding→patch→PR
+  # chain succeeded (the scan's own post-processing is separate from
+  # remediation); rendering "scanPhase Error" on a success card reads as a
+  # broken demo. The payoff here is the patch + PR, so omit the field unless it
+  # reinforces success.
+  case "${phase}" in
+    Ready|Succeeded|Completed|Complete)
+      __card_kv "scanPhase" "${phase}" ;;
+  esac
   __card_kv "patches"   "${patches}"
   __card_kv "prStatus"  "${pr_status}"
   __card_blank

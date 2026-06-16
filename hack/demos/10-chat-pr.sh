@@ -10,9 +10,7 @@
 # chat request body (default: quiet-flag — short, real, fits on screen).
 #
 # Run live:        ./hack/demos/10-chat-pr.sh
-# Record (asciinema):
-#   asciinema rec --idle-time-limit 1.5 --cols 110 --rows 30 \
-#     -c "DEMO_RECORD_PROFILE=docs ./hack/demos/10-chat-pr.sh" /tmp/10.cast
+# Record (asciinema): hack/demos/record.sh 10 docs   (or: make demo-record DEMO=10)
 
 set -Eeuo pipefail
 
@@ -140,23 +138,29 @@ _chat_coordinator_status() {
   # corrupts the "== Succeeded" check, failing an otherwise-green run. Force
   # stderr (mirrors the _sandbox_turn_status fix in 60-agent-sandbox.sh).
   {
-    local phase counts children_count latest_child latest_phase
+    local phase counts children_count latest_child latest_phase session_json
     phase="$(kubectl get task "${parent}" -n "${DEMO_NAMESPACE}" \
       -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    # Child Task phase histogram via one kubectl call.
-    counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
-      -l "orka.ai/source=anthropic-proxy" --no-headers 2>/dev/null \
-      | awk '{p=$3; if(p=="")p="Pending"; c[p]++}
-             END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
-                   if(out=="")out="(none yet)"; print out }')"
-    children_count="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-      -l "orka.ai/source=anthropic-proxy" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
-    latest_child="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-      -l "orka.ai/source=anthropic-proxy" --sort-by=.metadata.creationTimestamp \
-      -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
-    latest_phase="$(kubectl get tasks -n "${DEMO_NAMESPACE}" \
-      -l "orka.ai/source=anthropic-proxy" --sort-by=.metadata.creationTimestamp \
-      -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || true)"
+    # Scope the child histogram to THIS chat session. The proxy-created tasks
+    # carry orka.ai/source=anthropic-proxy but NO orka.ai/chat-session label;
+    # they are correlated to the session by spec.sessionRef.name (the same key
+    # wait_for_chat_parent_task uses). Without this scope a prior run's tasks —
+    # which share the broad source label — surface stale phases (e.g. a
+    # hours-old Failed task) that contradict the "starts clean" framing. One
+    # JSON fetch feeds both the histogram and the latest-child fields.
+    session_json="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
+      -l "orka.ai/source=anthropic-proxy" -o json 2>/dev/null \
+      | jq -c --arg session "${DEMO_CHAT_SESSION}" \
+          '[.items[] | select((.spec.sessionRef.name // "") == $session)]
+           | sort_by(.metadata.creationTimestamp)' 2>/dev/null || printf '[]')"
+    [[ -z "${session_json}" ]] && session_json='[]'
+    counts="$(printf '%s' "${session_json}" \
+      | jq -r 'reduce .[] as $t ({}; .[($t.status.phase // "Pending")] += 1)
+               | to_entries | map("\(.key)=\(.value)") | join(" ")
+               | if . == "" then "(none yet)" else . end' 2>/dev/null || printf '(none yet)')"
+    children_count="$(printf '%s' "${session_json}" | jq -r 'length' 2>/dev/null || printf '0')"
+    latest_child="$(printf '%s' "${session_json}" | jq -r 'last? | .metadata.name // ""' 2>/dev/null || true)"
+    latest_phase="$(printf '%s' "${session_json}" | jq -r 'last? | .status.phase // ""' 2>/dev/null || true)"
 
     (( children_count >= 1 )) && demo_announce_once "chat-first-child" \
       "👶" "Coordinator created its first specialist child Task — agentic fan-out has started"
@@ -218,11 +222,16 @@ __demo_chat_heartbeat() {
     if (( elapsed - last_snapshot >= 60 )); then
       last_snapshot=${elapsed}
       local counts
+      # Scope to this session by spec.sessionRef.name (proxy tasks carry no
+      # chat-session label); see _chat_coordinator_status for the rationale.
       counts="$(kubectl --request-timeout=3s get tasks -n "${DEMO_NAMESPACE}" \
-        -l orka.ai/source=anthropic-proxy --no-headers 2>/dev/null \
-        | awk '{phase=$3; if(phase=="")phase="Pending"; c[phase]++}
-               END { out=""; for(p in c){if(out!="")out=out" "; out=out p"="c[p]}
-                     if(out=="")out="(no child tasks yet)"; print out }' )"
+        -l "orka.ai/source=anthropic-proxy" -o json 2>/dev/null \
+        | jq -r --arg session "${DEMO_CHAT_SESSION}" \
+            '[.items[] | select((.spec.sessionRef.name // "") == $session)]
+             | reduce .[] as $t ({}; .[($t.status.phase // "Pending")] += 1)
+             | to_entries | map("\(.key)=\(.value)") | join(" ")
+             | if . == "" then "(no child tasks yet)" else . end' 2>/dev/null \
+        || printf '(no child tasks yet)')"
       [[ -t 2 ]] && printf '\r\033[2K' >&2
       printf '%b[%s] 🪄  coordinator progress: %s%b\n' \
         "${DIM}" "$(__demo_log_ts)" "${counts}" "${COLOR_RESET}" >&2
@@ -235,14 +244,16 @@ trap 'demo_run_exit_cleanups; kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true; 
 run_demo_chat_request_file "${DEMO_WORKDIR}/chat-request.txt" "${DEMO_WORKDIR}/chat-client-result.json"
 kill "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
 wait "${__DEMO_CHAT_HB_PID}" 2>/dev/null || true
-trap - EXIT
+# Restore the global cleanup trap (not `trap - EXIT`) so the port-forward this
+# run started is still torn down at exit; the heartbeat PID is already reaped.
+trap 'demo_run_exit_cleanups' EXIT
 [[ -t 2 ]] && printf '\r\033[2K' >&2 || true
 demo_event "📬" "Chat HTTP turn returned. The coordinator Task is already running on the cluster."
 
 # Chapter 3 ------------------------------------------------------------------
 narrate "The chat turn creates a real coordinator Task in Kubernetes."
 chapter "Orka spawns the coordinator" "🎬"
-demo_event "🔭" "Looking up the Task that the chat session minted (via orka.ai/source=anthropic-proxy label + creation timestamp)."
+demo_event "🔭" "Looking up the Task that the chat session minted (via orka.ai/source=anthropic-proxy + orka.ai/chat-session label + creation timestamp)."
 DEMO_CHAT_PARENT_TASK="$(wait_for_chat_parent_task "${DEMO_CHAT_PARENT_TIMEOUT:-120}" "${DEMO_CHAT_STARTED_AT}")" \
   || die "failed to discover the Anthropic-proxy-created coordinator task"
 demo_event "✅" "Coordinator Task discovered: ${DEMO_CHAT_PARENT_TASK} — the K8s representation of the chat session's parent agent."
@@ -251,7 +262,11 @@ demo_event "✅" "Coordinator Task discovered: ${DEMO_CHAT_PARENT_TASK} — the 
 narrate "The coordinator invents its own Agents via create_agent. Names vary per run."
 chapter "Watch the coordinator delegate" "🪄"
 demo_event "🧩" "The coordinator uses create_agent + create_task to fan out work. Specialist Agents are minted on demand — no static workflow YAML."
-demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy --sort-by=.metadata.creationTimestamp"
+# Scope the visible table to THIS session's tasks by spec.sessionRef.name. The
+# proxy-created tasks carry orka.ai/source=anthropic-proxy but no per-session
+# label, so the broad selector would also list prior runs' tasks (the stale
+# 7h-old Failed task the audit caught). jq filters to this run server-side.
+demo_pe "kubectl get tasks -n ${DEMO_NAMESPACE} -l orka.ai/source=anthropic-proxy -o json | jq -r --arg s ${DEMO_CHAT_SESSION} '[.items[]|select((.spec.sessionRef.name // \"\")==\$s)]|sort_by(.metadata.creationTimestamp)[]|\"\\(.metadata.name)\\t\\(.status.phase // \"Pending\")\"' | column -t"
 demo_pe "kubectl get agents -n ${DEMO_NAMESPACE} -l orka.ai/created-by=chat"
 
 # Chapter 5 ------------------------------------------------------------------

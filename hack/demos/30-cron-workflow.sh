@@ -6,6 +6,8 @@
 # without waiting for the next tick, then narrates the visible pieces.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
+#
+# Record (asciinema): hack/demos/record.sh 30 docs   (or: make demo-record DEMO=30)
 
 set -Eeuo pipefail
 

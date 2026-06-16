@@ -8,6 +8,8 @@
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
 #
+# Record (asciinema): hack/demos/record.sh 50 docs   (or: make demo-record DEMO=50)
+#
 # SECURITY: helpers MUST NOT log Txn-Token values, Authorization values,
 # subject-token contents, or anything matching eyJ[A-Za-z0-9_=-]{20,}.
 # kontxt-caller's caller.sh enforces redaction on its own output;

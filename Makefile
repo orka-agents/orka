@@ -169,6 +169,14 @@ demo-images: ## Build + kind-load demo-only images (kontxt-caller + sandbox runt
 demo-test: ## Run hack/demos smoke tests (style helpers, profile dispatch, payoff cards)
 	bash hack/demos/lib/test/run-all.sh
 
+.PHONY: demo-record
+demo-record: ## Record demo casts (DEMO=all|00..70 PROFILE=docs OUT=hack/demos/out)
+	bash hack/demos/record.sh $${DEMO:-all} $${PROFILE:-docs} $${OUT:-hack/demos/out}
+
+.PHONY: demo-validate-casts
+demo-validate-casts: ## Validate recorded casts (CASTS=dir-or-file; default hack/demos/out)
+	bash hack/demos/validate-casts.sh $${CASTS:-hack/demos/out}
+
 ##@ UI
 
 .PHONY: ui-install

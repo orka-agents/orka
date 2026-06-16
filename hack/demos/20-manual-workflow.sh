@@ -6,6 +6,8 @@
 # apply instead of an Anthropic chat turn.
 #
 # Pacing is controlled by DEMO_RECORD_PROFILE (presenter|docs|social|hero).
+#
+# Record (asciinema): hack/demos/record.sh 20 docs   (or: make demo-record DEMO=20)
 
 set -Eeuo pipefail
 
