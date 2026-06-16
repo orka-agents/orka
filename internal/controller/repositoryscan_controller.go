@@ -37,6 +37,7 @@ import (
 )
 
 const (
+	maxThreatModelFallbackBytes  = 1 << 20
 	repositoryScanPhasePending   = "Pending"
 	repositoryScanPhaseScanning  = "Scanning"
 	repositoryScanPhaseReady     = "Ready"
@@ -1118,10 +1119,38 @@ func (r *RepositoryScanReconciler) loadThreatModelArtifact(ctx context.Context, 
 		}
 		return content, "", nil
 	case errors.Is(err, store.ErrNotFound):
+		content, ok, resultErr := r.threatModelFromTaskResult(ctx, task)
+		if resultErr != nil {
+			return "", "", resultErr
+		}
+		if ok {
+			return content, "", nil
+		}
 		return "", fmt.Sprintf("%s is missing", security.ArtifactThreatModel), nil
 	default:
 		return "", "", err
 	}
+}
+
+func (r *RepositoryScanReconciler) threatModelFromTaskResult(ctx context.Context, task *corev1alpha1.Task) (string, bool, error) {
+	if r.ResultStore == nil || task == nil {
+		return "", false, nil
+	}
+	data, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if len(data) > maxThreatModelFallbackBytes {
+		return "", false, nil
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(content, "#") || threatModelLooksLikeToolTranscript(content) {
+		return "", false, nil
+	}
+	return content, true, nil
 }
 
 func (r *RepositoryScanReconciler) loadDiscoveryFindingsV2Artifact(ctx context.Context, task *corev1alpha1.Task) (*security.FindingsV2Artifact, *security.ReviewContextManifest, string, error) {
