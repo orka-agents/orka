@@ -155,20 +155,27 @@ func TestCodexInstructionsDenyAllWhenAllowlistIntersectionEmpty(t *testing.T) {
 	}
 }
 
-func TestCodexAdapterUsesTurnEnvSandboxMode(t *testing.T) {
+func TestCodexAdapterIgnoresTurnEnvSandboxPolicy(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.CodexSandboxMode, "")
+	t.Setenv(workerenv.CodexDisableSandbox, "")
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
 	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
 		Prompt: "do work",
-		Env:    []string{workerenv.CodexSandboxMode + "=danger-full-access"},
+		Env: []string{
+			workerenv.CodexSandboxMode + "=danger-full-access",
+			workerenv.CodexDisableSandbox + "=true",
+		},
 	})
 	if err != nil {
 		t.Fatalf("BuildCommand: %v", err)
 	}
 	defer removeTempFiles(spec.TempFiles)
 	joined := strings.Join(spec.Args, " ")
-	if !strings.Contains(joined, "--sandbox danger-full-access") {
-		t.Fatalf("args = %q, want turn env sandbox mode", joined)
+	if strings.Contains(joined, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("args = %q, want turn env unable to disable sandbox", joined)
+	}
+	if strings.Contains(joined, "--sandbox danger-full-access") || !strings.Contains(joined, "--sandbox workspace-write") {
+		t.Fatalf("args = %q, want operator/default sandbox policy", joined)
 	}
 }

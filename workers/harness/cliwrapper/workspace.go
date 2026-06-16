@@ -142,15 +142,45 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo string) error {
 	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", ref)
 	if out, err := fetch.CombinedOutput(); err == nil {
-		checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", "FETCH_HEAD")
-		if out, err := checkout.CombinedOutput(); err != nil {
-			return gitCommandError("checkout turn workspace ref", err, out, repo)
-		}
-		return nil
+		return checkoutWorkspaceCommit(ctx, cloneDir, "FETCH_HEAD", repo)
 	} else if headsErr := fetchWorkspaceRemoteHeads(ctx, cloneDir); headsErr != nil {
 		return gitCommandError("fetch turn workspace ref", err, out, repo)
 	}
-	checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", ref)
+	commit, err := resolveWorkspaceRemoteBranch(ctx, cloneDir, ref, repo)
+	if err != nil {
+		return err
+	}
+	return checkoutWorkspaceCommit(ctx, cloneDir, commit, repo)
+}
+
+func resolveWorkspaceRemoteBranch(ctx context.Context, cloneDir, ref, repo string) (string, error) {
+	branch := strings.TrimSpace(ref)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	branch = strings.TrimPrefix(branch, "origin/")
+	if branch == "" || strings.HasPrefix(branch, "-") {
+		return "", fmt.Errorf("checkout turn workspace ref: invalid ref %q", ref)
+	}
+	remoteRef := "refs/remotes/origin/" + branch
+	verify := workspaceGitCommand(ctx, "-C", cloneDir, "rev-parse", "--verify", "--end-of-options", remoteRef+"^{commit}")
+	out, err := verify.CombinedOutput()
+	if err != nil {
+		return "", gitCommandError("resolve turn workspace ref", err, out, repo)
+	}
+	commit := strings.TrimSpace(string(out))
+	if commit == "" {
+		return "", fmt.Errorf("resolve turn workspace ref: empty commit for %q", ref)
+	}
+	return commit, nil
+}
+
+func checkoutWorkspaceCommit(ctx context.Context, cloneDir, ref, repo string) error {
+	verify := workspaceGitCommand(ctx, "-C", cloneDir, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	out, err := verify.CombinedOutput()
+	if err != nil {
+		return gitCommandError("resolve turn workspace ref", err, out, repo)
+	}
+	commit := strings.TrimSpace(string(out))
+	checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", "--detach", commit)
 	if out, err := checkout.CombinedOutput(); err != nil {
 		return gitCommandError("checkout turn workspace ref", err, out, repo)
 	}

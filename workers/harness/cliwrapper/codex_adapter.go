@@ -109,14 +109,11 @@ func buildCodexArgs(
 		"--config", "approval_policy=never",
 		"--config", "model_auto_compact_token_limit=" + codexAutoCompactTokenLimit(),
 	}
-	disableSandbox := firstNonEmpty(
-		envEntryValue(env, workerenv.CodexDisableSandbox),
-		os.Getenv(workerenv.CodexDisableSandbox),
-	)
+	disableSandbox := os.Getenv(workerenv.CodexDisableSandbox)
 	if bypassSandbox || workerenv.IsTrue(disableSandbox) {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	} else {
-		sandboxMode := codexSandboxMode(env)
+		sandboxMode := codexSandboxMode()
 		args = append(args, "--sandbox", sandboxMode)
 		if sandboxMode == defaultCodexSandboxMode {
 			args = append(args, "--config", "sandbox_workspace_write.network_access=true")
@@ -227,12 +224,8 @@ func codexAutoCompactTokenLimit() string {
 	return defaultCodexAutoCompactTokens
 }
 
-func codexSandboxMode(env []string) string {
-	mode := strings.TrimSpace(firstNonEmpty(
-		envEntryValue(env, workerenv.CodexSandboxMode),
-		os.Getenv(workerenv.CodexSandboxMode),
-	))
-	if mode != "" {
+func codexSandboxMode() string {
+	if mode := strings.TrimSpace(os.Getenv(workerenv.CodexSandboxMode)); mode != "" {
 		return mode
 	}
 	return defaultCodexSandboxMode
