@@ -478,7 +478,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		} else {
 			parsed.Result = result
 		}
-		removeControlResultFile(turnCtx.WorkDir, spec.ResultFile)
+		removeControlFiles(turnCtx.WorkDir, append(spec.TempFiles, spec.ResultFile)...)
 		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
 			finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
 			if finalizeErr != nil {
@@ -709,23 +709,29 @@ func truncateBytes(value string, maxBytes int) string {
 	return out.String()
 }
 
-func removeControlResultFile(workDir, resultFile string) {
-	if strings.TrimSpace(workDir) == "" || strings.TrimSpace(resultFile) == "" {
+func removeControlFiles(workDir string, controlFiles ...string) {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
 		return
 	}
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return
 	}
-	absResultFile, err := filepath.Abs(resultFile)
-	if err != nil {
-		return
+	for _, controlFile := range controlFiles {
+		if strings.TrimSpace(controlFile) == "" {
+			continue
+		}
+		absControlFile, err := filepath.Abs(controlFile)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(absWorkDir, absControlFile)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			continue
+		}
+		_ = os.Remove(absControlFile)
 	}
-	rel, err := filepath.Rel(absWorkDir, absResultFile)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return
-	}
-	_ = os.Remove(absResultFile)
 }
 
 func removeTurnEnv(env []string, names ...string) []string {

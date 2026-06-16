@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -91,6 +92,7 @@ func (a *GenericAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 		if err := os.WriteFile(path, []byte(turn.Prompt), 0o600); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
+		spec.TempFiles = appendUniqueString(spec.TempFiles, path)
 		spec.Env = setEnv(spec.Env, firstNonEmpty(cfg.PromptEnv, DefaultPromptEnv), path)
 	}
 
@@ -141,6 +143,13 @@ func readBoundedResultFile(path string) (string, error) {
 		return "", fmt.Errorf("result file exceeds harness storage limit")
 	}
 	return string(data), nil
+}
+
+func appendUniqueString(values []string, value string) []string {
+	if slices.Contains(values, value) {
+		return values
+	}
+	return append(values, value)
 }
 
 func firstNonEmpty(values ...string) string {

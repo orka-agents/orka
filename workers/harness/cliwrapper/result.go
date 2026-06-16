@@ -46,6 +46,8 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 	if root == "" {
 		root = strings.TrimSpace(turn.WorkDir)
 	}
+	restoreEnv := setTemporaryEnvEntries(turn.Env)
+	defer restoreEnv()
 	if root != "" {
 		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
@@ -53,10 +55,6 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 		if err := common.PreparePullRequestReviewContext(root, cfg); err != nil {
 			return cfg, err
 		}
-	}
-	restoreEnv := setTemporaryEnvEntries(turn.Env)
-	defer restoreEnv()
-	if root != "" {
 		if err := common.PrepareSecurityReviewContext(root, cfg); err != nil {
 			return cfg, err
 		}

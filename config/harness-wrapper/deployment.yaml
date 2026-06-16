@@ -63,6 +63,7 @@ spec:
             add:
             - SETUID
             - SETGID
+            - CHOWN
         livenessProbe:
           httpGet:
             path: /v1/health
