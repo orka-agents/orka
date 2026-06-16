@@ -1071,27 +1071,7 @@ exercise_orka_tasks() {
   verify_mcp_tool_boots_actor_once "${tool_client_image}"
   verify_mcp_tool_cleanup
 
-  run_default_workspace_task "codex-substrate-default-ci"
-  run_pooled_workspace_task "codex-substrate-pool-ci"
-
-  if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
-    run_retained_workspace_task "codex-substrate-retain-ci"
-  fi
-
-  log "Running missing-template negative task"
-  apply_task "codex-substrate-missing-template-ci" "      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-missing-template-ci
-        namespace: ate-demo
-      cleanupPolicy: delete"
-  wait_task_phase "codex-substrate-missing-template-ci" "Failed" 300
-  local message
-  message="$(kubectl -n default get task codex-substrate-missing-template-ci -o jsonpath='{.status.message}')"
-  if [[ "${message}" != *"not found"* ]]; then
-    echo "missing-template task failed with unexpected message: ${message}" >&2
-    exit 1
-  fi
+  log "Skipping agent Task execution-workspace checks: harness-wrapper runtime is service-backed and no longer runs agent tasks as Substrate Jobs"
 }
 
 wait_http_ok() {
