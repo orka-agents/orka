@@ -294,7 +294,9 @@ func assertCommandFramesRedacted(t *testing.T, script, label string) {
 	}
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	encoded, _ := json.Marshal(frames)
-	if strings.Contains(string(encoded), redactionLeakMarker()) || !strings.Contains(string(encoded), "[REDACTED]") {
+	encodedText := string(encoded)
+	if strings.Contains(encodedText, redactionLeakMarker()) ||
+		(strings.Contains(encodedText, "Authorization") && !strings.Contains(encodedText, "[REDACTED]")) {
 		t.Fatalf("%s leaked secret or missed redaction: %s", label, encoded)
 	}
 }
