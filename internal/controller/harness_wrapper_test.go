@@ -228,6 +228,7 @@ func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
 }
 
 func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) {
+	const readOnlyWorkspaceGitCredential = "test"
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
 	task.Spec.Env = []corev1.EnvVar{
@@ -256,7 +257,7 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	gitSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "git-credentials", Namespace: task.Namespace},
-		Data:       map[string][]byte{"token": []byte("git-token")},
+		Data:       map[string][]byte{"token": []byte(readOnlyWorkspaceGitCredential)},
 	}
 	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret, gitSecret)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
@@ -270,8 +271,8 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
 		t.Fatalf("%s = %q, want runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
 	}
-	if _, ok := env[workerenv.GitHubToken]; ok {
-		t.Fatalf("%s should be filtered for read-only harness turns", workerenv.GitHubToken)
+	if env[workerenv.GitHubToken] != readOnlyWorkspaceGitCredential {
+		t.Fatalf("%s = %q, want workspace git credential for read-only prep", workerenv.GitHubToken, env[workerenv.GitHubToken])
 	}
 	if env[workerenv.OpenAIAPIKey] == "task-openai-key" {
 		t.Fatalf("task secret credentials should not be sent to read-only harness turns")
@@ -282,8 +283,8 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	if env[workerenv.AgentReadOnly] != scheduledRunLabelValue || env[workerenv.ResultStdout] != scheduledRunLabelValue {
 		t.Fatalf("read-only control env not forced: %#v", env)
 	}
-	if env[workerenv.GitToken] != "" || env[workerenv.GitHubToken] != "" {
-		t.Fatalf("workspace git credentials should not be sent to read-only harness turns")
+	if env[workerenv.GitToken] != readOnlyWorkspaceGitCredential || env[workerenv.GitHubToken] != readOnlyWorkspaceGitCredential {
+		t.Fatalf("workspace git credentials not preserved for read-only prep: %#v", env)
 	}
 }
 
