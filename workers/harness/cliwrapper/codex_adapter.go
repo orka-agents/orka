@@ -71,7 +71,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
-		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false),
+		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, turn.Env),
 		Env:        buildCodexEnv(turn.Env),
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
@@ -93,7 +93,13 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 	return TurnResult{Result: run.Stdout, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
 }
 
-func buildCodexArgs(cfg *agentEnvConfig, outputPath, instructionsPath string, bypassSandbox bool) []string {
+func buildCodexArgs(
+	cfg *agentEnvConfig,
+	outputPath string,
+	instructionsPath string,
+	bypassSandbox bool,
+	env []string,
+) []string {
 	args := []string{
 		"exec",
 		"--skip-git-repo-check",
@@ -103,10 +109,14 @@ func buildCodexArgs(cfg *agentEnvConfig, outputPath, instructionsPath string, by
 		"--config", "approval_policy=never",
 		"--config", "model_auto_compact_token_limit=" + codexAutoCompactTokenLimit(),
 	}
-	if bypassSandbox || workerenv.IsTrue(os.Getenv(workerenv.CodexDisableSandbox)) {
+	disableSandbox := firstNonEmpty(
+		envEntryValue(env, workerenv.CodexDisableSandbox),
+		os.Getenv(workerenv.CodexDisableSandbox),
+	)
+	if bypassSandbox || workerenv.IsTrue(disableSandbox) {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	} else {
-		sandboxMode := codexSandboxMode()
+		sandboxMode := codexSandboxMode(env)
 		args = append(args, "--sandbox", sandboxMode)
 		if sandboxMode == defaultCodexSandboxMode {
 			args = append(args, "--config", "sandbox_workspace_write.network_access=true")
@@ -118,7 +128,11 @@ func buildCodexArgs(cfg *agentEnvConfig, outputPath, instructionsPath string, by
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
 	}
-	if baseURL := strings.TrimSpace(os.Getenv(workerenv.OpenAIBaseURL)); baseURL != "" {
+	baseURL := strings.TrimSpace(firstNonEmpty(
+		envEntryValue(env, workerenv.OpenAIBaseURL),
+		os.Getenv(workerenv.OpenAIBaseURL),
+	))
+	if baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
@@ -213,8 +227,12 @@ func codexAutoCompactTokenLimit() string {
 	return defaultCodexAutoCompactTokens
 }
 
-func codexSandboxMode() string {
-	if mode := strings.TrimSpace(os.Getenv(workerenv.CodexSandboxMode)); mode != "" {
+func codexSandboxMode(env []string) string {
+	mode := strings.TrimSpace(firstNonEmpty(
+		envEntryValue(env, workerenv.CodexSandboxMode),
+		os.Getenv(workerenv.CodexSandboxMode),
+	))
+	if mode != "" {
 		return mode
 	}
 	return defaultCodexSandboxMode

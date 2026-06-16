@@ -132,12 +132,21 @@ func setTemporaryEnv(key, value string) func() {
 	}
 }
 
+func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
+	safeDir := strings.TrimSpace(dir)
+	if abs, err := filepath.Abs(safeDir); err == nil {
+		safeDir = abs
+	}
+	gitArgs := append([]string{"-c", "safe.directory=" + safeDir, "-C", dir}, args...)
+	return exec.Command("git", gitArgs...)
+}
+
 func ShouldFinalizeWorkDir(workDir string) bool {
 	workDir = strings.TrimSpace(workDir)
 	if workDir == "" {
 		return false
 	}
-	return exec.Command("git", "-C", workDir, "rev-parse", "--show-toplevel").Run() == nil
+	return wrapperGitCommand(workDir, "rev-parse", "--show-toplevel").Run() == nil
 }
 
 func CleanFinalizedWorkDir(workDir string) error {
@@ -145,7 +154,7 @@ func CleanFinalizedWorkDir(workDir string) error {
 	if workDir == "" {
 		return nil
 	}
-	rootOut, err := exec.Command("git", "-C", workDir, "rev-parse", "--show-toplevel").Output()
+	rootOut, err := wrapperGitCommand(workDir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return nil
 	}
@@ -166,21 +175,21 @@ func CleanFinalizedWorkDir(workDir string) error {
 		return fmt.Errorf("clean finalized workdir %q is outside repository root %q", cleanPath, repoRoot)
 	}
 	if relPath == "." {
-		if out, err := exec.Command("git", "-C", repoRoot, "reset", "--hard", "HEAD").CombinedOutput(); err != nil {
+		if out, err := wrapperGitCommand(repoRoot, "reset", "--hard", "HEAD").CombinedOutput(); err != nil {
 			return fmt.Errorf("clean finalized workdir reset: %w: %s", err, strings.TrimSpace(string(out)))
 		}
-		if out, err := exec.Command("git", "-C", repoRoot, "clean", "-fd").CombinedOutput(); err != nil {
+		if out, err := wrapperGitCommand(repoRoot, "clean", "-fd").CombinedOutput(); err != nil {
 			return fmt.Errorf("clean finalized workdir clean: %w: %s", err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
-	if out, err := exec.Command("git", "-C", repoRoot, "reset", "HEAD", "--", relPath).CombinedOutput(); err != nil {
+	if out, err := wrapperGitCommand(repoRoot, "reset", "HEAD", "--", relPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("clean finalized workdir unstage: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("git", "-C", repoRoot, "checkout", "--", relPath).CombinedOutput(); err != nil {
+	if out, err := wrapperGitCommand(repoRoot, "checkout", "--", relPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("clean finalized workdir checkout: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("git", "-C", repoRoot, "clean", "-fd", "--", relPath).CombinedOutput(); err != nil {
+	if out, err := wrapperGitCommand(repoRoot, "clean", "-fd", "--", relPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("clean finalized workdir clean: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

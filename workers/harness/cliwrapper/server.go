@@ -17,6 +17,7 @@ import (
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const maxTerminalResultBytes = 512 * 1024
@@ -382,6 +383,12 @@ func (s *Server) runTurn(turn *turnState) {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
+	if turnCtx.WorkDir != preparedWorkspace.rootDir {
+		if err := common.EnsureWorkspaceArtifactsLink(turnCtx.WorkDir); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
+	}
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
@@ -413,6 +420,14 @@ func (s *Server) runTurn(turn *turnState) {
 		if strings.TrimSpace(run.Stderr) != "" {
 			msg = run.Stderr
 		}
+		if artifactErr := UploadTurnArtifacts(turnCtx); artifactErr != nil {
+			turn.appendFrame(s.runtimeLogTextFrame(
+				turn,
+				"artifact-upload",
+				artifactErr.Error(),
+				events.ExecutionEventSeverityWarning,
+			))
+		}
 		turn.appendFrame(s.failedFrame(turn, "command_failed", msg, false))
 	default:
 		restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
@@ -432,6 +447,7 @@ func (s *Server) runTurn(turn *turnState) {
 		} else {
 			parsed.Result = result
 		}
+		removeControlResultFile(turnCtx.WorkDir, spec.ResultFile)
 		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
 			finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
 			if finalizeErr != nil {
@@ -624,6 +640,25 @@ func redactAndTruncateBytes(value string, maxBytes int) string {
 	}
 	out.WriteRune('…')
 	return out.String()
+}
+
+func removeControlResultFile(workDir, resultFile string) {
+	if strings.TrimSpace(workDir) == "" || strings.TrimSpace(resultFile) == "" {
+		return
+	}
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return
+	}
+	absResultFile, err := filepath.Abs(resultFile)
+	if err != nil {
+		return
+	}
+	rel, err := filepath.Rel(absWorkDir, absResultFile)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return
+	}
+	_ = os.Remove(absResultFile)
 }
 
 func removeTurnEnv(env []string, names ...string) []string {

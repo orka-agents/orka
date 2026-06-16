@@ -30,6 +30,7 @@ kind_cluster="${KIND_CLUSTER:-orka-security-scan-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 test_namespace="${ORKA_SECURITY_SCAN_E2E_NAMESPACE:-default}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
+orka_harness_wrapper_deployment="${ORKA_HARNESS_WRAPPER_DEPLOYMENT:-orka-agent-harness-wrapper}"
 orka_api_service="${ORKA_API_SERVICE:-orka-api}"
 orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18086}"
@@ -553,6 +554,10 @@ patch_controller_images() {
       )
     ' | kubectl apply -f -
 
+  if kubectl -n "${orka_namespace}" get deployment "${orka_harness_wrapper_deployment}" >/dev/null 2>&1; then
+    run kubectl -n "${orka_namespace}" set image deployment/"${orka_harness_wrapper_deployment}" "wrapper=${fake_codex_image}"
+    run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_harness_wrapper_deployment}" --timeout=5m
+  fi
   run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
 }
 

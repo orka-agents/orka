@@ -101,15 +101,9 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		return preparedWorkspace{}, gitCommandError("clone turn workspace", err, out, repo)
 	}
 	if ref := strings.TrimSpace(turn.Metadata["gitRef"]); ref != "" {
-		fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", ref)
-		if out, err := fetch.CombinedOutput(); err != nil {
+		if err := fetchAndCheckoutWorkspaceRef(ctx, cloneDir, ref, repo); err != nil {
 			cleanup()
-			return preparedWorkspace{}, gitCommandError("fetch turn workspace ref", err, out, repo)
-		}
-		checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", "FETCH_HEAD")
-		if out, err := checkout.CombinedOutput(); err != nil {
-			cleanup()
-			return preparedWorkspace{}, gitCommandError("checkout turn workspace ref", err, out, repo)
+			return preparedWorkspace{}, err
 		}
 	}
 	pushBranch := strings.TrimSpace(turn.Metadata["pushBranch"])
@@ -143,6 +137,32 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		return preparedWorkspace{}, err
 	}
 	return preparedWorkspace{workDir: contained, rootDir: cloneDir, cleanup: cleanup}, nil
+}
+
+func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo string) error {
+	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", ref)
+	if out, err := fetch.CombinedOutput(); err == nil {
+		checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", "FETCH_HEAD")
+		if out, err := checkout.CombinedOutput(); err != nil {
+			return gitCommandError("checkout turn workspace ref", err, out, repo)
+		}
+		return nil
+	} else if headsErr := fetchWorkspaceRemoteHeads(ctx, cloneDir); headsErr != nil {
+		return gitCommandError("fetch turn workspace ref", err, out, repo)
+	}
+	checkout := workspaceGitCommand(ctx, "-C", cloneDir, "checkout", ref)
+	if out, err := checkout.CombinedOutput(); err != nil {
+		return gitCommandError("checkout turn workspace ref", err, out, repo)
+	}
+	return nil
+}
+
+func fetchWorkspaceRemoteHeads(ctx context.Context, cloneDir string) error {
+	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("fetch turn workspace remote heads: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func gitCommandError(operation string, err error, output []byte, rawRepo string) error {

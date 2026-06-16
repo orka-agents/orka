@@ -154,3 +154,21 @@ func TestCodexInstructionsDenyAllWhenAllowlistIntersectionEmpty(t *testing.T) {
 		t.Fatalf("instructions = %q, want deny-all tool guidance", instructions)
 	}
 }
+
+func TestCodexAdapterUsesTurnEnvSandboxMode(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.CodexSandboxMode, "")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt: "do work",
+		Env:    []string{workerenv.CodexSandboxMode + "=danger-full-access"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "--sandbox danger-full-access") {
+		t.Fatalf("args = %q, want turn env sandbox mode", joined)
+	}
+}
