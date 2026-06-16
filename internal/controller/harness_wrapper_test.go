@@ -431,3 +431,14 @@ func TestHarnessWrapperExpiredPlannedTurnIsClearedForReplan(t *testing.T) {
 		t.Fatalf("expired planned turn annotations were not cleared: %#v", updated.Annotations)
 	}
 }
+
+func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
+	for _, message := range []string{"stream_frames failed (404): turn not found", "stream_frames failed (410): gone"} {
+		if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should be classified as missing turn", message)
+		}
+	}
+	if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (401): unauthorized")) {
+		t.Fatal("unauthorized stream error should not be classified as missing turn")
+	}
+}

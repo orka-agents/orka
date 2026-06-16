@@ -266,6 +266,12 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		}
 	}
 	if err != nil && result.Completed == nil && result.Failed == nil && !result.Cancelled {
+		if harnessWrapperStreamErrorIsMissingTurn(err) && r.shouldRetry(task) {
+			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
+				return ctrl.Result{}, clearErr
+			}
+			return r.retryTask(ctx, task)
+		}
 		if harnessWrapperStreamErrorIsTerminal(err) {
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(err.Error()))
 		}
@@ -431,6 +437,19 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperMetadataAnno)
 	}
 	return r.Patch(ctx, task, patch)
+}
+
+func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	for _, marker := range []string{"(404)", "(410)", "turn not found"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func harnessWrapperStreamErrorIsTerminal(err error) bool {

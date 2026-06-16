@@ -36,6 +36,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	_ = os.Unsetenv(cliwrapper.EnvAuthValue)
 	var extraArgs repeatedString
 	var extraEnv repeatedString
 	fs := flag.NewFlagSet("orka-agent-harness-wrapper", flag.ContinueOnError)

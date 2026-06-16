@@ -185,12 +185,13 @@ if command -v docker >/dev/null 2>&1 && [[ "${DEMO_BUILD_CODEX_IMAGE:-1}" == "1"
 	docker build --platform "linux/${node_arch}" -t "${codex_image}" \
 	  -f "${repo_root}/workers/harness/Dockerfile" "${repo_root}"
 	publish_worker_image "${codex_image}"
+fi
+
   if kubectl -n "${orka_namespace}" get deployment "${harness_wrapper_deployment}" >/dev/null 2>&1; then
     log "Repointing ${harness_wrapper_deployment} image -> ${codex_image}"
     kubectl -n "${orka_namespace}" set image "deployment/${harness_wrapper_deployment}" "wrapper=${codex_image}"
     kubectl -n "${orka_namespace}" rollout status "deployment/${harness_wrapper_deployment}" --timeout=300s
   fi
-fi
 
 # --- AI worker image (type: ai coordinator in demos 10/20) ------------------
 # The manual/chat PR coordinators run as a `type: ai` Task, which uses the AI
