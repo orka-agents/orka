@@ -89,6 +89,17 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		return r.failTask(ctx, task, err.Error())
 	}
 
+	now := metav1.Now()
+	attempts := task.Status.Attempts + 1
+	if taskHasPlannedHarnessWrapperTurn(task) &&
+		(!harnessWrapperPlannedTurnMatchesTask(task, agent, attempts) ||
+			(!taskHasHarnessWrapperTurn(task) && harnessWrapperPlannedTurnExpired(task, now.Time))) {
+		if err := r.clearHarnessWrapperTurnState(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+	}
+
 	endpoint := harnessWrapperEndpoint()
 	if endpoint == "" {
 		return r.failTask(ctx, task, fmt.Sprintf("%s is required when agent harness runtime is enabled", harnessWrapperEndpointEnv))
@@ -96,22 +107,10 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	if r.ExecutionEventStore == nil {
 		return r.failTask(ctx, task, "execution event store is required for harness wrapper mode")
 	}
-
-	now := metav1.Now()
-	attempts := task.Status.Attempts + 1
-	if taskHasPlannedHarnessWrapperTurn(task) && !harnessWrapperPlannedTurnMatchesTask(task, agent, attempts) {
-		if err := r.clearHarnessWrapperTurnState(ctx, task); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
-	}
 	var request harness.StartTurnRequest
 	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if !taskHasHarnessWrapperTurn(task) {
-			if harnessWrapperPlannedTurnExpired(task, now.Time) {
-				return r.failTask(ctx, task, "planned harness runtime turn expired before start was confirmed")
-			}
 			var err error
 			request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 			if err != nil {

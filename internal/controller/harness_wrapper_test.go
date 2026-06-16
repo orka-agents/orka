@@ -400,3 +400,34 @@ func TestHarnessWrapperCapabilitiesReadErrorRetryable(t *testing.T) {
 		t.Fatal("expected runtime mismatch to remain terminal")
 	}
 }
+
+func TestHarnessWrapperExpiredPlannedTurnIsClearedForReplan(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	request, err := (&TaskReconciler{}).harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
+		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
+		harnessWrapperCorrelationIDAnno: request.CorrelationID,
+		harnessWrapperStartedAnno:       "false",
+		harnessWrapperPlannedAtAnno:     time.Now().Add(-harnessWrapperPlannedTurnTTL - time.Second).UTC().Format(time.RFC3339Nano),
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	result, err := r.runHarnessWrapperTask(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("runHarnessWrapperTask: %v", err)
+	}
+	if result.RequeueAfter != 100*time.Millisecond {
+		t.Fatalf("RequeueAfter = %v, want replan delay", result.RequeueAfter)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get task: %v", err)
+	}
+	if taskHasPlannedHarnessWrapperTurn(updated) {
+		t.Fatalf("expired planned turn annotations were not cleared: %#v", updated.Annotations)
+	}
+}
