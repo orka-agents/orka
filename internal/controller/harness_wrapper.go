@@ -131,6 +131,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return ctrl.Result{}, err
 		}
 	}
+	turnAccepted := startedPlannedTurn
 	if !startedPlannedTurn {
 		latest := &corev1alpha1.Task{}
 		if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
@@ -185,6 +186,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		return ctrl.Result{}, err
 	}
 	if !transitionedToRunning {
+		if turnAccepted {
+			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task left pending before running transition"); cancelErr != nil {
+				return ctrl.Result{}, cancelErr
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 	if err := r.recordTaskLifecycleEvent(

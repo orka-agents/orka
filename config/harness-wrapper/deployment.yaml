@@ -79,5 +79,6 @@ spec:
       - name: auth
         secret:
           secretName: harness-wrapper-auth
+          defaultMode: 0400
       - name: tmp
         emptyDir: {}
