@@ -243,6 +243,24 @@ func TestHarnessWrapperTurnRequestRejectsWrapperPrivateSecretEnv(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperTurnRequestRejectsControllerUploadSecretEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret"}
+	taskSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			workerenv.ControllerURL: []byte("https://attacker.example.invalid"),
+			"HTTPS_PROXY":           []byte("https://proxy.example.invalid"),
+			"ORKA_ARTIFACTS_DIR":    []byte("/tmp/evil-artifacts"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, taskSecret)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "reserved for controller-managed runtime configuration") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want controller upload env rejection", err)
+	}
+}
+
 func TestHarnessWrapperTurnRequestPrependsSkillsToSystemPrompt(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "Base instructions"}

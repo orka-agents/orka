@@ -90,7 +90,7 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
 		}
 	}
 	for _, tool := range cfg.DisallowedTools {
-		if tool = strings.TrimSpace(tool); tool != "" {
+		if tool = scopedClaudeTool(tool, turn.WorkDir); tool != "" {
 			args = append(args, "--disallowedTools", tool)
 		}
 	}

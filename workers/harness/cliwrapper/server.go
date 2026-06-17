@@ -130,6 +130,10 @@ func (s *Server) evictTurn(turn *turnState) {
 	if turn == nil {
 		return
 	}
+	if s.config.TurnRetention > 0 && turn.hasUnfetchedOutput() && turn.outputRetentionActive() {
+		s.scheduleTurnEviction(turn)
+		return
+	}
 	s.mu.Lock()
 	if current := s.turns[turn.request.TurnID]; current == turn {
 		delete(s.turns, turn.request.TurnID)
@@ -322,7 +326,9 @@ func (s *Server) handleOutput(w http.ResponseWriter, r *http.Request, turn *turn
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err == nil {
+		turn.markOutputFetched()
+	}
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turnState) {
@@ -419,7 +425,6 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	defer func() { _ = os.RemoveAll(turnHomeRoot) }()
 	if _, _, ok := childCredentialIDs(); ok {
 		if err := os.Chmod(turnHomeRoot, 0o711); err != nil {
 			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
@@ -427,6 +432,10 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		}
 	}
 	turnHome := filepath.Join(turnHomeRoot, "home")
+	defer func() {
+		_ = removeAllForChild(turnHome)
+		_ = os.RemoveAll(turnHomeRoot)
+	}()
 	if err := os.MkdirAll(turnHome, 0o700); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
@@ -476,6 +485,12 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		if strings.TrimSpace(run.Stderr) != "" {
 			msg = run.Stderr
 		}
+		partial := strings.TrimSpace(run.Stdout)
+		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
+			if finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, partial); finalizeErr == nil {
+				partial = string(finalized)
+			}
+		}
 		if artifactErr := UploadTurnArtifacts(turnCtx); artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
@@ -483,7 +498,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				artifactErr.Error(),
 			))
 		}
-		turn.appendFrame(s.failedFrame(turn, "command_failed", msg, false))
+		turn.appendFrame(s.failedFrameWithResult(turn, "command_failed", msg, partial, false))
 	default:
 		restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
 		defer restoreTurnEnv()
@@ -496,7 +511,12 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			turn.appendFrame(s.failedFrame(turn, "result_parse_failed", parseErr.Error(), false))
 			return
 		}
-		if result, artifactErr := EnsureTurnRequiredSecurityArtifacts(ctx, agentCfg, parsed.Result); artifactErr != nil {
+		if result, artifactErr := EnsureTurnRequiredSecurityArtifacts(
+			ctx,
+			agentCfg,
+			parsed.Result,
+			s.securityArtifactFollowUp(turn, turnCtx),
+		); artifactErr != nil {
 			turn.appendFrame(s.failedFrame(turn, "required_security_artifacts_missing", artifactErr.Error(), false))
 			return
 		} else {
@@ -541,6 +561,43 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			turn.appendFrame(s.failedFrame(turn, "result_store_failed", frameErr.Error(), false))
 			return
 		}
+	}
+}
+
+func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) common.SecurityArtifactFollowUp {
+	return func(ctx context.Context, prompt string) (string, error) {
+		followTurn := base
+		followTurn.Prompt = prompt
+		followTurn.Env = setEnv(followTurn.Env, workerenv.Prompt, prompt)
+		restoreFollowEnv := setTemporaryEnvEntries(followTurn.Env)
+		defer restoreFollowEnv()
+		spec, err := s.adapter.BuildCommand(ctx, followTurn)
+		if err != nil {
+			return "", err
+		}
+		defer removeTempFiles(spec.TempFiles)
+		if spec.Dir != "" {
+			followTurn.WorkDir = spec.Dir
+		}
+		turn.appendFrame(s.runtimeLogFrame(turn, "security artifact follow-up started", map[string]any{
+			"runtime": s.adapter.Name(),
+			"command": path.Base(spec.Path),
+		}))
+		run, runErr := s.runner.Run(ctx, spec)
+		if strings.TrimSpace(run.Stdout) != "" {
+			turn.appendFrame(s.outputFrame(turn, "stdout", run.Stdout))
+		}
+		if strings.TrimSpace(run.Stderr) != "" {
+			turn.appendFrame(s.runtimeLogTextFrame(turn, "stderr", run.Stderr))
+		}
+		if runErr != nil {
+			return strings.TrimSpace(run.Stdout), runErr
+		}
+		parsed, parseErr := s.adapter.ParseResult(ctx, followTurn, run)
+		if parseErr != nil {
+			return strings.TrimSpace(run.Stdout), parseErr
+		}
+		return parsed.Result, nil
 	}
 }
 
@@ -627,6 +684,8 @@ func (s *Server) normalizeFrame(turn *turnState, frame harness.HarnessEventFrame
 		failed := *frame.Failed
 		failed.Reason = events.RedactExecutionEventText(failed.Reason)
 		failed.Message = redactAndTruncate(failed.Message, events.MaxExecutionEventSummaryChars)
+		failed.Result = redactAndTruncateBytes(failed.Result, 64<<10)
+		failed.OutputRef = events.RedactExecutionEventText(failed.OutputRef)
 		frame.Failed = &failed
 	}
 	if frame.Error != nil {
@@ -685,8 +744,13 @@ func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.Har
 			return harness.HarnessEventFrame{}, err
 		}
 	}
+	previewLimit := maxTerminalResultBytes
+	if outputRef != "" {
+		previewLimit = 64 << 10
+	}
+	preview := redactAndTruncateBytes(result.Result, previewLimit)
 	frame := s.frame(turn, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{
-		Result:        redactAndTruncateBytes(result.Result, maxTerminalResultBytes),
+		Result:        preview,
 		OutputRef:     events.RedactExecutionEventText(outputRef),
 		RetainSession: false,
 	})
@@ -704,6 +768,27 @@ func (s *Server) failedFrame(turn *turnState, reason, message string, retryable 
 		Message:   redactAndTruncate(message, events.MaxExecutionEventSummaryChars),
 		Retryable: retryable,
 	})
+}
+
+func (s *Server) failedFrameWithResult(
+	turn *turnState,
+	reason string,
+	message string,
+	result string,
+	retryable bool,
+) harness.HarnessEventFrame {
+	frame := s.failedFrame(turn, reason, message, retryable)
+	if strings.TrimSpace(result) == "" || frame.Failed == nil {
+		return frame
+	}
+	outputRef, err := turn.storeOutput(result)
+	if err != nil {
+		frame.Metadata["outputRefError"] = events.RedactExecutionEventText(err.Error())
+		return frame
+	}
+	frame.Failed.Result = redactAndTruncateBytes(result, 64<<10)
+	frame.Failed.OutputRef = events.RedactExecutionEventText(outputRef)
+	return frame
 }
 
 func redactAndTruncate(value string, maxChars int) string {
@@ -811,11 +896,13 @@ type turnState struct {
 	cancel  context.CancelFunc
 	now     func() time.Time
 
-	mu         sync.Mutex
-	frames     []harness.HarnessEventFrame
-	terminal   bool
-	closed     bool
-	resultPath string
+	mu              sync.Mutex
+	frames          []harness.HarnessEventFrame
+	terminal        bool
+	closed          bool
+	resultPath      string
+	resultRead      bool
+	resultKeepUntil time.Time
 }
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
@@ -841,6 +928,8 @@ func (t *turnState) storeOutput(result string) (string, error) {
 	t.mu.Lock()
 	oldPath := t.resultPath
 	t.resultPath = outputPath
+	t.resultRead = false
+	t.resultKeepUntil = t.now().Add(max(30*time.Minute, 6*DefaultTurnRetention))
 	t.mu.Unlock()
 	if oldPath != "" {
 		_ = os.Remove(oldPath)
@@ -868,6 +957,24 @@ func (t *turnState) output() ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("turn output exceeds harness storage limit")
 	}
 	return data, true, nil
+}
+
+func (t *turnState) hasUnfetchedOutput() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.resultPath != "" && !t.resultRead
+}
+
+func (t *turnState) outputRetentionActive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.resultKeepUntil.IsZero() && t.now().Before(t.resultKeepUntil)
+}
+
+func (t *turnState) markOutputFetched() {
+	t.mu.Lock()
+	t.resultRead = true
+	t.mu.Unlock()
 }
 
 func (t *turnState) cleanupOutput() {

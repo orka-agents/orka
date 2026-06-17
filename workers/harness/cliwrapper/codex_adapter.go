@@ -133,8 +133,7 @@ func buildCodexArgs(
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
 	}
-	baseURL := codexOpenAIBaseURL()
-	if baseURL != "" {
+	if baseURL := codexOpenAIBaseURL(); baseURL != "" {
 		args = append(args, "--config", "openai_base_url="+baseURL)
 	}
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {

@@ -102,6 +102,9 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 		terminateProcessGroup(cmd.Process, r.CancelGrace)
 		waitErr = <-waitCh
 	}
+	if !cancelled {
+		terminateProcessGroup(cmd.Process, 0)
+	}
 	if waitErr == nil {
 		if err := ctx.Err(); err != nil {
 			cancelled = true

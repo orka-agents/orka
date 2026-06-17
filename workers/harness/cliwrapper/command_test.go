@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestCommandRunnerSuccess(t *testing.T) {
@@ -49,12 +51,31 @@ func TestCommandRunnerFailure(t *testing.T) {
 
 func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 	t.Setenv("PATH", "/original")
-	restore := setTemporaryEnvEntries([]string{"PATH=/tmp/evil", "ORKA_TEST_ENV=value"})
+	restore := setTemporaryEnvEntries([]string{
+		"PATH=/tmp/evil",
+		"ORKA_TEST_ENV=value",
+		"GIT_CONFIG_COUNT=1",
+		workerenv.GitToken + "=git-token",
+		"HTTPS_PROXY=http://proxy.invalid",
+		"ORKA_ARTIFACTS_DIR=/tmp/evil-artifacts",
+	})
 	if got := os.Getenv("PATH"); got != wrapperSafeCommandPath {
 		t.Fatalf("PATH during temporary env = %q, want safe wrapper path", got)
 	}
 	if got := os.Getenv("ORKA_TEST_ENV"); got != "value" {
 		t.Fatalf("ORKA_TEST_ENV = %q, want value", got)
+	}
+	if got := os.Getenv("GIT_CONFIG_COUNT"); got != "" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want blocked", got)
+	}
+	if got := os.Getenv(workerenv.GitToken); got != "git-token" {
+		t.Fatalf("%s = %q, want allowed git credential", workerenv.GitToken, got)
+	}
+	if got := os.Getenv("HTTPS_PROXY"); got != "" {
+		t.Fatalf("HTTPS_PROXY = %q, want blocked", got)
+	}
+	if got := os.Getenv("ORKA_ARTIFACTS_DIR"); got != "" {
+		t.Fatalf("ORKA_ARTIFACTS_DIR = %q, want blocked", got)
 	}
 	restore()
 	if got := os.Getenv("PATH"); got != "/original" {
@@ -62,6 +83,29 @@ func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 	}
 	if got := os.Getenv("ORKA_TEST_ENV"); got != "" {
 		t.Fatalf("ORKA_TEST_ENV after restore = %q, want empty", got)
+	}
+}
+
+func TestCommandRunnerSuccessReapsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups use Unix signals")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "child-done")
+	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
+	result, err := runner.Run(context.Background(), &CommandSpec{
+		Path: "/bin/sh",
+		Args: []string{"-c", "(sleep 5; touch " + marker + ") & exit 0"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	time.Sleep(250 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("child marker exists or stat err=%v; successful process group was not reaped", err)
 	}
 }
 

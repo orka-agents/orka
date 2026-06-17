@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +40,7 @@ const (
 	harnessWrapperStartedAnno       = "orka.ai/harness-wrapper-started"
 	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
 	harnessWrapperMetadataAnno      = "orka.ai/harness-wrapper-metadata"
+	harnessWrapperSkillsFilesMeta   = "skillsFiles"
 	harnessWrapperStreamPollTimeout = 2 * time.Second
 	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
 	harnessWrapperNoTimeoutDuration = time.Hour * 24 * 365 * 100
@@ -66,8 +69,8 @@ func harnessWrapperEndpoint() string {
 }
 
 func harnessWrapperAuthValue() string {
-	if path := strings.TrimSpace(os.Getenv(harnessWrapperAuthValueFileEnv)); path != "" {
-		data, err := os.ReadFile(path)
+	if tokenPath := strings.TrimSpace(os.Getenv(harnessWrapperAuthValueFileEnv)); tokenPath != "" {
+		data, err := os.ReadFile(tokenPath)
 		if err == nil {
 			return strings.TrimSpace(string(data))
 		}
@@ -90,6 +93,12 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return ctrl.Result{}, statusErr
 		}
 		return r.failTask(ctx, task, err.Error())
+	}
+	if execution := resolveExecution(task, agent); execution != nil {
+		return r.failTask(ctx, task, "agent execution placement is not supported by harness runtime yet")
+	}
+	if task.Spec.PriorTaskRef != nil {
+		return r.failTask(ctx, task, "priorTaskRef is not supported by harness runtime yet")
 	}
 
 	now := metav1.Now()
@@ -306,6 +315,24 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		}
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	}
+	if result.Failed != nil && r.ResultStore != nil {
+		resultBytes := []byte(result.Failed.Result)
+		if outputRef := strings.TrimSpace(result.Failed.OutputRef); outputRef == cliwrapperLocalOutputRef {
+			fetched, fetchErr := client.FetchTurnOutput(ctx, turnID, outputRef)
+			if fetchErr != nil {
+				log.Error(fetchErr, "failed to fetch failed harness wrapper result")
+			} else {
+				resultBytes = fetched
+			}
+		}
+		if len(resultBytes) > 0 {
+			if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, resultBytes); saveErr != nil {
+				log.Error(saveErr, "failed to save failed harness wrapper result")
+			} else {
+				task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+			}
+		}
+	}
 	if result.Cancelled {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, "harness wrapper turn cancelled")
 	}
@@ -351,7 +378,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
 	plannedMetadata := make(map[string]string, len(request.Metadata))
 	for key, value := range request.Metadata {
-		if key == "systemPrompt" {
+		if key == "systemPrompt" || key == harnessWrapperSkillsFilesMeta {
 			continue
 		}
 		plannedMetadata[key] = value
@@ -651,6 +678,11 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
 			metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
 		}
+		if strings.TrimSpace(metadata["model"]) == "" {
+			if model := r.harnessWrapperDefaultProviderModel(ctx, agent.Namespace); model != "" {
+				metadata["model"] = model
+			}
+		}
 		if agent.Spec.SystemPrompt != nil {
 			systemPrompt := strings.TrimSpace(agent.Spec.SystemPrompt.Inline)
 			if systemPrompt == "" && agent.Spec.SystemPrompt.ConfigMapRef != nil {
@@ -669,7 +701,7 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 			}
 		}
 	}
-	skillsPrompt, err := r.harnessWrapperSkillsPrompt(ctx, task, agent)
+	skillsPrompt, skillsFiles, err := r.harnessWrapperSkillsPrompt(ctx, task, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -678,6 +710,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 			[]string{skillsPrompt, strings.TrimSpace(metadata["systemPrompt"])},
 			"\n\n",
 		))
+	}
+	if skillsFiles != "" {
+		metadata[harnessWrapperSkillsFilesMeta] = skillsFiles
 	}
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*agent.Spec.Runtime.DefaultMaxTurns), 10)
@@ -755,51 +790,81 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	return metadata, nil
 }
 
+func (r *TaskReconciler) harnessWrapperDefaultProviderModel(ctx context.Context, namespace string) string {
+	if r == nil || r.Client == nil || strings.TrimSpace(namespace) == "" {
+		return ""
+	}
+	provider := &corev1alpha1.Provider{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: "default"}, provider); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(provider.Spec.DefaultModel)
+}
+
 func (r *TaskReconciler) harnessWrapperSkillsPrompt(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
-) (string, error) {
+) (string, string, error) {
 	if task == nil {
-		return "", nil
+		return "", "", nil
 	}
 	skillRefs := harnessWrapperSkillReferences(task, agent)
 	if len(skillRefs) == 0 {
-		return "", nil
+		return "", "", nil
 	}
 	promptParts := make([]string, 0, len(skillRefs))
+	files := map[string]string{}
 	for _, ref := range skillRefs {
 		switch {
 		case ref.Name != "":
 			skillName := strings.TrimSpace(ref.Name)
 			skill := &corev1alpha1.Skill{}
 			if err := r.Get(ctx, ctrlclient.ObjectKey{Name: skillName, Namespace: task.Namespace}, skill); err != nil {
-				return "", fmt.Errorf("failed to get Skill %q: %w", skillName, err)
+				return "", "", fmt.Errorf("failed to get Skill %q: %w", skillName, err)
 			}
 			metrics.SkillsLoaded.WithLabelValues(skill.Name, task.Namespace).Inc()
 			if content := strings.TrimSpace(skill.Spec.Content.Inline); content != "" {
 				promptParts = append(promptParts, content)
+				files[path.Join(skillName, "SKILL.md")] = skill.Spec.Content.Inline
+			}
+			filePaths := make([]string, 0, len(skill.Spec.Content.Files))
+			for filePath := range skill.Spec.Content.Files {
+				filePaths = append(filePaths, filePath)
+			}
+			sort.Strings(filePaths)
+			for _, filePath := range filePaths {
+				files[path.Join(skillName, filePath)] = skill.Spec.Content.Files[filePath]
 			}
 		case ref.ConfigMapRef != nil:
 			cmName := strings.TrimSpace(ref.ConfigMapRef.Name)
 			cmKey := strings.TrimSpace(ref.ConfigMapRef.Key)
 			cm := &corev1.ConfigMap{}
 			if err := r.Get(ctx, ctrlclient.ObjectKey{Name: cmName, Namespace: task.Namespace}, cm); err != nil {
-				return "", fmt.Errorf("failed to get skill ConfigMap %q: %w", cmName, err)
+				return "", "", fmt.Errorf("failed to get skill ConfigMap %q: %w", cmName, err)
 			}
 			content, ok := cm.Data[cmKey]
 			if !ok {
-				return "", fmt.Errorf("key %q not found in skill ConfigMap %q", cmKey, cmName)
+				return "", "", fmt.Errorf("key %q not found in skill ConfigMap %q", cmKey, cmName)
 			}
 			metrics.SkillsLoaded.WithLabelValues(cmName, task.Namespace).Inc()
 			if content = strings.TrimSpace(content); content != "" {
 				promptParts = append(promptParts, content)
+				files[path.Join(cmName+"-"+cmKey, "SKILL.md")] = content
 			}
 		default:
-			return "", fmt.Errorf("skill reference must set either name or configMapRef")
+			return "", "", fmt.Errorf("skill reference must set either name or configMapRef")
 		}
 	}
-	return strings.TrimSpace(strings.Join(promptParts, "\n\n")), nil
+	filesJSON := ""
+	if len(files) > 0 {
+		data, err := json.Marshal(files)
+		if err != nil {
+			return "", "", err
+		}
+		filesJSON = string(data)
+	}
+	return strings.TrimSpace(strings.Join(promptParts, "\n\n")), filesJSON, nil
 }
 
 func harnessWrapperSkillReferences(
@@ -1007,6 +1072,14 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 				name,
 			)
 		}
+		if harnessWrapperRootEnvNameBlocked(name) {
+			return nil, fmt.Errorf(
+				"harness runtime credential Secret %s/%s key %q is reserved for controller-managed runtime configuration",
+				key.Namespace,
+				key.Name,
+				name,
+			)
+		}
 		if len(raw) == 0 {
 			continue
 		}
@@ -1089,7 +1162,7 @@ func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {
 		if item.ValueFrom != nil {
 			return fmt.Errorf("task env %q uses valueFrom, which is not supported by harness runtime yet", name)
 		}
-		if harnessWrapperPrivateEnvName(name) || harnessWrapperEnvNameLooksSecret(name) {
+		if harnessWrapperPrivateEnvName(name) || harnessWrapperRootEnvNameBlocked(name) || harnessWrapperEnvNameLooksSecret(name) {
 			return fmt.Errorf("task env %q is not supported by harness runtime", name)
 		}
 	}
@@ -1098,6 +1171,24 @@ func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {
 
 func harnessWrapperPrivateEnvName(name string) bool {
 	return strings.HasPrefix(strings.TrimSpace(name), "ORKA_HARNESS_WRAPPER_")
+}
+
+func harnessWrapperRootEnvNameBlocked(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case workerenv.ControllerURL,
+		workerenv.ResultEndpoint,
+		workerenv.OpenAIBaseURL,
+		workerenv.ServiceAccountToken,
+		workerenv.ServiceAccountTokenPath,
+		"ORKA_ARTIFACTS_DIR",
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"ALL_PROXY",
+		"NO_PROXY":
+		return true
+	default:
+		return false
+	}
 }
 
 func harnessWrapperEnvNameValid(name string) bool {

@@ -205,6 +205,8 @@ type TurnCompleted struct {
 type TurnFailed struct {
 	Reason    string `json:"reason"`
 	Message   string `json:"message,omitempty"`
+	Result    string `json:"result,omitempty"`
+	OutputRef string `json:"outputRef,omitempty"`
 	Retryable bool   `json:"retryable,omitempty"`
 }
 

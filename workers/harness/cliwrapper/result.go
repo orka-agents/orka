@@ -2,6 +2,7 @@ package cliwrapper
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 )
 
 const wrapperSafeCommandPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+const turnMetadataSkillsFiles = "skillsFiles"
 
 var wrapperGitBinary = resolveSafeExecutable("git")
 
@@ -73,6 +76,9 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
 		}
+		if err := materializeTurnSkillFiles(root, turn.Metadata[turnMetadataSkillsFiles]); err != nil {
+			return cfg, err
+		}
 		if err := common.PrepareWorkspace(root); err != nil {
 			return cfg, err
 		}
@@ -85,11 +91,53 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 	}
 	turn.Prompt = cfg.Prompt
 	turn.Env = setEnv(turn.Env, workerenv.Prompt, cfg.Prompt)
+	if root != "" && strings.TrimSpace(turn.Metadata[turnMetadataSkillsFiles]) != "" {
+		turn.Env = setEnv(turn.Env, workerenv.SkillsDir, filepath.Join(root, ".skills"))
+	}
 	return cfg, nil
 }
 
-func EnsureTurnRequiredSecurityArtifacts(ctx context.Context, cfg *common.AgentConfig, result string) (string, error) {
-	return common.EnsureRequiredSecurityArtifacts(ctx, cfg, result, nil)
+func materializeTurnSkillFiles(root, raw string) error {
+	root = strings.TrimSpace(root)
+	raw = strings.TrimSpace(raw)
+	if root == "" || raw == "" {
+		return nil
+	}
+	var files map[string]string
+	if err := json.Unmarshal([]byte(raw), &files); err != nil {
+		return fmt.Errorf("parse turn skill files: %w", err)
+	}
+	skillsRoot := filepath.Join(root, ".skills")
+	if err := removeAllForChild(skillsRoot); err != nil {
+		return fmt.Errorf("clear turn skills directory: %w", err)
+	}
+	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
+		return fmt.Errorf("create turn skills directory: %w", err)
+	}
+	for rel, content := range files {
+		clean := filepath.Clean(strings.TrimSpace(rel))
+		if clean == "." || clean == "" || filepath.IsAbs(clean) ||
+			strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+			return fmt.Errorf("invalid turn skill file path %q", rel)
+		}
+		target := filepath.Join(skillsRoot, clean)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create turn skill file directory: %w", err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("write turn skill file %q: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+func EnsureTurnRequiredSecurityArtifacts(
+	ctx context.Context,
+	cfg *common.AgentConfig,
+	result string,
+	followUp common.SecurityArtifactFollowUp,
+) (string, error) {
+	return common.EnsureRequiredSecurityArtifacts(ctx, cfg, result, followUp)
 }
 
 func agentConfigForTurn(turn TurnContext) *common.AgentConfig {
@@ -131,7 +179,7 @@ func setTemporaryEnvEntries(entries []string) func() {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		if key == "PATH" {
+		if temporaryEnvEntryBlocked(key) {
 			continue
 		}
 		restores = append(restores, setTemporaryEnv(key, value))
@@ -142,6 +190,30 @@ func setTemporaryEnvEntries(entries []string) func() {
 			restores[i]()
 		}
 	}
+}
+
+func temporaryEnvEntryBlocked(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "PATH" {
+		return true
+	}
+	upper := strings.ToUpper(key)
+	if upper == "ORKA_ARTIFACTS_DIR" {
+		return true
+	}
+	switch upper {
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+		return true
+	}
+	if strings.HasPrefix(upper, "GIT_") {
+		switch key {
+		case workerenv.GitToken, workerenv.GitHubToken, workerenv.GitAskpass, workerenv.GitUsername:
+			return false
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func setTemporaryEnv(key, value string) func() {

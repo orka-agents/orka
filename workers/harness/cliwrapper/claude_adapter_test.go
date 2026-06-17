@@ -73,8 +73,9 @@ func TestClaudeAdapterScopesReadOnlyPermissions(t *testing.T) {
 				"LS(/workspace/**)",
 				"Read(/workspace/**)",
 			}, ","),
-			"disallowedTools": "Bash,Read(/proc/**)",
+			"disallowedTools": "Bash,Read(/proc/**),Read(/workspace/secrets/**)",
 		},
+		WorkDir: "/tmp/orka-workspace",
 	}
 	args := buildClaudeArgs(agentConfigFromTurn(turn), turn)
 	assertContains(t, args, "--bare")
@@ -82,13 +83,14 @@ func TestClaudeAdapterScopesReadOnlyPermissions(t *testing.T) {
 	assertFlagValue(t, args, "--permission-mode", "dontAsk")
 	assertFlagValue(t, args, "--tools", "Read,Glob,Grep,LS")
 	assertContains(t, args, "--allowedTools")
-	assertContains(t, args, "Read(/workspace/**)")
-	assertContains(t, args, "Glob(/workspace/**)")
-	assertContains(t, args, "Grep(/workspace/**)")
-	assertContains(t, args, "LS(/workspace/**)")
+	assertContains(t, args, "Read(/tmp/orka-workspace/**)")
+	assertContains(t, args, "Glob(/tmp/orka-workspace/**)")
+	assertContains(t, args, "Grep(/tmp/orka-workspace/**)")
+	assertContains(t, args, "LS(/tmp/orka-workspace/**)")
 	assertContains(t, args, "--disallowedTools")
 	assertContains(t, args, "Bash")
 	assertContains(t, args, "Read(/proc/**)")
+	assertContains(t, args, "Read(/tmp/orka-workspace/secrets/**)")
 	if slices.Contains(args, "Read(/workspace/**),Glob(/workspace/**),Grep(/workspace/**),LS(/workspace/**)") {
 		t.Fatal("--tools should receive bare tool names, not scoped permission specs")
 	}

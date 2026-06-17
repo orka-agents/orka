@@ -21,12 +21,20 @@ import (
 )
 
 const (
-	artifactsDir              = "/tmp/artifacts/"
+	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
+	defaultArtifactsDir       = "/tmp/artifacts"
 	workspaceArtifactsDirName = ".orka-artifacts"
 	maxTotalSize              = 50 << 20 // 50 MB
 	maxFileSize               = 10 << 20 // 10 MB
 	artifactPath              = "internal/v1/artifacts"
 )
+
+func artifactsDir() string {
+	if dir := strings.TrimSpace(os.Getenv(artifactsDirEnv)); dir != "" {
+		return filepath.Clean(dir)
+	}
+	return defaultArtifactsDir
+}
 
 // EnsureWorkspaceArtifactsLink exposes /tmp/artifacts inside the repo root so
 // runtime agents can write artifacts using a workspace-relative path.
@@ -34,7 +42,8 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	if workspaceDir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+	artifactRoot := artifactsDir()
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
@@ -51,7 +60,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 				if !filepath.IsAbs(resolved) {
 					resolved = filepath.Join(filepath.Dir(linkPath), resolved)
 				}
-				if filepath.Clean(resolved) == filepath.Clean(artifactsDir) {
+				if filepath.Clean(resolved) == filepath.Clean(artifactRoot) {
 					return nil
 				}
 			}
@@ -62,7 +71,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 		return fmt.Errorf("failed to inspect workspace artifact path: %w", err)
 	}
 
-	if err := os.Symlink(artifactsDir, linkPath); err != nil {
+	if err := os.Symlink(artifactRoot, linkPath); err != nil {
 		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
 	}
 	return nil
@@ -73,7 +82,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 func MissingArtifacts(filenames []string) ([]string, error) {
 	missing := make([]string, 0, len(filenames))
 	for _, filename := range filenames {
-		info, err := os.Stat(filepath.Join(artifactsDir, filename))
+		info, err := os.Stat(filepath.Join(artifactsDir(), filename))
 		switch {
 		case os.IsNotExist(err):
 			missing = append(missing, filename)
@@ -92,20 +101,22 @@ func WriteArtifactFile(filename string, data []byte) error {
 	if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\") {
 		return fmt.Errorf("invalid artifact filename %q", filename)
 	}
-	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+	artifactRoot := artifactsDir()
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(artifactsDir, filename), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(artifactRoot, filename), data, 0o644); err != nil {
 		return fmt.Errorf("failed to write artifact %s: %w", filename, err)
 	}
 	return nil
 }
 
-// UploadArtifacts scans /tmp/artifacts/ and uploads each file to the controller.
+// UploadArtifacts scans /tmp/artifacts and uploads each file to the controller.
 // It is called after SubmitResult to persist any files the agent wrote.
 // Returns nil if the artifacts directory does not exist or is empty.
 func UploadArtifacts() error {
-	info, err := os.Lstat(artifactsDir)
+	artifactRoot := artifactsDir()
+	info, err := os.Lstat(artifactRoot)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -119,7 +130,7 @@ func UploadArtifacts() error {
 		return fmt.Errorf("artifacts path is not a directory")
 	}
 
-	dirFile, err := openNoFollow(artifactsDir)
+	dirFile, err := openNoFollow(artifactRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

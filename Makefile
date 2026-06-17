@@ -280,6 +280,11 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	cd config/harness-wrapper && "$(KUSTOMIZE)" edit set image ghcr.io/sozercan/orka/agent-harness-wrapper=${HARNESS_WRAPPER_IMG}
+	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	@if ! "$(KUBECTL)" -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then \
+		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
+		"$(KUBECTL)" -n orka-system create secret generic harness-wrapper-auth --from-literal=token="$$token"; \
+	fi
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
