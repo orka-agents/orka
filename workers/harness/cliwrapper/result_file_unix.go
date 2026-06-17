@@ -125,5 +125,5 @@ func resultFileLinkCount(info os.FileInfo) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return uint64(stat.Nlink), true
+	return uint64(stat.Nlink), true //nolint:unconvert // Stat_t.Nlink is narrower on Darwin and uint64 on Linux.
 }
