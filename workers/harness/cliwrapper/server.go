@@ -389,6 +389,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	restoreChildIdentity := suspendChildIdentity()
+	if err := prepareTurnArtifactsDir(); err != nil {
+		restoreChildIdentity()
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
 	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
 	restoreChildIdentity()
 	if err != nil {
@@ -537,6 +542,13 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 	}
+}
+
+func prepareTurnArtifactsDir() error {
+	if err := os.MkdirAll("/tmp/artifacts", 0o770); err != nil {
+		return err
+	}
+	return prepareArtifactsForChild("/tmp/artifacts")
 }
 
 func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir string) error {
