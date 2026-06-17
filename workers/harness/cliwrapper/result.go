@@ -44,10 +44,6 @@ func FinalizeTurnResult(workDir, output string) ([]byte, error) {
 func ClearTurnArtifacts() {
 	const artifactDir = "/tmp/artifacts"
 	_ = removeAllForChild(artifactDir)
-	if _, err := os.Lstat(artifactDir); os.IsNotExist(err) {
-		return
-	}
-	_ = chownArtifactDirsForWrapper(artifactDir)
 	_ = os.RemoveAll(artifactDir)
 }
 

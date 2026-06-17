@@ -540,7 +540,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 }
 
 func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir string) error {
-	if err := chownTreeForChild("/tmp/artifacts"); err != nil {
+	if err := prepareArtifactsForChild("/tmp/artifacts"); err != nil {
 		return err
 	}
 	if workDir == "" || workDir == rootDir {
@@ -549,7 +549,7 @@ func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir string) error {
 	if err := common.EnsureWorkspaceArtifactsLink(workDir); err != nil {
 		return err
 	}
-	return chownTreeForChild("/tmp/artifacts")
+	return prepareArtifactsForChild("/tmp/artifacts")
 }
 
 func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, terminal any) harness.HarnessEventFrame {

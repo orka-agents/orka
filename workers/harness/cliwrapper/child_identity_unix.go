@@ -43,39 +43,39 @@ func chownTreeForChild(path string) error {
 	return chownTree(path, uid, gid)
 }
 
-func chownArtifactDirsForWrapper(path string) error {
-	if os.Geteuid() != 0 || strings.TrimSpace(path) == "" {
-		return nil
-	}
-	return filepath.WalkDir(path, func(p string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !entry.IsDir() {
-			return nil
-		}
-		fd, err := unix.Open(p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return err
-		}
-		if err := unix.Fchown(fd, 0, 0); err != nil {
-			_ = unix.Close(fd)
-			return err
-		}
-		if err := unix.Fchmod(fd, 0o700); err != nil {
-			_ = unix.Close(fd)
-			return err
-		}
-		return unix.Close(fd)
-	})
-}
-
 func chownTree(path string, uid, gid int) error {
 	return filepath.WalkDir(path, func(p string, _ os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		return os.Lchown(p, uid, gid)
+	})
+}
+
+func prepareArtifactsForChild(path string) error {
+	uid, _, ok := childCredentialIDs()
+	if !ok || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return filepath.WalkDir(path, func(p string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := os.Lchown(p, uid, 0); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			fd, err := unix.Open(p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			if err != nil {
+				return err
+			}
+			if err := unix.Fchmod(fd, 0o770); err != nil {
+				_ = unix.Close(fd)
+				return err
+			}
+			return unix.Close(fd)
+		}
+		return nil
 	})
 }
 
