@@ -42,9 +42,13 @@ func FinalizeTurnResult(workDir, output string) ([]byte, error) {
 // UploadTurnArtifacts reuses the existing worker artifact uploader. It is a
 // no-op when /tmp/artifacts is absent.
 func ClearTurnArtifacts() {
-	if err := removeAllForChild("/tmp/artifacts"); err != nil {
-		_ = os.RemoveAll("/tmp/artifacts")
+	const artifactDir = "/tmp/artifacts"
+	_ = removeAllForChild(artifactDir)
+	if _, err := os.Lstat(artifactDir); os.IsNotExist(err) {
+		return
 	}
+	_ = chownArtifactDirsForWrapper(artifactDir)
+	_ = os.RemoveAll(artifactDir)
 }
 
 func UploadTurnArtifacts(turn TurnContext) error {
