@@ -204,7 +204,11 @@ func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 		createSparseArtifactFile(t, fmt.Sprintf("file-%d.bin", i), fileSize)
 	}
 
-	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("UploadArtifacts() uploaded %s before enforcing total size", r.URL.Path)
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 

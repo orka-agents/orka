@@ -132,7 +132,7 @@ func UploadArtifacts() error {
 		return nil
 	}
 
-	var totalSize int
+	var totalSize int64
 
 	baseEndpoint, err := artifactEndpointBase()
 	if err != nil {
@@ -183,6 +183,11 @@ func UploadArtifacts() error {
 			_ = file.Close()
 			continue
 		}
+		if fi.Size() > maxFileSize {
+			_ = file.Close()
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, fi.Size(), maxFileSize)
+			continue
+		}
 		data, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
 		_ = file.Close()
 		if err != nil {
@@ -195,11 +200,10 @@ func UploadArtifacts() error {
 			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, len(data), maxFileSize)
 			continue
 		}
-		totalSize += len(data)
+		totalSize += int64(len(data))
 		if totalSize > maxTotalSize {
 			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, maxTotalSize)
 		}
-
 		pending = append(pending, pendingArtifact{
 			filename:    filename,
 			data:        data,
