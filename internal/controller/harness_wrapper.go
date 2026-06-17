@@ -21,6 +21,7 @@ import (
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -668,6 +669,16 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 			}
 		}
 	}
+	skillsPrompt, err := r.harnessWrapperSkillsPrompt(ctx, task, agent)
+	if err != nil {
+		return nil, err
+	}
+	if skillsPrompt != "" {
+		metadata["systemPrompt"] = strings.TrimSpace(strings.Join(
+			[]string{skillsPrompt, strings.TrimSpace(metadata["systemPrompt"])},
+			"\n\n",
+		))
+	}
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*agent.Spec.Runtime.DefaultMaxTurns), 10)
 	}
@@ -742,6 +753,94 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		}
 	}
 	return metadata, nil
+}
+
+func (r *TaskReconciler) harnessWrapperSkillsPrompt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) (string, error) {
+	if task == nil {
+		return "", nil
+	}
+	skillRefs := harnessWrapperSkillReferences(task, agent)
+	if len(skillRefs) == 0 {
+		return "", nil
+	}
+	promptParts := make([]string, 0, len(skillRefs))
+	for _, ref := range skillRefs {
+		switch {
+		case ref.Name != "":
+			skillName := strings.TrimSpace(ref.Name)
+			skill := &corev1alpha1.Skill{}
+			if err := r.Get(ctx, ctrlclient.ObjectKey{Name: skillName, Namespace: task.Namespace}, skill); err != nil {
+				return "", fmt.Errorf("failed to get Skill %q: %w", skillName, err)
+			}
+			metrics.SkillsLoaded.WithLabelValues(skill.Name, task.Namespace).Inc()
+			if content := strings.TrimSpace(skill.Spec.Content.Inline); content != "" {
+				promptParts = append(promptParts, content)
+			}
+		case ref.ConfigMapRef != nil:
+			cmName := strings.TrimSpace(ref.ConfigMapRef.Name)
+			cmKey := strings.TrimSpace(ref.ConfigMapRef.Key)
+			cm := &corev1.ConfigMap{}
+			if err := r.Get(ctx, ctrlclient.ObjectKey{Name: cmName, Namespace: task.Namespace}, cm); err != nil {
+				return "", fmt.Errorf("failed to get skill ConfigMap %q: %w", cmName, err)
+			}
+			content, ok := cm.Data[cmKey]
+			if !ok {
+				return "", fmt.Errorf("key %q not found in skill ConfigMap %q", cmKey, cmName)
+			}
+			metrics.SkillsLoaded.WithLabelValues(cmName, task.Namespace).Inc()
+			if content = strings.TrimSpace(content); content != "" {
+				promptParts = append(promptParts, content)
+			}
+		default:
+			return "", fmt.Errorf("skill reference must set either name or configMapRef")
+		}
+	}
+	return strings.TrimSpace(strings.Join(promptParts, "\n\n")), nil
+}
+
+func harnessWrapperSkillReferences(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) []corev1alpha1.SkillReference {
+	var skillRefs []corev1alpha1.SkillReference
+	if agent != nil {
+		skillRefs = append(skillRefs, agent.Spec.Skills...)
+	}
+	if task != nil && task.Spec.AI != nil {
+		skillRefs = append(skillRefs, task.Spec.AI.Skills...)
+	}
+	if len(skillRefs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(skillRefs))
+	deduped := make([]corev1alpha1.SkillReference, 0, len(skillRefs))
+	for _, ref := range skillRefs {
+		key := ""
+		switch {
+		case strings.TrimSpace(ref.Name) != "":
+			name := strings.TrimSpace(ref.Name)
+			ref.Name = name
+			key = "skill:" + name
+		case ref.ConfigMapRef != nil:
+			cmName := strings.TrimSpace(ref.ConfigMapRef.Name)
+			cmKey := strings.TrimSpace(ref.ConfigMapRef.Key)
+			ref.ConfigMapRef = &corev1alpha1.ConfigMapKeySelector{Name: cmName, Key: cmKey}
+			key = "configmap:" + cmName + "/" + cmKey
+		}
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, ref)
+	}
+	return deduped
 }
 
 // harnessWrapperBaseTurnEnv copies only literal Task env after validateTaskAgentCompatibility
@@ -900,6 +999,14 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 				name,
 			)
 		}
+		if harnessWrapperPrivateEnvName(name) {
+			return nil, fmt.Errorf(
+				"harness runtime credential Secret %s/%s key %q is reserved for wrapper configuration",
+				key.Namespace,
+				key.Name,
+				name,
+			)
+		}
 		if len(raw) == 0 {
 			continue
 		}
@@ -982,11 +1089,15 @@ func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {
 		if item.ValueFrom != nil {
 			return fmt.Errorf("task env %q uses valueFrom, which is not supported by harness runtime yet", name)
 		}
-		if strings.HasPrefix(name, "ORKA_HARNESS_WRAPPER_") || harnessWrapperEnvNameLooksSecret(name) {
+		if harnessWrapperPrivateEnvName(name) || harnessWrapperEnvNameLooksSecret(name) {
 			return fmt.Errorf("task env %q is not supported by harness runtime", name)
 		}
 	}
 	return nil
+}
+
+func harnessWrapperPrivateEnvName(name string) bool {
+	return strings.HasPrefix(strings.TrimSpace(name), "ORKA_HARNESS_WRAPPER_")
 }
 
 func harnessWrapperEnvNameValid(name string) bool {

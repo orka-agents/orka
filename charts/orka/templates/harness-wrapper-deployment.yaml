@@ -73,6 +73,7 @@ spec:
                 - SETUID
                 - SETGID
                 - CHOWN
+                - KILL
           livenessProbe:
             httpGet:
               path: /v1/health

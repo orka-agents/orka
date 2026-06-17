@@ -13,6 +13,25 @@ import (
 	"github.com/sozercan/orka/workers/common"
 )
 
+const wrapperSafeCommandPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+var wrapperGitBinary = resolveSafeExecutable("git")
+
+func resolveSafeExecutable(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsRune(name, os.PathSeparator) {
+		return name
+	}
+	for _, dir := range filepath.SplitList(wrapperSafeCommandPath) {
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return name
+}
+
 // FinalizeTurnResult reuses the existing worker structured-result and workspace
 // diff finalization behavior. A non-git or empty workDir falls back to the raw
 // agent output, matching workers/common.FinalizeResult semantics.
@@ -103,14 +122,19 @@ func agentConfigForTurn(turn TurnContext) *common.AgentConfig {
 }
 
 func setTemporaryEnvEntries(entries []string) func() {
-	restores := make([]func(), 0, len(entries))
+	restores := make([]func(), 0, len(entries)+1)
 	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok || strings.TrimSpace(key) == "" {
 			continue
 		}
-		restores = append(restores, setTemporaryEnv(strings.TrimSpace(key), value))
+		key = strings.TrimSpace(key)
+		if key == "PATH" {
+			continue
+		}
+		restores = append(restores, setTemporaryEnv(key, value))
 	}
+	restores = append(restores, setTemporaryEnv("PATH", wrapperSafeCommandPath))
 	return func() {
 		for i := len(restores) - 1; i >= 0; i-- {
 			restores[i]()
@@ -139,7 +163,8 @@ func wrapperGitCommand(dir string, args ...string) *exec.Cmd {
 		safeDir = abs
 	}
 	gitArgs := append([]string{"-c", "safe.directory=" + safeDir, "-C", dir}, args...)
-	cmd := exec.Command("git", gitArgs...)
+	cmd := exec.Command(wrapperGitBinary, gitArgs...)
+	cmd.Env = setEnv(os.Environ(), "PATH", wrapperSafeCommandPath)
 	cmd.SysProcAttr = commandSysProcAttr()
 	return cmd
 }

@@ -89,6 +89,198 @@ func TestGenericAdapterBuildCommandPromptModes(t *testing.T) {
 	removeTempFiles(spec.TempFiles)
 }
 
+func TestGenericAdapterRejectsResultFileEscapingWorkspaceSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "escape")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	outsideResult := filepath.Join(outside, "result.txt")
+	if err := os.WriteFile(outsideResult, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+		ResultFile: filepath.Join("escape", "result.txt"),
+		WorkDir:    dir,
+	})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: dir})
+	if err == nil || (!strings.Contains(err.Error(), "escapes workspace") &&
+		!strings.Contains(err.Error(), "must not contain symlink")) {
+		t.Fatalf("BuildCommand error = %v, want workspace escape or symlink rejection", err)
+	}
+	if _, statErr := os.Stat(outsideResult); statErr != nil {
+		t.Fatalf("outside result was modified before validation: %v", statErr)
+	}
+}
+
+func TestGenericAdapterRejectsResultFileSymlinkedParentInsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	actual := filepath.Join(dir, "actual")
+	if err := os.Mkdir(actual, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actual, filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+		ResultFile: filepath.Join("link", "result.txt"),
+		WorkDir:    dir,
+	})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "must not contain symlink") {
+		t.Fatalf("BuildCommand error = %v, want symlinked parent rejection", err)
+	}
+}
+
+func TestGenericAdapterResultFileModeRequiresConfiguredPath(t *testing.T) {
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+	})
+	if err := adapter.Validate(); err == nil || !strings.Contains(err.Error(), EnvResultFile) {
+		t.Fatalf("Validate() error = %v, want missing result file", err)
+	}
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), EnvResultFile) {
+		t.Fatalf("BuildCommand() error = %v, want missing result file", err)
+	}
+}
+
+func TestGenericAdapterResultFilePrecreateReplacesHardLink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	outsideResult := filepath.Join(outside, "result.txt")
+	if err := os.WriteFile(outsideResult, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(dir, "result.txt")
+	if err := os.Link(outsideResult, resultPath); err != nil {
+		t.Skipf("hard links unsupported: %v", err)
+	}
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+		ResultFile: "result.txt",
+		WorkDir:    dir,
+	})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	data, err := os.ReadFile(outsideResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep" {
+		t.Fatalf("outside hard-link target = %q, want untouched", string(data))
+	}
+}
+
+func TestGenericAdapterResultFileRequiresChildWrite(t *testing.T) {
+	dir := t.TempDir()
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+		ResultFile: "result.txt",
+		WorkDir:    dir,
+	})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	_, err = adapter.ParseResult(
+		context.Background(),
+		TurnContext{},
+		CommandResult{Stdout: "stdout", ResultFile: spec.ResultFile},
+	)
+	if err == nil || !strings.Contains(err.Error(), "result file was not written") {
+		t.Fatalf("ParseResult error = %v, want unwritten result file", err)
+	}
+}
+
+func TestGenericAdapterRejectsResultFileReplacedWithSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	outsideResult := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideResult, []byte("outside secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+		ResultFile: "result.txt",
+		WorkDir:    dir,
+	})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if err := os.Remove(spec.ResultFile); err != nil {
+		t.Fatalf("replace result file: %v", err)
+	}
+	if err := os.Symlink(outsideResult, spec.ResultFile); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	result, err := adapter.ParseResult(
+		context.Background(),
+		TurnContext{},
+		CommandResult{Stdout: "stdout", ResultFile: spec.ResultFile},
+	)
+	if err == nil || !strings.Contains(err.Error(), "read result file") {
+		t.Fatalf("ParseResult error = %v, result=%q; want symlink read rejection", err, result.Result)
+	}
+	if strings.Contains(result.Result, "outside secret") {
+		t.Fatalf("ParseResult leaked symlink target content: %q", result.Result)
+	}
+}
+
+func TestGenericAdapterRejectsResultFileParentReplacedWithSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "result.txt"), []byte("outside secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewGenericAdapter(GenericAdapterConfig{
+		Command:    testEchoCommand,
+		ResultMode: ResultModeFile,
+		ResultFile: filepath.Join("nested", "result.txt"),
+		WorkDir:    dir,
+	})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: dir})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if err := os.Remove(spec.ResultFile); err != nil {
+		t.Fatalf("remove result file before replacing parent: %v", err)
+	}
+	parent := filepath.Dir(spec.ResultFile)
+	if err := os.Remove(parent); err != nil {
+		t.Fatalf("remove result parent before replacing it: %v", err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	result, err := adapter.ParseResult(
+		context.Background(),
+		TurnContext{WorkDir: dir},
+		CommandResult{Stdout: "stdout", ResultFile: spec.ResultFile},
+	)
+	if err == nil || !strings.Contains(err.Error(), "read result file") {
+		t.Fatalf("ParseResult error = %v, result=%q; want symlinked parent rejection", err, result.Result)
+	}
+	if strings.Contains(result.Result, "outside secret") {
+		t.Fatalf("ParseResult leaked symlinked parent target content: %q", result.Result)
+	}
+}
+
 func TestGenericAdapterResultFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "result.txt")

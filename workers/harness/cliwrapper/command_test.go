@@ -47,6 +47,24 @@ func TestCommandRunnerFailure(t *testing.T) {
 	}
 }
 
+func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
+	t.Setenv("PATH", "/original")
+	restore := setTemporaryEnvEntries([]string{"PATH=/tmp/evil", "ORKA_TEST_ENV=value"})
+	if got := os.Getenv("PATH"); got != wrapperSafeCommandPath {
+		t.Fatalf("PATH during temporary env = %q, want safe wrapper path", got)
+	}
+	if got := os.Getenv("ORKA_TEST_ENV"); got != "value" {
+		t.Fatalf("ORKA_TEST_ENV = %q, want value", got)
+	}
+	restore()
+	if got := os.Getenv("PATH"); got != "/original" {
+		t.Fatalf("PATH after restore = %q, want original", got)
+	}
+	if got := os.Getenv("ORKA_TEST_ENV"); got != "" {
+		t.Fatalf("ORKA_TEST_ENV after restore = %q, want empty", got)
+	}
+}
+
 func TestCommandRunnerTimeoutKillsProcess(t *testing.T) {
 	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

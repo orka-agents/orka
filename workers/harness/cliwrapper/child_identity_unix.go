@@ -82,6 +82,24 @@ func prepareControlFileForChild(path string, mode os.FileMode) error {
 	return nil
 }
 
+func prepareOpenControlFileForChild(file *os.File, mode os.FileMode) error {
+	uid, _, ok := childCredentialIDs()
+	if !ok {
+		return nil
+	}
+	if err := file.Chown(0, 0); err != nil {
+		return err
+	}
+	if err := file.Chmod(mode); err != nil {
+		return err
+	}
+	if err := file.Chown(uid, 0); err != nil {
+		_ = file.Chmod(0o600)
+		return err
+	}
+	return nil
+}
+
 func removeAllForChild(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return nil

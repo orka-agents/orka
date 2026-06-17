@@ -227,6 +227,50 @@ func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperTurnRequestRejectsWrapperPrivateSecretEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret"}
+	taskSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			"ORKA_HARNESS_WRAPPER_CHILD_UID": []byte("0"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, taskSecret)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "reserved for wrapper configuration") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want wrapper-private Secret env rejection", err)
+	}
+}
+
+func TestHarnessWrapperTurnRequestPrependsSkillsToSystemPrompt(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "Base instructions"}
+	agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "agent-skill"}}
+	task.Spec.AI = &corev1alpha1.AISpec{Skills: []corev1alpha1.SkillReference{{
+		ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "task-skills", Key: "review"},
+	}}}
+	skill := &corev1alpha1.Skill{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-skill", Namespace: task.Namespace},
+		Spec: corev1alpha1.SkillSpec{Content: corev1alpha1.SkillContent{
+			Inline: "Use the agent skill.",
+		}},
+	}
+	skillCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-skills", Namespace: task.Namespace},
+		Data:       map[string]string{"review": "Use the task skill."},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, skill, skillCM)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	want := "Use the agent skill.\n\nUse the task skill.\n\nBase instructions"
+	if request.Metadata["systemPrompt"] != want {
+		t.Fatalf("systemPrompt = %q, want %q", request.Metadata["systemPrompt"], want)
+	}
+}
+
 func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) {
 	const readOnlyWorkspaceGitCredential = "test"
 	task, agent := harnessWrapperTaskAndAgent()

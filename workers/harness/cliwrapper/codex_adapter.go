@@ -95,8 +95,8 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 		if err != nil {
 			return TurnResult{Result: run.Stdout}, err
 		}
-		if data != "" {
-			return TurnResult{Result: data, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+		if data.contents != "" {
+			return TurnResult{Result: data.contents, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
 		}
 	}
 	return TurnResult{Result: run.Stdout, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil

@@ -498,7 +498,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			parsed.Result = result
 		}
 		removeControlFiles(turnCtx.WorkDir, append(spec.TempFiles, spec.ResultFile)...)
-		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
+		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) && ShouldFinalizeWorkDir(turnCtx.WorkDir) {
 			finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
 			if finalizeErr != nil {
 				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
