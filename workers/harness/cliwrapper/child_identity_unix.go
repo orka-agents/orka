@@ -61,12 +61,13 @@ func prepareArtifactsForChild(path string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.Lchown(p, uid, 0); err != nil {
-			return err
-		}
 		if entry.IsDir() {
 			fd, err := unix.Open(p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 			if err != nil {
+				return err
+			}
+			if err := unix.Fchown(fd, uid, 0); err != nil {
+				_ = unix.Close(fd)
 				return err
 			}
 			if err := unix.Fchmod(fd, 0o770); err != nil {
@@ -75,7 +76,7 @@ func prepareArtifactsForChild(path string) error {
 			}
 			return unix.Close(fd)
 		}
-		return nil
+		return os.Lchown(p, uid, 0)
 	})
 }
 

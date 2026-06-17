@@ -71,6 +71,7 @@ spec:
             - SETGID
             - CHOWN
             - KILL
+            - FOWNER
         livenessProbe:
           httpGet:
             path: /v1/health
