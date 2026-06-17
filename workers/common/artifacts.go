@@ -121,11 +121,17 @@ func UploadArtifacts() error {
 
 	dirFile, err := openNoFollow(artifactsDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to open artifacts directory: %w", err)
 	}
 	defer dirFile.Close() //nolint:errcheck
 	entries, err := dirFile.ReadDir(-1)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to read artifacts directory: %w", err)
 	}
 	if len(entries) == 0 {
