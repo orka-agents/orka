@@ -239,6 +239,8 @@ spec:
               value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
             - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
               value: /var/run/orka/harness-wrapper/token
+            - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
+              value: {{ printf "%s-agent-harness-wrapper" (include "orka.fullname" .) | quote }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:

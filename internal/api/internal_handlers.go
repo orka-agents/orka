@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -29,6 +30,13 @@ import (
 )
 
 const maxResultSize = 10 << 20 // 10MB
+
+const (
+	harnessWrapperStartedAnnotation = "orka.ai/harness-wrapper-started"
+	harnessWrapperTurnIDAnnotation  = "orka.ai/harness-wrapper-turn-id"
+	harnessWrapperRuntimeAnnotation = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperServiceAccountEnv = "ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME"
+)
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
@@ -393,7 +401,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid filename")
 	}
 
-	if err := verifyCallerNamespace(c, namespace); err != nil {
+	if err := h.verifyArtifactUploadCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -630,6 +638,92 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 	}
 
 	return nil
+}
+
+func (h *InternalHandlers) verifyArtifactUploadCaller(c fiber.Ctx, namespace, taskName string) error {
+	if err := verifyCallerNamespace(c, namespace); err != nil {
+		var fiberErr *fiber.Error
+		if !errors.As(err, &fiberErr) || fiberErr.Code != fiber.StatusForbidden {
+			return err
+		}
+		if allowErr := h.verifyHarnessWrapperArtifactUpload(c.Context(), GetUserInfo(c), namespace, taskName); allowErr == nil {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *InternalHandlers) verifyHarnessWrapperArtifactUpload(
+	ctx context.Context,
+	userInfo *UserInfo,
+	namespace string,
+	taskName string,
+) error {
+	if h == nil || h.k8sClient == nil || userInfo == nil {
+		return fiber.NewError(fiber.StatusForbidden, "cross-namespace access denied")
+	}
+	if userInfo.AuthType != AuthTypeTokenReview {
+		return fiber.NewError(fiber.StatusForbidden, "caller pod token required")
+	}
+	controlNamespace := currentPodNamespace()
+	if controlNamespace == "" {
+		return fiber.NewError(fiber.StatusForbidden, "controller namespace unavailable")
+	}
+	callerNamespace := strings.TrimSpace(userInfo.Namespace)
+	if callerNamespace == "" {
+		callerNamespace = parseServiceAccountNamespace(userInfo.Username)
+	}
+	if callerNamespace != controlNamespace {
+		return fiber.NewError(fiber.StatusForbidden, "caller is not a control-plane service account")
+	}
+	if serviceAccountNameFromUsername(userInfo.Username) != expectedHarnessWrapperServiceAccountName() {
+		return fiber.NewError(fiber.StatusForbidden, "caller is not the harness wrapper service account")
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := h.k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
+		return fiber.NewError(fiber.StatusForbidden, "target task not found")
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return fiber.NewError(fiber.StatusForbidden, "target task is not an agent task")
+	}
+	if strings.TrimSpace(task.Status.JobName) != "" {
+		return fiber.NewError(fiber.StatusForbidden, "target task has a worker job")
+	}
+	if task.Annotations == nil ||
+		!strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnnotation]), "true") ||
+		strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == "" ||
+		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) == "" {
+		return fiber.NewError(fiber.StatusForbidden, "target task is not running through harness wrapper")
+	}
+	return nil
+}
+
+func currentPodNamespace() string {
+	if namespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); namespace != "" {
+		return namespace
+	}
+	data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func expectedHarnessWrapperServiceAccountName() string {
+	if name := strings.TrimSpace(os.Getenv(harnessWrapperServiceAccountEnv)); name != "" {
+		return name
+	}
+	return "agent-harness-wrapper"
+}
+
+func serviceAccountNameFromUsername(username string) string {
+	parts := strings.Split(strings.TrimSpace(username), ":")
+	if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" {
+		return parts[3]
+	}
+	return ""
 }
 
 func verifyCallerOwnsTaskWorker(ctx context.Context, c client.Client, userInfo *UserInfo, task *corev1alpha1.Task) error {

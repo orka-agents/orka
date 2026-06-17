@@ -19,6 +19,7 @@ spec:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: agent-harness-wrapper
     spec:
+      serviceAccountName: {{ include "orka.fullname" . }}-agent-harness-wrapper
       automountServiceAccountToken: false
       securityContext:
         runAsUser: 0
