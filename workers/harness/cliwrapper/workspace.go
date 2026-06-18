@@ -3,14 +3,23 @@ package cliwrapper
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/sozercan/orka/internal/workerenv"
 )
+
+var lookupWorkspaceHostIPs = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+const envAllowedGitHosts = "ORKA_HARNESS_WRAPPER_ALLOWED_GIT_HOSTS"
 
 func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	baseArgs := []string{
@@ -53,10 +62,62 @@ func validateWorkspaceRepoURL(rawRepo string) error {
 		return fmt.Errorf("workspace git repo URL must not include credentials, query, or fragment")
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if host != "github.com" {
-		return fmt.Errorf("workspace git repo host %q is not allowed", parsed.Hostname())
+	if err := validateWorkspaceRepoHost(host); err != nil {
+		return err
 	}
 	return nil
+}
+
+func validateWorkspaceRepoHost(host string) error {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return fmt.Errorf("workspace git repo host %q is not allowed", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if workspaceIPBlocked(ip) {
+			return fmt.Errorf("workspace git repo host %q resolves to a private or local address", host)
+		}
+		if !workspaceGitHostAllowed(host) {
+			return fmt.Errorf("workspace git repo host %q is not allowed", host)
+		}
+		return nil
+	}
+	if !workspaceGitHostAllowed(host) {
+		return fmt.Errorf("workspace git repo host %q is not allowed", host)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addrs, err := lookupWorkspaceHostIPs(ctx, host)
+	if err != nil {
+		return fmt.Errorf("resolve workspace git repo host %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("resolve workspace git repo host %q: no addresses", host)
+	}
+	for _, addr := range addrs {
+		if workspaceIPBlocked(addr.IP) {
+			return fmt.Errorf("workspace git repo host %q resolves to a private or local address", host)
+		}
+	}
+	return nil
+}
+
+func workspaceGitHostAllowed(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if slices.Contains([]string{"github.com", "gitlab.com", "bitbucket.org"}, host) {
+		return true
+	}
+	for item := range strings.SplitSeq(os.Getenv(envAllowedGitHosts), ",") {
+		if host == strings.ToLower(strings.TrimSpace(item)) {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceIPBlocked(ip net.IP) bool {
+	return ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
 }
 
 type preparedWorkspace struct {

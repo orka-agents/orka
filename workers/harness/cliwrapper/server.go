@@ -528,14 +528,18 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			parsed.Result = result
 		}
 		removeControlFiles(turnCtx.WorkDir, append(spec.TempFiles, spec.ResultFile)...)
-		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) && ShouldFinalizeWorkDir(turnCtx.WorkDir) {
-			finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, parsed.Result)
+		finalizeWorkDir := turnCtx.WorkDir
+		if preparedWorkspace.rootDir != "" {
+			finalizeWorkDir = preparedWorkspace.rootDir
+		}
+		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) && ShouldFinalizeWorkDir(finalizeWorkDir) {
+			finalized, finalizeErr := FinalizeTurnResult(finalizeWorkDir, parsed.Result)
 			if finalizeErr != nil {
 				turn.appendFrame(s.failedFrame(turn, "result_finalize_failed", finalizeErr.Error(), false))
 				return
 			}
 			parsed.Result = string(finalized)
-			finalizedWorkDir = turnCtx.WorkDir
+			finalizedWorkDir = finalizeWorkDir
 		}
 		if len([]byte(parsed.Result)) > maxStoredResultBytes {
 			turn.appendFrame(s.failedFrame(

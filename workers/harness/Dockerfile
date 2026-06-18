@@ -31,6 +31,8 @@ RUN npm install -g @openai/codex @anthropic-ai/claude-code \
     && npm cache clean --force
 
 COPY --from=target-go /usr/local/go /usr/local/go
+RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 COPY --from=builder /out/orka-agent-harness-wrapper /orka-agent-harness-wrapper
 COPY --from=builder /out/orka-workspace-agent /orka-workspace-agent
 

@@ -2,6 +2,7 @@ package cliwrapper
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -395,11 +396,16 @@ func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
 }
 
 func TestValidateWorkspaceRepoURLRejectsLocalInputs(t *testing.T) {
+	withWorkspaceHostLookup(t, map[string][]net.IPAddr{
+		"github.com": {{IP: net.ParseIP("140.82.112.3")}},
+	})
 	for _, repo := range []string{
 		"/tmp/repo",
 		"file:///tmp/repo",
 		"https://localhost/repo.git",
 		"https://127.0.0.1/repo.git",
+		"https://10.0.0.1/repo.git",
+		"https://metadata.local/repo.git",
 		"https://user@github.com/sozercan/orka.git",
 		"https://github.com/sozercan/orka.git?credential=value",
 	} {
@@ -410,7 +416,41 @@ func TestValidateWorkspaceRepoURLRejectsLocalInputs(t *testing.T) {
 }
 
 func TestValidateWorkspaceRepoURLAllowsHTTPSRemote(t *testing.T) {
-	if err := validateWorkspaceRepoURL("https://github.com/sozercan/orka.git"); err != nil {
+	withWorkspaceHostLookup(t, map[string][]net.IPAddr{
+		"gitlab.com": {{IP: net.ParseIP("172.65.251.78")}},
+	})
+	if err := validateWorkspaceRepoURL("https://gitlab.com/group/repo.git"); err != nil {
 		t.Fatalf("validateWorkspaceRepoURL() error = %v", err)
 	}
+}
+
+func TestValidateWorkspaceRepoURLAllowsConfiguredEnterpriseHost(t *testing.T) {
+	t.Setenv(envAllowedGitHosts, "git.example.com")
+	withWorkspaceHostLookup(t, map[string][]net.IPAddr{
+		"git.example.com": {{IP: net.ParseIP("203.0.113.10")}},
+	})
+	if err := validateWorkspaceRepoURL("https://git.example.com/group/repo.git"); err != nil {
+		t.Fatalf("validateWorkspaceRepoURL() error = %v", err)
+	}
+}
+
+func TestValidateWorkspaceRepoURLRejectsPrivateResolvedHost(t *testing.T) {
+	withWorkspaceHostLookup(t, map[string][]net.IPAddr{
+		"git.internal.example.com": {{IP: net.ParseIP("10.0.0.10")}},
+	})
+	if err := validateWorkspaceRepoURL("https://git.internal.example.com/group/repo.git"); err == nil {
+		t.Fatal("validateWorkspaceRepoURL() error = nil, want private resolved host rejection")
+	}
+}
+
+func withWorkspaceHostLookup(t *testing.T, hosts map[string][]net.IPAddr) {
+	t.Helper()
+	original := lookupWorkspaceHostIPs
+	lookupWorkspaceHostIPs = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if addrs, ok := hosts[host]; ok {
+			return addrs, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { lookupWorkspaceHostIPs = original })
 }

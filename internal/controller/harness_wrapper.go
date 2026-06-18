@@ -97,8 +97,8 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	if execution := resolveExecution(task, agent); execution != nil {
 		return r.failTask(ctx, task, "agent execution placement is not supported by harness runtime yet")
 	}
-	if task.Spec.PriorTaskRef != nil {
-		return r.failTask(ctx, task, "priorTaskRef is not supported by harness runtime yet")
+	if task.Spec.PriorTaskRef != nil && r.EnforceNamespaceIsolation {
+		return r.failTask(ctx, task, "priorTaskRef is not supported by harness runtime when namespace isolation is enforced")
 	}
 
 	now := metav1.Now()
