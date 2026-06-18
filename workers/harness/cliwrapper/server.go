@@ -521,6 +521,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			agentCfg,
 			parsed.Result,
 			s.securityArtifactFollowUp(turn, turnCtx),
+			turnArtifactsDir,
 		); artifactErr != nil {
 			turn.appendFrame(s.failedFrame(turn, "required_security_artifacts_missing", artifactErr.Error(), false))
 			return

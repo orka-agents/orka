@@ -158,7 +158,10 @@ func EnsureTurnRequiredSecurityArtifacts(
 	cfg *common.AgentConfig,
 	result string,
 	followUp common.SecurityArtifactFollowUp,
+	artifactDir string,
 ) (string, error) {
+	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+	defer restoreArtifactDir()
 	return common.EnsureRequiredSecurityArtifacts(ctx, cfg, result, followUp)
 }
 
