@@ -618,6 +618,11 @@ func prepareTurnArtifactsDirForWrapper(artifactDir string) error {
 	if err := os.MkdirAll(artifactDir, 0o770); err != nil {
 		return err
 	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(artifactDir, 0, 0); err != nil {
+			return err
+		}
+	}
 	return os.Chmod(artifactDir, 0o770)
 }
 
