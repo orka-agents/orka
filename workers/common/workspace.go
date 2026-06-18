@@ -613,7 +613,7 @@ func resetReservedWorkspacePaths(workDir string) {
 	// Runtime agents expose a repo-local symlink to /tmp/artifacts so scan and
 	// patch jobs can write required artifacts from inside the workspace. That
 	// symlink is infrastructure, not a user-facing code change.
-	execGit(workDir, "reset", "-q", "--", workspaceArtifactsDirName) //nolint:errcheck
+	execGit(workDir, "reset", "-q", "--", workspaceArtifactsDirName, ":(glob)**/"+workspaceArtifactsDirName) //nolint:errcheck,lll
 }
 
 // execGit runs a git command in the given directory and returns combined output.

@@ -24,6 +24,7 @@ import (
 	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -252,22 +253,31 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	}
 	afterSeq := harnessWrapperLastFrameSeq(task)
 	lastFrameSeq := afterSeq
+	existingFrameKeys, err := r.existingHarnessFrameKeys(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	streamCtx, cancel := context.WithTimeout(ctx, harnessWrapperStreamPollTimeout)
 	defer cancel()
 	err = client.StreamFrames(streamCtx, turnID, afterSeq, func(frame harness.HarnessEventFrame) error {
 		if frame.RuntimeSessionID != runtimeSessionID || frame.TurnID != turnID || frame.CorrelationID != correlationID {
 			return fmt.Errorf("harness frame identity does not match running turn")
 		}
-		mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
-		if err != nil {
-			return err
-		}
-		appended, err := r.ExecutionEventStore.AppendExecutionEvent(streamCtx, mapped)
-		if err != nil {
-			return fmt.Errorf("append mapped harness event: %w", err)
-		}
 		result.Frames = append(result.Frames, frame)
-		result.Events = append(result.Events, *appended)
+		key := harnessFrameKey(frame)
+		_, alreadyAppended := existingFrameKeys[key]
+		if !alreadyAppended {
+			mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
+			if err != nil {
+				return err
+			}
+			appended, err := r.ExecutionEventStore.AppendExecutionEvent(streamCtx, mapped)
+			if err != nil {
+				return fmt.Errorf("append mapped harness event: %w", err)
+			}
+			result.Events = append(result.Events, *appended)
+			existingFrameKeys[key] = struct{}{}
+		}
 		if frame.Seq > lastFrameSeq {
 			lastFrameSeq = frame.Seq
 		}
@@ -359,6 +369,50 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn ended without result")
 	}
 	return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "harness wrapper task completed successfully")
+}
+
+func (r *TaskReconciler) existingHarnessFrameKeys(ctx context.Context, task *corev1alpha1.Task) (map[string]struct{}, error) {
+	keys := map[string]struct{}{}
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return keys, nil
+	}
+	eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list mapped harness events: %w", err)
+	}
+	for _, event := range eventsList {
+		var content struct {
+			Harness struct {
+				RuntimeSessionID string `json:"runtimeSessionID"`
+				TurnID           string `json:"turnID"`
+				CorrelationID    string `json:"correlationID"`
+				Seq              int64  `json:"seq"`
+			} `json:"harness"`
+		}
+		if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+			continue
+		}
+		keys[strings.Join([]string{
+			content.Harness.RuntimeSessionID,
+			content.Harness.TurnID,
+			content.Harness.CorrelationID,
+			strconv.FormatInt(content.Harness.Seq, 10),
+		}, "\x00")] = struct{}{}
+	}
+	return keys, nil
+}
+
+func harnessFrameKey(frame harness.HarnessEventFrame) string {
+	return strings.Join([]string{
+		string(frame.RuntimeSessionID),
+		string(frame.TurnID),
+		frame.CorrelationID,
+		strconv.FormatInt(frame.Seq, 10),
+	}, "\x00")
 }
 
 func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(

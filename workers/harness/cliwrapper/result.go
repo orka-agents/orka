@@ -227,7 +227,10 @@ func temporaryEnvEntryBlocked(key string) bool {
 		return true
 	}
 	switch upper {
-	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT":
+		return true
+	}
+	if strings.HasPrefix(upper, "DYLD_") {
 		return true
 	}
 	if strings.HasPrefix(upper, "GIT_") {

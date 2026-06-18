@@ -491,9 +491,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		}
 		partial := strings.TrimSpace(run.Stdout)
 		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
+			restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
 			if finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, partial); finalizeErr == nil {
 				partial = string(finalized)
 			}
+			restoreTurnEnv()
 		}
 		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
@@ -641,16 +643,13 @@ func prepareTurnArtifactsDirForWrapper(artifactDir string) error {
 }
 
 func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir, artifactDir string) error {
-	if err := prepareArtifactsForChild(artifactDir); err != nil {
-		return err
-	}
-	if workDir == "" || workDir == rootDir {
-		return nil
-	}
-	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
-	defer restoreArtifactDir()
-	if err := common.EnsureWorkspaceArtifactsLink(workDir); err != nil {
-		return err
+	if workDir != "" && rootDir != "" && workDir != rootDir {
+		restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+		if err := common.EnsureWorkspaceArtifactsLink(workDir); err != nil {
+			restoreArtifactDir()
+			return err
+		}
+		restoreArtifactDir()
 	}
 	return prepareArtifactsForChild(artifactDir)
 }

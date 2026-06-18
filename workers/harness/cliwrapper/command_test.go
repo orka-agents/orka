@@ -58,6 +58,8 @@ func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 		workerenv.GitToken + "=git-token",
 		"HTTPS_PROXY=http://proxy.invalid",
 		"ORKA_ARTIFACTS_DIR=/tmp/evil-artifacts",
+		"LD_PRELOAD=libevil.so",
+		"DYLD_INSERT_LIBRARIES=libevil.dylib",
 	})
 	if got := os.Getenv("PATH"); got != wrapperSafeCommandPath {
 		t.Fatalf("PATH during temporary env = %q, want safe wrapper path", got)
@@ -76,6 +78,12 @@ func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 	}
 	if got := os.Getenv("ORKA_ARTIFACTS_DIR"); got != "" {
 		t.Fatalf("ORKA_ARTIFACTS_DIR = %q, want blocked", got)
+	}
+	if got := os.Getenv("LD_PRELOAD"); got != "" {
+		t.Fatalf("LD_PRELOAD = %q, want blocked", got)
+	}
+	if got := os.Getenv("DYLD_INSERT_LIBRARIES"); got != "" {
+		t.Fatalf("DYLD_INSERT_LIBRARIES = %q, want blocked", got)
 	}
 	restore()
 	if got := os.Getenv("PATH"); got != "/original" {
