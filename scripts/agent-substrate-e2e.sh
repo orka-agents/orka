@@ -551,6 +551,15 @@ deploy_orka() {
     cd "${tmp_config}/config/harness-wrapper"
     "${ROOT_DIR}/bin/kustomize" edit set image "ghcr.io/sozercan/orka/agent-harness-wrapper=${codex_image}"
   )
+  kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+  if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
+    local wrapper_token_file
+    wrapper_token_file="$(mktemp "${TMP_ROOT}/harness-wrapper-token.XXXXXX")"
+    chmod 0600 "${wrapper_token_file}"
+    dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n' >"${wrapper_token_file}"
+    kubectl -n orka-system create secret generic harness-wrapper-auth --from-file=token="${wrapper_token_file}" >/dev/null
+    rm -f "${wrapper_token_file}"
+  fi
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
 
   local patch

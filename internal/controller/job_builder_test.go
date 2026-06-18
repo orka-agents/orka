@@ -139,14 +139,25 @@ func TestNewJobBuilder(t *testing.T) {
 	}
 }
 
-func TestJobBuilder_Build_AgentTaskRejected(t *testing.T) {
+func TestJobBuilder_Build_AgentTaskForExplicitJobBackend(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do work"},
 	}
-	if _, err := builder.Build(context.Background(), task, nil, nil); err == nil || !strings.Contains(err.Error(), "harness wrapper") {
-		t.Fatalf("Build(agent) error = %v, want harness wrapper rejection", err)
+	job, err := builder.Build(context.Background(), task, nil, nil)
+	if err != nil {
+		t.Fatalf("Build(agent) error = %v, want explicit job backend support", err)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Image != builder.AIWorkerImage {
+		t.Fatalf("Image = %q, want AI worker image %q", container.Image, builder.AIWorkerImage)
+	}
+	if len(container.Command) != 1 || container.Command[0] != "/worker" {
+		t.Fatalf("Command = %#v, want /worker", container.Command)
+	}
+	if job.Spec.Template.Spec.ServiceAccountName != VendorWorkerServiceAccount {
+		t.Fatalf("ServiceAccountName = %q, want vendor worker", job.Spec.Template.Spec.ServiceAccountName)
 	}
 }
 

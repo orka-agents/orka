@@ -11,6 +11,16 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
+const envCommandRunnerStdoutHelper = "ORKA_CLIWRAPPER_STDOUT_HELPER"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(envCommandRunnerStdoutHelper) == "1" {
+		_, _ = os.Stdout.Write([]byte("abcdefgh"))
+		return
+	}
+	os.Exit(m.Run())
+}
+
 func TestCommandRunnerSuccess(t *testing.T) {
 	runner := CommandRunner{StdoutLimitBytes: 5, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
 	result, err := runner.Run(context.Background(), &CommandSpec{Path: "/bin/sh", Args: []string{"-c", "printf abcdefgh"}})
@@ -35,6 +45,26 @@ func TestLimitedBufferTruncatesOutput(t *testing.T) {
 	}
 }
 
+func TestCommandRunnerPreservesFullStdoutWhenLogPreviewTruncates(t *testing.T) {
+	runner := CommandRunner{StdoutLimitBytes: 5, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
+	result, err := runner.Run(context.Background(), &CommandSpec{
+		Path: os.Args[0],
+		Env:  []string{envCommandRunnerStdoutHelper + "=1"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := result.Stdout; got != "abcde\n[stdout truncated at 5 bytes]" {
+		t.Fatalf("Stdout preview = %q, want truncated preview marker", got)
+	}
+	if result.FullStdoutTruncated {
+		t.Fatal("FullStdoutTruncated = true, want false for small output")
+	}
+	if got := result.ExactStdout(); got != "abcdefgh" {
+		t.Fatalf("ExactStdout = %q, want full stdout", got)
+	}
+}
+
 func TestCommandRunnerFailure(t *testing.T) {
 	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
 	result, err := runner.Run(context.Background(), &CommandSpec{
@@ -54,10 +84,13 @@ func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 	restore := setTemporaryEnvEntries([]string{
 		"PATH=/tmp/evil",
 		"ORKA_TEST_ENV=value",
+		"HOME=/tmp/evil-home",
+		"XDG_CONFIG_HOME=/tmp/evil-xdg",
 		"GIT_CONFIG_COUNT=1",
 		workerenv.GitToken + "=git-token",
 		"HTTPS_PROXY=http://proxy.invalid",
 		"ORKA_ARTIFACTS_DIR=/tmp/evil-artifacts",
+		workerenv.GitAskpass + "=/tmp/evil-askpass",
 		"LD_PRELOAD=libevil.so",
 		"DYLD_INSERT_LIBRARIES=libevil.dylib",
 	})
@@ -66,6 +99,12 @@ func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 	}
 	if got := os.Getenv("ORKA_TEST_ENV"); got != "value" {
 		t.Fatalf("ORKA_TEST_ENV = %q, want value", got)
+	}
+	if got := os.Getenv("HOME"); got != "/tmp/orka-empty-git-home" {
+		t.Fatalf("HOME = %q, want safe root-prep HOME", got)
+	}
+	if got := os.Getenv("XDG_CONFIG_HOME"); got != "/tmp/orka-empty-git-config" {
+		t.Fatalf("XDG_CONFIG_HOME = %q, want safe root-prep XDG config", got)
 	}
 	if got := os.Getenv("GIT_CONFIG_COUNT"); got != "" {
 		t.Fatalf("GIT_CONFIG_COUNT = %q, want blocked", got)
@@ -78,6 +117,12 @@ func TestSetTemporaryEnvEntriesUsesSafePath(t *testing.T) {
 	}
 	if got := os.Getenv("ORKA_ARTIFACTS_DIR"); got != "" {
 		t.Fatalf("ORKA_ARTIFACTS_DIR = %q, want blocked", got)
+	}
+	if got := os.Getenv(workerenv.GitAskpass); got != controllerGitAskpassPath {
+		t.Fatalf("%s = %q, want controller helper %q", workerenv.GitAskpass, got, controllerGitAskpassPath)
+	}
+	if got := os.Getenv("GIT_ASKPASS"); got != controllerGitAskpassPath {
+		t.Fatalf("GIT_ASKPASS = %q, want controller helper %q", got, controllerGitAskpassPath)
 	}
 	if got := os.Getenv("LD_PRELOAD"); got != "" {
 		t.Fatalf("LD_PRELOAD = %q, want blocked", got)

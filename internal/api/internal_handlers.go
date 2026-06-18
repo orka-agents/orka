@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	batchv1 "k8s.io/api/batch/v1"
@@ -35,7 +36,9 @@ const (
 	harnessWrapperStartedAnnotation = "orka.ai/harness-wrapper-started"
 	harnessWrapperTurnIDAnnotation  = "orka.ai/harness-wrapper-turn-id"
 	harnessWrapperRuntimeAnnotation = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
 	harnessWrapperServiceAccountEnv = "ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME"
+	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
 )
 
 // InternalHandlers contains handlers for internal worker endpoints.
@@ -641,15 +644,19 @@ func verifyCallerNamespace(c fiber.Ctx, namespace string) error {
 }
 
 func (h *InternalHandlers) verifyArtifactUploadCaller(c fiber.Ctx, namespace, taskName string) error {
+	userInfo := GetUserInfo(c)
 	if err := verifyCallerNamespace(c, namespace); err != nil {
 		var fiberErr *fiber.Error
 		if !errors.As(err, &fiberErr) || fiberErr.Code != fiber.StatusForbidden {
 			return err
 		}
-		if allowErr := h.verifyHarnessWrapperArtifactUpload(c.Context(), GetUserInfo(c), namespace, taskName); allowErr == nil {
+		if allowErr := h.verifyHarnessWrapperArtifactUpload(c.Context(), userInfo, namespace, taskName); allowErr == nil {
 			return nil
 		}
 		return err
+	}
+	if userInfo != nil && serviceAccountNameFromUsername(userInfo.Username) == expectedHarnessWrapperServiceAccountName() {
+		return h.verifyHarnessWrapperArtifactUpload(c.Context(), userInfo, namespace, taskName)
 	}
 	return nil
 }
@@ -691,13 +698,33 @@ func (h *InternalHandlers) verifyHarnessWrapperArtifactUpload(
 	if strings.TrimSpace(task.Status.JobName) != "" {
 		return fiber.NewError(fiber.StatusForbidden, "target task has a worker job")
 	}
-	if task.Annotations == nil ||
-		!strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnnotation]), "true") ||
-		strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == "" ||
-		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) == "" {
+	if !harnessWrapperArtifactUploadAuthorized(task) {
 		return fiber.NewError(fiber.StatusForbidden, "target task is not running through harness wrapper")
 	}
 	return nil
+}
+
+func harnessWrapperArtifactUploadAuthorized(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil ||
+		strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == "" ||
+		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) == "" {
+		return false
+	}
+	if task.Status.Phase != "" && task.Status.Phase != corev1alpha1.TaskPhasePending && task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnnotation]), "true") {
+		return true
+	}
+	plannedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[harnessWrapperPlannedAtAnno]))
+	if err != nil {
+		return false
+	}
+	now := time.Now()
+	if plannedAt.After(now.Add(time.Minute)) {
+		return false
+	}
+	return now.Sub(plannedAt) <= harnessWrapperPlannedTurnTTL
 }
 
 func currentPodNamespace() string {

@@ -85,12 +85,12 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
 		args = append(args, "--tools", strings.Join(tools, ","))
 	}
 	for _, tool := range cfg.AllowedTools {
-		if tool = scopedClaudeTool(tool, turn.WorkDir); tool != "" {
+		if tool = scopedClaudeTool(tool, firstNonEmpty(turn.RootDir, turn.WorkDir)); tool != "" {
 			args = append(args, "--allowedTools", tool)
 		}
 	}
 	for _, tool := range cfg.DisallowedTools {
-		if tool = scopedClaudeTool(tool, turn.WorkDir); tool != "" {
+		if tool = scopedClaudeTool(tool, firstNonEmpty(turn.RootDir, turn.WorkDir)); tool != "" {
 			args = append(args, "--disallowedTools", tool)
 		}
 	}

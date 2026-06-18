@@ -176,6 +176,27 @@ func TestCodexAdapterPreservesExplicitCodexAPIKey(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterUsesRuntimeSecretBaseURLWithoutOperatorBaseURL(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIBaseURL, "")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt: "do work",
+		Env:    []string{workerenv.OpenAIBaseURL + "=https://runtime-secret.example.invalid/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "openai_base_url=https://runtime-secret.example.invalid/v1") {
+		t.Fatalf("args = %q, want runtime secret base URL", joined)
+	}
+	if !containsEnv(spec.Env, workerenv.OpenAIBaseURL+"=https://runtime-secret.example.invalid/v1") {
+		t.Fatalf("env = %#v, want runtime secret base URL", spec.Env)
+	}
+}
+
 func TestCodexAdapterIgnoresTurnEnvOpenAIBaseURL(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.OpenAIBaseURL, "https://operator.example.invalid/v1")

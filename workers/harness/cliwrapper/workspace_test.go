@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
@@ -56,6 +58,116 @@ func TestFetchAndCheckoutWorkspaceRefFallbackChecksOutRemoteBranchCommit(t *test
 	actual := testGitOutput(t, cloneDir, "rev-parse", "HEAD")
 	if actual != featureCommit {
 		t.Fatalf("HEAD = %s, want feature commit %s", actual, featureCommit)
+	}
+}
+
+func TestFetchAndCheckoutWorkspaceRefFetchesPinnedCommitHistory(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "init")
+	testGit(t, sourceDir, "config", "user.email", "test@example.invalid")
+	testGit(t, sourceDir, "config", "user.name", "Test User")
+	testGit(t, sourceDir, "checkout", "-B", "main")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "add", "README.md")
+	testGit(t, sourceDir, "commit", "-m", "main")
+	testGit(t, sourceDir, "checkout", "-B", "feature")
+	if err := os.WriteFile(filepath.Join(sourceDir, "feature.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "add", "feature.txt")
+	testGit(t, sourceDir, "commit", "-m", "feature first")
+	firstFeatureCommit := testGitOutput(t, sourceDir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(sourceDir, "feature.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, sourceDir, "commit", "-am", "feature second")
+	testGit(t, sourceDir, "checkout", "main")
+
+	originDir := filepath.Join(root, "origin.git")
+	testGit(t, root, "clone", "--bare", sourceDir, originDir)
+	cloneDir := filepath.Join(root, "clone")
+	testGit(t, root, "clone", "--depth=1", "--branch", "main", "file://"+originDir, cloneDir)
+
+	if err := fetchAndCheckoutWorkspaceRef(
+		context.Background(),
+		cloneDir,
+		firstFeatureCommit,
+		"https://github.com/example/repo.git",
+	); err != nil {
+		t.Fatalf("fetchAndCheckoutWorkspaceRef: %v", err)
+	}
+	if got := testGitOutput(t, cloneDir, "rev-parse", "HEAD"); got != firstFeatureCommit {
+		t.Fatalf("HEAD = %s, want pinned commit %s", got, firstFeatureCommit)
+	}
+}
+
+func TestWorkspaceGitCommandForcesControllerAskpass(t *testing.T) {
+	t.Setenv(workerenv.GitToken, "token")
+	t.Setenv(workerenv.GitAskpass, "/tmp/attacker-askpass")
+
+	cmd := workspaceGitCommand(context.Background(), "status")
+	env := map[string]string{}
+	for _, entry := range cmd.Env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if got := env["GIT_ASKPASS"]; got != controllerGitAskpassPath {
+		t.Fatalf("GIT_ASKPASS = %q, want controller helper %q", got, controllerGitAskpassPath)
+	}
+	if got := env[workerenv.GitAskpass]; got != controllerGitAskpassPath {
+		t.Fatalf("%s = %q, want controller helper %q", workerenv.GitAskpass, got, controllerGitAskpassPath)
+	}
+}
+
+func TestWorkspaceGitCommandUsesGitHubTokenOnlyForGitHubRepos(t *testing.T) {
+	t.Setenv(workerenv.GitToken, "")
+	t.Setenv(workerenv.GitHubToken, "github-token")
+	t.Setenv(workerenv.GitRepo, "https://github.com/example/private.git")
+
+	cmd := workspaceGitCommand(context.Background(), "status")
+	env := map[string]string{}
+	for _, entry := range cmd.Env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if env[workerenv.GitToken] != "github-token" {
+		t.Fatalf("%s = %q, want github fallback", workerenv.GitToken, env[workerenv.GitToken])
+	}
+
+	t.Setenv(workerenv.GitRepo, "http://github.com/example/private.git")
+	cmd = workspaceGitCommand(context.Background(), "status")
+	env = map[string]string{}
+	for _, entry := range cmd.Env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if env[workerenv.GitToken] != "" {
+		t.Fatalf("%s = %q, want no github fallback for non-HTTPS repo", workerenv.GitToken, env[workerenv.GitToken])
+	}
+
+	t.Setenv(workerenv.GitRepo, "https://gitlab.com/example/private.git")
+	cmd = workspaceGitCommand(context.Background(), "status")
+	env = map[string]string{}
+	for _, entry := range cmd.Env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if env[workerenv.GitToken] != "" {
+		t.Fatalf("%s = %q, want no github fallback for non-GitHub repo", workerenv.GitToken, env[workerenv.GitToken])
 	}
 }
 

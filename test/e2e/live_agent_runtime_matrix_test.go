@@ -206,15 +206,8 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		By("waiting for the Codex task to return the exact marker from the prior diff")
 		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
-		Eventually(func(g Gomega) {
-			task := fetchTaskSnapshot(codexTaskReadName)
-			g.Expect(task.Status.JobName).NotTo(BeEmpty())
-
-			cmd := exec.Command("kubectl", "logs", "job/"+task.Status.JobName, "-n", namespace)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring("successfully applied prior task diff from " + codexTaskWriteName))
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		// Harness-wrapper-backed agent tasks do not create a worker Job. The result
+		// assertion below verifies the priorTaskRef workspace diff was consumed.
 		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexMarker))
 	})
 

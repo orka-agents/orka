@@ -2,6 +2,8 @@ package cliwrapper
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,9 +63,13 @@ func wrapperArtifactsDir() string {
 }
 
 func UploadTurnArtifacts(turn TurnContext, artifactDir string) error {
+	resolvedArtifactDir := firstNonEmpty(artifactDir, wrapperArtifactsDir())
+	if err := prepareArtifactsForWrapper(resolvedArtifactDir); err != nil {
+		return fmt.Errorf("prepare artifacts for wrapper upload: %w", err)
+	}
 	restoreTurnEnv := setTemporaryEnvEntries(turn.Env)
 	defer restoreTurnEnv()
-	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", resolvedArtifactDir)
 	defer restoreArtifactDir()
 	restoreTaskName := setTemporaryEnv(workerenv.TaskName, turn.TaskName)
 	defer restoreTaskName()
@@ -91,11 +97,20 @@ func PrepareTurnContext(
 	defer restoreEnv()
 	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
 	defer restoreArtifactDir()
+	skillsRoot := ""
+	if root != "" && strings.TrimSpace(turn.Metadata[turnMetadataSkillsFiles]) != "" {
+		skillsRoot = turnSkillsRoot(turn, artifactDir)
+	}
 	if root != "" {
+		if strings.TrimSpace(cfg.PRBaseRepo) != "" {
+			if err := validateWorkspaceRepoURL(cfg.PRBaseRepo); err != nil {
+				return cfg, fmt.Errorf("validate PR base repo: %w", err)
+			}
+		}
 		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
 		}
-		if err := materializeTurnSkillFiles(root, turn.Metadata[turnMetadataSkillsFiles]); err != nil {
+		if err := materializeTurnSkillFiles(skillsRoot, turn.Metadata[turnMetadataSkillsFiles]); err != nil {
 			return cfg, err
 		}
 		if err := common.PrepareWorkspace(root); err != nil {
@@ -113,23 +128,36 @@ func PrepareTurnContext(
 	if artifactDir != "" {
 		turn.Env = setEnv(turn.Env, "ORKA_ARTIFACTS_DIR", artifactDir)
 	}
-	if root != "" && strings.TrimSpace(turn.Metadata[turnMetadataSkillsFiles]) != "" {
-		turn.Env = setEnv(turn.Env, workerenv.SkillsDir, filepath.Join(root, ".skills"))
+	if skillsRoot != "" {
+		turn.Env = setEnv(turn.Env, workerenv.SkillsDir, skillsRoot)
 	}
 	return cfg, nil
 }
 
-func materializeTurnSkillFiles(root, raw string) error {
-	root = strings.TrimSpace(root)
+func turnSkillsRoot(turn *TurnContext, _ string) string {
+	if turn != nil {
+		if root := strings.TrimSpace(turn.SkillsRoot); root != "" && filepath.IsAbs(filepath.Clean(root)) {
+			return filepath.Clean(root)
+		}
+	}
+	identity := "unknown"
+	if turn != nil {
+		identity = strings.Join([]string{turn.RuntimeSessionID, turn.TurnID, turn.CorrelationID}, "|")
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return filepath.Join(os.TempDir(), "orka-harness-skills", hex.EncodeToString(sum[:8]))
+}
+
+func materializeTurnSkillFiles(skillsRoot, raw string) error {
+	skillsRoot = strings.TrimSpace(skillsRoot)
 	raw = strings.TrimSpace(raw)
-	if root == "" || raw == "" {
+	if skillsRoot == "" || raw == "" {
 		return nil
 	}
 	var files map[string]string
 	if err := json.Unmarshal([]byte(raw), &files); err != nil {
 		return fmt.Errorf("parse turn skill files: %w", err)
 	}
-	skillsRoot := filepath.Join(root, ".skills")
 	if err := removeAllForChild(skillsRoot); err != nil {
 		return fmt.Errorf("clear turn skills directory: %w", err)
 	}
@@ -160,9 +188,25 @@ func EnsureTurnRequiredSecurityArtifacts(
 	followUp common.SecurityArtifactFollowUp,
 	artifactDir string,
 ) (string, error) {
+	if err := prepareArtifactsForWrapper(artifactDir); err != nil {
+		return result, fmt.Errorf("prepare artifacts for wrapper security validation: %w", err)
+	}
 	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
 	defer restoreArtifactDir()
-	return common.EnsureRequiredSecurityArtifacts(ctx, cfg, result, followUp)
+	wrappedFollowUp := followUp
+	if followUp != nil {
+		wrappedFollowUp = func(ctx context.Context, prompt string) (string, error) {
+			if err := prepareArtifactsForChild(artifactDir); err != nil {
+				return "", fmt.Errorf("prepare artifacts for child follow-up: %w", err)
+			}
+			followUpResult, followUpErr := followUp(ctx, prompt)
+			if err := prepareArtifactsForWrapper(artifactDir); err != nil && followUpErr == nil {
+				followUpErr = fmt.Errorf("prepare artifacts for wrapper after follow-up: %w", err)
+			}
+			return followUpResult, followUpErr
+		}
+	}
+	return common.EnsureRequiredSecurityArtifacts(ctx, cfg, result, wrappedFollowUp)
 }
 
 func agentConfigForTurn(turn TurnContext) *common.AgentConfig {
@@ -206,18 +250,41 @@ func agentConfigForTurn(turn TurnContext) *common.AgentConfig {
 }
 
 func setTemporaryEnvEntries(entries []string) func() {
-	restores := make([]func(), 0, len(entries)+1)
+	restores := make([]func(), 0, len(entries)+4)
+	hasGitToken := false
+	gitHubAuth := ""
+	gitRepo := ""
 	for _, entry := range entries {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok || strings.TrimSpace(key) == "" {
 			continue
 		}
 		key = strings.TrimSpace(key)
+		if key == workerenv.GitToken && strings.TrimSpace(value) != "" {
+			hasGitToken = true
+		}
+		if key == workerenv.GitHubToken {
+			gitHubAuth = strings.TrimSpace(value)
+		}
+		if key == workerenv.GitRepo {
+			gitRepo = strings.TrimSpace(value)
+		}
 		if temporaryEnvEntryBlocked(key) {
 			continue
 		}
 		restores = append(restores, setTemporaryEnv(key, value))
 	}
+	if !hasGitToken && gitHubAuth != "" && workspaceRepoUsesGitHubToken(gitRepo) {
+		restores = append(restores, setTemporaryEnv(workerenv.GitToken, gitHubAuth))
+		hasGitToken = true
+	}
+	if hasGitToken {
+		restores = append(restores, setTemporaryEnv(workerenv.GitAskpass, controllerGitAskpassPath))
+		restores = append(restores, setTemporaryEnv("GIT_ASKPASS", controllerGitAskpassPath))
+	}
+	restores = append(restores, setTemporaryEnv("HOME", "/tmp/orka-empty-git-home"))
+	restores = append(restores, setTemporaryEnv("XDG_CONFIG_HOME", "/tmp/orka-empty-git-config"))
+	restores = append(restores, setTemporaryEnv("XDG_CONFIG_DIRS", "/tmp/orka-empty-git-config-dirs"))
 	restores = append(restores, setTemporaryEnv("PATH", wrapperSafeCommandPath))
 	return func() {
 		for i := len(restores) - 1; i >= 0; i-- {
@@ -232,7 +299,9 @@ func temporaryEnvEntryBlocked(key string) bool {
 		return true
 	}
 	upper := strings.ToUpper(key)
-	if upper == "ORKA_ARTIFACTS_DIR" {
+	if upper == "ORKA_ARTIFACTS_DIR" || upper == "HOME" ||
+		upper == "XDG_CONFIG_HOME" || upper == "XDG_CONFIG_DIRS" ||
+		upper == workerenv.GitAskpass {
 		return true
 	}
 	switch upper {

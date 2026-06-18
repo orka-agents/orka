@@ -598,11 +598,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		if task.Spec.Transaction != nil || effectiveAgentResources(task, agent) {
-			return r.createTaskJob(ctx, task, agent, provider)
-		}
 		if taskHasPlannedHarnessWrapperTurn(task) {
 			return r.runHarnessWrapperTask(ctx, task, agent)
+		}
+		if !agentTaskHasRuntimeSecret(task, agent) || agentTaskRequiresJobBackend(task, agent) {
+			return r.createTaskJob(ctx, task, agent, provider)
 		}
 		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
@@ -616,6 +616,25 @@ func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
 	}
 	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
 	return err == nil && pending
+}
+
+func agentTaskHasRuntimeSecret(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return task != nil && task.Spec.SecretRef != nil ||
+		agent != nil && agent.Spec.SecretRef != nil
+}
+
+func agentTaskRequiresJobBackend(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil {
+		return false
+	}
+	return task.Spec.Transaction != nil ||
+		effectiveAgentResources(task, agent) ||
+		taskRequestsExecutionWorkspace(task) ||
+		resolveExecution(task, agent) != nil
+}
+
+func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 }
 
 func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {

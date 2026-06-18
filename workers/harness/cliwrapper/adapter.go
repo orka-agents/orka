@@ -49,6 +49,8 @@ type TurnContext struct {
 	CorrelationID    string
 	Prompt           string
 	WorkDir          string
+	RootDir          string
+	SkillsRoot       string
 	Env              []string
 	Deadline         time.Time
 	Metadata         map[string]string
@@ -67,15 +69,16 @@ type CommandSpec struct {
 
 // CommandResult captures bounded process output and lifecycle metadata.
 type CommandResult struct {
-	Stdout     string
-	FullStdout string
-	Stderr     string
-	ExitCode   int
-	StartedAt  time.Time
-	FinishedAt time.Time
-	TimedOut   bool
-	Cancelled  bool
-	ResultFile string
+	Stdout              string
+	FullStdout          string
+	FullStdoutTruncated bool
+	Stderr              string
+	ExitCode            int
+	StartedAt           time.Time
+	FinishedAt          time.Time
+	TimedOut            bool
+	Cancelled           bool
+	ResultFile          string
 }
 
 func (r CommandResult) ExactStdout() string {
@@ -174,6 +177,7 @@ func turnEnvFromRequest(cfg Config, request harness.StartTurnRequest, metadata m
 		"prBaseRepo":       workerenv.PRBaseRepo,
 		"prBaseSHA":        workerenv.PRBaseSHA,
 		"pushBranch":       workerenv.PushBranch,
+		"timeoutSeconds":   workerenv.TimeoutSeconds,
 	}
 	for key, envName := range metadataEnv {
 		if value := strings.TrimSpace(metadata[key]); value != "" {

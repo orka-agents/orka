@@ -285,9 +285,6 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 
 // BuildWithOptions creates a Job for the given Task using additional resolved options.
 func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
-	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		return nil, fmt.Errorf("agent tasks execute through the harness wrapper and do not use worker Jobs")
-	}
 	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
 		return nil, err
 	}
@@ -449,7 +446,8 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 			container.Args = workerArgs
 		}
 	case corev1alpha1.TaskTypeAgent:
-		// Agent tasks are executed through the harness wrapper path, not worker Jobs.
+		container.Image = b.AIWorkerImage
+		container.Command = []string{"/worker"}
 	}
 
 	// Add tmp volume mount for read-only root filesystem

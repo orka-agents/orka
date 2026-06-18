@@ -49,7 +49,12 @@ func TestCopilotAdapterBuildCommandUsesHelperAndCLIEnv(t *testing.T) {
 func TestCopilotAdapterRunsFakeHelperThroughWrapper(t *testing.T) {
 	dir := t.TempDir()
 	helper := filepath.Join(dir, "copilot-helper.sh")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf 'copilot:%s' \"$(cat)\"\n"), 0o700); err != nil {
+	helperScript := `#!/bin/sh
+prompt=$(cat)
+if [ -z "$prompt" ]; then prompt=$ORKA_PROMPT; fi
+printf 'copilot:%s' "$prompt"
+`
+	if err := os.WriteFile(helper, []byte(helperScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	cfg := DefaultConfig()

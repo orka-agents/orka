@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
@@ -137,6 +138,94 @@ func TestUploadArtifactAllowsHarnessWrapperControlPlaneUpload(t *testing.T) {
 	require.Equal(t, "text/markdown", ct)
 }
 
+func TestUploadArtifactAllowsPlannedHarnessWrapperControlPlaneUpload(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "orka-system")
+	t.Setenv(harnessWrapperServiceAccountEnv, "agent-harness-wrapper")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "planned-task",
+			Namespace: "default",
+			Annotations: map[string]string{
+				harnessWrapperTurnIDAnnotation:  "turn-1",
+				harnessWrapperRuntimeAnnotation: "runtime-1",
+				harnessWrapperPlannedAtAnno:     time.Now().UTC().Format(time.RFC3339Nano),
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			AuthType:  AuthTypeTokenReview,
+			Namespace: "orka-system",
+			Username:  "system:serviceaccount:orka-system:agent-harness-wrapper",
+		})
+		return c.Next()
+	})
+	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/internal/v1/artifacts/default/planned-task/output.txt",
+		bytes.NewReader([]byte("artifact")))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestUploadArtifactRejectsCompletedHarnessWrapperUpload(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "orka-system")
+	t.Setenv(harnessWrapperServiceAccountEnv, "agent-harness-wrapper")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "completed-wrapper-task",
+			Namespace: "default",
+			Annotations: map[string]string{
+				harnessWrapperStartedAnnotation: "true",
+				harnessWrapperTurnIDAnnotation:  "turn-1",
+				harnessWrapperRuntimeAnnotation: "runtime-1",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			AuthType:  AuthTypeTokenReview,
+			Namespace: "orka-system",
+			Username:  "system:serviceaccount:orka-system:agent-harness-wrapper",
+		})
+		return c.Next()
+	})
+	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/internal/v1/artifacts/default/completed-wrapper-task/output.txt",
+		bytes.NewReader([]byte("artifact")))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 func TestUploadArtifactRejectsCrossNamespaceNonWrapperTask(t *testing.T) {
 	t.Setenv("POD_NAMESPACE", "orka-system")
 	t.Setenv(harnessWrapperServiceAccountEnv, "agent-harness-wrapper")
@@ -209,6 +298,49 @@ func TestUploadArtifactRejectsWrongControlPlaneServiceAccount(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/internal/v1/artifacts/default/wrapped-task/output.txt",
+		bytes.NewReader([]byte("artifact")))
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestUploadArtifactRejectsFuturePlannedHarnessWrapperUpload(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "orka-system")
+	t.Setenv(harnessWrapperServiceAccountEnv, "agent-harness-wrapper")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "future-planned-task",
+			Namespace: "default",
+			Annotations: map[string]string{
+				harnessWrapperTurnIDAnnotation:  "turn-1",
+				harnessWrapperRuntimeAnnotation: "runtime-1",
+				harnessWrapperPlannedAtAnno:     time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	ss := sqlite.NewStore(db, ":memory:")
+	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			AuthType:  AuthTypeTokenReview,
+			Namespace: "orka-system",
+			Username:  "system:serviceaccount:orka-system:agent-harness-wrapper",
+		})
+		return c.Next()
+	})
+	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
+	req := httptest.NewRequest(http.MethodPost,
+		"/internal/v1/artifacts/default/future-planned-task/output.txt",
 		bytes.NewReader([]byte("artifact")))
 	req.Header.Set("Content-Type", "text/plain")
 	resp, err := app.Test(req)

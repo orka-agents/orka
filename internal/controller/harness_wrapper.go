@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,21 +32,23 @@ import (
 const cliwrapperLocalOutputRef = "cliwrapper-result-v1"
 
 const (
-	harnessWrapperEndpointEnv       = "ORKA_HARNESS_WRAPPER_ENDPOINT"
-	harnessWrapperAuthValueEnv      = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
-	harnessWrapperAuthValueFileEnv  = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
-	harnessWrapperTurnIDAnnotation  = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperCorrelationIDAnno = "orka.ai/harness-wrapper-correlation-id"
-	harnessWrapperLastFrameSeqAnno  = "orka.ai/harness-wrapper-last-frame-seq"
-	harnessWrapperStartedAnno       = "orka.ai/harness-wrapper-started"
-	harnessWrapperPlannedAtAnno     = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperMetadataAnno      = "orka.ai/harness-wrapper-metadata"
-	harnessWrapperSkillsFilesMeta   = "skillsFiles"
-	harnessWrapperStreamPollTimeout = 2 * time.Second
-	harnessWrapperPlannedTurnTTL    = 5 * time.Minute
-	harnessWrapperNoTimeoutDuration = time.Hour * 24 * 365 * 100
-	harnessWrapperRuntimeGeneric    = "generic"
+	harnessWrapperEndpointEnv            = "ORKA_HARNESS_WRAPPER_ENDPOINT"
+	harnessWrapperAuthValueEnv           = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
+	harnessWrapperAuthValueFileEnv       = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
+	harnessWrapperTurnIDAnnotation       = "orka.ai/harness-wrapper-turn-id"
+	harnessWrapperRuntimeAnnotation      = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperCorrelationIDAnno      = "orka.ai/harness-wrapper-correlation-id"
+	harnessWrapperLastFrameSeqAnno       = "orka.ai/harness-wrapper-last-frame-seq"
+	harnessWrapperStartedAnno            = "orka.ai/harness-wrapper-started"
+	harnessWrapperPlannedAtAnno          = "orka.ai/harness-wrapper-planned-at"
+	harnessWrapperMetadataAnno           = "orka.ai/harness-wrapper-metadata"
+	harnessWrapperOutputFetchRetriesAnno = "orka.ai/harness-wrapper-output-fetch-retries"
+	harnessWrapperMaxOutputFetchRetries  = 3
+	harnessWrapperSkillsFilesMeta        = "skillsFiles"
+	harnessWrapperStreamPollTimeout      = 2 * time.Second
+	harnessWrapperPlannedTurnTTL         = 5 * time.Minute
+	harnessWrapperNoTimeoutDuration      = time.Hour * 24 * 365 * 100
+	harnessWrapperRuntimeGeneric         = "generic"
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -99,7 +102,10 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		return r.failTask(ctx, task, "agent execution placement is not supported by harness runtime yet")
 	}
 	if task.Spec.PriorTaskRef != nil && r.EnforceNamespaceIsolation {
-		return r.failTask(ctx, task, "priorTaskRef is not supported by harness runtime when namespace isolation is enforced")
+		priorNS := strings.TrimSpace(task.Spec.PriorTaskRef.Namespace)
+		if priorNS != "" && priorNS != task.Namespace {
+			return r.failTask(ctx, task, "cross-namespace priorTaskRef is not supported by harness runtime when namespace isolation is enforced")
+		}
 	}
 
 	now := metav1.Now()
@@ -129,7 +135,10 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 		} else {
 			startedPlannedTurn = true
-			request = r.plannedHarnessWrapperStartTurnRequest(task, agent, now.Time)
+			request, err = r.plannedHarnessWrapperStartTurnRequest(ctx, task, agent, now.Time)
+			if err != nil {
+				return r.failTask(ctx, task, err.Error())
+			}
 		}
 		request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
 		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
@@ -315,7 +324,14 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			fetched, fetchErr := client.FetchTurnOutput(ctx, turnID, outputRef)
 			if fetchErr != nil {
 				log.Error(fetchErr, "failed to fetch harness wrapper result")
-				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to fetch harness wrapper result: %v", fetchErr))
+				retries := harnessWrapperOutputFetchRetries(task)
+				if retries >= harnessWrapperMaxOutputFetchRetries {
+					return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to fetch harness wrapper result: %v", fetchErr))
+				}
+				if patchErr := r.patchHarnessWrapperOutputFetchRetries(ctx, task, retries+1); patchErr != nil {
+					return ctrl.Result{}, patchErr
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
 			resultBytes = fetched
 		}
@@ -413,6 +429,30 @@ func harnessFrameKey(frame harness.HarnessEventFrame) string {
 		frame.CorrelationID,
 		strconv.FormatInt(frame.Seq, 10),
 	}, "\x00")
+}
+
+func harnessWrapperOutputFetchRetries(task *corev1alpha1.Task) int {
+	if task == nil || task.Annotations == nil {
+		return 0
+	}
+	retries, err := strconv.Atoi(strings.TrimSpace(task.Annotations[harnessWrapperOutputFetchRetriesAnno]))
+	if err != nil || retries < 0 {
+		return 0
+	}
+	return retries
+}
+
+func (r *TaskReconciler) patchHarnessWrapperOutputFetchRetries(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retries int,
+) error {
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[harnessWrapperOutputFetchRetriesAnno] = strconv.Itoa(retries)
+	return r.Patch(ctx, task, patch)
 }
 
 func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
@@ -633,10 +673,11 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 }
 
 func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
+	ctx context.Context,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	now time.Time,
-) harness.StartTurnRequest {
+) (harness.StartTurnRequest, error) {
 	deadline := now.Add(harnessWrapperNoTimeoutDuration)
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
@@ -646,6 +687,10 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 		runtimeName = string(agent.Spec.Runtime.Type)
 	}
 	metadata := harnessWrapperPlannedMetadata(task, runtimeName)
+	env, err := r.harnessWrapperBaseTurnEnv(ctx, task)
+	if err != nil {
+		return harness.StartTurnRequest{}, err
+	}
 	prompt := task.Spec.Prompt
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
@@ -660,10 +705,10 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 		CorrelationID:     strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Deadline:          deadline.UTC(),
 		AuthIdentity:      harness.AuthIdentity{Subject: "task:" + task.Namespace + "/" + task.Name},
-		Input:             harness.TurnInput{Prompt: prompt, Env: r.harnessWrapperBaseTurnEnv(task)},
+		Input:             harness.TurnInput{Prompt: prompt, Env: env},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Metadata:          metadata,
-	}
+	}, nil
 }
 
 func (r *TaskReconciler) harnessWrapperStartTurnRequest(
@@ -965,12 +1010,13 @@ func harnessWrapperSkillReferences(
 	return deduped
 }
 
-// harnessWrapperBaseTurnEnv copies only literal Task env after validateTaskAgentCompatibility
-// has rejected valueFrom entries and secret-looking task env names. Runtime credentials
-// are resolved separately from Agent/Task SecretRefs and are never persisted in annotations.
-func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []harness.TurnEnvVar {
+// harnessWrapperBaseTurnEnv copies literal Task env and resolves supported valueFrom
+// entries after validateTaskAgentCompatibility has rejected secret-looking task env
+// names. Runtime credentials are resolved separately from Agent/Task SecretRefs and
+// are never persisted in annotations.
+func (r *TaskReconciler) harnessWrapperBaseTurnEnv(ctx context.Context, task *corev1alpha1.Task) ([]harness.TurnEnvVar, error) {
 	if task == nil {
-		return nil
+		return nil, nil
 	}
 	env := make([]harness.TurnEnvVar, 0, len(task.Spec.Env)+4)
 	for _, item := range task.Spec.Env {
@@ -981,7 +1027,18 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []ha
 		if taskRequestsReadOnlyAgent(task) && harnessWrapperReadOnlyEnvBlocked(name) {
 			continue
 		}
-		env = append(env, harness.TurnEnvVar{Name: item.Name, Value: item.Value})
+		value := item.Value
+		if item.ValueFrom != nil {
+			resolved, present, err := r.resolveHarnessWrapperTaskEnvValueFrom(ctx, task, item)
+			if err != nil {
+				return nil, err
+			}
+			if !present {
+				continue
+			}
+			value = resolved
+		}
+		env = append(env, harness.TurnEnvVar{Name: item.Name, Value: value})
 	}
 	if r != nil && r.JobBuilder != nil && strings.TrimSpace(r.JobBuilder.ControllerURL) != "" {
 		controllerURL := strings.TrimSpace(r.JobBuilder.ControllerURL)
@@ -1008,7 +1065,7 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(task *corev1alpha1.Task) []ha
 		env = setHarnessTurnEnv(env, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		env = setHarnessTurnEnv(env, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
-	return env
+	return env, nil
 }
 
 // harnessWrapperTurnEnv intentionally does not accept a Provider: type: agent tasks with
@@ -1019,7 +1076,10 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
-	env := r.harnessWrapperBaseTurnEnv(task)
+	env, err := r.harnessWrapperBaseTurnEnv(ctx, task)
+	if err != nil {
+		return nil, err
+	}
 	workspaceGitEnv, err := r.harnessWrapperWorkspaceGitSecretEnv(ctx, task)
 	if err != nil {
 		return nil, err
@@ -1028,7 +1088,6 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	if err != nil {
 		return nil, err
 	}
-	env = append(env, workspaceGitEnv...)
 	env = append(env, agentSecretEnv...)
 	if !taskRequestsReadOnlyAgent(task) {
 		taskSecretEnv, err := r.harnessWrapperTaskSecretEnv(ctx, task)
@@ -1037,6 +1096,9 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 		}
 		env = append(env, taskSecretEnv...)
 	}
+	// Workspace credentials are used by root-side clone/fetch/push preparation and
+	// must remain authoritative over broad runtime Secret keys such as GIT_TOKEN.
+	env = append(env, workspaceGitEnv...)
 	return env, nil
 }
 
@@ -1065,7 +1127,6 @@ func (r *TaskReconciler) harnessWrapperWorkspaceGitSecretEnv(
 	}
 	env := []harness.TurnEnvVar{
 		{Name: workerenv.GitToken, Value: token},
-		{Name: workerenv.GitHubToken, Value: token},
 		{Name: workerenv.GitAskpass, Value: "/bin/echo-token"},
 	}
 	if username := strings.TrimSpace(string(secret.Data["username"])); username != "" {
@@ -1081,9 +1142,6 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 ) ([]harness.TurnEnvVar, error) {
 	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return nil, nil
-	}
-	if agent.Namespace != task.Namespace {
-		return nil, fmt.Errorf("agent runtime secretRef namespace %q does not match task namespace %q", agent.Namespace, task.Namespace)
 	}
 	env, err := r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: task.Namespace})
 	if err != nil {
@@ -1114,12 +1172,7 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 			continue
 		}
 		if !harnessWrapperEnvNameValid(name) {
-			return nil, fmt.Errorf(
-				"harness runtime credential Secret %s/%s key %q has an invalid env name",
-				key.Namespace,
-				key.Name,
-				name,
-			)
+			continue
 		}
 		if harnessWrapperPrivateEnvName(name) {
 			return nil, fmt.Errorf(
@@ -1129,7 +1182,7 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 				name,
 			)
 		}
-		if harnessWrapperRootEnvNameBlocked(name) {
+		if harnessWrapperRootEnvNameBlocked(name) && !harnessWrapperRuntimeSecretEnvAllowed(name) {
 			return nil, fmt.Errorf(
 				"harness runtime credential Secret %s/%s key %q is reserved for controller-managed runtime configuration",
 				key.Namespace,
@@ -1207,6 +1260,79 @@ func harnessWrapperReadOnlyEnvBlocked(name string) bool {
 	}
 }
 
+func (r *TaskReconciler) resolveHarnessWrapperTaskEnvValueFrom(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	item corev1.EnvVar,
+) (string, bool, error) {
+	if item.ValueFrom == nil {
+		return item.Value, true, nil
+	}
+	name := strings.TrimSpace(item.Name)
+	source := item.ValueFrom
+	switch {
+	case source.FieldRef != nil:
+		switch strings.TrimSpace(source.FieldRef.FieldPath) {
+		case "metadata.name":
+			return task.Name, true, nil
+		case "metadata.namespace":
+			return task.Namespace, true, nil
+		case "metadata.uid":
+			return string(task.UID), true, nil
+		default:
+			return "", false, fmt.Errorf("task env %q fieldRef %q is not supported by harness runtime", name, source.FieldRef.FieldPath)
+		}
+	case source.ConfigMapKeyRef != nil:
+		return r.resolveHarnessWrapperConfigMapEnv(ctx, task, name, source.ConfigMapKeyRef)
+	default:
+		return "", false, fmt.Errorf("task env %q uses unsupported valueFrom source for harness runtime", name)
+	}
+}
+
+func (r *TaskReconciler) resolveHarnessWrapperConfigMapEnv(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	envName string,
+	ref *corev1.ConfigMapKeySelector,
+) (string, bool, error) {
+	if ref == nil || strings.TrimSpace(ref.Name) == "" || strings.TrimSpace(ref.Key) == "" {
+		return "", false, fmt.Errorf("task env %q configMapKeyRef name and key are required", envName)
+	}
+	cm := &corev1.ConfigMap{}
+	key := ctrlclient.ObjectKey{Name: strings.TrimSpace(ref.Name), Namespace: task.Namespace}
+	if err := r.Get(ctx, key, cm); err != nil {
+		if ref.Optional != nil && *ref.Optional && apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("resolve task env %q ConfigMap %s/%s: %w", envName, key.Namespace, key.Name, err)
+	}
+	value, ok := cm.Data[ref.Key]
+	if !ok {
+		if ref.Optional != nil && *ref.Optional {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("resolve task env %q ConfigMap %s/%s key %q: not found", envName, key.Namespace, key.Name, ref.Key)
+	}
+	return value, true, nil
+}
+
+func harnessWrapperTaskEnvValueFromSupported(source *corev1.EnvVarSource) bool {
+	if source == nil {
+		return true
+	}
+	if source.SecretKeyRef != nil || source.ResourceFieldRef != nil {
+		return false
+	}
+	count := 0
+	if source.FieldRef != nil {
+		count++
+	}
+	if source.ConfigMapKeyRef != nil {
+		count++
+	}
+	return count == 1
+}
+
 func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {
 	for i, item := range env {
 		name := strings.TrimSpace(item.Name)
@@ -1216,8 +1342,8 @@ func validateHarnessWrapperTaskEnv(env []corev1.EnvVar) error {
 		if !harnessWrapperEnvNameValid(name) {
 			return fmt.Errorf("task env %q has an invalid name", name)
 		}
-		if item.ValueFrom != nil {
-			return fmt.Errorf("task env %q uses valueFrom, which is not supported by harness runtime yet", name)
+		if item.ValueFrom != nil && !harnessWrapperTaskEnvValueFromSupported(item.ValueFrom) {
+			return fmt.Errorf("task env %q uses unsupported valueFrom source for harness runtime", name)
 		}
 		if harnessWrapperPrivateEnvName(name) || harnessWrapperRootEnvNameBlocked(name) || harnessWrapperEnvNameLooksSecret(name) {
 			return fmt.Errorf("task env %q is not supported by harness runtime", name)
@@ -1263,6 +1389,15 @@ func harnessWrapperEnvNameValid(name string) bool {
 		}
 	}
 	return true
+}
+
+func harnessWrapperRuntimeSecretEnvAllowed(name string) bool {
+	switch strings.TrimSpace(name) {
+	case workerenv.OpenAIBaseURL, workerenv.AnthropicBaseURL, workerenv.AIBaseURL:
+		return true
+	default:
+		return false
+	}
 }
 
 func harnessWrapperEnvNameLooksSecret(name string) bool {

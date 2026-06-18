@@ -202,29 +202,27 @@ var _ = Describe("Workspace Advanced Features", func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
 
-			By("verifying a Job is created")
-			verifyJobCreatedForTask(taskName, 2*time.Minute)
-
-			By("verifying ORKA_WORKSPACE_SUBPATH and ORKA_GIT_REPO env vars")
+			By("verifying harness-wrapper workspace metadata")
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "jobs",
-					"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-					"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-					"-n", namespace)
+				cmd := exec.Command("kubectl", "get", "task", taskName, "-n", namespace, "-o", "json")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).NotTo(BeEmpty())
 
-				var envVars []envVar
-				err = json.Unmarshal([]byte(output), &envVars)
+				var task struct {
+					Metadata struct {
+						Annotations map[string]string `json:"annotations"`
+					} `json:"metadata"`
+				}
+				err = json.Unmarshal([]byte(output), &task)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				envMap := make(map[string]string)
-				for _, e := range envVars {
-					envMap[e.Name] = e.Value
-				}
-				g.Expect(envMap).To(HaveKeyWithValue("ORKA_GIT_REPO", "https://github.com/sozercan/ayna"))
-				g.Expect(envMap).To(HaveKeyWithValue("ORKA_WORKSPACE_SUBPATH", "docs"))
+				rawMetadata := task.Metadata.Annotations["orka.ai/harness-wrapper-metadata"]
+				g.Expect(rawMetadata).NotTo(BeEmpty())
+				metadata := map[string]string{}
+				err = json.Unmarshal([]byte(rawMetadata), &metadata)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(metadata).To(HaveKeyWithValue("gitRepo", "https://github.com/sozercan/ayna"))
+				g.Expect(metadata).To(HaveKeyWithValue("workspaceSubPath", "docs"))
 			}, 30*time.Second, time.Second).Should(Succeed())
 		})
 	})

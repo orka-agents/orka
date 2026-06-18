@@ -23,6 +23,9 @@ spec:
       serviceAccountName: agent-harness-wrapper
       automountServiceAccountToken: false
       securityContext:
+        # The wrapper process runs as root only so it can read 0400 controller
+        # token volumes and set child credentials. Runtime commands are launched
+        # through commandSysProcAttr with ORKA_HARNESS_WRAPPER_CHILD_UID/GID.
         runAsUser: 0
         runAsGroup: 0
         seccompProfile:
@@ -43,6 +46,7 @@ spec:
           value: /var/run/orka/harness-wrapper/token
         - name: ORKA_ALLOW_BASH
           value: "true"
+        # All turn subprocesses run under this unprivileged identity.
         - name: ORKA_HARNESS_WRAPPER_CHILD_UID
           value: "1000"
         - name: ORKA_HARNESS_WRAPPER_CHILD_GID

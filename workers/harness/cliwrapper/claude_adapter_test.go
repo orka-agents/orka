@@ -75,7 +75,7 @@ func TestClaudeAdapterScopesReadOnlyPermissions(t *testing.T) {
 			}, ","),
 			"disallowedTools": "Bash,Read(/proc/**),Read(/workspace/secrets/**)",
 		},
-		WorkDir: "/tmp/orka-workspace",
+		WorkDir: "/repo-root",
 	}
 	args := buildClaudeArgs(agentConfigFromTurn(turn), turn)
 	assertContains(t, args, "--bare")
@@ -83,14 +83,15 @@ func TestClaudeAdapterScopesReadOnlyPermissions(t *testing.T) {
 	assertFlagValue(t, args, "--permission-mode", "dontAsk")
 	assertFlagValue(t, args, "--tools", "Read,Glob,Grep,LS")
 	assertContains(t, args, "--allowedTools")
-	assertContains(t, args, "Read(/tmp/orka-workspace/**)")
-	assertContains(t, args, "Glob(/tmp/orka-workspace/**)")
-	assertContains(t, args, "Grep(/tmp/orka-workspace/**)")
-	assertContains(t, args, "LS(/tmp/orka-workspace/**)")
+	assertContains(t, args, "Read(/repo-root/**)")
+	assertContains(t, args, "Glob(/repo-root/**)")
+	assertContains(t, args, "Grep(/repo-root/**)")
+	assertContains(t, args, "LS(/repo-root/**)")
 	assertContains(t, args, "--disallowedTools")
 	assertContains(t, args, "Bash")
 	assertContains(t, args, "Read(/proc/**)")
-	assertContains(t, args, "Read(/tmp/orka-workspace/secrets/**)")
+	assertContains(t, args, "Read(/repo-root/secrets/**)")
+	assertNotContains(t, args, "Read(/repo-root/subdir/secrets/**)")
 	if slices.Contains(args, "Read(/workspace/**),Glob(/workspace/**),Grep(/workspace/**),LS(/workspace/**)") {
 		t.Fatal("--tools should receive bare tool names, not scoped permission specs")
 	}
@@ -146,6 +147,13 @@ func assertContains(t *testing.T, values []string, want string) {
 		return
 	}
 	t.Fatalf("%q not found in %v", want, values)
+}
+
+func assertNotContains(t *testing.T, values []string, want string) {
+	t.Helper()
+	if slices.Contains(values, want) {
+		t.Fatalf("%q unexpectedly found in %v", want, values)
+	}
 }
 
 func assertFlagValue(t *testing.T, args []string, flag, want string) {

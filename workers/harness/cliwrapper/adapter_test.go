@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 const (
@@ -326,6 +327,15 @@ func TestTurnContextFromRequestDoesNotDefaultWorkDirToRepo(t *testing.T) {
 	}
 }
 
+func TestTurnEnvFromRequestCarriesTimeoutMetadata(t *testing.T) {
+	req := validWrapperStartTurnRequest()
+	req.Metadata = map[string]string{"timeoutSeconds": "2700"}
+	env := turnEnvFromRequest(DefaultConfig(), req, req.Metadata)
+	if !containsEnv(env, workerenv.TimeoutSeconds+"=2700") {
+		t.Fatalf("env = %#v, want timeout seconds", env)
+	}
+}
+
 func validWrapperStartTurnRequest() harness.StartTurnRequest {
 	return harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
@@ -392,6 +402,23 @@ func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
 	}
 	if len(cfg.AllowedTools) != 0 {
 		t.Fatalf("AllowedTools = %#v, want empty intersection", cfg.AllowedTools)
+	}
+}
+
+func TestPrepareTurnContextRejectsUnsafePRBaseRepo(t *testing.T) {
+	root := t.TempDir()
+	turn := &TurnContext{
+		WorkDir: root,
+		Metadata: map[string]string{
+			"prBaseRepo": "https://127.0.0.1/private/repo.git",
+		},
+	}
+	_, err := PrepareTurnContext(context.Background(), turn, root, filepath.Join(t.TempDir(), "artifacts"))
+	if err == nil {
+		t.Fatal("PrepareTurnContext error = nil, want unsafe PR base repo rejection")
+	}
+	if !strings.Contains(err.Error(), "validate PR base repo") {
+		t.Fatalf("PrepareTurnContext error = %v, want PR base validation", err)
 	}
 }
 

@@ -19,7 +19,11 @@ var lookupWorkspaceHostIPs = func(ctx context.Context, host string) ([]net.IPAdd
 	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
 
-const envAllowedGitHosts = "ORKA_HARNESS_WRAPPER_ALLOWED_GIT_HOSTS"
+const (
+	envAllowedGitHosts       = "ORKA_HARNESS_WRAPPER_ALLOWED_GIT_HOSTS"
+	controllerGitAskpassPath = "/bin/echo-token"
+	workspaceRefFetchDepth   = "1000"
+)
 
 func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	baseArgs := []string{
@@ -37,17 +41,32 @@ func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 		"HOME=/tmp/orka-empty-git-home",
 		"XDG_CONFIG_HOME=/tmp/orka-empty-git-config",
 	}
-	if token := strings.TrimSpace(os.Getenv(workerenv.GitToken)); token != "" {
-		env = setEnv(env, workerenv.GitToken, token)
-		env = setEnv(env, workerenv.GitHubToken, firstNonEmpty(os.Getenv(workerenv.GitHubToken), token))
-		env = setEnv(env, workerenv.GitAskpass, firstNonEmpty(os.Getenv(workerenv.GitAskpass), "/bin/echo-token"))
-		env = setEnv(env, "GIT_ASKPASS", envEntryValue(env, workerenv.GitAskpass))
+	gitAuth := strings.TrimSpace(os.Getenv(workerenv.GitToken))
+	githubAuth := strings.TrimSpace(os.Getenv(workerenv.GitHubToken))
+	cloneAuth := gitAuth
+	if cloneAuth == "" && workspaceRepoUsesGitHubToken(os.Getenv(workerenv.GitRepo)) {
+		cloneAuth = githubAuth
+	}
+	if cloneAuth != "" {
+		env = setEnv(env, workerenv.GitToken, cloneAuth)
+		env = setEnv(env, workerenv.GitHubToken, firstNonEmpty(githubAuth, cloneAuth))
+		env = setEnv(env, workerenv.GitAskpass, controllerGitAskpassPath)
+		env = setEnv(env, "GIT_ASKPASS", controllerGitAskpassPath)
 		if username := strings.TrimSpace(os.Getenv(workerenv.GitUsername)); username != "" {
 			env = setEnv(env, workerenv.GitUsername, username)
 		}
 	}
 	cmd.Env = env
 	return cmd
+}
+
+func workspaceRepoUsesGitHubToken(rawRepo string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawRepo))
+	if err != nil || parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return host == "github.com" || strings.HasSuffix(host, ".github.com")
 }
 
 func validateWorkspaceRepoURL(rawRepo string) error {
@@ -121,10 +140,11 @@ func workspaceIPBlocked(ip net.IP) bool {
 }
 
 type preparedWorkspace struct {
-	workDir string
-	rootDir string
-	baseDir string
-	cleanup func()
+	workDir      string
+	rootDir      string
+	baseDir      string
+	ownedBaseDir bool
+	cleanup      func()
 }
 
 func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorkspace, error) {
@@ -140,7 +160,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 			cleanup()
 			return preparedWorkspace{}, fmt.Errorf("create isolated turn workdir: %w", err)
 		}
-		return preparedWorkspace{workDir: workDir, rootDir: root, baseDir: root, cleanup: cleanup}, nil
+		return preparedWorkspace{workDir: workDir, rootDir: root, baseDir: root, ownedBaseDir: true, cleanup: cleanup}, nil
 	}
 	if err := validateWorkspaceRepoURL(repo); err != nil {
 		return preparedWorkspace{}, err
@@ -196,7 +216,13 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		cleanup()
 		return preparedWorkspace{}, err
 	}
-	return preparedWorkspace{workDir: contained, rootDir: cloneDir, baseDir: root, cleanup: cleanup}, nil
+	return preparedWorkspace{
+		workDir:      contained,
+		rootDir:      cloneDir,
+		baseDir:      root,
+		ownedBaseDir: true,
+		cleanup:      cleanup,
+	}, nil
 }
 
 func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo string) error {
@@ -250,7 +276,7 @@ func normalizeWorkspaceBranchRef(ref string) (string, error) {
 
 func fetchWorkspaceRemoteBranch(ctx context.Context, cloneDir, branch, repo string) error {
 	refspec := "+refs/heads/" + branch + ":refs/remotes/origin/" + branch
-	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", refspec)
+	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth="+workspaceRefFetchDepth, "origin", refspec)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return gitCommandError("fetch turn workspace remote branch", err, out, repo)
 	}
@@ -258,7 +284,12 @@ func fetchWorkspaceRemoteBranch(ctx context.Context, cloneDir, branch, repo stri
 }
 
 func fetchWorkspaceRemoteHeads(ctx context.Context, cloneDir string) error {
-	cmd := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	cmd := workspaceGitCommand(
+		ctx,
+		"-C", cloneDir,
+		"fetch", "--depth="+workspaceRefFetchDepth,
+		"origin", "+refs/heads/*:refs/remotes/origin/*",
+	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("fetch turn workspace remote heads: %w: %s", err, strings.TrimSpace(string(out)))
 	}

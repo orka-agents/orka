@@ -76,6 +76,45 @@ func TestServerRequiresBearerTokenForTurnEndpoints(t *testing.T) {
 	}
 }
 
+func TestServerReloadsBearerTokenFile(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("old-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.AuthValueFile = tokenFile
+	cfg.AuthValue = "old-token"
+	cfg.Generic.Command = testEchoCommand
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	defer cleanup()
+
+	request := validWrapperStartTurnRequest()
+	oldClient, err := harness.NewClient(baseURL, harness.WithBearerToken("old-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldClient.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("old token StartTurn: %v", err)
+	}
+	collectWrapperFrames(t, oldClient, request.TurnID, 0)
+
+	if err := os.WriteFile(tokenFile, []byte("new-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := validWrapperStartTurnRequest()
+	stale.TurnID = harness.HarnessTurnID(string(stale.TurnID) + "-rotated")
+	if _, err := oldClient.StartTurn(context.Background(), stale); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("stale token StartTurn error = %v, want 401", err)
+	}
+	newClient, err := harness.NewClient(baseURL, harness.WithBearerToken("new-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newClient.StartTurn(context.Background(), stale); err != nil {
+		t.Fatalf("new token StartTurn: %v", err)
+	}
+}
+
 func TestServerEnforcesSingleConcurrentTurn(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, NewFakeAdapter(FakeBehaviorCancellation))
 	defer cleanup()
@@ -229,6 +268,33 @@ func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	}
 	if !strings.Contains(last.Completed.Result, "result-from-file") {
 		t.Fatalf("completed result = %q, want result file content", last.Completed.Result)
+	}
+}
+
+func TestServerFailedCommandPreservesAdapterResultFile(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic = GenericAdapterConfig{
+		Command:    "/bin/sh",
+		Args:       []string{"-c", "printf partial-from-file > result.txt; exit 7"},
+		PromptMode: PromptModeStdin,
+		ResultMode: ResultModeFile,
+		ResultFile: "result.txt",
+	}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), req); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, req.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Failed == nil || !strings.Contains(last.Failed.Result, "partial-from-file") {
+		t.Fatalf("failed frame = %#v, want result file content", last.Failed)
 	}
 }
 

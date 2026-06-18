@@ -177,6 +177,20 @@ func UploadArtifacts() error {
 			fmt.Fprintf(os.Stderr, "artifact: skipping invalid filename %q\n", filename)
 			continue
 		}
+		if e.Type()&os.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr, "artifact: skipping symlink %s\n", filename)
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "artifact: failed to inspect %s: %v\n", filename, err)
+			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", filename, err))
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "artifact: skipping non-regular file %s\n", filename)
+			continue
+		}
 		// Reject symlinks and open relative to the already-open artifact directory
 		// so the artifact root path is not re-resolved after the no-follow check.
 		file, err := openAtNoFollow(dirFile, filename)

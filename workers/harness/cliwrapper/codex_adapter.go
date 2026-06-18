@@ -78,9 +78,10 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		}
 	}
 
+	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(turn.Env, workerenv.OpenAIBaseURL))
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
-		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false),
+		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, baseURL),
 		Env:        buildCodexEnv(turn.Env),
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
@@ -107,6 +108,7 @@ func buildCodexArgs(
 	outputPath string,
 	instructionsPath string,
 	bypassSandbox bool,
+	baseURL string,
 ) []string {
 	args := []string{
 		"exec",
@@ -133,8 +135,8 @@ func buildCodexArgs(
 	if instructionsPath != "" {
 		args = append(args, "--config", "model_instructions_file="+instructionsPath)
 	}
-	if baseURL := codexOpenAIBaseURL(); baseURL != "" {
-		args = append(args, "--config", "openai_base_url="+baseURL)
+	if strings.TrimSpace(baseURL) != "" {
+		args = append(args, "--config", "openai_base_url="+strings.TrimSpace(baseURL))
 	}
 	if webSearchSetting, ok := codexWebSearchSetting(cfg); ok {
 		args = append(args, "--config", "web_search="+webSearchSetting)
@@ -211,9 +213,10 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 }
 
 func buildCodexEnv(extra []string) []string {
+	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(extra, workerenv.OpenAIBaseURL))
 	env := removeTurnEnv(append([]string(nil), extra...), workerenv.OpenAIBaseURL)
 	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
-	if baseURL := codexOpenAIBaseURL(); baseURL != "" {
+	if baseURL != "" {
 		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)
 	}
 	if envEntryValue(env, workerenv.CodexAPIKey) == "" {

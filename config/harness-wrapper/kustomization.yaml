@@ -4,3 +4,6 @@ resources:
 - serviceaccount.yaml
 - deployment.yaml
 - service.yaml
+
+patches:
+- path: volume-mode-patch.yaml

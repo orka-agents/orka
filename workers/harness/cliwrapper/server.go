@@ -94,7 +94,11 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	if s.config.AllowUnauthenticated {
 		return true
 	}
-	want := strings.TrimSpace(s.config.AuthValue)
+	want, err := s.currentAuthValue()
+	if err != nil {
+		writeSafeError(w, http.StatusServiceUnavailable, "wrapper auth token is not configured")
+		return false
+	}
 	if want == "" {
 		writeSafeError(w, http.StatusServiceUnavailable, "wrapper auth token is not configured")
 		return false
@@ -157,6 +161,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"mode":    "observed",
 		},
 	})
+}
+
+func (s *Server) currentAuthValue() (string, error) {
+	if file := strings.TrimSpace(s.config.AuthValueFile); file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return strings.TrimSpace(s.config.AuthValue), nil
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -393,11 +408,15 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	turnCtx.RootDir = preparedWorkspace.rootDir
 	turnArtifactsDir := turnArtifactDir(preparedWorkspace)
 	defer ClearTurnArtifacts(turnArtifactsDir)
 	if err := prepareTurnArtifactsDirForWrapper(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
+	}
+	if preparedWorkspace.baseDir != "" {
+		turnCtx.SkillsRoot = filepath.Join(preparedWorkspace.baseDir, "skills")
 	}
 	restoreChildIdentity := suspendChildIdentity()
 	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir, turnArtifactsDir)
@@ -406,23 +425,13 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	if err := ensureWorkspaceArtifactsWritableForChild(
+	if err := ensureWorkspaceArtifactsLinkForTurn(
 		preparedWorkspace.rootDir,
 		turnCtx.WorkDir,
 		turnArtifactsDir,
 	); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
-	}
-	if err := chownTreeForChild(preparedWorkspace.rootDir); err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-		return
-	}
-	if preparedWorkspace.baseDir != "" && preparedWorkspace.baseDir != preparedWorkspace.rootDir {
-		if err := os.Chmod(preparedWorkspace.baseDir, 0o711); err != nil {
-			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-			return
-		}
 	}
 	turnHomeRoot, err := os.MkdirTemp("/tmp", "orka-harness-home-*")
 	if err != nil {
@@ -467,11 +476,30 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	if spec.Dir != "" {
 		turnCtx.WorkDir = spec.Dir
 	}
+	if preparedWorkspace.baseDir != "" &&
+		(preparedWorkspace.baseDir != preparedWorkspace.rootDir || preparedWorkspace.ownedBaseDir) {
+		if err := ensureDirectoryTraversable(preparedWorkspace.baseDir); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
+	}
+	if err := chownTreeForChild(preparedWorkspace.rootDir, turnArtifactsDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	if err := prepareArtifactsForChild(turnArtifactsDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
 	turn.appendFrame(s.runtimeLogFrame(turn, "runtime command started", map[string]any{
 		"runtime": s.adapter.Name(),
 		"command": path.Base(spec.Path),
 	}))
 	run, runErr := s.runner.Run(ctx, spec)
+	if run.FullStdoutTruncated && strings.TrimSpace(spec.ResultFile) == "" {
+		turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime stdout exceeded harness storage limit", false))
+		return
+	}
 	if strings.TrimSpace(run.Stdout) != "" {
 		turn.appendFrame(s.outputFrame(turn, "stdout", run.Stdout))
 	}
@@ -489,7 +517,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		if strings.TrimSpace(run.Stderr) != "" {
 			msg = run.Stderr
 		}
-		partial := strings.TrimSpace(run.Stdout)
+		partial, hasAdapterResult := s.failedTurnPartialResult(ctx, turnCtx, run)
+		if run.FullStdoutTruncated && !hasAdapterResult {
+			turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime stdout exceeded harness storage limit", false))
+			return
+		}
 		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
 			restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
 			if finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, partial); finalizeErr == nil {
@@ -575,6 +607,25 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	}
 }
 
+func (s *Server) failedTurnPartialResult(ctx context.Context, turnCtx TurnContext, run CommandResult) (string, bool) {
+	partial := strings.TrimSpace(run.ExactStdout())
+	hasAdapterResult := false
+	if resultPath := strings.TrimSpace(run.ResultFile); resultPath != "" {
+		if data, err := readBoundedResultFile(resultPath, turnCtx.WorkDir); err == nil &&
+			!resultFileUnwritten(data.info) && strings.TrimSpace(data.contents) != "" {
+			partial = strings.TrimSpace(data.contents)
+			hasAdapterResult = true
+		}
+	}
+	restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
+	defer restoreTurnEnv()
+	if parsed, err := s.adapter.ParseResult(ctx, turnCtx, run); err == nil && strings.TrimSpace(parsed.Result) != "" {
+		partial = strings.TrimSpace(parsed.Result)
+		hasAdapterResult = true
+	}
+	return partial, hasAdapterResult
+}
+
 func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) common.SecurityArtifactFollowUp {
 	return func(ctx context.Context, prompt string) (string, error) {
 		followTurn := base
@@ -613,23 +664,18 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 }
 
 func turnArtifactDir(workspace preparedWorkspace) string {
+	if workspace.baseDir != "" {
+		return filepath.Join(workspace.baseDir, "artifacts")
+	}
 	if workspace.rootDir != "" {
-		gitDir := filepath.Join(workspace.rootDir, ".git")
-		if info, err := os.Lstat(gitDir); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-			return filepath.Join(gitDir, "orka-artifacts")
-		}
-		if workspace.baseDir != "" {
-			return filepath.Join(workspace.baseDir, "artifacts")
-		}
 		return filepath.Join(workspace.rootDir, ".orka-runtime-artifacts")
 	}
-	return filepath.Join(workspace.baseDir, "artifacts")
+	return filepath.Join(os.TempDir(), "orka-runtime-artifacts")
 }
 
 // prepareTurnArtifactsDirForWrapper creates the per-turn artifact directory for
-// root-side workspace prep. Child ownership is applied later by
-// ensureWorkspaceArtifactsWritableForChild, after PrepareTurnContext has written
-// controller-generated security context artifacts.
+// root-side workspace prep. Child ownership is applied later after the workspace
+// tree has been chowned for the child.
 func prepareTurnArtifactsDirForWrapper(artifactDir string) error {
 	if err := os.MkdirAll(artifactDir, 0o770); err != nil {
 		return err
@@ -642,16 +688,25 @@ func prepareTurnArtifactsDirForWrapper(artifactDir string) error {
 	return os.Chmod(artifactDir, 0o770)
 }
 
-func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir, artifactDir string) error {
-	if workDir != "" && rootDir != "" && workDir != rootDir {
-		restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
-		if err := common.EnsureWorkspaceArtifactsLink(workDir); err != nil {
-			restoreArtifactDir()
-			return err
-		}
-		restoreArtifactDir()
+func ensureDirectoryTraversable(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
 	}
-	return prepareArtifactsForChild(artifactDir)
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	mode := info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	return os.Chmod(dir, mode|0o111)
+}
+
+func ensureWorkspaceArtifactsLinkForTurn(rootDir, workDir, artifactDir string) error {
+	if workDir == "" || rootDir == "" || workDir == rootDir {
+		return nil
+	}
+	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+	defer restoreArtifactDir()
+	return common.EnsureWorkspaceArtifactsLink(workDir)
 }
 
 func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, terminal any) harness.HarnessEventFrame {

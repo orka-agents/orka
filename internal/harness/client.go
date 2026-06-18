@@ -152,6 +152,8 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*Ca
 }
 
 func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outputRef string) ([]byte, error) {
+	ctx, cancel := c.controlContext(ctx)
+	defer cancel()
 	if strings.TrimSpace(string(turnID)) == "" {
 		return nil, safeClientError("fetch_turn_output", 0, "turn id is required")
 	}

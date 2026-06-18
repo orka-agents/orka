@@ -11,9 +11,10 @@ const (
 
 func childCredentialIDs() (int, int, bool) { return 0, 0, false }
 
-func chownTreeForChild(string) error { return nil }
+func chownTreeForChild(string, ...string) error { return nil }
 
-func prepareArtifactsForChild(string) error { return nil }
+func prepareArtifactsForChild(string) error   { return nil }
+func prepareArtifactsForWrapper(string) error { return nil }
 
 func prepareHomeForChild(string) error { return nil }
 

@@ -32,7 +32,8 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
 
 	task, agent := harnessWrapperTaskAndAgent()
-	r := newUnitReconciler(newTestScheme(), task, agent)
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
 	updated := runHarnessWrapperTaskToCompletion(t, r, task)
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded (message=%s)", updated.Status.Phase, updated.Status.Message)
@@ -72,7 +73,8 @@ func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
 	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
 
 	task, agent := harnessWrapperTaskAndAgent()
-	r := newUnitReconciler(newTestScheme(), task, agent)
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
 	updated := runHarnessWrapperTaskToCompletion(t, r, task)
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
@@ -104,7 +106,8 @@ func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
 
 	task, agent := harnessWrapperTaskAndAgent()
-	r := newUnitReconciler(newTestScheme(), task, agent)
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
 	if _, err := r.handlePending(context.Background(), task); err != nil {
 		t.Fatalf("handlePending: %v", err)
 	}
@@ -126,7 +129,8 @@ func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 
 func TestHarnessRuntimeMissingEndpointFailsAgentTask(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
-	r := newUnitReconciler(newTestScheme(), task, agent)
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
 	if _, err := r.handlePending(context.Background(), task); err != nil {
 		t.Fatalf("handlePending: %v", err)
 	}
@@ -181,6 +185,16 @@ func harnessWrapperTaskAndAgent() (*corev1alpha1.Task, *corev1alpha1.Agent) {
 	return task, agent
 }
 
+func attachHarnessWrapperRuntimeSecret(task *corev1alpha1.Task, agent *corev1alpha1.Agent) *corev1.Secret {
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "harness-runtime-secret"}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "harness-runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			workerenv.OpenAIAPIKey: []byte("test-runtime-key"),
+		},
+	}
+}
+
 func hasExecutionEventType(eventsList []store.ExecutionEvent, typ string) bool {
 	for _, event := range eventsList {
 		if event.Type == typ {
@@ -224,6 +238,83 @@ func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
 	}
 	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
 		t.Fatalf("%s = %q, want task runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
+	}
+}
+
+func TestHarnessWrapperTurnRequestUsesTaskNamespaceForCrossNamespaceAgentSecret(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Namespace = "shared-agents"
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "runtime-secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-secret", Namespace: task.Namespace},
+		Data:       map[string][]byte{workerenv.OpenAIAPIKey: []byte("task-local-key")},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIAPIKey] != "task-local-key" {
+		t.Fatalf("%s = %q, want task-local secret", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+}
+
+func TestHarnessWrapperTurnRequestAllowsRuntimeSecretProviderBaseURL(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "runtime-secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			workerenv.OpenAIAPIKey:  []byte("runtime-key"),
+			workerenv.OpenAIBaseURL: []byte("https://proxy.example.invalid/v1"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIBaseURL] != "https://proxy.example.invalid/v1" {
+		t.Fatalf("%s = %q, want proxy base URL", workerenv.OpenAIBaseURL, env[workerenv.OpenAIBaseURL])
+	}
+}
+
+func TestHarnessWrapperSecretEnvSkipsFileStyleKeys(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "runtime-secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			workerenv.OpenAIAPIKey: []byte("runtime-key"),
+			".npmrc":               []byte("registry=https://example.invalid"),
+			"config.json":          []byte("{}"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIAPIKey] != "runtime-key" {
+		t.Fatalf("%s = %q, want runtime key", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+	if _, ok := env[".npmrc"]; ok {
+		t.Fatal("file-style key .npmrc was projected as env")
+	}
+	if _, ok := env["config.json"]; ok {
+		t.Fatal("file-style key config.json was projected as env")
 	}
 }
 
@@ -333,8 +424,11 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
 		t.Fatalf("%s = %q, want runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
 	}
-	if env[workerenv.GitHubToken] != readOnlyWorkspaceGitCredential {
-		t.Fatalf("%s = %q, want workspace git credential for read-only prep", workerenv.GitHubToken, env[workerenv.GitHubToken])
+	if env[workerenv.GitHubToken] == "runtime-github-token" {
+		t.Fatalf("read-only Claude runtime should not receive unrelated %s", workerenv.GitHubToken)
+	}
+	if env[workerenv.GitToken] != readOnlyWorkspaceGitCredential {
+		t.Fatalf("%s = %q, want workspace git credential for read-only prep", workerenv.GitToken, env[workerenv.GitToken])
 	}
 	if env[workerenv.OpenAIAPIKey] == "task-openai-key" {
 		t.Fatalf("task secret credentials should not be sent to read-only harness turns")
@@ -345,7 +439,7 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	if env[workerenv.AgentReadOnly] != scheduledRunLabelValue || env[workerenv.ResultStdout] != scheduledRunLabelValue {
 		t.Fatalf("read-only control env not forced: %#v", env)
 	}
-	if env[workerenv.GitToken] != readOnlyWorkspaceGitCredential || env[workerenv.GitHubToken] != readOnlyWorkspaceGitCredential {
+	if env[workerenv.GitToken] != readOnlyWorkspaceGitCredential {
 		t.Fatalf("workspace git credentials not preserved for read-only prep: %#v", env)
 	}
 }
@@ -376,6 +470,104 @@ func TestHarnessWrapperPlannedTurnMustMatchTaskIdentity(t *testing.T) {
 	}
 }
 
+func TestExistingHarnessFrameKeysIndexesStoredHarnessIdentity(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	eventStore := store.NewFakeExecutionEventStore()
+	_, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		Type:       events.ExecutionEventTypeAgentRuntimeStarted,
+		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-1","turnID":"turn-1","correlationID":"corr-1","seq":7}}`),
+	})
+	if err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+	r := &TaskReconciler{ExecutionEventStore: eventStore}
+	keys, err := r.existingHarnessFrameKeys(context.Background(), task)
+	if err != nil {
+		t.Fatalf("existingHarnessFrameKeys: %v", err)
+	}
+	key := strings.Join([]string{"runtime-1", "turn-1", "corr-1", "7"}, "\x00")
+	if _, ok := keys[key]; !ok {
+		t.Fatalf("existing frame key missing from %#v", keys)
+	}
+}
+
+func TestHarnessWrapperTurnMetadataCarriesTaskTimeout(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.Timeout = &metav1.Duration{Duration: 45 * time.Minute}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	if request.Metadata["timeoutSeconds"] != "2700" {
+		t.Fatalf("metadata timeoutSeconds = %q, want 2700", request.Metadata["timeoutSeconds"])
+	}
+}
+
+func TestHarnessWrapperTurnRequestResolvesTaskValueFromEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.Env = []corev1.EnvVar{
+		{
+			Name: "CONFIG_VALUE",
+			ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "task-config"},
+				Key:                  "setting",
+			}},
+		},
+		{
+			Name:      "TASK_NAME",
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}},
+		},
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-config", Namespace: task.Namespace},
+		Data:       map[string]string{"setting": "from-config"},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, cm)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env["CONFIG_VALUE"] != "from-config" {
+		t.Fatalf("CONFIG_VALUE = %q, want from-config", env["CONFIG_VALUE"])
+	}
+	if env["TASK_NAME"] != task.Name {
+		t.Fatalf("TASK_NAME = %q, want %q", env["TASK_NAME"], task.Name)
+	}
+}
+
+func TestHarnessWrapperTurnRequestOmitsOptionalMissingValueFromEnv(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	optional := true
+	task.Spec.Env = []corev1.EnvVar{
+		{
+			Name: "OPTIONAL_CONFIG",
+			ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "missing-config"},
+				Key:                  "setting",
+				Optional:             &optional,
+			}},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	for _, item := range request.Input.Env {
+		if item.Name == "OPTIONAL_CONFIG" {
+			t.Fatalf("OPTIONAL_CONFIG was emitted with value %q, want omitted", item.Value)
+		}
+	}
+}
+
 func TestHarnessWrapperTurnRequestCarriesWorkspaceGitSecretEnv(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
@@ -389,7 +581,14 @@ func TestHarnessWrapperTurnRequestCarriesWorkspaceGitSecretEnv(t *testing.T) {
 			"username": []byte("git-user"),
 		},
 	}
-	r := newUnitReconciler(newTestScheme(), task, agent, gitSecret)
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
+	agentSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			workerenv.GitToken: []byte("agent-token-value"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, gitSecret, agentSecret)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err != nil {
 		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
@@ -398,8 +597,11 @@ func TestHarnessWrapperTurnRequestCarriesWorkspaceGitSecretEnv(t *testing.T) {
 	for _, item := range request.Input.Env {
 		env[item.Name] = item.Value
 	}
-	if env[workerenv.GitToken] != "git-token-value" || env[workerenv.GitHubToken] != "git-token-value" {
+	if env[workerenv.GitToken] != "git-token-value" {
 		t.Fatalf("git token env missing or wrong: %#v", env)
+	}
+	if env[workerenv.GitHubToken] == "git-token-value" {
+		t.Fatalf("workspace git token should not overwrite runtime %s: %#v", workerenv.GitHubToken, env)
 	}
 	if env[workerenv.GitUsername] != "git-user" {
 		t.Fatalf("git username env = %q, want git-user", env[workerenv.GitUsername])
@@ -455,7 +657,7 @@ func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.
 	}
 }
 
-func TestValidateHarnessWrapperTaskEnvRejectsSecretAndValueFrom(t *testing.T) {
+func TestValidateHarnessWrapperTaskEnvRejectsSecretAndUnsupportedValueFrom(t *testing.T) {
 	if err := validateHarnessWrapperTaskEnv([]corev1.EnvVar{{Name: "ORKA_SECURITY_STAGE", Value: "review"}}); err != nil {
 		t.Fatalf("safe env rejected: %v", err)
 	}

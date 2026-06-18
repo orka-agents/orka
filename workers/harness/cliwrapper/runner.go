@@ -113,20 +113,21 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 			waitErr = err
 		}
 	}
-	waitForPipeCopies(&copyWG, stdoutPipe, stderrPipe, time.Second)
+	waitForPipeCopies(&copyWG, stdoutPipe, stderrPipe, 5*time.Second)
 
 	finished := time.Now().UTC()
 	exitCode := exitCodeFromError(waitErr)
 	result := CommandResult{
-		Stdout:     stdout.String(),
-		FullStdout: stdoutFull.String(),
-		Stderr:     stderr.String(),
-		ExitCode:   exitCode,
-		StartedAt:  started,
-		FinishedAt: finished,
-		TimedOut:   timedOut,
-		Cancelled:  cancelled && !timedOut,
-		ResultFile: spec.ResultFile,
+		Stdout:              stdout.String(),
+		FullStdout:          stdoutFull.String(),
+		FullStdoutTruncated: stdoutFull.Truncated(),
+		Stderr:              stderr.String(),
+		ExitCode:            exitCode,
+		StartedAt:           started,
+		FinishedAt:          finished,
+		TimedOut:            timedOut,
+		Cancelled:           cancelled && !timedOut,
+		ResultFile:          spec.ResultFile,
 	}
 	if stdout.Truncated() {
 		result.Stdout += fmt.Sprintf("\n[stdout truncated at %d bytes]", r.StdoutLimitBytes)
