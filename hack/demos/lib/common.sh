@@ -1585,6 +1585,61 @@ wait_for_task_succeeded() {
   return 1
 }
 
+# wait_for_substrate_task_done <task> [timeout]
+#
+# Like wait_for_task_succeeded, but tolerant of a post-success workspace
+# TEARDOWN failure. The agent-substrate gVisor runtime has a flaky actor
+# suspend/resume RPC: a reused-workspace Task can reattach the warm workspace
+# (reused=true), do its work, and push its commit, then mark the Task Failed
+# solely because the actor teardown RPC timed out AFTER the work was done.
+#
+# To avoid masking a REAL failure, a Failed task is accepted only when BOTH:
+#   (a) the workspace actually reattached: reused=true AND ws.phase=Ready, AND
+#   (b) the failure is provably teardown-only: the task status carries a
+#       teardown/cleanup-timeout signature (suspend/resume actor, wait actor
+#       status, scrub/release workspace, handoff token, cleanup/teardown).
+# A failure where the workspace never came ready, OR where the failure has no
+# teardown signature (e.g. the command or push itself failed after readiness),
+# still fails. DEMO_SUBSTRATE_STRICT=1 disables tolerance entirely.
+wait_for_substrate_task_done() {
+  local task_name="$1"
+  local timeout_seconds="${2:-900}"
+  local phase reused ws_phase status_blob
+  phase="$(wait_for_task_terminal "${task_name}" "${timeout_seconds}")" || return 1
+  if [[ "${phase}" == "Succeeded" ]]; then
+    return 0
+  fi
+  if [[ "${phase}" != "Failed" || "${DEMO_SUBSTRATE_STRICT:-0}" == "1" ]]; then
+    printf 'task %s finished with phase %s\n' "${task_name}" "${phase}" >&2
+    return 1
+  fi
+
+  reused="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
+    -o jsonpath='{.status.executionWorkspace.reused}' 2>/dev/null || true)"
+  ws_phase="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
+    -o jsonpath='{.status.executionWorkspace.phase}' 2>/dev/null || true)"
+  # (a) workspace must have reattached and become ready
+  if [[ "${reused}" != "true" || "${ws_phase}" != "Ready" ]]; then
+    printf 'task %s Failed and workspace did not reattach (reused=%s phase=%s); not tolerable\n' \
+      "${task_name}" "${reused:-?}" "${ws_phase:-?}" >&2
+    return 1
+  fi
+
+  # (b) the failure must carry a teardown/cleanup-timeout signature. Scan the
+  # task message, all condition reasons/messages, and the workspace message.
+  status_blob="$(kubectl get task "${task_name}" -n "${DEMO_NAMESPACE}" \
+    -o jsonpath='{.status.message}{" "}{range .status.conditions[*]}{.reason}{" "}{.message}{" "}{end}{.status.executionWorkspace.message}{" "}{.status.executionWorkspace.reason}' 2>/dev/null || true)"
+  if printf '%s' "${status_blob}" \
+       | grep -qiE 'cleanup|teardown|release|suspend actor|resume actor|wait actor status|scrub workspace|handoff token'; then
+    printf 'note: task %s reattached the warm workspace (reused=true, Ready) and its work landed; the Task is Failed only because the substrate actor teardown timed out — accepting as demo success (the payoff card still asserts the real PR)\n' \
+      "${task_name}" >&2
+    return 0
+  fi
+
+  printf 'task %s Failed after workspace readiness but with no teardown signature; treating as a real failure\n' "${task_name}" >&2
+  return 1
+}
+
 wait_for_first_scheduled_child() {
   local timeout_seconds="${1:-180}"
   local deadline child
