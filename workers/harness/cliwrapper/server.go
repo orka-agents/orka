@@ -395,7 +395,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	turnArtifactsDir := filepath.Join(preparedWorkspace.baseDir, "artifacts")
 	defer ClearTurnArtifacts(turnArtifactsDir)
-	if err := prepareTurnArtifactsDir(turnArtifactsDir); err != nil {
+	if err := prepareTurnArtifactsDirForWrapper(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
@@ -610,11 +610,15 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 	}
 }
 
-func prepareTurnArtifactsDir(artifactDir string) error {
+// prepareTurnArtifactsDirForWrapper creates the per-turn artifact directory for
+// root-side workspace prep. Child ownership is applied later by
+// ensureWorkspaceArtifactsWritableForChild, after PrepareTurnContext has written
+// controller-generated security context artifacts.
+func prepareTurnArtifactsDirForWrapper(artifactDir string) error {
 	if err := os.MkdirAll(artifactDir, 0o770); err != nil {
 		return err
 	}
-	return prepareArtifactsForChild(artifactDir)
+	return os.Chmod(artifactDir, 0o770)
 }
 
 func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir, artifactDir string) error {
