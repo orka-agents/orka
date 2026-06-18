@@ -96,8 +96,11 @@ render_substrate_agent                                       > "${DEMO_WORKDIR}/
 render_substrate_task "${cold_task}" session true  "${cold_prompt}" > "${DEMO_WORKDIR}/substrate-cold.yaml"
 # Warm beat bases off the branch the cold beat already pushed (arg 5), so its
 # push to the same pushBranch is a fast-forward follow-up commit instead of a
-# rejected non-fast-forward.
-render_substrate_task "${warm_task}" session false "${warm_prompt}" "${push_branch}" > "${DEMO_WORKDIR}/substrate-warm.yaml"
+# rejected non-fast-forward. cleanupPolicy=delete (arg 6): the warm beat is the
+# terminal beat — nothing reuses its workspace, and "retain" triggers a broken
+# gVisor checkpoint/suspend on release. "delete" tears the actor down cleanly
+# while still demonstrating warm REATTACH (reused=true) on entry.
+render_substrate_task "${warm_task}" session false "${warm_prompt}" "${push_branch}" delete > "${DEMO_WORKDIR}/substrate-warm.yaml"
 render_substrate_story_file                                  > "${DEMO_WORKDIR}/substrate-story.txt"
 
 demo_scenario "Agent Substrate — a real agent in a gVisor workspace" \

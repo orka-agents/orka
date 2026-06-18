@@ -1035,8 +1035,15 @@ render_substrate_task() {
   # Basing the warm beat on the cold beat's pushBranch makes its push a clean
   # fast-forward follow-up commit — the intended "same branch" narrative.
   local base_branch="${5:-${DEMO_SUBSTRATE_GIT_BASE_BRANCH}}"
+  # Cleanup policy. Default ties to reuse (session→retain so the next beat can
+  # reattach; otherwise delete). Arg 6 overrides it. The TERMINAL warm beat
+  # passes "delete": nothing reuses its workspace afterward, and "retain"
+  # triggers a gVisor actor checkpoint/suspend (runsc) on release that is broken
+  # in the pinned runtime — "delete" tears the actor down cleanly and avoids
+  # that path while still proving warm REATTACH (reused=true) happened on entry.
   local cleanup="retain"
   [[ "${reuse}" == "session" ]] || cleanup="delete"
+  [[ -n "${6:-}" ]] && cleanup="$6"
   local session_block=""
   if [[ "${reuse}" == "session" ]]; then
     session_block="  sessionRef:
