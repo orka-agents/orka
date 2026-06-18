@@ -384,7 +384,6 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 
 	turn.appendFrame(s.frame(turn, harness.FrameTurnStarted, "turn started", nil))
 	ClearTurnArtifacts()
-	defer ClearTurnArtifacts()
 	restoreWorkspaceEnv := setTemporaryEnvEntries(turnCtx.Env)
 	preparedWorkspace, err := prepareTurnWorkspace(ctx, turnCtx)
 	restoreWorkspaceEnv()
@@ -394,19 +393,25 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
+	turnArtifactsDir := filepath.Join(preparedWorkspace.baseDir, "artifacts")
+	defer ClearTurnArtifacts(turnArtifactsDir)
 	restoreChildIdentity := suspendChildIdentity()
-	if err := prepareTurnArtifactsDir(); err != nil {
+	if err := prepareTurnArtifactsDir(turnArtifactsDir); err != nil {
 		restoreChildIdentity()
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir)
+	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir, turnArtifactsDir)
 	restoreChildIdentity()
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
-	if err := ensureWorkspaceArtifactsWritableForChild(preparedWorkspace.rootDir, turnCtx.WorkDir); err != nil {
+	if err := ensureWorkspaceArtifactsWritableForChild(
+		preparedWorkspace.rootDir,
+		turnCtx.WorkDir,
+		turnArtifactsDir,
+	); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
@@ -491,7 +496,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				partial = string(finalized)
 			}
 		}
-		if artifactErr := UploadTurnArtifacts(turnCtx); artifactErr != nil {
+		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
 				"artifact-upload",
@@ -541,7 +546,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			))
 			return
 		}
-		if artifactErr := UploadTurnArtifacts(turnCtx); artifactErr != nil {
+		if artifactErr := UploadTurnArtifacts(turnCtx, turnArtifactsDir); artifactErr != nil {
 			turn.appendFrame(s.runtimeLogTextFrame(
 				turn,
 				"artifact-upload",
@@ -601,24 +606,26 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 	}
 }
 
-func prepareTurnArtifactsDir() error {
-	if err := os.MkdirAll("/tmp/artifacts", 0o770); err != nil {
+func prepareTurnArtifactsDir(artifactDir string) error {
+	if err := os.MkdirAll(artifactDir, 0o770); err != nil {
 		return err
 	}
-	return prepareArtifactsForChild("/tmp/artifacts")
+	return prepareArtifactsForChild(artifactDir)
 }
 
-func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir string) error {
-	if err := prepareArtifactsForChild("/tmp/artifacts"); err != nil {
+func ensureWorkspaceArtifactsWritableForChild(rootDir, workDir, artifactDir string) error {
+	if err := prepareArtifactsForChild(artifactDir); err != nil {
 		return err
 	}
 	if workDir == "" || workDir == rootDir {
 		return nil
 	}
+	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+	defer restoreArtifactDir()
 	if err := common.EnsureWorkspaceArtifactsLink(workDir); err != nil {
 		return err
 	}
-	return prepareArtifactsForChild("/tmp/artifacts")
+	return prepareArtifactsForChild(artifactDir)
 }
 
 func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, terminal any) harness.HarnessEventFrame {

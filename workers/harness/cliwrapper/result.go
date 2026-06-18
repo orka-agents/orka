@@ -43,16 +43,28 @@ func FinalizeTurnResult(workDir, output string) ([]byte, error) {
 }
 
 // UploadTurnArtifacts reuses the existing worker artifact uploader. It is a
-// no-op when /tmp/artifacts is absent.
-func ClearTurnArtifacts() {
-	const artifactDir = "/tmp/artifacts"
+// no-op when the selected turn artifact directory is absent.
+func ClearTurnArtifacts(artifactDirs ...string) {
+	artifactDir := firstNonEmpty(artifactDirs...)
+	if artifactDir == "" {
+		artifactDir = wrapperArtifactsDir()
+	}
 	_ = removeAllForChild(artifactDir)
 	_ = os.RemoveAll(artifactDir)
 }
 
-func UploadTurnArtifacts(turn TurnContext) error {
+func wrapperArtifactsDir() string {
+	if dir := strings.TrimSpace(os.Getenv("ORKA_ARTIFACTS_DIR")); dir != "" {
+		return filepath.Clean(dir)
+	}
+	return "/tmp/artifacts"
+}
+
+func UploadTurnArtifacts(turn TurnContext, artifactDir string) error {
 	restoreTurnEnv := setTemporaryEnvEntries(turn.Env)
 	defer restoreTurnEnv()
+	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+	defer restoreArtifactDir()
 	restoreTaskName := setTemporaryEnv(workerenv.TaskName, turn.TaskName)
 	defer restoreTaskName()
 	restoreTaskNamespace := setTemporaryEnv(workerenv.TaskNamespace, turn.Namespace)
@@ -61,7 +73,12 @@ func UploadTurnArtifacts(turn TurnContext) error {
 	return err
 }
 
-func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot string) (*common.AgentConfig, error) {
+func PrepareTurnContext(
+	ctx context.Context,
+	turn *TurnContext,
+	workspaceRoot string,
+	artifactDir string,
+) (*common.AgentConfig, error) {
 	if turn == nil {
 		return nil, nil
 	}
@@ -72,6 +89,8 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 	}
 	restoreEnv := setTemporaryEnvEntries(turn.Env)
 	defer restoreEnv()
+	restoreArtifactDir := setTemporaryEnv("ORKA_ARTIFACTS_DIR", artifactDir)
+	defer restoreArtifactDir()
 	if root != "" {
 		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
@@ -91,6 +110,9 @@ func PrepareTurnContext(ctx context.Context, turn *TurnContext, workspaceRoot st
 	}
 	turn.Prompt = cfg.Prompt
 	turn.Env = setEnv(turn.Env, workerenv.Prompt, cfg.Prompt)
+	if artifactDir != "" {
+		turn.Env = setEnv(turn.Env, "ORKA_ARTIFACTS_DIR", artifactDir)
+	}
 	if root != "" && strings.TrimSpace(turn.Metadata[turnMetadataSkillsFiles]) != "" {
 		turn.Env = setEnv(turn.Env, workerenv.SkillsDir, filepath.Join(root, ".skills"))
 	}
