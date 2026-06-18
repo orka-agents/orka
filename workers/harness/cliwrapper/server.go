@@ -393,7 +393,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	}
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
-	turnArtifactsDir := filepath.Join(preparedWorkspace.baseDir, "artifacts")
+	turnArtifactsDir := turnArtifactDir(preparedWorkspace)
 	defer ClearTurnArtifacts(turnArtifactsDir)
 	if err := prepareTurnArtifactsDirForWrapper(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
@@ -608,6 +608,20 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 		}
 		return parsed.Result, nil
 	}
+}
+
+func turnArtifactDir(workspace preparedWorkspace) string {
+	if workspace.rootDir != "" {
+		gitDir := filepath.Join(workspace.rootDir, ".git")
+		if info, err := os.Lstat(gitDir); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			return filepath.Join(gitDir, "orka-artifacts")
+		}
+		if workspace.baseDir != "" {
+			return filepath.Join(workspace.baseDir, "artifacts")
+		}
+		return filepath.Join(workspace.rootDir, ".orka-runtime-artifacts")
+	}
+	return filepath.Join(workspace.baseDir, "artifacts")
 }
 
 // prepareTurnArtifactsDirForWrapper creates the per-turn artifact directory for
