@@ -308,7 +308,7 @@ const fs = require('fs');
 const path = require('path');
 const childProcess = require('child_process');
 
-const artifactDir = '/tmp/artifacts';
+const artifactDir = process.env.ORKA_ARTIFACTS_DIR || '/tmp/artifacts';
 const prompt = fs.readFileSync(0, 'utf8');
 fs.mkdirSync(artifactDir, { recursive: true });
 
