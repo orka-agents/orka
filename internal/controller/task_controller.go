@@ -601,8 +601,8 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		if taskHasPlannedHarnessWrapperTurn(task) {
 			return r.runHarnessWrapperTask(ctx, task, agent)
 		}
-		if !agentTaskHasRuntimeSecret(task, agent) || agentTaskRequiresJobBackend(task, agent) {
-			return r.createTaskJob(ctx, task, agent, provider)
+		if reason := agentTaskJobBackendUnsupportedReason(task, agent); reason != "" {
+			return r.failTask(ctx, task, reason)
 		}
 		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
@@ -618,23 +618,20 @@ func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
 	return err == nil && pending
 }
 
-func agentTaskHasRuntimeSecret(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	return task != nil && task.Spec.SecretRef != nil ||
-		agent != nil && agent.Spec.SecretRef != nil
-}
-
-func agentTaskRequiresJobBackend(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+func agentTaskJobBackendUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
 	if task == nil {
-		return false
+		return ""
 	}
-	return task.Spec.Transaction != nil ||
-		effectiveAgentResources(task, agent) ||
-		taskRequestsExecutionWorkspace(task) ||
-		resolveExecution(task, agent) != nil
-}
-
-func taskRequestsExecutionWorkspace(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
+	switch {
+	case task.Spec.Transaction != nil:
+		return "agent CLI runtime tasks do not support transaction token delegation with the harness wrapper yet"
+	case effectiveAgentResources(task, agent):
+		return "agent CLI runtime tasks do not support custom Kubernetes resources with the harness wrapper yet"
+	case resolveExecution(task, agent) != nil:
+		return "agent CLI runtime tasks do not support execution placement with the harness wrapper yet"
+	default:
+		return ""
+	}
 }
 
 func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {

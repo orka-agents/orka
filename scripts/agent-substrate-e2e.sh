@@ -561,6 +561,8 @@ deploy_orka() {
     rm -f "${wrapper_token_file}"
   fi
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
+  run kubectl -n orka-system set env deployment/orka-agent-harness-wrapper CODEX_CLI_PATH=/bin/true
+  run kubectl -n orka-system rollout status deployment/orka-agent-harness-wrapper --timeout=5m
 
   local patch
   patch="$(jq -cn \
@@ -661,9 +663,6 @@ spec:
   agentRuntime:
     maxTurns: 1
     allowBash: true
-  env:
-    - name: CODEX_CLI_PATH
-      value: /bin/true
   execution:
     workspace:
 ${workspace_yaml}

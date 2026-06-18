@@ -121,6 +121,51 @@ func validateWorkspaceRepoHost(host string) error {
 	return nil
 }
 
+func cleanupTurnWorkspacePath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	childErr := removeAllForChild(path)
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil
+	}
+	if err := relaxWorkspaceTreePermissions(path); err != nil && childErr != nil {
+		return fmt.Errorf("remove workspace as child: %w; relax workspace permissions: %v", childErr, err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		if childErr != nil {
+			return fmt.Errorf("remove workspace as child: %w; remove workspace as wrapper: %v", childErr, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func relaxWorkspaceTreePermissions(root string) error {
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
+	if err := os.Chmod(root, 0o700); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		mode := os.FileMode(0o600)
+		if d.IsDir() {
+			mode = 0o700
+		}
+		if chmodErr := os.Chmod(path, mode); chmodErr != nil && !os.IsNotExist(chmodErr) {
+			return chmodErr
+		}
+		return nil
+	})
+}
+
 func workspaceGitHostAllowed(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if slices.Contains([]string{"github.com", "gitlab.com", "bitbucket.org"}, host) {
@@ -154,7 +199,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		if err != nil {
 			return preparedWorkspace{}, fmt.Errorf("create isolated turn workspace: %w", err)
 		}
-		cleanup := func() { _ = removeAllForChild(root); _ = os.RemoveAll(root) }
+		cleanup := func() { _ = cleanupTurnWorkspacePath(root) }
 		workDir := filepath.Join(root, "workspace")
 		if err := os.MkdirAll(workDir, 0o700); err != nil {
 			cleanup()
@@ -170,7 +215,7 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 		return preparedWorkspace{}, fmt.Errorf("create turn workspace: %w", err)
 	}
 	cloneDir := filepath.Join(root, "repo")
-	cleanup := func() { _ = removeAllForChild(cloneDir); _ = os.RemoveAll(root) }
+	cleanup := func() { _ = cleanupTurnWorkspacePath(root) }
 	args := []string{"clone", "--depth=1"}
 	if branch := strings.TrimSpace(turn.Metadata["gitBranch"]); branch != "" {
 		args = append(args, "--branch", branch)

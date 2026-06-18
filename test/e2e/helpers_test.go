@@ -203,6 +203,56 @@ func verifyResultAvailable(taskName string) {
 	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
+// verifyHarnessWrapperMetadataForTask waits until a Task is planned for the
+// harness-wrapper backend and verifies selected metadata fields.
+func verifyHarnessWrapperMetadataForTask(taskName string, expected map[string]string, timeout time.Duration) {
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "task", taskName, "-n", namespace, "-o", "json")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		var task struct {
+			Metadata struct {
+				Annotations map[string]string `json:"annotations"`
+			} `json:"metadata"`
+			Status struct {
+				JobName string `json:"jobName"`
+				Phase   string `json:"phase"`
+			} `json:"status"`
+		}
+		err = json.Unmarshal([]byte(output), &task)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(task.Status.JobName).To(BeEmpty(), "harness-wrapper tasks should not create worker Jobs")
+		g.Expect(task.Status.Phase).To(BeElementOf("Pending", "Running", "Succeeded", "Failed"))
+
+		annotations := task.Metadata.Annotations
+		g.Expect(annotations).To(HaveKey("orka.ai/harness-wrapper-turn-id"))
+		g.Expect(annotations).To(HaveKey("orka.ai/harness-wrapper-runtime-session-id"))
+		g.Expect(annotations).To(HaveKey("orka.ai/harness-wrapper-correlation-id"))
+		rawMetadata := annotations["orka.ai/harness-wrapper-metadata"]
+		g.Expect(rawMetadata).NotTo(BeEmpty())
+		metadata := map[string]string{}
+		err = json.Unmarshal([]byte(rawMetadata), &metadata)
+		g.Expect(err).NotTo(HaveOccurred())
+		for key, value := range expected {
+			g.Expect(metadata).To(HaveKeyWithValue(key, value))
+		}
+	}, timeout, time.Second).Should(Succeed())
+}
+
+func verifyNoJobForTask(taskName string, timeout time.Duration) {
+	Consistently(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "jobs",
+			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+			"-o", "jsonpath={.items[*].metadata.name}",
+			"-n", namespace,
+		)
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(strings.TrimSpace(output)).To(BeEmpty())
+	}, timeout, time.Second).Should(Succeed())
+}
+
 // verifyJobCreatedForTask waits for a Job labeled with the task name to appear.
 func verifyJobCreatedForTask(taskName string, timeout time.Duration) {
 	Eventually(func(g Gomega) {

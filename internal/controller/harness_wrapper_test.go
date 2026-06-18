@@ -241,6 +241,49 @@ func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {
 	}
 }
 
+func TestPlannedHarnessWrapperStartTurnRequestRebuildsFullInput(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.CodexCLIPath, Value: "/bin/codex-test"}}
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: task.Namespace},
+		Data: map[string][]byte{
+			workerenv.OpenAIAPIKey: []byte("runtime-openai-key"),
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	planned, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(planned.TurnID),
+		harnessWrapperRuntimeAnnotation: string(planned.RuntimeSessionID),
+		harnessWrapperCorrelationIDAnno: planned.CorrelationID,
+		harnessWrapperMetadataAnno:      `{"runtime":"codex","wrapper":"cli"}`,
+		harnessWrapperLastFrameSeqAnno:  "0",
+		harnessWrapperStartedAnno:       scheduledRunLabelValue,
+	}
+
+	replayed, err := r.plannedHarnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now())
+	if err != nil {
+		t.Fatalf("plannedHarnessWrapperStartTurnRequest: %v", err)
+	}
+	if replayed.TurnID != planned.TurnID || replayed.RuntimeSessionID != planned.RuntimeSessionID || replayed.CorrelationID != planned.CorrelationID {
+		t.Fatalf("replayed identity = (%q,%q,%q), want planned (%q,%q,%q)", replayed.TurnID, replayed.RuntimeSessionID, replayed.CorrelationID, planned.TurnID, planned.RuntimeSessionID, planned.CorrelationID)
+	}
+	env := map[string]string{}
+	for _, item := range replayed.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.CodexCLIPath] != "/bin/codex-test" {
+		t.Fatalf("%s = %q, want task env", workerenv.CodexCLIPath, env[workerenv.CodexCLIPath])
+	}
+	if env[workerenv.OpenAIAPIKey] != "runtime-openai-key" {
+		t.Fatalf("%s = %q, want runtime secret env", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+}
+
 func TestHarnessWrapperTurnRequestUsesTaskNamespaceForCrossNamespaceAgentSecret(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Namespace = "shared-agents"

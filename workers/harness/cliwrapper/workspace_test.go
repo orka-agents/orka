@@ -5,11 +5,68 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sozercan/orka/internal/workerenv"
 )
+
+const testWindowsOS = "windows"
+
+func TestCleanupTurnWorkspacePathRemovesUnreadableChildTree(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("unix permission cleanup regression")
+	}
+	root := t.TempDir()
+	stubborn := filepath.Join(root, "workspace", "stubborn")
+	if err := os.MkdirAll(stubborn, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stubborn, "artifact.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stubborn, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(stubborn, 0o700) }()
+
+	if err := cleanupTurnWorkspacePath(filepath.Join(root, "workspace")); err != nil {
+		t.Fatalf("cleanupTurnWorkspacePath: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "workspace")); !os.IsNotExist(err) {
+		t.Fatalf("workspace still exists or stat failed: %v", err)
+	}
+}
+
+func TestRelaxWorkspaceTreePermissionsSkipsSymlinks(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("unix symlink permissions regression")
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(workspace, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := relaxWorkspaceTreePermissions(workspace); err != nil {
+		t.Fatalf("relaxWorkspaceTreePermissions: %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("symlink target mode = %o, want unchanged 0600", got)
+	}
+}
 
 func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
 	cloneDir, _ := newWorkspaceGitFixture(t)

@@ -686,29 +686,19 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	if agent != nil && agent.Spec.Runtime != nil {
 		runtimeName = string(agent.Spec.Runtime.Type)
 	}
-	metadata := harnessWrapperPlannedMetadata(task, runtimeName)
-	env, err := r.harnessWrapperBaseTurnEnv(ctx, task)
+	attempts := harnessWrapperCurrentAttempt(task)
+	request, err := r.harnessWrapperStartTurnRequest(ctx, task, agent, now, attempts)
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
-	prompt := task.Spec.Prompt
-	if prompt == "" && task.Spec.AI != nil {
-		prompt = task.Spec.AI.Prompt
+	request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
+	request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
+	request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
+	request.Deadline = deadline.UTC()
+	if request.Metadata == nil {
+		request.Metadata = harnessWrapperPlannedMetadata(task, runtimeName)
 	}
-	return harness.StartTurnRequest{
-		Version:           harness.ProtocolVersion,
-		Namespace:         task.Namespace,
-		TaskName:          task.Name,
-		SessionName:       harnessWrapperSessionName(task),
-		RuntimeSessionID:  harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation])),
-		TurnID:            harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])),
-		CorrelationID:     strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
-		Deadline:          deadline.UTC(),
-		AuthIdentity:      harness.AuthIdentity{Subject: "task:" + task.Namespace + "/" + task.Name},
-		Input:             harness.TurnInput{Prompt: prompt, Env: env},
-		ToolExecutionMode: harness.ToolExecutionModeObserved,
-		Metadata:          metadata,
-	}, nil
+	return request, nil
 }
 
 func (r *TaskReconciler) harnessWrapperStartTurnRequest(
