@@ -134,7 +134,20 @@ record_one() {
   fi
 
   if [[ "${DEMO_RECORD_VALIDATE:-1}" == "1" ]]; then
+    # Per-demo idle-trimmed-playback budget. The flagship full-SDLC demos
+    # (10 chat→PR, 20 manual→PR) drive a real coordinator + many child Tasks +
+    # review + CI + a real PR, so their legitimate length exceeds the default
+    # docs budget. Give them more headroom; everything else keeps the tight
+    # default. Override per run with CAST_MAX_SECONDS.
+    local demo_budget="${CAST_MAX_SECONDS:-}"
+    if [[ -z "${demo_budget}" ]]; then
+      case "${id}" in
+        10|20) demo_budget=240 ;;
+        *)     demo_budget=180 ;;
+      esac
+    fi
     CAST_REQUIRE_GEOMETRY=1 CAST_EXPECT_COLS="${cols}" CAST_EXPECT_ROWS="${rows}" \
+    CAST_MAX_SECONDS="${demo_budget}" \
       bash "${here}/validate-casts.sh" "${out}" || {
         printf 'record: validation FAILED for %s — do not publish this take\n' "${out}" >&2
         return 1

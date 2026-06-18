@@ -9,6 +9,10 @@ __pycache__/
 *.dylib
 bin/*
 
+# Recorded demo casts (build output of hack/demos/record.sh)
+hack/demos/out/
+*.cast
+
 # Test binary, built with `go test -c`
 *.test
 

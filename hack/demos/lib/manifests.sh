@@ -1028,6 +1028,13 @@ render_substrate_task() {
   local reuse="${2:-session}"
   local create="${3:-false}"
   local prompt="${4:-Make the requested change and stop.}"
+  # Optional base-branch override (arg 5). The WARM beat must base off the
+  # branch the COLD beat already pushed, not the repo default: both beats push
+  # the SAME pushBranch, so a warm push rooted at the default base would be a
+  # non-fast-forward (remote already has the cold commit) and get rejected.
+  # Basing the warm beat on the cold beat's pushBranch makes its push a clean
+  # fast-forward follow-up commit — the intended "same branch" narrative.
+  local base_branch="${5:-${DEMO_SUBSTRATE_GIT_BASE_BRANCH}}"
   local cleanup="retain"
   [[ "${reuse}" == "session" ]] || cleanup="delete"
   local session_block=""
@@ -1062,7 +1069,7 @@ ${session_block}
     allowBash: true
     workspace:
       gitRepo: ${DEMO_SUBSTRATE_GIT_REPO}
-      branch: ${DEMO_SUBSTRATE_GIT_BASE_BRANCH}
+      branch: ${base_branch}
       pushBranch: ${DEMO_SUBSTRATE_PUSH_BRANCH}
       gitSecretRef:
         name: ${DEMO_SUBSTRATE_GIT_SECRET}
