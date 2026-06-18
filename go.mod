@@ -12,8 +12,8 @@ require (
 	github.com/gofiber/fiber/v3 v3.2.0
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v3 v3.1.1
-	github.com/onsi/ginkgo/v2 v2.30.0
-	github.com/onsi/gomega v1.40.0
+	github.com/onsi/ginkgo/v2 v2.31.0
+	github.com/onsi/gomega v1.42.0
 	github.com/openai/openai-go/v3 v3.39.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
