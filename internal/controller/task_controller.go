@@ -598,6 +598,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		if task.Spec.Transaction != nil || effectiveAgentResources(task, agent) {
+			return r.createTaskJob(ctx, task, agent, provider)
+		}
 		if taskHasPlannedHarnessWrapperTurn(task) {
 			return r.runHarnessWrapperTask(ctx, task, agent)
 		}
@@ -613,6 +616,13 @@ func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
 	}
 	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
 	return err == nil && pending
+}
+
+func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task != nil && (len(task.Spec.Resources.Requests) > 0 || len(task.Spec.Resources.Limits) > 0) {
+		return true
+	}
+	return agent != nil && (len(agent.Spec.Resources.Requests) > 0 || len(agent.Spec.Resources.Limits) > 0)
 }
 
 func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
@@ -2717,9 +2727,6 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		// Agent with runtime must not have a model provider set
 		if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 			return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
-		}
-		if task.Spec.Transaction != nil {
-			return fmt.Errorf("transaction-scoped tasks are not supported by harness runtime yet")
 		}
 		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
 			return err

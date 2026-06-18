@@ -141,7 +141,7 @@ func (a *GenericAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Com
 }
 
 func (a *GenericAdapter) ParseResult(_ context.Context, turn TurnContext, run CommandResult) (TurnResult, error) {
-	result := run.Stdout
+	result := run.ExactStdout()
 	if strings.ToLower(strings.TrimSpace(a.config.ResultMode)) == ResultModeFile {
 		path := strings.TrimSpace(run.ResultFile)
 		if path == "" {

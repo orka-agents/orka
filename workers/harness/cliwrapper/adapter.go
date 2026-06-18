@@ -68,6 +68,7 @@ type CommandSpec struct {
 // CommandResult captures bounded process output and lifecycle metadata.
 type CommandResult struct {
 	Stdout     string
+	FullStdout string
 	Stderr     string
 	ExitCode   int
 	StartedAt  time.Time
@@ -75,6 +76,13 @@ type CommandResult struct {
 	TimedOut   bool
 	Cancelled  bool
 	ResultFile string
+}
+
+func (r CommandResult) ExactStdout() string {
+	if r.FullStdout != "" {
+		return r.FullStdout
+	}
+	return r.Stdout
 }
 
 // TurnResult is the adapter-normalized terminal result for a turn.

@@ -52,6 +52,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	cmd.SysProcAttr = commandSysProcAttr()
 
 	stdout := newLimitedBuffer(r.StdoutLimitBytes)
+	stdoutFull := newLimitedBuffer(maxStoredResultBytes)
 	stderr := newLimitedBuffer(r.StderrLimitBytes)
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -81,7 +82,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	copyWG.Add(2)
 	go func() {
 		defer copyWG.Done()
-		_, _ = io.Copy(stdout, stdoutPipe)
+		_, _ = io.Copy(io.MultiWriter(stdout, stdoutFull), stdoutPipe)
 	}()
 	go func() {
 		defer copyWG.Done()
@@ -118,6 +119,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	exitCode := exitCodeFromError(waitErr)
 	result := CommandResult{
 		Stdout:     stdout.String(),
+		FullStdout: stdoutFull.String(),
 		Stderr:     stderr.String(),
 		ExitCode:   exitCode,
 		StartedAt:  started,

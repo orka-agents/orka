@@ -22,8 +22,12 @@ FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    build-essential \
+    curl \
     git \
     libcap2-bin \
+    make \
+    pkg-config \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 

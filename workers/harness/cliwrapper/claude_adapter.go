@@ -50,7 +50,7 @@ func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comm
 }
 
 func (a *ClaudeAdapter) ParseResult(_ context.Context, _ TurnContext, run CommandResult) (TurnResult, error) {
-	return TurnResult{Result: run.Stdout, Metadata: map[string]string{"adapter": RuntimeClaude}}, nil
+	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeClaude}}, nil
 }
 
 func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {

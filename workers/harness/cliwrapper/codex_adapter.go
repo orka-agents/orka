@@ -99,7 +99,7 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 			return TurnResult{Result: data.contents, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
 		}
 	}
-	return TurnResult{Result: run.Stdout, Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
 }
 
 func buildCodexArgs(

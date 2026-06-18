@@ -171,13 +171,22 @@ func agentConfigForTurn(turn TurnContext) *common.AgentConfig {
 	if parsed, err := strconv.Atoi(maxTurnsValue); err == nil && parsed > 0 {
 		maxTurns = parsed
 	}
+	timeoutSeconds := 0
+	timeoutValue := firstNonEmpty(
+		turn.Metadata["timeoutSeconds"],
+		envEntryValue(turn.Env, workerenv.TimeoutSeconds),
+	)
+	if parsed, err := strconv.Atoi(timeoutValue); err == nil && parsed > 0 {
+		timeoutSeconds = parsed
+	}
 	return &common.AgentConfig{
-		TaskName:      turn.TaskName,
-		TaskNamespace: turn.Namespace,
-		Prompt:        turn.Prompt,
-		Model:         firstNonEmpty(turn.Metadata["model"], envEntryValue(turn.Env, workerenv.Model)),
-		SystemPrompt:  firstNonEmpty(turn.Metadata["systemPrompt"], envEntryValue(turn.Env, workerenv.SystemPrompt)),
-		MaxTurns:      maxTurns,
+		TaskName:       turn.TaskName,
+		TaskNamespace:  turn.Namespace,
+		Prompt:         turn.Prompt,
+		Model:          firstNonEmpty(turn.Metadata["model"], envEntryValue(turn.Env, workerenv.Model)),
+		SystemPrompt:   firstNonEmpty(turn.Metadata["systemPrompt"], envEntryValue(turn.Env, workerenv.SystemPrompt)),
+		MaxTurns:       maxTurns,
+		TimeoutSeconds: timeoutSeconds,
 		AllowedTools: splitCSV(firstNonEmpty(
 			turn.Metadata["allowedTools"],
 			envEntryValue(turn.Env, workerenv.AllowedTools),
@@ -235,7 +244,7 @@ func temporaryEnvEntryBlocked(key string) bool {
 	}
 	if strings.HasPrefix(upper, "GIT_") {
 		switch key {
-		case workerenv.GitToken, workerenv.GitHubToken, workerenv.GitAskpass, workerenv.GitUsername:
+		case workerenv.GitToken, workerenv.GitHubToken, workerenv.GitUsername:
 			return false
 		default:
 			return true

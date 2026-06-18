@@ -774,6 +774,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*task.Spec.AgentRuntime.MaxTurns), 10)
 	}
+	if task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0 {
+		metadata["timeoutSeconds"] = strconv.FormatInt(int64(task.Spec.Timeout.Duration/time.Second), 10)
+	}
 	allowedTools := []string(nil)
 	if agent != nil && agent.Spec.Runtime != nil {
 		allowedTools = agent.Spec.Runtime.DefaultAllowedTools
@@ -1231,6 +1234,7 @@ func harnessWrapperRootEnvNameBlocked(name string) bool {
 	switch strings.ToUpper(strings.TrimSpace(name)) {
 	case workerenv.ControllerURL,
 		workerenv.ResultEndpoint,
+		workerenv.GitAskpass,
 		workerenv.OpenAIBaseURL,
 		workerenv.ServiceAccountToken,
 		workerenv.ServiceAccountTokenPath,
