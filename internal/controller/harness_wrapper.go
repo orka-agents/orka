@@ -486,12 +486,20 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 }
 
 func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *corev1alpha1.Task) error {
-	patch := ctrlclient.MergeFrom(task.DeepCopy())
-	if task.Annotations == nil {
-		task.Annotations = map[string]string{}
+	latest := &corev1alpha1.Task{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return err
 	}
-	task.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
-	return r.Patch(ctx, task, patch)
+	patch := ctrlclient.MergeFrom(latest.DeepCopy())
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
+	if err := r.Patch(ctx, latest, patch); err != nil {
+		return err
+	}
+	latest.DeepCopyInto(task)
+	return nil
 }
 
 func harnessWrapperPlannedMetadata(task *corev1alpha1.Task, runtimeName string) map[string]string {
