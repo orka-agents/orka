@@ -3,7 +3,10 @@
 package cliwrapper
 
 import (
+	"bytes"
 	"os"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -36,4 +39,53 @@ func terminateProcessGroup(process *os.Process, grace time.Duration) {
 	if err := syscall.Kill(pgid, syscall.SIGKILL); err != nil {
 		_ = process.Kill()
 	}
+}
+
+func terminateMarkedChildProcesses(marker string, grace time.Duration) {
+	pids := markedChildPIDs(marker)
+	if len(pids) == 0 {
+		return
+	}
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	if grace > 0 {
+		time.Sleep(grace)
+	}
+	for _, pid := range markedChildPIDs(marker) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+func markedChildPIDs(marker string) []int {
+	if marker == "" {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	needle := []byte(turnProcessMarkerEnv + "=" + marker)
+	self := os.Getpid()
+	pids := []int(nil)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == self {
+			continue
+		}
+		env, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "environ"))
+		if err != nil {
+			continue
+		}
+		for item := range bytes.SplitSeq(env, []byte{0}) {
+			if bytes.Equal(item, needle) {
+				pids = append(pids, pid)
+				break
+			}
+		}
+	}
+	return pids
 }

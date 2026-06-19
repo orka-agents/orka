@@ -235,7 +235,7 @@ func TestGenericAdapterRejectsResultFileReplacedWithSymlink(t *testing.T) {
 		TurnContext{},
 		CommandResult{Stdout: "stdout", ResultFile: spec.ResultFile},
 	)
-	if err == nil || !strings.Contains(err.Error(), "read result file") {
+	if !resultPathRejectedError(err) {
 		t.Fatalf("ParseResult error = %v, result=%q; want symlink read rejection", err, result.Result)
 	}
 	if strings.Contains(result.Result, "outside secret") {
@@ -275,7 +275,7 @@ func TestGenericAdapterRejectsResultFileParentReplacedWithSymlink(t *testing.T) 
 		TurnContext{WorkDir: dir},
 		CommandResult{Stdout: "stdout", ResultFile: spec.ResultFile},
 	)
-	if err == nil || !strings.Contains(err.Error(), "read result file") {
+	if !resultPathRejectedError(err) {
 		t.Fatalf("ParseResult error = %v, result=%q; want symlinked parent rejection", err, result.Result)
 	}
 	if strings.Contains(result.Result, "outside secret") {
@@ -480,4 +480,13 @@ func withWorkspaceHostLookup(t *testing.T, hosts map[string][]net.IPAddr) {
 		return nil, os.ErrNotExist
 	}
 	t.Cleanup(func() { lookupWorkspaceHostIPs = original })
+}
+
+func resultPathRejectedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "must not be a symlink") ||
+		strings.Contains(message, "not a directory")
 }

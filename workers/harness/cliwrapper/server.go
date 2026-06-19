@@ -518,14 +518,20 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			msg = run.Stderr
 		}
 		partial, hasAdapterResult := s.failedTurnPartialResult(ctx, turnCtx, run)
+		removeControlFiles(turnCtx.WorkDir, append(spec.TempFiles, spec.ResultFile)...)
 		if run.FullStdoutTruncated && !hasAdapterResult {
 			turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime stdout exceeded harness storage limit", false))
 			return
 		}
-		if ShouldFinalizeWorkDir(turnCtx.WorkDir) {
+		finalizeWorkDir := turnCtx.WorkDir
+		if preparedWorkspace.rootDir != "" {
+			finalizeWorkDir = preparedWorkspace.rootDir
+		}
+		if !envEntryIsTrue(turnCtx.Env, workerenv.ResultStdout) && ShouldFinalizeWorkDir(finalizeWorkDir) {
 			restoreTurnEnv := setTemporaryEnvEntries(turnCtx.Env)
-			if finalized, finalizeErr := FinalizeTurnResult(turnCtx.WorkDir, partial); finalizeErr == nil {
+			if finalized, finalizeErr := FinalizeTurnResult(finalizeWorkDir, partial); finalizeErr == nil {
 				partial = string(finalized)
+				finalizedWorkDir = finalizeWorkDir
 			}
 			restoreTurnEnv()
 		}
@@ -535,6 +541,11 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				"artifact-upload",
 				artifactErr.Error(),
 			))
+		}
+		if finalizedWorkDir != "" {
+			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
+				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", cleanErr.Error()))
+			}
 		}
 		turn.appendFrame(s.failedFrameWithResult(turn, "command_failed", msg, partial, false))
 	default:

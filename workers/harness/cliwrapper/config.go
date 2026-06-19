@@ -233,8 +233,8 @@ func (c Config) Validate() error {
 	if c.CancelGrace < 0 {
 		return fmt.Errorf("cancel grace period must be non-negative")
 	}
-	if c.TurnRetention < 0 {
-		return fmt.Errorf("turn retention must be non-negative")
+	if c.TurnRetention <= 0 {
+		return fmt.Errorf("turn retention must be positive")
 	}
 	if !c.AllowUnauthenticated && strings.TrimSpace(c.AuthValue) == "" {
 		return fmt.Errorf("auth token is required unless %s=true", EnvAllowUnauthenticated)
