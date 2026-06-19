@@ -1,10 +1,8 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-COPILOT_WORKER_IMG ?= ghcr.io/sozercan/orka/agent-worker-copilot:latest
-CLAUDE_WORKER_IMG ?= ghcr.io/sozercan/orka/agent-worker-claude:latest
-CODEX_WORKER_IMG ?= ghcr.io/sozercan/orka/agent-worker-codex:latest
 AI_WORKER_IMG ?= ghcr.io/sozercan/orka/ai-worker:latest
 GENERAL_WORKER_IMG ?= ghcr.io/sozercan/orka/general-worker:latest
+HARNESS_WRAPPER_IMG ?= ghcr.io/sozercan/orka/agent-harness-wrapper:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -104,11 +102,9 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and build all images without running tests.
 	@echo "Loading images into Kind cluster '$(KIND_CLUSTER)'..."
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(COPILOT_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(CLAUDE_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(CODEX_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e-run-only
 test-e2e-run-only: manifests generate fmt vet ## Run e2e tests without rebuilding images (for fast iteration).
@@ -234,55 +230,35 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
-.PHONY: docker-build-copilot-worker
-docker-build-copilot-worker: ## Build docker image for the Copilot agent worker.
-	$(CONTAINER_TOOL) build -t ${COPILOT_WORKER_IMG} -f workers/agent/copilot/Dockerfile .
-
-.PHONY: bundle-copilot-cli
-bundle-copilot-cli: ## Bundle the Copilot CLI binary for the current platform (for local development).
-	go run github.com/github/copilot-sdk/go/cmd/bundler --output workers/agent/copilot/
-
-.PHONY: docker-build-claude-worker
-docker-build-claude-worker: ## Build docker image for the Claude agent worker.
-	$(CONTAINER_TOOL) build -t ${CLAUDE_WORKER_IMG} -f workers/agent/claude/Dockerfile .
-
-.PHONY: docker-build-codex-worker
-docker-build-codex-worker: ## Build docker image for the Codex agent worker.
-	$(CONTAINER_TOOL) build -t ${CODEX_WORKER_IMG} -f workers/agent/codex/Dockerfile .
-
 .PHONY: docker-build-ai-worker
 docker-build-ai-worker: ## Build docker image for the AI worker.
 	$(CONTAINER_TOOL) build -t ${AI_WORKER_IMG} -f workers/ai/Dockerfile .
+
+.PHONY: docker-build-harness-wrapper
+docker-build-harness-wrapper: ## Build docker image for the agent harness wrapper.
+	$(CONTAINER_TOOL) build -t ${HARNESS_WRAPPER_IMG} -f workers/harness/Dockerfile .
 
 .PHONY: docker-build-general-worker
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
 
-.PHONY: docker-push-copilot-worker
-docker-push-copilot-worker: ## Push docker image for the Copilot agent worker.
-	$(CONTAINER_TOOL) push ${COPILOT_WORKER_IMG}
-
-.PHONY: docker-push-claude-worker
-docker-push-claude-worker: ## Push docker image for the Claude agent worker.
-	$(CONTAINER_TOOL) push ${CLAUDE_WORKER_IMG}
-
-.PHONY: docker-push-codex-worker
-docker-push-codex-worker: ## Push docker image for the Codex agent worker.
-	$(CONTAINER_TOOL) push ${CODEX_WORKER_IMG}
-
 .PHONY: docker-push-ai-worker
 docker-push-ai-worker: ## Push docker image for the AI worker.
 	$(CONTAINER_TOOL) push ${AI_WORKER_IMG}
+
+.PHONY: docker-push-harness-wrapper
+docker-push-harness-wrapper: ## Push docker image for the agent harness wrapper.
+	$(CONTAINER_TOOL) push ${HARNESS_WRAPPER_IMG}
 
 .PHONY: docker-push-general-worker
 docker-push-general-worker: ## Push docker image for the general worker.
 	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
 
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-copilot-worker docker-build-claude-worker docker-build-codex-worker docker-build-ai-worker docker-build-general-worker ## Build all docker images.
+docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-harness-wrapper ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-copilot-worker docker-push-claude-worker docker-push-codex-worker docker-push-ai-worker docker-push-general-worker ## Push all docker images.
+docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-harness-wrapper ## Push all docker images.
 
 ##@ Deployment
 
@@ -303,6 +279,12 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	cd config/harness-wrapper && "$(KUSTOMIZE)" edit set image ghcr.io/sozercan/orka/agent-harness-wrapper=${HARNESS_WRAPPER_IMG}
+	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	@if ! "$(KUBECTL)" -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then \
+		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
+		"$(KUBECTL)" -n orka-system create secret generic harness-wrapper-auth --from-literal=token="$$token"; \
+	fi
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 
 .PHONY: undeploy

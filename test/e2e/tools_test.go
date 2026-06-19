@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -352,38 +351,17 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the Job has tool filtering env vars")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", filterTaskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
-
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_ALLOWED_TOOLS"),
-				"Job should have ORKA_ALLOWED_TOOLS env var")
-			g.Expect(envMap["ORKA_ALLOWED_TOOLS"]).To(ContainSubstring("Read"))
-			g.Expect(envMap["ORKA_ALLOWED_TOOLS"]).To(ContainSubstring("Grep"))
-
-			g.Expect(envMap).To(HaveKey("ORKA_DISALLOWED_TOOLS"),
-				"Job should have ORKA_DISALLOWED_TOOLS env var")
-			g.Expect(envMap["ORKA_DISALLOWED_TOOLS"]).To(ContainSubstring("Bash"))
-			g.Expect(envMap["ORKA_DISALLOWED_TOOLS"]).To(ContainSubstring("Write"))
-		}, 2*time.Minute, time.Second).Should(Succeed())
+		By("verifying harness-wrapper tool filter metadata")
+		verifyHarnessWrapperMetadataForTask(filterTaskName, map[string]string{
+			"runtime":         "claude",
+			"wrapper":         "cli",
+			"maxTurns":        "1",
+			"allowedTools":    "Read,Grep",
+			"disallowedTools": "Bash,Write",
+		}, 2*time.Minute)
 	})
 
+	// Test: PriorTaskRef
 	// Test: PriorTaskRef chaining
 	It("should set ORKA_PRIOR_TASK env var when priorTaskRef is specified", func() {
 		By("creating an Agent for prior task test")
@@ -460,34 +438,15 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the Job has ORKA_PRIOR_TASK env var")
-		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", priorTask2Name),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
-
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_PRIOR_TASK"),
-				"Job should have ORKA_PRIOR_TASK env var")
-			g.Expect(envMap["ORKA_PRIOR_TASK"]).To(Equal(priorTask1Name))
-			g.Expect(envMap).To(HaveKey("ORKA_PRIOR_TASK_NAMESPACE"))
-			g.Expect(envMap["ORKA_PRIOR_TASK_NAMESPACE"]).To(Equal(namespace))
-		}, 2*time.Minute, time.Second).Should(Succeed())
+		By("verifying harness-wrapper metadata is planned for the child task")
+		verifyHarnessWrapperMetadataForTask(priorTask2Name, map[string]string{
+			"runtime":  "claude",
+			"wrapper":  "cli",
+			"maxTurns": "1",
+		}, 2*time.Minute)
 	})
 
+	// Test: AI task using web_fetch tool
 	// Test: AI task using web_fetch tool
 	It("should execute an AI task that uses the web_fetch tool", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")

@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -446,6 +447,41 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskCopilotRuntime(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for copilot harness runtime", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support copilot") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only copilot rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -454,7 +490,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime:     &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime:     &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			ProviderRef: &corev1alpha1.ProviderReference{Name: "p1"},
 		},
 	}
@@ -471,7 +507,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskAgentExecutionWorkspace(t *test
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Execution: &corev1alpha1.ExecutionSpec{
 				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
 			},
@@ -494,7 +530,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndModelProvider(t *test
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Model:   &corev1alpha1.ModelConfig{Provider: "openai"},
 		},
 	}
@@ -511,7 +547,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoPrompt(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err == nil {
@@ -527,7 +563,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskValid(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
@@ -4765,6 +4801,89 @@ func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	if len(jobs.Items) != 0 {
 		t.Fatalf("expected no Job to be created while transaction token is pending, got %d", len(jobs.Items))
 	}
+}
+
+func TestHandlePending_AgentRuntimeWithoutSecretUsesHarnessWrapperNotJob(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-no-secret", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, harnessWrapperEndpointEnv) {
+		t.Fatalf("message = %q, want harness wrapper endpoint failure", updated.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
+func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-with-resources", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "custom Kubernetes resources") {
+		t.Fatalf("message = %q, want resource unsupported failure", updated.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
 }
 
 func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t *testing.T) {

@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -46,7 +45,7 @@ var _ = Describe("Agent Copilot Runtime", Ordered, func() {
 		dumpDebugInfo(taskName, "e2e-copilot-real-task")
 	})
 
-	It("should create a Job with Copilot runtime configuration", func() {
+	It("should start a harness-wrapper turn with Copilot runtime configuration", func() {
 		By("creating a Secret with GITHUB_TOKEN")
 		secretManifest := fmt.Sprintf(`{
 			"apiVersion": "v1",
@@ -116,62 +115,16 @@ var _ = Describe("Agent Copilot Runtime", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create Task")
 
-		By("verifying that a Job is created for the copilot agent task")
-		verifyJobCreated := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName),
-				"-o", "jsonpath={.items[0].metadata.name}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to get Job for copilot agent task")
-			g.Expect(output).NotTo(BeEmpty(), "Job name should not be empty")
-		}
-		Eventually(verifyJobCreated, 2*time.Minute, time.Second).Should(Succeed())
+		By("verifying harness-wrapper metadata is planned for the copilot agent task")
+		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
+			"runtime":   "copilot",
+			"wrapper":   "cli",
+			"maxTurns":  "5",
+			"allowBash": "true",
+		}, 2*time.Minute)
 
-		By("verifying the Job has the correct Copilot worker image")
-		verifyContainerImage := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].image}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring("copilot"), "Image should be the Copilot agent worker")
-		}
-		Eventually(verifyContainerImage, 30*time.Second, time.Second).Should(Succeed())
-
-		By("verifying the Job has required environment variables")
-		verifyEnvVars := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
-
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to parse env vars JSON")
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_TASK_NAME"))
-			g.Expect(envMap["ORKA_TASK_NAME"]).To(Equal(taskName))
-			g.Expect(envMap).To(HaveKey("ORKA_TASK_NAMESPACE"))
-			g.Expect(envMap["ORKA_TASK_NAMESPACE"]).To(Equal(namespace))
-			g.Expect(envMap).To(HaveKey("ORKA_PROMPT"))
-			g.Expect(envMap["ORKA_PROMPT"]).To(Equal("list files in current directory"))
-			g.Expect(envMap).To(HaveKey("ORKA_MAX_TURNS"))
-			g.Expect(envMap["ORKA_MAX_TURNS"]).To(Equal("5"))
-		}
-		Eventually(verifyEnvVars, 30*time.Second, time.Second).Should(Succeed())
+		By("verifying the Task does not use a worker Job")
+		verifyNoJobForTask(taskName, 5*time.Second)
 
 		By("verifying the Task reaches a terminal status")
 		verifyTaskTerminal := func(g Gomega) {
@@ -257,8 +210,10 @@ var _ = Describe("Agent Copilot Runtime", Ordered, func() {
 		Expect(phase).To(BeElementOf("Succeeded", "Failed"),
 			"Copilot agent task should reach terminal phase")
 
-		By("verifying the Job used the correct copilot worker image")
-		image := getJobContainerImage(realTaskName)
-		Expect(image).To(ContainSubstring("copilot"), "Job should use copilot worker image")
+		By("verifying the real copilot task used the harness wrapper")
+		verifyHarnessWrapperMetadataForTask(realTaskName, map[string]string{
+			"runtime": "copilot",
+			"wrapper": "cli",
+		}, 30*time.Second)
 	})
 })

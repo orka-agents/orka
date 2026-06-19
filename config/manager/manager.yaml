@@ -5,6 +5,9 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
   name: system
 ---
 apiVersion: apps/v1
@@ -68,10 +71,6 @@ spec:
           - --store-path=/data/orka.db
           - --controller-url=http://orka-api.orka-system.svc:8080
           - --ai-worker-image=ghcr.io/sozercan/orka/ai-worker:latest
-          - --copilot-worker-image=ghcr.io/sozercan/orka/agent-worker-copilot:latest
-          - --claude-worker-image=ghcr.io/sozercan/orka/agent-worker-claude:latest
-          - --codex-worker-image=ghcr.io/sozercan/orka/agent-worker-codex:latest
-          - --codex-sandbox-mode=danger-full-access
           - --general-worker-image=ghcr.io/sozercan/orka/general-worker:latest
           - --execution-workspace-default-provider=agent-sandbox
           - --agent-sandbox-enabled=false
@@ -90,6 +89,13 @@ spec:
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        env:
+          - name: ORKA_HARNESS_WRAPPER_ENDPOINT
+            value: http://orka-agent-harness-wrapper:8080
+          - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+            value: /var/run/orka/harness-wrapper/token
+          - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
+            value: orka-agent-harness-wrapper
         ports: []
         securityContext:
           readOnlyRootFilesystem: true
@@ -123,10 +129,16 @@ spec:
             mountPath: /data
           - name: tmp
             mountPath: /tmp
+          - name: harness-wrapper-auth
+            mountPath: /var/run/orka/harness-wrapper
+            readOnly: true
       volumes:
         - name: store
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+        - name: harness-wrapper-auth
+          secret:
+            secretName: harness-wrapper-auth
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

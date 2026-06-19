@@ -127,6 +127,7 @@ func captureGeneralWorkerHTTPEvents(t *testing.T, taskName string, runWorker fun
 	t.Setenv(workerenv.ControllerURL, server.URL)
 	t.Setenv(workerenv.TaskName, taskName)
 	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv("ORKA_ARTIFACTS_DIR", filepath.Join(t.TempDir(), "artifacts"))
 	runWorker()
 
 	mu.Lock()

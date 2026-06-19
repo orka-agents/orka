@@ -748,7 +748,7 @@ demo-magic cluster. Stand it up with `make demo-substrate-up`
 `scripts/agent-substrate-e2e.sh` standup (`KEEP_CLUSTER=1`) — Substrate control
 plane in `ate-system`, a `WorkerPool` + gVisor `ActorTemplate` (`orka-codex-ci`
 in `ate-demo`), Orka wired with `--substrate-*` flags; (2) builds a
-**codex-capable Actor image** (the production `agent-worker-codex` — daemon +
+**codex-capable Actor image** (the production `agent-harness-wrapper` — daemon +
 codex CLI + git) and points the ActorTemplate at it; (3) deploys the **vekil**
 model proxy (one-time GitHub **device-code** login — the operator completes it
 from the pod logs, since a plain `gho_` gh token has no Copilot entitlement);
