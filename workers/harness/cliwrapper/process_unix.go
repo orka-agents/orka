@@ -3,10 +3,9 @@
 package cliwrapper
 
 import (
-	"bytes"
 	"os"
-	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -41,8 +40,11 @@ func terminateProcessGroup(process *os.Process, grace time.Duration) {
 	}
 }
 
-func terminateMarkedChildProcesses(marker string, grace time.Duration) {
-	pids := markedChildPIDs(marker)
+// terminateChildCredentialProcesses reaps processes still running as the
+// wrapper's dedicated child UID before the server frees its single active turn
+// slot. The wrapper pod runs as root and only turn subprocesses use this UID.
+func terminateChildCredentialProcesses(grace time.Duration) {
+	pids := childCredentialPIDs()
 	if len(pids) == 0 {
 		return
 	}
@@ -52,20 +54,20 @@ func terminateMarkedChildProcesses(marker string, grace time.Duration) {
 	if grace > 0 {
 		time.Sleep(grace)
 	}
-	for _, pid := range markedChildPIDs(marker) {
+	for _, pid := range childCredentialPIDs() {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 }
 
-func markedChildPIDs(marker string) []int {
-	if marker == "" {
+func childCredentialPIDs() []int {
+	uid, _, ok := childCredentialIDs()
+	if !ok {
 		return nil
 	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
-	needle := []byte(turnProcessMarkerEnv + "=" + marker)
 	self := os.Getpid()
 	pids := []int(nil)
 	for _, entry := range entries {
@@ -76,16 +78,26 @@ func markedChildPIDs(marker string) []int {
 		if err != nil || pid <= 0 || pid == self {
 			continue
 		}
-		env, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "environ"))
+		status, err := os.ReadFile("/proc/" + entry.Name() + "/status")
 		if err != nil {
 			continue
 		}
-		for item := range bytes.SplitSeq(env, []byte{0}) {
-			if bytes.Equal(item, needle) {
-				pids = append(pids, pid)
-				break
-			}
+		if statusUID(status) == uid {
+			pids = append(pids, pid)
 		}
 	}
 	return pids
+}
+
+func statusUID(status []byte) int {
+	for line := range strings.SplitSeq(string(status), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "Uid:" {
+			uid, err := strconv.Atoi(fields[1])
+			if err == nil {
+				return uid
+			}
+		}
+	}
+	return -1
 }

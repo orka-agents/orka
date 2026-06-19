@@ -21,4 +21,4 @@ func terminateProcessGroup(process *os.Process, grace time.Duration) {
 	_ = process.Kill()
 }
 
-func terminateMarkedChildProcesses(string, time.Duration) {}
+func terminateChildCredentialProcesses(time.Duration) {}

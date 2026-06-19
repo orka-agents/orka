@@ -13,8 +13,6 @@ import (
 	"time"
 )
 
-const turnProcessMarkerEnv = "ORKA_HARNESS_WRAPPER_TURN_PROCESS_MARKER"
-
 type CommandRunner struct {
 	StdoutLimitBytes int64
 	StderrLimitBytes int64
@@ -47,9 +45,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.Dir
-	turnProcessMarker := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	cmd.Env = mergeCommandEnv(sanitizedProcessEnv(os.Environ()), spec.Env)
-	cmd.Env = setEnv(cmd.Env, turnProcessMarkerEnv, turnProcessMarker)
 	if len(spec.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(spec.Stdin)
 	}
@@ -110,7 +106,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	if !cancelled {
 		terminateProcessGroup(cmd.Process, 0)
 	}
-	terminateMarkedChildProcesses(turnProcessMarker, r.CancelGrace)
+	terminateChildCredentialProcesses(r.CancelGrace)
 	if waitErr == nil {
 		if err := ctx.Err(); err != nil {
 			cancelled = true
