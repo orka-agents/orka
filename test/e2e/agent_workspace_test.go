@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -94,84 +93,17 @@ var _ = Describe("Agent Workspace", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create Task with workspace config")
 
-		By("verifying that a Job is created for the workspace task")
-		verifyJobCreated := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName),
-				"-o", "jsonpath={.items[0].metadata.name}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to get Job for workspace task")
-			g.Expect(output).NotTo(BeEmpty(), "Job name should not be empty")
-		}
-		Eventually(verifyJobCreated, 2*time.Minute, time.Second).Should(Succeed())
+		By("verifying harness-wrapper workspace metadata")
+		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
+			"runtime":   "claude",
+			"wrapper":   "cli",
+			"gitRepo":   "https://github.com/example/repo",
+			"gitBranch": "main",
+			"maxTurns":  "3",
+			"allowBash": "false",
+		}, 2*time.Minute)
 
-		By("verifying the Job pod has workspace-related env vars")
-		verifyWorkspaceEnvVars := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
-
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to parse env vars JSON")
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_GIT_REPO"))
-			g.Expect(envMap["ORKA_GIT_REPO"]).To(Equal("https://github.com/example/repo"))
-			g.Expect(envMap).To(HaveKey("ORKA_GIT_BRANCH"))
-			g.Expect(envMap["ORKA_GIT_BRANCH"]).To(Equal("main"))
-		}
-		Eventually(verifyWorkspaceEnvVars, 30*time.Second, time.Second).Should(Succeed())
-
-		By("verifying emptyDir volumes are mounted at /workspace")
-		verifyWorkspaceVolume := func(g Gomega) {
-			// Check that the workspace volume exists
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.volumes[*].name}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring("workspace"), "Should have a workspace volume")
-
-			// Check that the volume mount exists at /workspace
-			cmd = exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].volumeMounts}",
-				"-n", namespace,
-			)
-			output, err = utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			type volumeMount struct {
-				Name      string `json:"name"`
-				MountPath string `json:"mountPath"`
-			}
-			var mounts []volumeMount
-			err = json.Unmarshal([]byte(output), &mounts)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to parse volume mounts JSON")
-
-			found := false
-			for _, m := range mounts {
-				if m.Name == "workspace" && m.MountPath == "/workspace" {
-					found = true
-					break
-				}
-			}
-			g.Expect(found).To(BeTrue(), "Should have workspace volume mounted at /workspace")
-		}
-		Eventually(verifyWorkspaceVolume, 30*time.Second, time.Second).Should(Succeed())
+		By("verifying the Task does not use a worker Job")
+		verifyNoJobForTask(taskName, 5*time.Second)
 	})
 })

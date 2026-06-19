@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -33,7 +32,7 @@ var _ = Describe("Agent Advanced Features", func() {
 		}
 	})
 
-	It("should mount skill content from a Skill CRD into the agent Job", func() {
+	It("should include skill content metadata in the harness-wrapper turn", func() {
 		skillName := prefix + "skill"
 		agentName := prefix + "skill-agent"
 		taskName := prefix + "skill-task"
@@ -120,11 +119,19 @@ var _ = Describe("Agent Advanced Features", func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create task with skill agent")
 
-		By("verifying a Job is created for the task")
-		verifyJobCreatedForTask(taskName, 2*time.Minute)
+		By("verifying harness-wrapper metadata is planned for the skill task")
+		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
+			"runtime":   "claude",
+			"wrapper":   "cli",
+			"maxTurns":  "1",
+			"allowBash": "false",
+		}, 2*time.Minute)
+
+		By("verifying the Task does not use a worker Job")
+		verifyNoJobForTask(taskName, 5*time.Second)
 	})
 
-	It("should propagate resource requests and limits to the agent Job", func() {
+	It("should reject resource-backed CLI runtime tasks before creating a Job", func() {
 		agentName := prefix + "res-agent"
 		taskName := prefix + "res-task"
 
@@ -179,36 +186,20 @@ var _ = Describe("Agent Advanced Features", func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent task with resources")
 
-		By("verifying a Job is created for the task")
-		verifyJobCreatedForTask(taskName, 2*time.Minute)
-
-		By("verifying the Job has correct resource constraints")
+		By("verifying unsupported resource-backed CLI runtime task fails without a Job")
 		Eventually(func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].resources}",
+			cmd := exec.Command("kubectl", "get", "task", taskName,
+				"-o", "jsonpath={.status.phase}{\"|\"}{.status.message}",
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty(), "Job should have resources set")
-
-			var resources map[string]interface{}
-			err = json.Unmarshal([]byte(output), &resources)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to parse resources JSON")
-
-			// Verify requests
-			requests, ok := resources["requests"].(map[string]interface{})
-			g.Expect(ok).To(BeTrue(), "resources should have requests")
-			g.Expect(requests).To(HaveKey("memory"))
-			g.Expect(requests).To(HaveKey("cpu"))
-
-			// Verify limits
-			limits, ok := resources["limits"].(map[string]interface{})
-			g.Expect(ok).To(BeTrue(), "resources should have limits")
-			g.Expect(limits).To(HaveKey("memory"))
-			g.Expect(limits).To(HaveKey("cpu"))
+			g.Expect(output).To(ContainSubstring("Failed|"))
+			g.Expect(output).To(ContainSubstring("custom Kubernetes resources"))
 		}, 30*time.Second, time.Second).Should(Succeed())
+
+		By("verifying the Task does not use a worker Job")
+		verifyNoJobForTask(taskName, 5*time.Second)
 	})
 
 	It("should support sessionRef with maxMessages", func() {

@@ -237,58 +237,18 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent task")
 
-		By("verifying the Job has ORKA_RESULT_ENDPOINT env var")
-		verifyResultEndpoint := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", agentTaskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
+		By("verifying harness-wrapper metadata is planned for the agent task")
+		verifyHarnessWrapperMetadataForTask(agentTaskName, map[string]string{
+			"runtime":  "claude",
+			"wrapper":  "cli",
+			"maxTurns": "1",
+		}, 2*time.Minute)
 
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_RESULT_ENDPOINT"),
-				"Worker should have ORKA_RESULT_ENDPOINT for HTTP result submission")
-			g.Expect(envMap["ORKA_RESULT_ENDPOINT"]).To(ContainSubstring("/internal/v1/results/"),
-				"Result endpoint should point to internal API")
-
-			g.Expect(envMap).To(HaveKey("ORKA_CONTROLLER_URL"),
-				"Worker should have ORKA_CONTROLLER_URL for coordination")
-		}
-		Eventually(verifyResultEndpoint, 2*time.Minute, time.Second).Should(Succeed())
-
-		By("verifying the Job does NOT have ORKA_RESULT_CONFIGMAP env var (removed)")
-		verifyNoConfigMapEnv := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", agentTaskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			for _, e := range envVars {
-				g.Expect(e.Name).NotTo(Equal("ORKA_RESULT_CONFIGMAP"),
-					"ORKA_RESULT_CONFIGMAP should not be present — replaced by ORKA_RESULT_ENDPOINT")
-			}
-		}
-		Eventually(verifyNoConfigMapEnv, 30*time.Second, time.Second).Should(Succeed())
+		By("verifying the Task does not use a worker Job")
+		verifyNoJobForTask(agentTaskName, 5*time.Second)
 	})
 
+	// Test 5:
 	// Test 5: Verify the DB size metric is exposed via the metrics endpoint
 	It("should expose orka_store_db_size_bytes metric", func() {
 		By("checking the controller logs for SQLite store startup message")
