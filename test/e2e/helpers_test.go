@@ -241,7 +241,7 @@ func verifyHarnessWrapperMetadataForTask(taskName string, expected map[string]st
 }
 
 func verifyNoJobForTask(taskName string, timeout time.Duration) {
-	Consistently(func(g Gomega) {
+	Eventually(func(g Gomega) {
 		cmd := exec.Command("kubectl", "get", "jobs",
 			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
 			"-o", "jsonpath={.items[*].metadata.name}",
