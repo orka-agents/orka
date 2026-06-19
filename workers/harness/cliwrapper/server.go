@@ -445,10 +445,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		}
 	}
 	turnHome := filepath.Join(turnHomeRoot, "home")
-	defer func() {
-		_ = removeAllForChild(turnHome)
-		_ = os.RemoveAll(turnHomeRoot)
-	}()
+	defer func() { _ = cleanupTurnWorkspacePath(turnHomeRoot) }()
 	if err := os.MkdirAll(turnHome, 0o700); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
@@ -546,6 +543,10 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", cleanErr.Error()))
 			}
+		}
+		if len([]byte(partial)) > maxStoredResultBytes {
+			turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime result exceeded harness storage limit", false))
+			return
 		}
 		turn.appendFrame(s.failedFrameWithResult(turn, "command_failed", msg, partial, false))
 	default:

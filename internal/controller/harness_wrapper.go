@@ -341,7 +341,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		}
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	}
-	if result.Failed != nil && r.ResultStore != nil {
+	if result.Failed != nil && r.ResultStore != nil && (!result.Failed.Retryable || !r.shouldRetry(task)) {
 		resultBytes := []byte(result.Failed.Result)
 		if outputRef := strings.TrimSpace(result.Failed.OutputRef); outputRef == cliwrapperLocalOutputRef {
 			fetched, fetchErr := client.FetchTurnOutput(ctx, turnID, outputRef)

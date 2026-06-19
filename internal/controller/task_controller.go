@@ -598,11 +598,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		if taskHasPlannedHarnessWrapperTurn(task) {
-			return r.runHarnessWrapperTask(ctx, task, agent)
-		}
 		if reason := agentTaskJobBackendUnsupportedReason(task, agent); reason != "" {
 			return r.failTask(ctx, task, reason)
+		}
+		if taskHasPlannedHarnessWrapperTurn(task) {
+			return r.runHarnessWrapperTask(ctx, task, agent)
 		}
 		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
