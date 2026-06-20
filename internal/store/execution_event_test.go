@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/metrics"
 )
 
 func TestExecutionEventFilterNormalizationDefaultsLimit(t *testing.T) {
@@ -287,4 +288,75 @@ func TestExecutionEventStoreFakeValidationAndDelete(t *testing.T) {
 	if latest != 0 {
 		t.Fatalf("latest after delete = %d, want 0", latest)
 	}
+}
+
+func TestAppendExecutionEventRecordsRedactionMetricExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+
+	// Worker/API path: the payload is pre-sanitized in a different process before
+	// submission, so by the time the store sanitizes again the content already
+	// carries the redaction marker and does not change. The metric must still
+	// count this persisted event once (regression: it previously recorded 0).
+	t.Run("worker pre-redacted counts once", func(t *testing.T) {
+		metrics.ExecutionEventRedactionsTotal.Reset()
+		store := NewFakeExecutionEventStore()
+		// Simulate the worker having already redacted: content contains the marker
+		// and the API DTO sanitize would not change it further.
+		_, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  ExecutionEventStreamTypeTask,
+			StreamID:    "task",
+			Type:        events.ExecutionEventTypeModelMessage,
+			ContentText: "api key " + events.ExecutionEventRedactedValue,
+		})
+		if err != nil {
+			t.Fatalf("AppendExecutionEvent() error = %v", err)
+		}
+		if got := metrics.CounterVecValue(metrics.ExecutionEventRedactionsTotal, ExecutionEventStreamTypeTask, events.ExecutionEventTypeModelMessage); got != 1 {
+			t.Fatalf("redactions counter = %v, want 1 (pre-redacted worker payload must count once)", got)
+		}
+	})
+
+	// Harness path: SanitizeExecutionEventPayloadFields runs in the mapper AND
+	// again in the store. The metric must count the persisted event once, not
+	// twice (regression: it previously recorded 2).
+	t.Run("double sanitize counts once", func(t *testing.T) {
+		metrics.ExecutionEventRedactionsTotal.Reset()
+		store := NewFakeExecutionEventStore()
+		event := &ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  ExecutionEventStreamTypeTask,
+			StreamID:    "task",
+			Type:        events.ExecutionEventTypeModelMessage,
+			ContentText: "authorization: Bearer sk-secret-value-1234567890",
+		}
+		// Mapper-style first pass before the store appends (store sanitizes again).
+		if err := SanitizeExecutionEventPayloadFields(event); err != nil {
+			t.Fatalf("SanitizeExecutionEventPayloadFields() error = %v", err)
+		}
+		if _, err := store.AppendExecutionEvent(ctx, event); err != nil {
+			t.Fatalf("AppendExecutionEvent() error = %v", err)
+		}
+		if got := metrics.CounterVecValue(metrics.ExecutionEventRedactionsTotal, ExecutionEventStreamTypeTask, events.ExecutionEventTypeModelMessage); got != 1 {
+			t.Fatalf("redactions counter = %v, want 1 (double sanitize must not double-count)", got)
+		}
+	})
+
+	// Clean payload: no redaction marker -> no count.
+	t.Run("clean payload counts zero", func(t *testing.T) {
+		metrics.ExecutionEventRedactionsTotal.Reset()
+		store := NewFakeExecutionEventStore()
+		if _, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  ExecutionEventStreamTypeTask,
+			StreamID:    "task",
+			Type:        events.ExecutionEventTypeModelMessage,
+			ContentText: "nothing sensitive here",
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent() error = %v", err)
+		}
+		if got := metrics.CounterVecValue(metrics.ExecutionEventRedactionsTotal, ExecutionEventStreamTypeTask, events.ExecutionEventTypeModelMessage); got != 0 {
+			t.Fatalf("redactions counter = %v, want 0", got)
+		}
+	})
 }

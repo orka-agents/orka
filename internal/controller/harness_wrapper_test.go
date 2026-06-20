@@ -537,6 +537,69 @@ func TestExistingHarnessFrameKeysIndexesStoredHarnessIdentity(t *testing.T) {
 	}
 }
 
+// The controller-side cross-restart idempotency backstop: if frames for a turn ID
+// are already persisted, the turn already ran and must be recovered rather than
+// re-issued (which would duplicate side effects after a wrapper restart).
+func TestHarnessWrapperTurnHasPersistedFrames(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	eventStore := store.NewFakeExecutionEventStore()
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		Type:       events.ExecutionEventTypeAgentRuntimeStarted,
+		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-1","turnID":"turn-abc","correlationID":"corr-1","seq":1}}`),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+	r := &TaskReconciler{ExecutionEventStore: eventStore}
+
+	has, err := r.harnessWrapperTurnHasPersistedFrames(context.Background(), task, "turn-abc")
+	if err != nil {
+		t.Fatalf("harnessWrapperTurnHasPersistedFrames: %v", err)
+	}
+	if !has {
+		t.Fatal("expected persisted frames for turn-abc to be detected")
+	}
+
+	has, err = r.harnessWrapperTurnHasPersistedFrames(context.Background(), task, "turn-other")
+	if err != nil {
+		t.Fatalf("harnessWrapperTurnHasPersistedFrames(other): %v", err)
+	}
+	if has {
+		t.Fatal("unexpected match for a different turn ID")
+	}
+
+	emptyStore := store.NewFakeExecutionEventStore()
+	has, err = (&TaskReconciler{ExecutionEventStore: emptyStore}).harnessWrapperTurnHasPersistedFrames(context.Background(), task, "turn-abc")
+	if err != nil {
+		t.Fatalf("harnessWrapperTurnHasPersistedFrames(empty): %v", err)
+	}
+	if has {
+		t.Fatal("unexpected match against an empty store")
+	}
+}
+
+// The persisted execution-event SessionName for a harness task must be EMPTY
+// when the task has no real SessionRef, so a SessionRef-less task named "foo"
+// cannot collide its events into a real Session "foo". The protocol-level
+// harnessWrapperSessionName still falls back to the task name (a non-empty
+// identifier is required on the wire), but that value must NOT be the one
+// persisted as the event session key.
+func TestHarnessEventSessionNameEmptyWithoutRealSessionRef(t *testing.T) {
+	r := &TaskReconciler{}
+	task, _ := harnessWrapperTaskAndAgent()
+	task.Spec.SessionRef = nil
+
+	if got := r.executionEventSessionName(context.Background(), task); got != "" {
+		t.Fatalf("executionEventSessionName for SessionRef-less task = %q, want empty (no collision into a real Session)", got)
+	}
+	// The protocol identifier helper still returns a non-empty value (the task name).
+	if got := harnessWrapperSessionName(task); got != task.Name {
+		t.Fatalf("harnessWrapperSessionName = %q, want task name %q for the protocol request", got, task.Name)
+	}
+}
+
 func TestExistingHarnessFrameKeysPagesPastNonHarnessEvents(t *testing.T) {
 	task, _ := harnessWrapperTaskAndAgent()
 	eventStore := store.NewFakeExecutionEventStore()

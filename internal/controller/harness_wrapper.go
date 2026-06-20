@@ -46,7 +46,6 @@ const (
 	harnessWrapperMaxOutputFetchRetries  = 3
 	harnessWrapperSkillsFilesMeta        = "skillsFiles"
 	harnessWrapperStreamPollTimeout      = 2 * time.Second
-	harnessWrapperPlannedTurnTTL         = 5 * time.Minute
 	harnessWrapperNoTimeoutDuration      = time.Hour * 24 * 365 * 100
 	harnessWrapperRuntimeGeneric         = "generic"
 )
@@ -173,21 +172,35 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 			return r.failTask(ctx, task, err.Error())
 		}
-		if _, err := client.StartTurn(ctx, request); err != nil {
-			message := err.Error()
-			switch {
-			case strings.Contains(message, "turn already exists"):
-				// Treat a duplicate turn ID as idempotent recovery after the wrapper
-				// accepted the planned turn before Running status was persisted.
-			case strings.Contains(message, "maximum concurrent turns"):
-				if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
-					return ctrl.Result{}, clearErr
+		// Cross-restart idempotency backstop: if this deterministic turn ID already
+		// produced persisted frames, the turn was already accepted and ran. Do NOT
+		// re-issue StartTurn (which would duplicate external side effects after a
+		// wrapper pod restart wiped its in-memory turn map); recover by treating the
+		// turn as accepted and proceeding to the Running transition.
+		hasFrames, framesErr := r.harnessWrapperTurnHasPersistedFrames(ctx, task, request.TurnID)
+		if framesErr != nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if !hasFrames {
+			if _, err := client.StartTurn(ctx, request); err != nil {
+				message := err.Error()
+				switch {
+				case strings.Contains(message, "turn already exists"):
+					// Treat a duplicate turn ID as idempotent recovery after the wrapper
+					// accepted the planned turn before Running status was persisted.
+				case strings.Contains(message, "turn already completed"):
+					// The wrapper already ran this turn to completion and evicted it; its
+					// tombstone rejects re-acceptance. Recover instead of re-executing.
+				case strings.Contains(message, "maximum concurrent turns"):
+					if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
+						return ctrl.Result{}, clearErr
+					}
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				case harnessWrapperStartTurnErrorIsRetryable(err):
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				default:
+					return r.failTask(ctx, task, events.RedactExecutionEventText(message))
 				}
-				return ctrl.Result{RequeueAfter: time.Second}, nil
-			case harnessWrapperStartTurnErrorIsRetryable(err):
-				return ctrl.Result{RequeueAfter: time.Second}, nil
-			default:
-				return r.failTask(ctx, task, events.RedactExecutionEventText(message))
 			}
 		}
 		turnAccepted = true
@@ -218,6 +231,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		}
 		return ctrl.Result{}, nil
 	}
+	// TaskStarted is best-effort, mirroring the general-worker Job path
+	// (task_controller.go). The status has already transitioned to Running above;
+	// returning an error here would route the next reconcile to
+	// finishHarnessWrapperTask (which does not append TaskStarted), permanently
+	// dropping the start event on a transient store failure. Log and continue.
 	if err := r.recordTaskLifecycleEvent(
 		ctx,
 		task,
@@ -225,7 +243,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		events.ExecutionEventSeverityInfo,
 		"harness wrapper task started",
 	); err != nil {
-		return ctrl.Result{}, err
+		logf.FromContext(ctx).Info("best-effort harness TaskStarted event append failed", "error", err, "task", task.Name)
 	}
 	return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 }
@@ -255,9 +273,16 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	}
 	result := harness.TurnRunResult{}
 	mapCtx := harness.EventMapContext{
-		Namespace:   task.Namespace,
-		TaskName:    task.Name,
-		SessionName: harnessWrapperSessionName(task),
+		Namespace: task.Namespace,
+		TaskName:  task.Name,
+		// Use the real-session-only helper here (not harnessWrapperSessionName,
+		// which falls back to task.Name): this SessionName is PERSISTED as the
+		// execution event's session key, so a task-name fallback would collide a
+		// SessionRef-less task's events into any real Session of the same name.
+		// The StartTurn/CancelTurn request sites below intentionally keep
+		// harnessWrapperSessionName because the protocol requires a non-empty
+		// identifier there (it is not a stored timeline key).
+		SessionName: r.executionEventSessionName(ctx, task),
 		AgentName:   harnessWrapperTaskAgentName(task),
 	}
 	afterSeq := harnessWrapperLastFrameSeq(task)
@@ -443,6 +468,58 @@ func harnessFrameKey(frame harness.HarnessEventFrame) string {
 		frame.CorrelationID,
 		strconv.FormatInt(frame.Seq, 10),
 	}, "\x00")
+}
+
+// harnessWrapperTurnHasPersistedFrames reports whether the event store already
+// holds at least one mapped frame for the given turn ID on this task's stream.
+// Because the event store is the controller's durable database (not wrapper
+// memory), a positive result means the turn was already accepted and ran — even
+// across a wrapper pod restart that wiped its in-memory turn map. The controller
+// uses this to recover instead of re-issuing StartTurn (which would duplicate
+// external side effects) when the "started" marker was never persisted.
+func (r *TaskReconciler) harnessWrapperTurnHasPersistedFrames(ctx context.Context, task *corev1alpha1.Task, turnID harness.HarnessTurnID) (bool, error) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return false, nil
+	}
+	wantTurnID := strings.TrimSpace(string(turnID))
+	if wantTurnID == "" {
+		return false, nil
+	}
+	var afterSeq int64
+	for {
+		eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  task.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   task.Name,
+			AfterSeq:   afterSeq,
+			Limit:      store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return false, fmt.Errorf("list mapped harness events: %w", err)
+		}
+		if len(eventsList) == 0 {
+			return false, nil
+		}
+		for _, event := range eventsList {
+			if event.Seq > afterSeq {
+				afterSeq = event.Seq
+			}
+			var content struct {
+				Harness struct {
+					TurnID string `json:"turnID"`
+				} `json:"harness"`
+			}
+			if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+				continue
+			}
+			if strings.TrimSpace(content.Harness.TurnID) == wantTurnID {
+				return true, nil
+			}
+		}
+		if len(eventsList) < store.MaxExecutionEventLimit {
+			return false, nil
+		}
+	}
 }
 
 func harnessWrapperOutputFetchRetries(task *corev1alpha1.Task) int {
@@ -633,6 +710,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperStartedAnno)
 		delete(task.Annotations, harnessWrapperPlannedAtAnno)
 		delete(task.Annotations, harnessWrapperMetadataAnno)
+		delete(task.Annotations, harnessWrapperOutputFetchRetriesAnno)
 	}
 	return r.Patch(ctx, task, patch)
 }

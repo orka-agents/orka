@@ -112,6 +112,7 @@ controller:
       taskRead: ""
       taskList: ""
       taskDelete: ""
+      taskUpdate: ""
       toolRead: ""
       toolUse: ""
       providerUse: ""

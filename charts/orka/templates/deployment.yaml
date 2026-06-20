@@ -87,6 +87,9 @@ spec:
             {{- if .taskDelete }}
             - {{ printf "--context-token-task-delete-scopes=%s" .taskDelete | quote }}
             {{- end }}
+            {{- if .taskUpdate }}
+            - {{ printf "--context-token-task-update-scopes=%s" .taskUpdate | quote }}
+            {{- end }}
             {{- if .toolRead }}
             - {{ printf "--context-token-tool-read-scopes=%s" .toolRead | quote }}
             {{- end }}

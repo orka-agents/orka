@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,7 +21,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
@@ -109,9 +109,21 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	}
 
 	forkCtx := forkcontext.BuildContext(namespace, sourceName, afterSeq, eventsBefore, forkcontext.DefaultMaxEvents)
+	idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
 	newName := strings.TrimSpace(req.NewTaskName)
+	// Idempotent recovery is opt-in via an explicit Idempotency-Key. We do NOT
+	// infer idempotency from (source, afterSeq, requester) alone, because that
+	// tuple omits the divergent overrides (prompt/agentRef/workspace) — forking
+	// one checkpoint into several distinct branches is the primary use case, so
+	// the default must mint a unique name. With a key, the caller is explicitly
+	// asserting "same logical fork", so retries collapse onto one object.
+	idempotent := newName == "" && idempotencyKey != ""
 	if newName == "" {
-		newName = generatedForkTaskName(sourceName)
+		if idempotent {
+			newName = deterministicForkTaskName(sourceName, afterSeq, forkRequesterIdentity(c), idempotencyKey)
+		} else {
+			newName = generatedForkTaskName(sourceName)
+		}
 	}
 
 	spec := *source.Spec.DeepCopy()
@@ -146,15 +158,131 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.preflightForkTaskCreate(c.Context(), namespace, newName, forked); err != nil {
-		return err
+
+	// Reject oversize objects BEFORE any write. The apiserver/etcd object-size
+	// limit is enforced only on the real persisted write (a DryRunAll create does
+	// not catch it), so guard with an explicit serialized-size budget here and
+	// surface 413 rather than a generic 500 with an orphaned request event.
+	if size := forkedTaskSerializedSize(forked); size > maxForkedTaskSerializedBytes {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge,
+			fmt.Sprintf("forked task is too large (%d bytes > %d limit); fork from an earlier checkpoint or shorten the prompt", size, maxForkedTaskSerializedBytes))
 	}
 
+	// Create the Task FIRST (it is the authoritative object). Only after a
+	// confirmed-successful create do we append fork timeline events, so a failed
+	// create can never orphan a TaskForkRequested/Created event (invariant 1 & 4).
+	if err := h.client.Create(c.Context(), forked); err != nil {
+		switch {
+		case apierrors.IsAlreadyExists(err):
+			// Idempotent recovery only when the caller opted in with an
+			// Idempotency-Key: the existing object is the same logical fork (same
+			// source + checkpoint), so return it instead of creating a duplicate.
+			// Without a key (default unique auto-name, or an explicit user-supplied
+			// name), a collision is a genuine conflict — we never silently alias a
+			// divergent fork onto a pre-existing Task whose spec differs.
+			if idempotent {
+				if existing, ok := h.matchingExistingFork(c.Context(), namespace, newName, sourceName, afterSeq); ok {
+					return c.Status(fiber.StatusOK).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: existing.Name, AfterSeq: afterSeq, ForkContext: forkCtx})
+				}
+			}
+			return fiber.NewError(fiber.StatusConflict, "forked task already exists")
+		case apierrors.IsRequestEntityTooLargeError(err):
+			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "forked task is too large; fork from an earlier checkpoint or shorten the prompt")
+		default:
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked task: %v", err))
+		}
+	}
+
+	// Timeline events are best-effort AFTER the authoritative create. A failure
+	// here must not fail the fork (the Task already exists and is self-describing
+	// via its parent labels/annotations); log and continue (invariant 1).
+	h.appendForkTimelineEvents(c.Context(), namespace, sourceName, newName, afterSeq, sourceSessionName, forkedSessionName)
+
+	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
+}
+
+// maxForkedTaskSerializedBytes bounds the serialized forked Task well under the
+// kube-apiserver/etcd ~1.5 MiB object-size limit, leaving headroom for
+// server-side managed fields and status.
+const maxForkedTaskSerializedBytes = 1024 * 1024
+
+func forkedTaskSerializedSize(task *corev1alpha1.Task) int {
+	if task == nil {
+		return 0
+	}
+	data, err := json.Marshal(task)
+	if err != nil {
+		// Treat an unmarshalable object as oversize (fail-closed).
+		return maxForkedTaskSerializedBytes + 1
+	}
+	return len(data)
+}
+
+// forkRequesterIdentity returns a stable identifier for the caller used to scope
+// deterministic fork names, so different users forking the same checkpoint do not
+// collide. Falls back to empty when unauthenticated.
+func forkRequesterIdentity(c fiber.Ctx) string {
+	if info := GetUserInfo(c); info != nil {
+		if u := strings.TrimSpace(info.Username); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+// deterministicForkTaskName derives a stable fork name so retries of the same
+// logical fork (identified by an explicit Idempotency-Key) resolve to the same
+// object. Used only on the opt-in idempotent path.
+func deterministicForkTaskName(sourceName string, afterSeq int64, requester, idempotencyKey string) string {
+	seed := idempotencyKey
+	if seed == "" {
+		seed = fmt.Sprintf("%s\x00%d\x00%s", sourceName, afterSeq, requester)
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(sum[:4]))
+}
+
+// generatedForkTaskName mints a unique fork name (random suffix). This is the
+// default for auto-named forks so that forking one checkpoint into several
+// distinct branches always creates distinct Tasks; it never aliases divergent
+// forks. Retry-safety for the same logical fork is opt-in via an Idempotency-Key
+// (see deterministicForkTaskName); the create-before-events ordering already
+// removes the transient-failure retry that previously caused duplicates.
+func generatedForkTaskName(sourceName string) string {
+	var suffix [4]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Sprintf("%s-fork-%d", forkcontext.SanitizeTaskNamePrefix(sourceName), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(suffix[:]))
+}
+
+// matchingExistingFork returns the existing Task at newName if it is the same
+// logical fork (same source task and checkpoint seq), enabling idempotent
+// recovery on retry.
+func (h *Handlers) matchingExistingFork(ctx context.Context, namespace, newName, sourceName string, afterSeq int64) (*corev1alpha1.Task, bool) {
+	existing := &corev1alpha1.Task{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: newName}, existing); err != nil {
+		return nil, false
+	}
+	if existing.Annotations[labels.AnnotationForkSourceTask] != sourceName {
+		return nil, false
+	}
+	if existing.Annotations[labels.AnnotationForkSourceSeq] != strconv.FormatInt(afterSeq, 10) {
+		return nil, false
+	}
+	return existing, true
+}
+
+// appendForkTimelineEvents records the fork request + created events on the
+// source and forked streams. It is best-effort: the authoritative Task already
+// exists, so an append failure is logged but does not fail the request.
+func (h *Handlers) appendForkTimelineEvents(ctx context.Context, namespace, sourceName, newName string, afterSeq int64, sourceSessionName, forkedSessionName string) {
 	requestContent, err := marshalForkEventContent(sourceName, newName, afterSeq, "request")
 	if err != nil {
-		return err
+		log.Info("fork: failed to encode request event content", "error", err, "task", sourceName)
+		return
 	}
-	if _, err := h.executionEventStore.AppendExecutionEvent(c.Context(), &store.ExecutionEvent{
+	if _, err := h.executionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   namespace,
 		StreamType:  events.ExecutionEventStreamTypeTask,
 		StreamID:    sourceName,
@@ -165,19 +293,13 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		Summary:     "task fork requested",
 		Content:     requestContent,
 	}); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append fork request event: %v", err))
-	}
-
-	if err := h.client.Create(c.Context(), forked); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return fiber.NewError(fiber.StatusConflict, "forked task already exists")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked task: %v", err))
+		log.Info("fork: failed to append request event", "error", err, "task", sourceName)
 	}
 
 	createdContent, err := marshalForkEventContent(sourceName, newName, afterSeq, "created")
 	if err != nil {
-		return err
+		log.Info("fork: failed to encode created event content", "error", err, "task", newName)
+		return
 	}
 	for _, event := range []struct {
 		streamID    string
@@ -186,7 +308,7 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		{streamID: sourceName, sessionName: sourceSessionName},
 		{streamID: newName, sessionName: forkedSessionName},
 	} {
-		if _, err := h.executionEventStore.AppendExecutionEvent(c.Context(), &store.ExecutionEvent{
+		if _, err := h.executionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 			Namespace:   namespace,
 			StreamType:  events.ExecutionEventStreamTypeTask,
 			StreamID:    event.streamID,
@@ -197,32 +319,9 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 			Summary:     "task fork created",
 			Content:     createdContent,
 		}); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append fork created event: %v", err))
+			log.Info("fork: failed to append created event", "error", err, "stream", event.streamID)
 		}
 	}
-
-	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
-}
-
-func (h *Handlers) preflightForkTaskCreate(
-	ctx context.Context,
-	namespace string,
-	newName string,
-	forked *corev1alpha1.Task,
-) error {
-	existing := &corev1alpha1.Task{}
-	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: newName}, existing); err == nil {
-		return fiber.NewError(fiber.StatusConflict, "forked task already exists")
-	} else if !apierrors.IsNotFound(err) {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to check forked task: %v", err))
-	}
-	if err := h.client.Create(ctx, forked.DeepCopy(), ctrlclient.DryRunAll); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return fiber.NewError(fiber.StatusConflict, "forked task already exists")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to validate forked task create: %v", err))
-	}
-	return nil
 }
 
 func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest) {
@@ -382,12 +481,4 @@ func listTaskEventsThrough(
 		}
 	}
 	return out, nil
-}
-
-func generatedForkTaskName(sourceName string) string {
-	var suffix [4]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return fmt.Sprintf("%s-fork-%d", forkcontext.SanitizeTaskNamePrefix(sourceName), time.Now().Unix())
-	}
-	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(suffix[:]))
 }

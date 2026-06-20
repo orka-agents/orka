@@ -164,13 +164,22 @@ orka task fork <task> --after 5 --agent reviewer --prompt "Continue from here"
 
 ## Durable approvals MVP
 
-Workers can emit approval events:
+Workers emit only the `ApprovalRequested` event. The internal event submission
+endpoint (`SubmitExecutionEvent`) rejects worker-submitted terminal approval
+events with `403 Forbidden` ("terminal task and approval events must use
+controller-owned paths").
 
-- `ApprovalRequested`,
+The approval lifecycle event types carried on the task stream are:
+
+- `ApprovalRequested` — emitted by workers,
 - `ApprovalApproved`,
 - `ApprovalDeclined`,
 - `ApprovalExpired`,
 - `ApprovalCancelled`.
+
+The four terminal types (`ApprovalApproved`, `ApprovalDeclined`,
+`ApprovalExpired`, `ApprovalCancelled`) are appended only by controller-owned
+paths — for example the decision endpoint below — never by worker submissions.
 
 Pending/current approvals are derived from the event stream:
 

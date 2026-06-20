@@ -142,9 +142,14 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		SessionName: sessionName,
 		Type:        eventType,
 		Severity:    events.ExecutionEventSeverityInfo,
-		ToolCallID:  current.ToolCallID,
-		Summary:     fmt.Sprintf("approval %s", decision),
-		Content:     content,
+		// Stamp the canonical approval ID into the stable top-level field (not
+		// current.ToolCallID, which is empty for harness-emitted approvals). This
+		// keeps approvals.Derive and the terminal-conflict guard able to match the
+		// decision to its pending approval even if a large reason truncates the
+		// JSON content (where approvalID would otherwise be the only copy).
+		ToolCallID: approvalID,
+		Summary:    fmt.Sprintf("approval %s", decision),
+		Content:    content,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {

@@ -19,11 +19,6 @@ import (
 )
 
 const (
-	EnvOrkaControllerURL = "ORKA_CONTROLLER_URL"
-	EnvOrkaTaskNamespace = "ORKA_TASK_NAMESPACE"
-	EnvOrkaTaskName      = "ORKA_TASK_NAME"
-	EnvOrkaSessionName   = "ORKA_SESSION_NAME"
-
 	DefaultServiceAccountBearerPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultEventRecorderTimeout     = 2 * time.Second
 )
@@ -59,10 +54,10 @@ var _ EventRecorder = (*HTTPEventRecorder)(nil)
 // never blocks task execution.
 func NewHTTPEventRecorderFromEnv() EventRecorder {
 	return NewHTTPEventRecorder(HTTPEventRecorderConfig{
-		ControllerURL: os.Getenv(EnvOrkaControllerURL),
-		Namespace:     os.Getenv(EnvOrkaTaskNamespace),
-		TaskName:      os.Getenv(EnvOrkaTaskName),
-		SessionName:   os.Getenv(EnvOrkaSessionName),
+		ControllerURL: os.Getenv(workerenv.ControllerURL),
+		Namespace:     os.Getenv(workerenv.TaskNamespace),
+		TaskName:      os.Getenv(workerenv.TaskName),
+		SessionName:   os.Getenv(workerenv.SessionName),
 		BearerPath:    firstNonEmpty(os.Getenv(workerenv.ServiceAccountTokenPath), DefaultServiceAccountBearerPath),
 	})
 }

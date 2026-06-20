@@ -36,7 +36,20 @@ type Server struct {
 	mu          sync.RWMutex
 	turns       map[harness.HarnessTurnID]*turnState
 	activeTurns int
+	// consumedTurns is a bounded set of turn IDs that have been accepted and then
+	// evicted, so a duplicate StartTurn for an already-run-and-evicted turn is
+	// rejected deterministically (409) instead of being re-executed. This closes
+	// the at-least-once external side-effect window when the controller retries a
+	// StartTurn whose "started" marker it failed to persist after the turn had
+	// already completed and been evicted from s.turns. Bounded FIFO so memory is
+	// capped; it does NOT survive a wrapper process restart (the controller's
+	// event-store check is the cross-restart backstop).
+	consumedTurns map[harness.HarnessTurnID]struct{}
+	consumedOrder []harness.HarnessTurnID
 }
+
+// maxConsumedTurnIDs bounds the in-memory tombstone of consumed turn IDs.
+const maxConsumedTurnIDs = 1024
 
 type RuntimeSupportProvider interface {
 	SupportedRuntimes() []string
@@ -68,11 +81,12 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 		}
 	}
 	s := &Server{
-		config:  cfg,
-		adapter: adapter,
-		runner:  NewCommandRunner(cfg),
-		now:     time.Now,
-		turns:   map[harness.HarnessTurnID]*turnState{},
+		config:        cfg,
+		adapter:       adapter,
+		runner:        NewCommandRunner(cfg),
+		now:           time.Now,
+		turns:         map[harness.HarnessTurnID]*turnState{},
+		consumedTurns: map[harness.HarnessTurnID]struct{}{},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -143,8 +157,24 @@ func (s *Server) evictTurn(turn *turnState) {
 	if current := s.turns[turn.request.TurnID]; current == turn {
 		delete(s.turns, turn.request.TurnID)
 	}
+	s.markTurnConsumedLocked(turn.request.TurnID)
 	s.mu.Unlock()
 	turn.cleanupOutput()
+}
+
+// markTurnConsumedLocked records a turn ID as consumed (accepted then evicted) in
+// a bounded FIFO set. Caller must hold s.mu.
+func (s *Server) markTurnConsumedLocked(id harness.HarnessTurnID) {
+	if _, ok := s.consumedTurns[id]; ok {
+		return
+	}
+	s.consumedTurns[id] = struct{}{}
+	s.consumedOrder = append(s.consumedOrder, id)
+	for len(s.consumedOrder) > maxConsumedTurnIDs {
+		oldest := s.consumedOrder[0]
+		s.consumedOrder = s.consumedOrder[1:]
+		delete(s.consumedTurns, oldest)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +264,14 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 	if _, exists := s.turns[request.TurnID]; exists {
 		s.mu.Unlock()
 		writeSafeError(w, http.StatusConflict, "turn already exists")
+		return
+	}
+	if _, consumed := s.consumedTurns[request.TurnID]; consumed {
+		s.mu.Unlock()
+		// This turn ID was already accepted and run to completion (then evicted).
+		// Re-accepting it would duplicate external side effects (branch push, PR
+		// creation, token spend), so reject deterministically.
+		writeSafeError(w, http.StatusConflict, "turn already completed")
 		return
 	}
 	if s.activeTurns >= 1 {

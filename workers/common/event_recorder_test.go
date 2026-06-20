@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestEventRecorderFakeCapturesEventsInOrder(t *testing.T) {
@@ -139,9 +140,9 @@ func TestFakeEventRecorderReset(t *testing.T) {
 }
 
 func TestHTTPEventRecorderFromEnvMissingConfigNoop(t *testing.T) {
-	t.Setenv(EnvOrkaControllerURL, "")
-	t.Setenv(EnvOrkaTaskNamespace, "default")
-	t.Setenv(EnvOrkaTaskName, "task-1")
+	t.Setenv(workerenv.ControllerURL, "")
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "task-1")
 	if _, ok := NewHTTPEventRecorderFromEnv().(NoopEventRecorder); !ok {
 		t.Fatalf("NewHTTPEventRecorderFromEnv() = %T, want NoopEventRecorder", NewHTTPEventRecorderFromEnv())
 	}
@@ -161,10 +162,10 @@ func TestHTTPEventRecorderFromEnvPropagatesSessionName(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv(EnvOrkaControllerURL, server.URL)
-	t.Setenv(EnvOrkaTaskNamespace, "default")
-	t.Setenv(EnvOrkaTaskName, "task-1")
-	t.Setenv(EnvOrkaSessionName, "session-1")
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "task-1")
+	t.Setenv(workerenv.SessionName, "session-1")
 
 	recorder := NewHTTPEventRecorderFromEnv()
 	recorder.Record(context.Background(), events.ExecutionEventTypeWorkerStarted)

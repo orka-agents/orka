@@ -63,8 +63,18 @@ const (
 )
 
 // StartTurnRequest is the Orka-to-harness request that starts one explicit turn.
-// All identity and policy fields are safe references or verified metadata; raw
-// credentials and TxTokens must never be serialized here.
+// Identity and policy fields are safe references or verified metadata. Resolved
+// literal credentials destined for the runtime subprocess ARE permitted in
+// Input.Env (see TurnEnvVar): this request is the controller-to-wrapper delivery
+// channel for credentials and is the architectural equivalent of mounting a
+// Secret into the wrapper pod. The prohibition on raw secrets/TxTokens applies to
+// OBSERVABLE and DURABLE surfaces only — Task status, persisted annotations,
+// execution events/frames, logs, and trace output — never to this in-memory
+// request body. Raw TxTokens remain disallowed entirely (use owner-referenced
+// child Secrets and fail-closed TTS exchanges). Callers MUST NOT log this request
+// or persist Input.Env, and the wrapper should drop Input.Env from retained turn
+// state once child env is materialized. Transport confidentiality (TLS) for this
+// channel is a deployment-posture concern tracked separately.
 type StartTurnRequest struct {
 	Version           string            `json:"version"`
 	Namespace         string            `json:"namespace"`
@@ -104,7 +114,11 @@ type TurnInput struct {
 
 // TurnEnvVar is a resolved, literal environment variable passed to the
 // wrapper subprocess. It intentionally does not model SecretKeyRef/ValueFrom;
-// controller-side validation must reject unresolved or secret-backed values.
+// controller-side validation must reject UNRESOLVED references (SecretKeyRef/
+// ValueFrom) and raw TxTokens. Resolved literal credential values (e.g. a
+// provider API key or git token already read from a Secret by the controller)
+// ARE permitted here — this is the credential delivery channel — but must never
+// be logged, persisted, or surfaced in events/status/trace.
 type TurnEnvVar struct {
 	Name  string `json:"name"`
 	Value string `json:"value,omitempty"`

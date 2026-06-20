@@ -239,6 +239,53 @@ func TestServerEvictsCompletedTurnsAfterRetention(t *testing.T) {
 	})
 }
 
+// After a turn completes and is evicted, re-issuing StartTurn with the same turn
+// ID must be rejected (409 "turn already completed") rather than re-running the
+// CLI, so a controller retry cannot duplicate external side effects.
+func TestServerRejectsReacceptOfEvictedTurn(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = testEchoCommand
+	cfg.TurnRetention = 20 * time.Millisecond
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	_ = collectWrapperFrames(t, client, request.TurnID, 0)
+	// Wait until the completed turn is evicted from the active map.
+	eventually(t, time.Second, func() bool {
+		server.mu.RLock()
+		defer server.mu.RUnlock()
+		return server.turns[request.TurnID] == nil
+	})
+
+	// Re-issuing the same turn ID must now be a deterministic conflict, not a new run.
+	_, err = client.StartTurn(context.Background(), request)
+	if err == nil {
+		t.Fatal("re-StartTurn of an evicted turn succeeded, want conflict")
+	}
+	if !strings.Contains(err.Error(), "turn already completed") {
+		t.Fatalf("re-StartTurn error = %v, want 'turn already completed'", err)
+	}
+	// The turn must NOT have been re-admitted to the active map.
+	server.mu.RLock()
+	_, active := server.turns[request.TurnID]
+	server.mu.RUnlock()
+	if active {
+		t.Fatal("evicted turn was re-admitted to the active map")
+	}
+}
+
 func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
