@@ -60,6 +60,32 @@ func TestCodexAdapterRequiresAllowBash(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterCleansTempFilesOnWorkspaceStatError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.SystemPrompt, "system guidance requiring an instructions file")
+	loop := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Skipf("symlink loop unavailable: %v", err)
+	}
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: loop})
+
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+	if err == nil || !strings.Contains(err.Error(), "stat codex workspace directory") {
+		t.Fatalf("BuildCommand error = %v, want workspace stat error", err)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("ReadDir temp: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "codex-instructions-") || strings.HasPrefix(entry.Name(), "codex-last-message-") {
+			t.Fatalf("temporary file %q was not cleaned up after BuildCommand failure", entry.Name())
+		}
+	}
+}
+
 func TestCodexAdapterRunsFakeCLIThroughWrapper(t *testing.T) {
 	dir := t.TempDir()
 	fakeCodex := filepath.Join(dir, "codex-fake.sh")

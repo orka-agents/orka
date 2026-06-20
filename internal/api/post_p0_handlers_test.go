@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -73,6 +74,32 @@ func (f *postP0FakeSessionStore) SearchTranscript(ctx context.Context, filter st
 }
 func (f *postP0FakeSessionStore) UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error {
 	return nil
+}
+
+type postP0FailingAppendEventStore struct {
+	store.ExecutionEventStore
+	failType  string
+	failAfter int
+	seen      int
+	failed    bool
+}
+
+func (s *postP0FailingAppendEventStore) AppendExecutionEvent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+) (*store.ExecutionEvent, error) {
+	if event != nil && event.Type == s.failType {
+		s.seen++
+		failAfter := s.failAfter
+		if failAfter <= 0 {
+			failAfter = 1
+		}
+		if s.seen >= failAfter {
+			s.failed = true
+			return nil, fmt.Errorf("injected append failure for %s", event.Type)
+		}
+	}
+	return s.ExecutionEventStore.AppendExecutionEvent(ctx, event)
 }
 
 func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
@@ -552,6 +579,104 @@ func TestForkTaskAPI(t *testing.T) {
 	}
 	if latest != 3 || len(sessionEvents) != 3 {
 		t.Fatalf("latest=%d sessionEvents=%#v, want fork request and created events in session timeline", latest, sessionEvents)
+	}
+}
+
+func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "source-task")
+	existingFork := testTask("default", "existing-fork")
+	h, app := setupTaskEventHandlers(t, eventStore, source, existingFork)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"existing-fork","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", resp.StatusCode)
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "source-task", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range listed {
+		if event.Type == events.ExecutionEventTypeTaskForkRequested {
+			t.Fatalf("fork request event was appended despite create failure: %#v", listed)
+		}
+	}
+}
+
+func TestForkTaskAPIDoesNotCreateTaskWhenRequestEventAppendFails(t *testing.T) {
+	baseStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, baseStore, "source-task", events.ExecutionEventTypeTaskStarted)
+	eventStore := &postP0FailingAppendEventStore{
+		ExecutionEventStore: baseStore,
+		failType:            events.ExecutionEventTypeTaskForkRequested,
+	}
+	source := testTask("default", "source-task")
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"rollback-fork","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", resp.StatusCode)
+	}
+	if !eventStore.failed {
+		t.Fatal("expected injected append failure to run")
+	}
+	created := &corev1alpha1.Task{}
+	err = h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "rollback-fork"}, created)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("fork task get error = %v, want not found after rollback", err)
+	}
+	listed, err := baseStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "source-task", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range listed {
+		if event.Type == events.ExecutionEventTypeTaskForkRequested {
+			t.Fatalf("fork request event was appended despite injected failure: %#v", listed)
+		}
+	}
+}
+
+func TestForkTaskAPIAddsContextToLegacyTopLevelAIPrompt(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "legacy-ai-source", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "legacy-ai-source")
+	source.Spec.Type = corev1alpha1.TaskTypeAI
+	source.Spec.Prompt = "legacy top-level prompt"
+	source.Spec.AI = &corev1alpha1.AISpec{Prompt: "ai prompt"}
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/legacy-ai-source/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"legacy-ai-fork"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "legacy-ai-fork"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if !strings.Contains(created.Spec.Prompt, "Fork context through execution event checkpoint") ||
+		!strings.Contains(created.Spec.Prompt, "legacy top-level prompt") {
+		t.Fatalf("created top-level prompt = %q, want fork context and legacy prompt", created.Spec.Prompt)
+	}
+	if created.Spec.AI == nil ||
+		!strings.Contains(created.Spec.AI.Prompt, "Fork context through execution event checkpoint") ||
+		!strings.Contains(created.Spec.AI.Prompt, "ai prompt") {
+		t.Fatalf("created AI prompt = %#v, want fork context and AI prompt", created.Spec.AI)
 	}
 }
 

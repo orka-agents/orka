@@ -71,6 +71,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 	if stat, err := os.Stat(dir); err != nil || !stat.IsDir() {
 		if err != nil && !os.IsNotExist(err) {
 			_ = os.Remove(outputPath)
+			cleanupInstructions()
 			return nil, fmt.Errorf("stat codex workspace directory: %w", err)
 		}
 		if wd, wdErr := os.Getwd(); wdErr == nil {

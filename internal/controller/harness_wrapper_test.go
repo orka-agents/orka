@@ -537,6 +537,44 @@ func TestExistingHarnessFrameKeysIndexesStoredHarnessIdentity(t *testing.T) {
 	}
 }
 
+func TestExistingHarnessFrameKeysPagesPastNonHarnessEvents(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	eventStore := store.NewFakeExecutionEventStore()
+	for i := range store.MaxExecutionEventLimit {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:  task.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   task.Name,
+			TaskName:   task.Name,
+			Type:       events.ExecutionEventTypeModelMessage,
+			Summary:    fmt.Sprintf("non-harness event %d", i),
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(non-harness %d): %v", i, err)
+		}
+	}
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		TaskName:   task.Name,
+		Type:       events.ExecutionEventTypeAgentRuntimeCompleted,
+		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-page","turnID":"turn-page","correlationID":"corr-page","seq":1001}}`),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(harness): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	keys, err := (&TaskReconciler{ExecutionEventStore: eventStore}).existingHarnessFrameKeys(ctx, task)
+	if err != nil {
+		t.Fatalf("existingHarnessFrameKeys: %v", err)
+	}
+	key := strings.Join([]string{"runtime-page", "turn-page", "corr-page", "1001"}, "\x00")
+	if _, ok := keys[key]; !ok {
+		t.Fatalf("paged harness frame key missing from %#v", keys)
+	}
+}
+
 func TestHarnessWrapperTurnMetadataCarriesTaskTimeout(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.Timeout = &metav1.Duration{Duration: 45 * time.Minute}

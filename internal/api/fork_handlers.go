@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
@@ -145,6 +146,10 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.preflightForkTaskCreate(c.Context(), namespace, newName, forked); err != nil {
+		return err
+	}
+
 	requestContent, err := marshalForkEventContent(sourceName, newName, afterSeq, "request")
 	if err != nil {
 		return err
@@ -199,6 +204,27 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(ForkTaskResponse{Namespace: namespace, SourceTaskName: sourceName, NewTaskName: newName, AfterSeq: afterSeq, ForkContext: forkCtx})
 }
 
+func (h *Handlers) preflightForkTaskCreate(
+	ctx context.Context,
+	namespace string,
+	newName string,
+	forked *corev1alpha1.Task,
+) error {
+	existing := &corev1alpha1.Task{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: newName}, existing); err == nil {
+		return fiber.NewError(fiber.StatusConflict, "forked task already exists")
+	} else if !apierrors.IsNotFound(err) {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to check forked task: %v", err))
+	}
+	if err := h.client.Create(ctx, forked.DeepCopy(), ctrlclient.DryRunAll); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return fiber.NewError(fiber.StatusConflict, "forked task already exists")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to validate forked task create: %v", err))
+	}
+	return nil
+}
+
 func applyForkRequestOverrides(spec *corev1alpha1.TaskSpec, req ForkTaskRequest) {
 	if spec == nil {
 		return
@@ -244,6 +270,9 @@ func applyForkContextToSpec(spec *corev1alpha1.TaskSpec, forkCtx forkcontext.Con
 	contextBlock := "Fork context through execution event checkpoint:\n" + string(encoded)
 	if spec.AI != nil {
 		spec.AI.Prompt = joinForkContextPrompt(contextBlock, spec.AI.Prompt)
+		if spec.Type == corev1alpha1.TaskTypeAI && strings.TrimSpace(spec.Prompt) == "" {
+			return nil
+		}
 	}
 	if spec.Type == corev1alpha1.TaskTypeAgent || strings.TrimSpace(spec.Prompt) != "" {
 		spec.Prompt = joinForkContextPrompt(contextBlock, spec.Prompt)

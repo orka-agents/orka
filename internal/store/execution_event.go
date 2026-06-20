@@ -212,6 +212,9 @@ func SanitizeExecutionEventPayloadFields(event *ExecutionEvent) error {
 	if event == nil {
 		return nil
 	}
+	beforeSummary := event.Summary
+	beforeContent := append([]byte(nil), event.Content...)
+	beforeContentText := event.ContentText
 	payload, err := events.SanitizeExecutionEventPayload(event.Summary, event.Content, event.ContentText)
 	if err != nil {
 		return err
@@ -219,12 +222,15 @@ func SanitizeExecutionEventPayloadFields(event *ExecutionEvent) error {
 	event.Summary = payload.Summary
 	event.Content = payload.Content
 	event.ContentText = payload.ContentText
+	redactedThisPass := executionEventPayloadContainsRedactionMarker(event) &&
+		(beforeSummary != event.Summary || string(beforeContent) != string(event.Content) || beforeContentText != event.ContentText)
+	truncatedThisPass := payload.Truncation != nil && !payload.Truncation.Empty()
 	event.Truncation = MergeExecutionEventTruncation(event.Truncation, payload.Truncation)
 	metrics.RecordExecutionEventPayloadSanitization(
 		event.StreamType,
 		event.Type,
-		executionEventPayloadContainsRedactionMarker(event),
-		event.Truncation != nil && !event.Truncation.Empty(),
+		redactedThisPass,
+		truncatedThisPass,
 	)
 	return nil
 }

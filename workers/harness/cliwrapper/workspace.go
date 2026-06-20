@@ -271,7 +271,10 @@ func prepareTurnWorkspace(ctx context.Context, turn TurnContext) (preparedWorksp
 }
 
 func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo string) error {
-	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", ref)
+	if err := validateWorkspaceRefForFetch(ref); err != nil {
+		return err
+	}
+	fetch := workspaceGitCommand(ctx, "-C", cloneDir, "fetch", "--depth=1", "origin", "--end-of-options", ref)
 	if _, err := fetch.CombinedOutput(); err == nil {
 		return checkoutWorkspaceCommit(ctx, cloneDir, "FETCH_HEAD", repo)
 	}
@@ -293,6 +296,15 @@ func fetchAndCheckoutWorkspaceRef(ctx context.Context, cloneDir, ref, repo strin
 		return err
 	}
 	return checkoutWorkspaceCommit(ctx, cloneDir, commit, repo)
+}
+
+func validateWorkspaceRefForFetch(ref string) error {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" || strings.HasPrefix(trimmed, "-") || strings.Contains(trimmed, "..") ||
+		strings.Contains(trimmed, "@{") || strings.ContainsAny(trimmed, " ~^:?*[\\") {
+		return fmt.Errorf("checkout turn workspace ref: invalid ref %q", ref)
+	}
+	return nil
 }
 
 func looksLikeCommitRef(ref string) bool {

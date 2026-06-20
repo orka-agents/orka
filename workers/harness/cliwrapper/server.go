@@ -2,6 +2,7 @@ package cliwrapper
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -104,7 +105,7 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if got == "" || got != want {
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 		writeSafeError(w, http.StatusUnauthorized, "unauthorized")
 		return false
 	}
@@ -333,7 +334,7 @@ func (s *Server) handleOutput(w http.ResponseWriter, r *http.Request, turn *turn
 	}
 	data, ok, err := turn.output()
 	if err != nil {
-		writeSafeError(w, http.StatusInternalServerError, err.Error())
+		writeSafeError(w, http.StatusInternalServerError, "failed to read turn output")
 		return
 	}
 	if !ok {

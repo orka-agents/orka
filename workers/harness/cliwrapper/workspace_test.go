@@ -68,6 +68,26 @@ func TestRelaxWorkspaceTreePermissionsSkipsSymlinks(t *testing.T) {
 	}
 }
 
+func TestValidateWorkspaceRefForFetchRejectsUnsafeRefs(t *testing.T) {
+	for _, ref := range []string{
+		"", " -branch", "-branch", "feature..main", "main@{1}",
+		"feature branch", "main~1", "main:other", "main\\othere",
+	} {
+		t.Run(ref, func(t *testing.T) {
+			if err := validateWorkspaceRefForFetch(ref); err == nil {
+				t.Fatalf("validateWorkspaceRefForFetch(%q) error = nil, want rejection", ref)
+			}
+		})
+	}
+	for _, ref := range []string{"main", "feature/test", "refs/heads/main", "origin/feature"} {
+		t.Run("valid_"+ref, func(t *testing.T) {
+			if err := validateWorkspaceRefForFetch(ref); err != nil {
+				t.Fatalf("validateWorkspaceRefForFetch(%q) error = %v, want nil", ref, err)
+			}
+		})
+	}
+}
+
 func TestFetchAndCheckoutWorkspaceRefRejectsPathspecFallback(t *testing.T) {
 	cloneDir, _ := newWorkspaceGitFixture(t)
 	before := testGitOutput(t, cloneDir, "rev-parse", "HEAD")

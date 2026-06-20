@@ -392,32 +392,46 @@ func (r *TaskReconciler) existingHarnessFrameKeys(ctx context.Context, task *cor
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
 		return keys, nil
 	}
-	eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace:  task.Namespace,
-		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   task.Name,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list mapped harness events: %w", err)
-	}
-	for _, event := range eventsList {
-		var content struct {
-			Harness struct {
-				RuntimeSessionID string `json:"runtimeSessionID"`
-				TurnID           string `json:"turnID"`
-				CorrelationID    string `json:"correlationID"`
-				Seq              int64  `json:"seq"`
-			} `json:"harness"`
+	var afterSeq int64
+	for {
+		eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  task.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   task.Name,
+			AfterSeq:   afterSeq,
+			Limit:      store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list mapped harness events: %w", err)
 		}
-		if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
-			continue
+		if len(eventsList) == 0 {
+			break
 		}
-		keys[strings.Join([]string{
-			content.Harness.RuntimeSessionID,
-			content.Harness.TurnID,
-			content.Harness.CorrelationID,
-			strconv.FormatInt(content.Harness.Seq, 10),
-		}, "\x00")] = struct{}{}
+		for _, event := range eventsList {
+			if event.Seq > afterSeq {
+				afterSeq = event.Seq
+			}
+			var content struct {
+				Harness struct {
+					RuntimeSessionID string `json:"runtimeSessionID"`
+					TurnID           string `json:"turnID"`
+					CorrelationID    string `json:"correlationID"`
+					Seq              int64  `json:"seq"`
+				} `json:"harness"`
+			}
+			if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+				continue
+			}
+			keys[strings.Join([]string{
+				content.Harness.RuntimeSessionID,
+				content.Harness.TurnID,
+				content.Harness.CorrelationID,
+				strconv.FormatInt(content.Harness.Seq, 10),
+			}, "\x00")] = struct{}{}
+		}
+		if len(eventsList) < store.MaxExecutionEventLimit {
+			break
+		}
 	}
 	return keys, nil
 }

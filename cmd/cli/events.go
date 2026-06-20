@@ -245,6 +245,7 @@ func newExecutionFollowCmd(use, short, basePath string) *cobra.Command {
 			}
 			if ctx.Err() != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Resume with --after %d\n", lastSeq) //nolint:errcheck
+				return nil
 			}
 			return reader.Err()
 		},

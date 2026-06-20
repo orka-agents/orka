@@ -102,7 +102,7 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 		t,
 		app,
 		"/internal/v1/events/default/task/owned-task",
-		map[string]any{"type": events.ExecutionEventTypeWorkerStarted},
+		map[string]any{"type": events.ExecutionEventTypeWorkerStarted, "taskName": "spoofed-task"},
 	)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("owned worker status = %d, want 201", resp.StatusCode)
@@ -118,6 +118,9 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	}
 	if len(stored) != 1 {
 		t.Fatalf("stored len = %d, want 1", len(stored))
+	}
+	if stored[0].TaskName != "owned-task" {
+		t.Fatalf("stored taskName = %q, want authenticated stream id", stored[0].TaskName)
 	}
 	if stored[0].SessionName != "session-owned" {
 		t.Fatalf("stored sessionName = %q, want task session", stored[0].SessionName)

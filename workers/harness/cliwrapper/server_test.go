@@ -503,6 +503,32 @@ func TestServerStoresOversizedCompletedResultOutOfBand(t *testing.T) {
 	}
 }
 
+func TestServerHandleOutputUsesSafeErrorForReadFailure(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	turn := newTurnState(validWrapperStartTurnRequest(), time.Now)
+	turn.resultPath = filepath.Join(t.TempDir(), "sensitive-output-path-token")
+	req := httptest.NewRequest(http.MethodGet, "/output?ref="+localOutputRef, nil)
+	rec := httptest.NewRecorder()
+
+	server.handleOutput(rec, req, turn)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "sensitive-output-path-token") || strings.Contains(body, turn.resultPath) {
+		t.Fatalf("output error leaked internal path: %q", body)
+	}
+	if !strings.Contains(body, "failed to read turn output") {
+		t.Fatalf("output error body = %q, want safe generic message", body)
+	}
+}
+
 func TestServerRedactsCommandStderrFrames(t *testing.T) {
 	assertCommandFramesRedacted(t, "printf '"+testBearerHeaderValue()+"' >&2; exit 7", "stderr frames")
 }
