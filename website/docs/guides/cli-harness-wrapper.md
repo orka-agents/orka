@@ -33,11 +33,10 @@ The CLI subprocess is **per turn**. The wrapper process can stay up and accept m
 
 Current adapters:
 
-- `generic` — runs a configured command.
+- `generic` — simple command adapter for tests and bring-your-own commands.
 - `codex` — adapter for the Codex CLI using Orka runtime settings.
 - `claude` — adapter for the Claude Code CLI using Orka runtime settings.
 - `copilot` — adapter for GitHub Copilot through the Copilot SDK helper subprocess.
-- `generic` — simple command adapter for tests and bring-your-own commands.
 
 ## Generic command example
 
@@ -96,17 +95,46 @@ Operators must set `ORKA_HARNESS_WRAPPER_ENDPOINT=<trusted wrapper URL>` on the 
 
 The focused test matrix covers generic command success, result-file extraction, non-zero failure, timeout, cancellation including process-group cleanup, redaction, event-stream cursoring, harness conformance, Codex fake-CLI success/failure, and controller routing through the harness runtime.
 
+## Event mapping
+
+Harness-backed agent tasks emit Orka execution events from harness turn frames. A successful observed-mode turn normally produces task lifecycle events plus runtime events such as:
+
+- `AgentRuntimeStarted`
+- `AgentRuntimeCommandStarted`
+- `ModelMessage` when stdout/stderr or model output previews are observed
+- `AgentRuntimeCompleted`
+- `TaskSucceeded`
+
+The controller persists the task result from the harness `TurnCompleted` frame. Harness-backed agent tasks do **not** currently emit the worker-side `ResultSubmitted` event used by the older worker HTTP recorder path.
+
+## Live validation checklist
+
+For post-merge or release validation, use a real cluster with the harness wrapper Deployment and an in-cluster model proxy such as Vekil. Recommended coverage:
+
+1. Verify `GET /v1/health` and `GET /v1/capabilities` on `svc/orka-agent-harness-wrapper`.
+2. Verify `POST /v1/turns` rejects missing or bad bearer tokens. Health and capabilities are intentionally public.
+3. Run a real `codex` Agent task through the wrapper and Vekil.
+4. Run a real `claude` Agent task through the wrapper and Vekil when a Claude-compatible model is exposed.
+5. Exercise workspace clone/read with a public repository and assert `AgentRuntimeCompleted` plus `TaskSucceeded` events.
+6. Fork a harness-backed task and verify checkpoint context plus the fork task result.
+7. Exercise direct generic-wrapper cancellation and deadline timeout; expected terminal frames are `TurnCancelled` and `TurnFailed` respectively.
+8. Verify unsafe workspace URLs such as `https://localhost/...` fail closed.
+9. When a GitHub token is available, run a temporary branch push and PR creation/cleanup flow against a disposable branch.
+
+A validated real-world flow is: Orka harness-backed `codex` task clones Orka, writes a temporary validation file, pushes `live/harness-wrapper-pr-validation-*`, opens a real GitHub PR, verifies the diff, then closes the PR and deletes the branch.
+
 ## Cancellation
 
 `CancelTurn` cancels the turn context. For subprocess adapters, the wrapper sends `SIGTERM` to the process group, waits the configured grace period, then sends `SIGKILL`. This is designed to stop child processes as well as the direct CLI process. The event stream ends with `TurnCancelled` when cancellation wins, or `TurnFailed` for timeouts and non-zero exits.
 
 ## Security notes
 
-- Turn, event-stream, and cancel endpoints require a bearer token unless `ORKA_HARNESS_WRAPPER_ALLOW_UNAUTHENTICATED=true` is explicitly set for local-only tests.
+- Mutating turn endpoints (`POST /v1/turns`, event streams for a turn, and cancel) require a bearer token unless `ORKA_HARNESS_WRAPPER_ALLOW_UNAUTHENTICATED=true` is explicitly set for local-only tests. Health and capabilities endpoints are intentionally public for readiness discovery.
 - Wrapper frames must not include raw environment dumps, API keys, TxTokens, service-account tokens, cookies, or authorization headers.
 - Stdout/stderr previews are redacted and truncated before becoming frames.
 - Prompt-file mode uses per-turn temp files and removes wrapper-created temp files after the command is parsed.
 - Observed-mode wrappers cannot prove what an opaque CLI did internally; use least-privilege credentials and runtime sandboxing exactly as for CLI-backed runtimes.
+- GitHub/LLM credentials belong in Kubernetes Secrets and must not be logged. For live PR-flow tests, create temporary branches/PRs and close/delete them after validation.
 
 ## Substrate relationship
 
