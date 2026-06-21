@@ -409,7 +409,11 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req)
+	// This handler makes a real outbound call to the provider (which fails on the
+	// fake key), so it can exceed Fiber's default 1s app.Test timeout under CI
+	// load and flake with an i/o timeout. Allow a generous timeout for the
+	// network round trip.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 30 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1146,7 +1150,11 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req)
+	// This handler makes a real outbound call to the provider (which fails on the
+	// fake key), so it can exceed Fiber's default 1s app.Test timeout under CI
+	// load and flake with an i/o timeout. Allow a generous timeout for the
+	// network round trip.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 30 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
