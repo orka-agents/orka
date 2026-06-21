@@ -9,6 +9,7 @@ import { ShieldCheck, Check, X, Clock, RefreshCw } from 'lucide-react'
 import { useTaskApprovals, useDecideApproval } from '@/hooks/use-execution-events'
 import { ApiError } from '@/lib/api-client'
 import type { Approval } from '@/schemas/execution-event'
+import type { TaskPhase } from '@/schemas/task'
 
 function statusStyle(status: string): { className: string; live: boolean; label: string } {
   switch (status) {
@@ -167,9 +168,11 @@ function ApprovalCard({
   )
 }
 
-export function TaskApprovalPanel({ taskId }: { taskId: string }) {
-  // Poll while there are pending approvals so live high-risk prompts surface.
-  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000)
+export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskPhase?: TaskPhase }) {
+  // Poll while approvals are pending or the task is still running, so a live
+  // ApprovalRequested surfaces even if the panel opened before any existed.
+  const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
+  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning)
   const approvals = data?.approvals ?? []
   const pending = approvals.filter((a) => a.status === 'pending')
 

@@ -59,10 +59,17 @@ export function useTaskTrace(taskId: string, enabled = true) {
   })
 }
 
-// Poll only while at least one approval is still pending. Once every approval is
-// terminal (or there are none), polling stops so a settled panel doesn't refetch
-// forever. Pass pollIntervalMs to enable polling; omit it to never poll.
-export function useTaskApprovals(taskId: string, enabled = true, pollIntervalMs?: number) {
+// Poll while an approval is still pending OR the task can still emit new
+// approvals (it is not in a terminal phase). Polling stops only once nothing is
+// pending AND the task has finished, so a settled panel doesn't refetch forever
+// while a still-running task's first ApprovalRequested is never missed. Pass
+// pollIntervalMs to enable polling; omit it to never poll.
+export function useTaskApprovals(
+  taskId: string,
+  enabled = true,
+  pollIntervalMs?: number,
+  taskRunning = false,
+) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['taskApprovals', taskId, namespace],
@@ -75,7 +82,7 @@ export function useTaskApprovals(taskId: string, enabled = true, pollIntervalMs?
       if (!pollIntervalMs) return false
       const approvals = query.state.data?.approvals ?? []
       const hasPending = approvals.some((a) => a.status === 'pending')
-      return hasPending ? pollIntervalMs : false
+      return hasPending || taskRunning ? pollIntervalMs : false
     },
   })
 }

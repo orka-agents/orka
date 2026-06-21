@@ -202,7 +202,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="approvals">
-          <TaskApprovalPanel taskId={taskId} />
+          <TaskApprovalPanel taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
         <TabsContent value="logs">

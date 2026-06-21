@@ -213,4 +213,37 @@ describe('ForkDialog', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /tk-fork-late/ })).not.toBeInTheDocument()
   })
+
+  it('regenerates the idempotency key when a fork parameter is edited after a failure', async () => {
+    const keys: string[] = []
+    let attempts = 0
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        attempts += 1
+        if (attempts === 1) return new HttpResponse('ambiguous failure', { status: 503 })
+        return HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-2', afterSeq: 2,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 2, events: [], truncated: false },
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ForkDialog taskId="tk" event={makeEvent({ seq: 2 })} open onOpenChange={() => {}} />)
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(screen.getByText(/ambiguous failure/i)).toBeInTheDocument())
+    // Edit the prompt before retrying — the new overrides must NOT collapse onto
+    // the original fork, so the key must change.
+    await user.type(screen.getByLabelText(/prompt override/i), 'different prompt')
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-2/ })).toBeInTheDocument())
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeTruthy()
+    expect(keys[1]).toBeTruthy()
+    // Editing invalidated the key, so the retry carries a DIFFERENT one.
+    expect(keys[1]).not.toBe(keys[0])
+  })
 })

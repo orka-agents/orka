@@ -147,6 +147,24 @@ describe('use-execution-events hooks', () => {
     expect(calls).toBe(afterFirst)
   })
 
+  it('useTaskApprovals keeps polling while the task is running even with no approvals', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        // No approvals yet, but the task is still running so a future
+        // ApprovalRequested could appear — polling must continue.
+        return HttpResponse.json({ namespace: 'default', taskName: params.id, approvals: [] })
+      }),
+    )
+    const { result } = renderHook(
+      () => useTaskApprovals('tk', true, 50, /* taskRunning */ true),
+      { wrapper: createWrapper() },
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    await waitFor(() => expect(calls).toBeGreaterThan(1), { timeout: 1000 })
+  })
+
   it('useTaskApprovals keeps polling while an approval is pending', async () => {
     let calls = 0
     server.use(

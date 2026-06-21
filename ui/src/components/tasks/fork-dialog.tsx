@@ -84,6 +84,21 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
     }
   }
 
+  // Editing any fork parameter invalidates the current idempotency key. If a
+  // prior attempt actually created the fork (an ambiguous failure), reusing the
+  // key after changing prompt/agent/name would resolve to that original task and
+  // silently ignore the new overrides; minting a fresh key on the next submit
+  // makes the edited fork a distinct request.
+  function onEdit<T>(setter: (value: T) => void) {
+    return (value: T) => {
+      idempotencyKeyRef.current = ''
+      setter(value)
+    }
+  }
+  const setNewTaskNameEdited = onEdit(setNewTaskName)
+  const setAgentNameEdited = onEdit(setAgentName)
+  const setPromptEdited = onEdit(setPrompt)
+
   // Single close path so every dismissal — Escape, overlay, the X button, and the
   // footer Close/Cancel buttons — resets form and result state. The dialog stays
   // mounted under TaskEventTimeline, so skipping reset would reopen on a stale
@@ -135,7 +150,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
                 id="fork-name"
                 type="text"
                 value={newTaskName}
-                onChange={(e) => setNewTaskName(e.target.value)}
+                onChange={(e) => setNewTaskNameEdited(e.target.value)}
                 placeholder="auto-generated if blank"
                 className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                 disabled={fork.isPending}
@@ -149,7 +164,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
                 id="fork-agent"
                 type="text"
                 value={agentName}
-                onChange={(e) => setAgentName(e.target.value)}
+                onChange={(e) => setAgentNameEdited(e.target.value)}
                 placeholder="keep source agent if blank"
                 className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                 disabled={fork.isPending}
@@ -162,7 +177,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
               <textarea
                 id="fork-prompt"
                 value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
+                onChange={(e) => setPromptEdited(e.target.value)}
                 placeholder="keep source prompt if blank"
                 rows={3}
                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
