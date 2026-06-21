@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, waitFor, act } from '@/test/test-utils'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
-import { useExecutionEventStream } from './use-execution-event-stream'
+import { useExecutionEventStream, reconnectBackoffMs } from './use-execution-event-stream'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -215,5 +215,20 @@ describe('useExecutionEventStream', () => {
     const secondUrl = fetchSpy.mock.calls[1][0] as string
     expect(secondUrl).toContain('/api/v1/tasks/task-b/stream')
     expect(secondUrl).toContain('after=0')
+  })
+
+  it('applies capped exponential backoff across consecutive errors', () => {
+    // A clean 'closed' cycle (errorCount 0) keeps the tight base delay.
+    expect(reconnectBackoffMs(2000, 0)).toBe(2000)
+    // Consecutive errors escalate: base, 2x, 4x, 8x, ...
+    expect(reconnectBackoffMs(2000, 1)).toBe(2000)
+    expect(reconnectBackoffMs(2000, 2)).toBe(4000)
+    expect(reconnectBackoffMs(2000, 3)).toBe(8000)
+    // Each step is strictly larger until the cap.
+    const seq = [1, 2, 3, 4, 5].map((n) => reconnectBackoffMs(2000, n))
+    for (let i = 1; i < seq.length; i++) expect(seq[i]).toBeGreaterThan(seq[i - 1])
+    // Capped at 30s and never exceeded, even past the max step count.
+    expect(reconnectBackoffMs(2000, 99)).toBe(30000)
+    expect(reconnectBackoffMs(20000, 5)).toBe(30000)
   })
 })

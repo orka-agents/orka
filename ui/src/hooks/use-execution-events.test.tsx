@@ -125,6 +125,46 @@ describe('use-execution-events hooks', () => {
     expect(result.current.data?.approvals[0].id).toBe('ap-1')
   })
 
+  it('useTaskApprovals stops polling once no approval is pending', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        return HttpResponse.json({
+          namespace: 'default',
+          taskName: params.id,
+          // All terminal — nothing pending, so polling must not continue.
+          approvals: [{ id: 'ap-1', action: 'web_fetch', status: 'approved', createdAt: '2026-06-13T00:00:00Z' }],
+        })
+      }),
+    )
+    const { result } = renderHook(() => useTaskApprovals('tk', true, 50), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const afterFirst = calls
+    // Wait well beyond several poll intervals; with no pending approval the
+    // refetchInterval function returns false, so no further requests fire.
+    await new Promise((r) => setTimeout(r, 250))
+    expect(calls).toBe(afterFirst)
+  })
+
+  it('useTaskApprovals keeps polling while an approval is pending', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        return HttpResponse.json({
+          namespace: 'default',
+          taskName: params.id,
+          approvals: [{ id: 'ap-1', action: 'web_fetch', status: 'pending', createdAt: '2026-06-13T00:00:00Z' }],
+        })
+      }),
+    )
+    const { result } = renderHook(() => useTaskApprovals('tk', true, 50), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    // A pending approval keeps the poll alive, so more requests accrue over time.
+    await waitFor(() => expect(calls).toBeGreaterThan(1), { timeout: 1000 })
+  })
+
   it('useDecideApproval posts the decision body', async () => {
     let capturedBody: unknown = null
     let capturedPath = ''

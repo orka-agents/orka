@@ -59,7 +59,10 @@ export function useTaskTrace(taskId: string, enabled = true) {
   })
 }
 
-export function useTaskApprovals(taskId: string, enabled = true, refetchInterval?: number) {
+// Poll only while at least one approval is still pending. Once every approval is
+// terminal (or there are none), polling stops so a settled panel doesn't refetch
+// forever. Pass pollIntervalMs to enable polling; omit it to never poll.
+export function useTaskApprovals(taskId: string, enabled = true, pollIntervalMs?: number) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['taskApprovals', taskId, namespace],
@@ -68,7 +71,12 @@ export function useTaskApprovals(taskId: string, enabled = true, refetchInterval
         namespace,
       }),
     enabled: enabled && !!taskId,
-    refetchInterval,
+    refetchInterval: (query) => {
+      if (!pollIntervalMs) return false
+      const approvals = query.state.data?.approvals ?? []
+      const hasPending = approvals.some((a) => a.status === 'pending')
+      return hasPending ? pollIntervalMs : false
+    },
   })
 }
 

@@ -39,6 +39,23 @@ export interface UseExecutionEventStreamResult {
 type ConnectDisposition = 'complete' | 'closed' | 'error' | 'aborted' | 'unsupported'
 
 const DEFAULT_RECONNECT_DELAY = 2000
+// Cap exponential backoff so a persistently failing endpoint settles at a slow
+// retry cadence instead of being re-hit every reconnectDelayMs.
+const MAX_RECONNECT_DELAY = 30000
+const MAX_ERROR_BACKOFF_STEPS = 5
+
+// Reconnect delay after `errorCount` consecutive errors: base * 2^(n-1), capped.
+// errorCount 0 (a clean 'closed' cycle) returns the tight base delay.
+export function reconnectBackoffMs(
+  baseDelay: number,
+  errorCount: number,
+  maxDelay = MAX_RECONNECT_DELAY,
+  maxSteps = MAX_ERROR_BACKOFF_STEPS,
+): number {
+  if (errorCount <= 0) return baseDelay
+  const step = Math.min(errorCount, maxSteps)
+  return Math.min(baseDelay * 2 ** (step - 1), maxDelay)
+}
 
 // Live execution-event stream over Server-Sent Events. EventSource cannot send an
 // Authorization header, so this reads the SSE body via fetch + ReadableStream,
@@ -63,6 +80,9 @@ export function useExecutionEventStream(
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Generation guards against stale async loops writing state after a restart.
   const generationRef = useRef(0)
+  // Consecutive error count drives capped exponential backoff so a persistently
+  // failing endpoint isn't re-hit at the tight interval forever.
+  const errorBackoffRef = useRef(0)
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -198,12 +218,19 @@ export function useExecutionEventStream(
         if (disposition === 'aborted') {
           return
         }
+        // 'closed' is the normal end of a long-poll cycle: reconnect promptly and
+        // clear any error backoff. 'error' escalates with capped exponential
+        // backoff so a persistently failing endpoint isn't hammered every 2s.
+        let delay = reconnectDelayMs
         if (disposition === 'error') {
           setStatus('error')
+          errorBackoffRef.current = Math.min(errorBackoffRef.current + 1, MAX_ERROR_BACKOFF_STEPS)
+          delay = reconnectBackoffMs(reconnectDelayMs, errorBackoffRef.current)
+        } else {
+          errorBackoffRef.current = 0
         }
-        // 'closed' or recoverable 'error': reconnect from the latest cursor.
         await new Promise<void>((resolve) => {
-          reconnectTimerRef.current = setTimeout(resolve, reconnectDelayMs)
+          reconnectTimerRef.current = setTimeout(resolve, delay)
         })
       }
     },
@@ -234,6 +261,7 @@ export function useExecutionEventStream(
     teardown()
     seenSeqRef.current = new Set()
     lastSeqRef.current = after
+    errorBackoffRef.current = 0
     setEvents([])
     setLastSeq(after)
     setError(null)
