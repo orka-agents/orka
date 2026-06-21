@@ -104,12 +104,24 @@ export function useDecideApproval(taskId: string) {
   })
 }
 
+// Variables for a fork submission. idempotencyKey, when provided, is sent as the
+// Idempotency-Key header so the backend collapses retries of the same logical
+// fork (blank-name path) onto one task instead of minting a duplicate.
+export interface ForkTaskVariables extends ForkTaskRequest {
+  idempotencyKey?: string
+}
+
 export function useForkTask(taskId: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: (body: ForkTaskRequest) =>
-      api.post<ForkTaskResponse>(executionEventApiPath.taskFork(taskId), body, { namespace }),
+    mutationFn: ({ idempotencyKey, ...body }: ForkTaskVariables) =>
+      api.post<ForkTaskResponse>(
+        executionEventApiPath.taskFork(taskId),
+        body,
+        { namespace },
+        idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['taskEvents', taskId, namespace] })

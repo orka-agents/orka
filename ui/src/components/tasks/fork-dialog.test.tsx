@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useState } from 'react'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse, delay } from 'msw'
 import { render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { server } from '@/test/mocks/server'
@@ -143,5 +143,74 @@ describe('ForkDialog', () => {
     await user.click(screen.getByRole('button', { name: 'reopen' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /tk-fork-xyz/ })).not.toBeInTheDocument()
+  })
+
+  it('sends an Idempotency-Key header and reuses it across retries of one submission', async () => {
+    const keys: string[] = []
+    let attempts = 0
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        attempts += 1
+        // Fail the first attempt so the user retries from the error state.
+        if (attempts === 1) return new HttpResponse('temporary failure', { status: 503 })
+        return HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-1', afterSeq: 2,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 2, events: [], truncated: false },
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ForkDialog taskId="tk" event={makeEvent({ seq: 2 })} open onOpenChange={() => {}} />)
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(screen.getByText(/temporary failure/i)).toBeInTheDocument())
+    // Retry the same submission.
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(screen.getByRole('link', { name: /tk-fork-1/ })).toBeInTheDocument())
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBeTruthy()
+    // The retry must carry the SAME key so the backend collapses the duplicate.
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('ignores an async fork result that resolves after the dialog was closed', async () => {
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, async () => {
+        // Resolve slowly so we can close the dialog mid-flight.
+        await delay(80)
+        return HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-late', afterSeq: 3,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 3, events: [], truncated: false },
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>reopen</button>
+          <ForkDialog taskId="tk" event={makeEvent({ seq: 3 })} open={open} onOpenChange={setOpen} />
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<Harness />)
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    // Close the dialog while the request is still in flight (Escape, a Radix
+    // affordance that isn't disabled during submission).
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    // Give the in-flight request time to resolve against the now-closed dialog.
+    await new Promise((r) => setTimeout(r, 150))
+    // Reopen — the stale success screen must NOT appear; a fresh form shows.
+    await user.click(screen.getByRole('button', { name: 'reopen' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: /tk-fork-late/ })).not.toBeInTheDocument()
   })
 })

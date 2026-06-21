@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import {
   Dialog,
@@ -22,6 +22,12 @@ export interface ForkDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
+// Stable random id for an idempotency key. crypto.randomUUID is available in all
+// supported browsers and the test environment.
+function newIdempotencyKey(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `fork-${Date.now()}-${Math.round(Math.random() * 1e9)}`
+}
+
 export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProps) {
   const fork = useForkTask(taskId)
   const [newTaskName, setNewTaskName] = useState('')
@@ -29,10 +35,20 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
   const [prompt, setPrompt] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [created, setCreated] = useState<ForkTaskResponse | null>(null)
+  // Bumped on every reset so an in-flight submission that resolves after the
+  // dialog was closed (via Escape/overlay/X while pending) does not repopulate
+  // state on the now-closed, mounted component.
+  const submissionRef = useRef(0)
+  // A stable idempotency key per logical submission, reused across retries from
+  // the error state so a network drop after the server created the fork resolves
+  // to the same task instead of minting a duplicate. Regenerated on reset.
+  const idempotencyKeyRef = useRef<string>('')
 
   const afterSeq = event?.seq ?? 0
 
   function reset() {
+    submissionRef.current += 1
+    idempotencyKeyRef.current = ''
     setNewTaskName('')
     setAgentName('')
     setPrompt('')
@@ -44,15 +60,22 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
   async function submit() {
     if (fork.isPending) return
     setError(null)
+    const submission = submissionRef.current
+    // Reuse the key across retries of this submission; mint one on first attempt.
+    if (!idempotencyKeyRef.current) idempotencyKeyRef.current = newIdempotencyKey()
     try {
       const result = await fork.mutateAsync({
         afterSeq,
         newTaskName: newTaskName.trim() || undefined,
         agentRef: agentName.trim() ? { name: agentName.trim() } : undefined,
         prompt: prompt.trim() || undefined,
+        idempotencyKey: idempotencyKeyRef.current,
       })
+      // Ignore the result if the dialog was reset/closed while in flight.
+      if (submission !== submissionRef.current) return
       setCreated(result)
     } catch (err) {
+      if (submission !== submissionRef.current) return
       if (err instanceof ApiError) {
         setError(err.message || `Fork failed (${err.status}).`)
       } else {
