@@ -2607,26 +2607,25 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 	now := metav1.Now()
 	message := ""
 	if validationErr != nil {
-		message = strings.TrimSpace(validationErr.Error())
-	}
-	status := &corev1alpha1.ExecutionWorkspaceStatus{
-		Phase:          corev1alpha1.ExecutionWorkspacePhaseFailed,
-		Reason:         corev1alpha1.ExecutionWorkspaceReasonValidationFailed,
-		Message:        message,
-		LastUpdateTime: &now,
+		message = validationErr.Error()
 	}
 	ws := task.Spec.Execution.Workspace
 	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
+	failure := statusrules.ValidationFailure{
+		Message:    message,
+		ObservedAt: &now,
+	}
 	if supportedWorkspaceProvider(provider) {
-		status.Provider = provider
-		status.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
+		failure.Provider = provider
+		failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
 	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
-		status.ReusePolicy = reusePolicy
+		failure.ReusePolicy = reusePolicy
 	}
 	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
-		status.CleanupPolicy = cleanupPolicy
+		failure.CleanupPolicy = cleanupPolicy
 	}
+	status := statusrules.ValidationFailedStatus(failure)
 
 	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.ExecutionWorkspace = status

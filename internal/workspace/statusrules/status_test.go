@@ -123,3 +123,30 @@ func TestCleanupSucceeded(t *testing.T) {
 		})
 	}
 }
+
+func TestValidationFailedStatus(t *testing.T) {
+	observed := metav1.Now()
+	status := ValidationFailedStatus(ValidationFailure{
+		Provider:      corev1alpha1.WorkspaceProviderSubstrate,
+		TemplateRef:   &corev1alpha1.WorkspaceTemplateReference{Name: "tmpl", Namespace: "default"},
+		ReusePolicy:   corev1alpha1.WorkspaceReusePolicyNone,
+		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicyDelete,
+		Message:       "  " + strings.Repeat("x", 1100),
+		ObservedAt:    &observed,
+	})
+	if status.Provider != corev1alpha1.WorkspaceProviderSubstrate || status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed || status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
+		t.Fatalf("validation failure status core fields = %#v", status)
+	}
+	if status.TemplateRef == nil || status.TemplateRef.Name != "tmpl" || status.TemplateRef.Namespace != "default" {
+		t.Fatalf("validation failure templateRef = %#v", status.TemplateRef)
+	}
+	if status.ReusePolicy != corev1alpha1.WorkspaceReusePolicyNone || status.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {
+		t.Fatalf("validation failure policies = %q/%q", status.ReusePolicy, status.CleanupPolicy)
+	}
+	if status.LastUpdateTime == nil || !status.LastUpdateTime.Equal(&observed) {
+		t.Fatalf("LastUpdateTime = %#v, want observed", status.LastUpdateTime)
+	}
+	if !strings.HasSuffix(status.Message, "...<truncated>") {
+		t.Fatalf("message was not sanitized/truncated: len=%d", len(status.Message))
+	}
+}

@@ -103,6 +103,28 @@ func ValidInboundStatus(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
 	return true
 }
 
+type ValidationFailure struct {
+	Provider      corev1alpha1.WorkspaceProvider
+	TemplateRef   *corev1alpha1.WorkspaceTemplateReference
+	ReusePolicy   corev1alpha1.WorkspaceReusePolicy
+	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy
+	Message       string
+	ObservedAt    *metav1.Time
+}
+
+func ValidationFailedStatus(failure ValidationFailure) *corev1alpha1.ExecutionWorkspaceStatus {
+	return Update{
+		Provider:      failure.Provider,
+		TemplateRef:   failure.TemplateRef,
+		Phase:         corev1alpha1.ExecutionWorkspacePhaseFailed,
+		Reason:        corev1alpha1.ExecutionWorkspaceReasonValidationFailed,
+		ReusePolicy:   failure.ReusePolicy,
+		CleanupPolicy: failure.CleanupPolicy,
+		Message:       failure.Message,
+		ObservedAt:    failure.ObservedAt,
+	}.Status()
+}
+
 func CleanupSucceeded(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
 	if status == nil {
 		return false

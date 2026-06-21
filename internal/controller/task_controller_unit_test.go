@@ -4936,6 +4936,59 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 	assertNoJobsForTask(t, r, task)
 }
 
+func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderDetails(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-unsupported-provider", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProvider("provider-native"),
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	status := updated.Status.ExecutionWorkspace
+	if status == nil {
+		t.Fatal("ExecutionWorkspace status is nil")
+	}
+	if status.Provider != "" || status.TemplateRef != nil {
+		t.Fatalf("unsupported provider status provider=%q template=%#v, want provider-neutral empty details", status.Provider, status.TemplateRef)
+	}
+	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed || status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
+		t.Fatalf("workspace status phase/reason = %q/%q, want Failed/WorkspaceValidationFailed", status.Phase, status.Reason)
+	}
+	if !strings.Contains(status.Message, "unsupported execution workspace provider") {
+		t.Fatalf("workspace status message = %q, want unsupported provider", status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
 func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
