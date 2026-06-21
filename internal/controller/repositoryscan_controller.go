@@ -323,7 +323,7 @@ func (r *RepositoryScanReconciler) hasActiveScanPipelineTask(ctx context.Context
 		if !isScanPipelineStage(taskSecurityStage(&task)) {
 			continue
 		}
-		if isActiveTaskPhase(task.Status.Phase) {
+		if task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase) {
 			return true, nil
 		}
 	}
@@ -490,7 +490,7 @@ func (r *RepositoryScanReconciler) scanRunHasActivePipelineTask(ctx context.Cont
 		if !isScanPipelineStage(taskSecurityStage(task)) {
 			continue
 		}
-		if isActiveTaskPhase(task.Status.Phase) {
+		if task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase) {
 			return true, nil
 		}
 	}

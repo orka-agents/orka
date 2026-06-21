@@ -94,7 +94,7 @@ func TestLatestTerminalScanTaskPrefersNewestCompletedScan(t *testing.T) {
 					labels.LabelSecurityTarget: "kaset",
 				},
 			},
-			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+			Status: corev1alpha1.TaskStatus{},
 		},
 	}
 
