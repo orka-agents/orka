@@ -53,26 +53,31 @@ func HasRequiredInboundFields(status *corev1alpha1.ExecutionWorkspaceStatus) boo
 	return status != nil && status.Provider != "" && status.Phase != "" && status.Reason != ""
 }
 
-func ValidInboundStatus(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
-	if status == nil {
-		return false
-	}
-	switch status.Provider {
+func IsSupportedProvider(provider corev1alpha1.WorkspaceProvider) bool {
+	switch provider {
 	case corev1alpha1.WorkspaceProviderAgentSandbox, corev1alpha1.WorkspaceProviderSubstrate:
+		return true
 	default:
 		return false
 	}
-	switch status.Phase {
+}
+
+func IsValidPhase(phase corev1alpha1.ExecutionWorkspacePhase) bool {
+	switch phase {
 	case corev1alpha1.ExecutionWorkspacePhasePending,
 		corev1alpha1.ExecutionWorkspacePhaseReady,
 		corev1alpha1.ExecutionWorkspacePhaseReleased,
 		corev1alpha1.ExecutionWorkspacePhaseRetained,
 		corev1alpha1.ExecutionWorkspacePhaseDeleted,
 		corev1alpha1.ExecutionWorkspacePhaseFailed:
+		return true
 	default:
 		return false
 	}
-	switch status.Reason {
+}
+
+func IsValidReason(reason corev1alpha1.ExecutionWorkspaceReason) bool {
+	switch reason {
 	case corev1alpha1.ExecutionWorkspaceReasonPending,
 		corev1alpha1.ExecutionWorkspaceReasonClaimed,
 		corev1alpha1.ExecutionWorkspaceReasonReady,
@@ -88,20 +93,70 @@ func ValidInboundStatus(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
 		corev1alpha1.ExecutionWorkspaceReasonSecretScrubFailed,
 		corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
 		corev1alpha1.ExecutionWorkspaceReasonStatusUpdateFailed:
+		return true
 	default:
 		return false
 	}
-	switch status.ReusePolicy {
-	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
+}
+
+func IsConcreteReusePolicy(policy corev1alpha1.WorkspaceReusePolicy) bool {
+	switch policy {
+	case corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
+		return true
 	default:
 		return false
 	}
-	switch status.CleanupPolicy {
-	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+}
+
+func IsOptionalReusePolicy(policy corev1alpha1.WorkspaceReusePolicy) bool {
+	return policy == "" || IsConcreteReusePolicy(policy)
+}
+
+func IsConcreteCleanupPolicy(policy corev1alpha1.WorkspaceCleanupPolicy) bool {
+	switch policy {
+	case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
+		return true
 	default:
 		return false
 	}
-	return true
+}
+
+func IsOptionalCleanupPolicy(policy corev1alpha1.WorkspaceCleanupPolicy) bool {
+	return policy == "" || IsConcreteCleanupPolicy(policy)
+}
+
+func StatusReusePolicy(policy corev1alpha1.WorkspaceReusePolicy) (corev1alpha1.WorkspaceReusePolicy, bool) {
+	if policy == "" {
+		return corev1alpha1.WorkspaceReusePolicyNone, true
+	}
+	if IsConcreteReusePolicy(policy) {
+		return policy, true
+	}
+	return "", false
+}
+
+func StatusCleanupPolicy(policy, defaultPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
+	if policy == "" {
+		if IsConcreteCleanupPolicy(defaultPolicy) {
+			return defaultPolicy, true
+		}
+		return "", false
+	}
+	if IsConcreteCleanupPolicy(policy) {
+		return policy, true
+	}
+	return "", false
+}
+
+func ValidInboundStatus(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
+	if status == nil {
+		return false
+	}
+	return IsSupportedProvider(status.Provider) &&
+		IsValidPhase(status.Phase) &&
+		IsValidReason(status.Reason) &&
+		IsOptionalReusePolicy(status.ReusePolicy) &&
+		IsOptionalCleanupPolicy(status.CleanupPolicy)
 }
 
 type ValidationFailure struct {

@@ -1368,14 +1368,14 @@ func preTerminalExecutionWorkspaceCleanup(
 }
 
 func executionWorkspaceCleanupPolicy(workspaceEnv workerenv.ExecutionWorkspaceEnv) string {
-	policy := strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy))
+	policy := corev1alpha1.WorkspaceCleanupPolicy(strings.TrimSpace(strings.ToLower(workspaceEnv.CleanupPolicy)))
 	if strings.TrimSpace(workspaceEnv.Provider) == string(corev1alpha1.WorkspaceProviderSubstrate) &&
 		strings.TrimSpace(workspaceEnv.PoolName) != "" &&
 		policy != "" &&
-		policy != string(corev1alpha1.WorkspaceCleanupPolicyDelete) {
+		policy != corev1alpha1.WorkspaceCleanupPolicyDelete {
 		return string(corev1alpha1.WorkspaceCleanupPolicyDelete)
 	}
-	return policy
+	return string(policy)
 }
 
 func executionWorkspaceDeferredCleanupSubmitsStatus(workspaceEnv workerenv.ExecutionWorkspaceEnv) bool {

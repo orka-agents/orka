@@ -2577,15 +2577,11 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 }
 
 func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
-	switch ws.ReusePolicy {
-	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
-	default:
+	if !statusrules.IsOptionalReusePolicy(ws.ReusePolicy) {
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
 
-	switch ws.CleanupPolicy {
-	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-	default:
+	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
 		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
 	}
 	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
@@ -2690,12 +2686,7 @@ func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.
 }
 
 func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	switch cleanupPolicy {
-	case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-		return cleanupPolicy, true
-	default:
-		return "", false
-	}
+	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.

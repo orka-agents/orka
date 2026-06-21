@@ -180,3 +180,49 @@ func TestApplyReadyResult(t *testing.T) {
 		t.Fatalf("resume latency = %#v", update.ResumeLatency)
 	}
 }
+
+func TestStatusPolicyHelpers(t *testing.T) {
+	if !IsSupportedProvider(corev1alpha1.WorkspaceProviderSubstrate) || IsSupportedProvider("provider-native") {
+		t.Fatalf("provider support helper returned unexpected result")
+	}
+	for _, policy := range []corev1alpha1.WorkspaceReusePolicy{"", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession} {
+		if !IsOptionalReusePolicy(policy) {
+			t.Fatalf("IsOptionalReusePolicy(%q) = false", policy)
+		}
+	}
+	if IsOptionalReusePolicy("forever") {
+		t.Fatalf("unsupported reuse policy accepted")
+	}
+	for _, policy := range []corev1alpha1.WorkspaceCleanupPolicy{"", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain} {
+		if !IsOptionalCleanupPolicy(policy) {
+			t.Fatalf("IsOptionalCleanupPolicy(%q) = false", policy)
+		}
+	}
+	if IsOptionalCleanupPolicy("archive") {
+		t.Fatalf("unsupported cleanup policy accepted")
+	}
+}
+
+func TestStatusPolicyDefaults(t *testing.T) {
+	if got, ok := StatusReusePolicy(""); !ok || got != corev1alpha1.WorkspaceReusePolicyNone {
+		t.Fatalf("StatusReusePolicy(empty) = %q, %t; want none true", got, ok)
+	}
+	if got, ok := StatusReusePolicy(corev1alpha1.WorkspaceReusePolicySession); !ok || got != corev1alpha1.WorkspaceReusePolicySession {
+		t.Fatalf("StatusReusePolicy(session) = %q, %t; want session true", got, ok)
+	}
+	if _, ok := StatusReusePolicy("forever"); ok {
+		t.Fatalf("StatusReusePolicy accepted unsupported policy")
+	}
+	if got, ok := StatusCleanupPolicy("", corev1alpha1.WorkspaceCleanupPolicyDelete); !ok || got != corev1alpha1.WorkspaceCleanupPolicyDelete {
+		t.Fatalf("StatusCleanupPolicy(empty, delete) = %q, %t; want delete true", got, ok)
+	}
+	if got, ok := StatusCleanupPolicy(corev1alpha1.WorkspaceCleanupPolicyRetain, corev1alpha1.WorkspaceCleanupPolicyDelete); !ok || got != corev1alpha1.WorkspaceCleanupPolicyRetain {
+		t.Fatalf("StatusCleanupPolicy(retain, delete) = %q, %t; want retain true", got, ok)
+	}
+	if _, ok := StatusCleanupPolicy("", "archive"); ok {
+		t.Fatalf("StatusCleanupPolicy accepted unsupported default")
+	}
+	if _, ok := StatusCleanupPolicy("archive", corev1alpha1.WorkspaceCleanupPolicyDelete); ok {
+		t.Fatalf("StatusCleanupPolicy accepted unsupported explicit policy")
+	}
+}
