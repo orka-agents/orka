@@ -11,6 +11,13 @@ import type {
   ForkTaskResponse,
 } from '@/schemas/execution-event'
 
+// Request the server's maximum page size for the initial load. The list endpoint
+// defaults to a small page (100); without this, completed tasks with more events
+// would permanently show only the first page, and live tasks would rely entirely
+// on the stream to backfill. MaxExecutionEventLimit (1000) covers realistic tasks
+// in one page; the live stream still fills anything beyond it.
+const INITIAL_EVENT_PAGE_LIMIT = '1000'
+
 // List the initial (replay) page of a task's execution events. Live updates are
 // layered on top by the streaming hook; this query provides the static history
 // and a refetchable fallback when streaming is unavailable.
@@ -22,6 +29,7 @@ export function useTaskEvents(taskId: string, enabled = true) {
       api.get<ListExecutionEventsResponse>(executionEventApiPath.taskEvents(taskId), {
         namespace,
         after: '0',
+        limit: INITIAL_EVENT_PAGE_LIMIT,
       }),
     enabled: enabled && !!taskId,
   })
@@ -35,6 +43,7 @@ export function useSessionEvents(sessionId: string, enabled = true) {
       api.get<ListExecutionEventsResponse>(executionEventApiPath.sessionEvents(sessionId), {
         namespace,
         after: '0',
+        limit: INITIAL_EVENT_PAGE_LIMIT,
       }),
     enabled: enabled && !!sessionId,
   })

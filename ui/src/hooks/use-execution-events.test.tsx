@@ -57,6 +57,9 @@ describe('use-execution-events hooks', () => {
     expect(url.pathname).toBe('/api/v1/tasks/tk/events')
     expect(url.searchParams.get('after')).toBe('0')
     expect(url.searchParams.get('namespace')).toBe('default')
+    // Requests the server's max page size so completed tasks with many events
+    // aren't truncated to the small default page.
+    expect(url.searchParams.get('limit')).toBe('1000')
     expect(result.current.data?.latestSeq).toBe(2)
     expect(result.current.data?.events).toHaveLength(1)
   })

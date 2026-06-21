@@ -22,7 +22,11 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
     () => initial.data?.events ?? [],
     [initial.data],
   )
-  const seedSeq = Math.max(maxSeq(initialEvents), initial.data?.latestSeq ?? 0)
+  // Seed from the highest loaded session seq, not latestSeq: the session events
+  // endpoint returns a bounded first page, so seeding from latestSeq would skip
+  // every event between the loaded tail and latestSeq. Replaying from the loaded
+  // tail fills the gap without dropping events.
+  const seedSeq = maxSeq(initialEvents)
 
   const stream = useExecutionEventStream({
     url: executionEventApi.sessionStream(sessionId),
@@ -34,7 +38,8 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
     () => mergeEventsBySeq(initialEvents, stream.events),
     [initialEvents, stream.events],
   )
-  const lastSeq = Math.max(seedSeq, stream.lastSeq, maxSeq(events))
+  // Show the true latest session sequence for the resume helper.
+  const lastSeq = Math.max(initial.data?.latestSeq ?? 0, stream.lastSeq, maxSeq(events))
 
   const notImplemented =
     initial.error instanceof ApiError && initial.error.status === 501

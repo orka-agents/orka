@@ -185,4 +185,35 @@ describe('useExecutionEventStream', () => {
     renderHook(() => useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: false }))
     expect(fetchSpy).not.toHaveBeenCalled()
   })
+
+  it('resets accumulated events and cursor when the stream target changes', async () => {
+    const first = makeStreamResponse()
+    const second = makeStreamResponse()
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(first.response)
+      .mockResolvedValueOnce(second.response)
+
+    // The hook stays mounted; only the url prop changes, mirroring navigating
+    // from one task/session to another without unmounting.
+    const { result, rerender } = renderHook(
+      ({ url }) => useExecutionEventStream({ url, enabled: true }),
+      { initialProps: { url: '/api/v1/tasks/task-a/stream' } },
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+    first.push(eventFrame(7))
+    await waitFor(() => expect(result.current.events).toHaveLength(1))
+    expect(result.current.lastSeq).toBe(7)
+
+    // Switch target without unmounting.
+    rerender({ url: '/api/v1/tasks/task-b/stream' })
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2))
+    // Stale events and the old cursor must be cleared, and the new connection
+    // starts from after=0, not the previous stream's seq 7.
+    expect(result.current.events).toHaveLength(0)
+    expect(result.current.lastSeq).toBe(0)
+    const secondUrl = fetchSpy.mock.calls[1][0] as string
+    expect(secondUrl).toContain('/api/v1/tasks/task-b/stream')
+    expect(secondUrl).toContain('after=0')
+  })
 })

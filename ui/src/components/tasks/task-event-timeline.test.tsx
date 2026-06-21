@@ -13,20 +13,25 @@ vi.mock('@tanstack/react-router', async () => {
   return { ...actual, Link: ({ children, ...props }: any) => <a {...props}>{children}</a> }
 })
 
-// Control the stream hook output so the container test is deterministic.
+// Control the stream hook output so the container test is deterministic, and
+// capture the options it was called with so we can assert the seed cursor.
 const streamState: { current: Partial<UseExecutionEventStreamResult> } = { current: {} }
+const streamCalls: { url: string; after?: number; enabled: boolean }[] = []
 vi.mock('@/hooks/use-execution-event-stream', () => ({
-  useExecutionEventStream: () => ({
-    events: [],
-    lastSeq: 0,
-    status: 'idle',
-    error: null,
-    streamComplete: null,
-    isFollowing: false,
-    stop: vi.fn(),
-    restart: vi.fn(),
-    ...streamState.current,
-  }),
+  useExecutionEventStream: (opts: { url: string; after?: number; enabled: boolean }) => {
+    streamCalls.push({ url: opts.url, after: opts.after, enabled: opts.enabled })
+    return {
+      events: [],
+      lastSeq: 0,
+      status: 'idle',
+      error: null,
+      streamComplete: null,
+      isFollowing: false,
+      stop: vi.fn(),
+      restart: vi.fn(),
+      ...streamState.current,
+    }
+  },
 }))
 
 import { TaskEventTimeline } from './task-event-timeline'
@@ -37,6 +42,7 @@ describe('TaskEventTimeline', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default' })
     streamState.current = {}
+    streamCalls.length = 0
   })
 
   it('loads and renders initial events from the API', async () => {
@@ -143,5 +149,24 @@ describe('TaskEventTimeline', () => {
       expect(screen.getByText(/execution event storage is not enabled/i)).toBeInTheDocument(),
     )
     expect(screen.queryByRole('button', { name: /fork from here/i })).not.toBeInTheDocument()
+  })
+
+  it('seeds the live stream from the highest loaded seq, not latestSeq, on a partial page', async () => {
+    // Loaded page tops out at seq 100 while the server reports latestSeq 500.
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 500,
+          events: [makeEvent({ seq: 99, type: 'TaskStarted' }), makeEvent({ seq: 100, type: 'ModelMessage' })],
+        }),
+      ),
+    )
+    render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
+    // After the page loads (events up to seq 100), the stream must be seeded with
+    // the loaded tail (100) so it replays 101..500, rather than latestSeq (500)
+    // which would skip every event in the gap. Before the query resolves the seed
+    // is 0 (empty page), so wait for the post-load seed.
+    await waitFor(() => expect(streamCalls.some((c) => c.enabled && c.after === 100)).toBe(true))
+    expect(streamCalls.some((c) => c.enabled && c.after === 500)).toBe(false)
   })
 })

@@ -29,9 +29,11 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
     () => initial.data?.events ?? [],
     [initial.data],
   )
-  // Seed the stream cursor with the highest seq already loaded so we replay only
-  // the tail. The query reports latestSeq even when its page is empty.
-  const seedSeq = Math.max(maxSeq(initialEvents), initial.data?.latestSeq ?? 0)
+  // Seed the stream cursor with the highest seq actually loaded, NOT latestSeq:
+  // the list endpoint returns a bounded first page, so latestSeq can be far ahead
+  // of what we hold. Seeding from the loaded tail lets the stream replay every
+  // event after it (filling the gap up to latestSeq and beyond) without skipping.
+  const seedSeq = maxSeq(initialEvents)
 
   const stream = useExecutionEventStream({
     url: executionEventApi.taskStream(taskId),
@@ -43,7 +45,10 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
     () => mergeEventsBySeq(initialEvents, stream.events),
     [initialEvents, stream.events],
   )
-  const lastSeq = Math.max(seedSeq, stream.lastSeq, maxSeq(events))
+  // Display the true latest sequence the server reported, even if our loaded
+  // page or live tail hasn't reached it yet, so the resume-from-seq helper is
+  // accurate.
+  const lastSeq = Math.max(initial.data?.latestSeq ?? 0, stream.lastSeq, maxSeq(events))
 
   const notImplemented =
     initial.error instanceof ApiError && initial.error.status === 501

@@ -223,7 +223,11 @@ export function useExecutionEventStream(
     setStatus((prev) => (prev === 'complete' || prev === 'unsupported' ? prev : 'idle'))
   }, [teardown])
 
-  const restart = useCallback(() => {
+  // Reset all accumulated stream state and start a fresh connection. Used both
+  // by the public restart() and by the mount/target-change effect, so switching
+  // tasks/sessions or namespaces never carries the previous stream's events,
+  // dedupe set, cursor, or terminal marker into the new connection.
+  const startFresh = useCallback(() => {
     stoppedRef.current = false
     generationRef.current += 1
     const generation = generationRef.current
@@ -237,6 +241,8 @@ export function useExecutionEventStream(
     void runLoop(generation)
   }, [after, runLoop, teardown])
 
+  const restart = startFresh
+
   useEffect(() => {
     if (!enabled) {
       stoppedRef.current = true
@@ -245,10 +251,9 @@ export function useExecutionEventStream(
       setStatus('idle')
       return
     }
-    stoppedRef.current = false
-    generationRef.current += 1
-    const generation = generationRef.current
-    void runLoop(generation)
+    // A change to url/namespace/after means a new stream target; reset state so
+    // stale events and an outdated cursor don't bleed across the switch.
+    startFresh()
     return () => {
       generationRef.current += 1
       teardown()
