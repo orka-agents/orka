@@ -162,7 +162,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 					metrics.RecordExecutionEventStreamError("task", "write")
 					return false
 				}
-				if pendingTerminal == nil && isTerminalExecutionEventType(event.Type) {
+				if pendingTerminal == nil && events.IsTerminalTaskEventType(event.Type) {
 					terminalCopy := event
 					pendingTerminal = &terminalCopy
 				}
@@ -562,7 +562,7 @@ func terminalExecutionEventThroughCursor(
 			StreamType: events.ExecutionEventStreamTypeTask,
 			StreamID:   taskName,
 			AfterSeq:   after,
-			EventTypes: terminalExecutionEventTypes(),
+			EventTypes: events.TerminalTaskEventTypes(),
 			Limit:      store.MaxExecutionEventLimit,
 		})
 		if err != nil {
@@ -578,21 +578,13 @@ func terminalExecutionEventThroughCursor(
 			if event.Seq > after {
 				after = event.Seq
 			}
-			if isTerminalExecutionEventType(event.Type) {
+			if events.IsTerminalTaskEventType(event.Type) {
 				return event, true, nil
 			}
 		}
 		if len(batch) < store.MaxExecutionEventLimit {
 			return store.ExecutionEvent{}, false, nil
 		}
-	}
-}
-
-func terminalExecutionEventTypes() []string {
-	return []string{
-		events.ExecutionEventTypeTaskSucceeded,
-		events.ExecutionEventTypeTaskFailed,
-		events.ExecutionEventTypeTaskCancelled,
 	}
 }
 
@@ -631,7 +623,7 @@ func terminalExecutionEventForCompletion(
 				after = event.Seq
 			}
 			scannedThrough = max(scannedThrough, event.Seq)
-			if isTerminalExecutionEventType(event.Type) {
+			if events.IsTerminalTaskEventType(event.Type) {
 				return event, true, scannedThrough, nil
 			}
 		}
@@ -685,13 +677,4 @@ func writeExecutionEventStreamCompleteFrame(w *bufio.Writer, lastSeq int64, even
 		return false
 	}
 	return true
-}
-
-func isTerminalExecutionEventType(eventType string) bool {
-	switch eventType {
-	case events.ExecutionEventTypeTaskSucceeded, events.ExecutionEventTypeTaskFailed, events.ExecutionEventTypeTaskCancelled:
-		return true
-	default:
-		return false
-	}
 }
