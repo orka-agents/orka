@@ -116,6 +116,31 @@ describe('TaskApprovalPanel', () => {
     )
   })
 
+  it('refetches approvals after a 409 so the card reflects the settled state', async () => {
+    let decided = false
+    let getCalls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => {
+        getCalls += 1
+        // After the 409, the refetch returns the settled (declined) approval.
+        return HttpResponse.json(listResponse([approval({ status: decided ? 'declined' : 'pending' })]))
+      }),
+      http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, () => {
+        decided = true
+        return new HttpResponse('approval is already declined', { status: 409 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskApprovalPanel taskId="tk" />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument())
+    const callsBefore = getCalls
+    await user.click(screen.getByRole('button', { name: 'Approve' }))
+    // The 409 triggers a refetch (not waiting for the 5s poll), and the card
+    // updates to the settled state — no more action buttons.
+    await waitFor(() => expect(getCalls).toBeGreaterThan(callsBefore))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument())
+  })
+
   it('disables the action buttons while a decision is in flight', async () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))),

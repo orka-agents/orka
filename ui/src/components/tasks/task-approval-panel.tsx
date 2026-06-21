@@ -51,9 +51,12 @@ function formatTimestamp(ts?: string): string {
 function ApprovalCard({
   approval,
   taskId,
+  onConflict,
 }: {
   approval: Approval
   taskId: string
+  // Called when a decision returns 409 so the panel can refetch settled state.
+  onConflict?: () => void
 }) {
   const decide = useDecideApproval(taskId)
   const [reason, setReason] = useState('')
@@ -74,9 +77,12 @@ function ApprovalCard({
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         // The approval changed underneath us (decided elsewhere, expired, or
-        // cancelled). Surface it; the invalidated query will refresh state.
+        // cancelled). Surface it and refetch so the card reflects the settled
+        // server state instead of waiting for the next poll — useDecideApproval
+        // only invalidates on success, so we trigger the refresh here.
         setConflict(err.message || 'This approval was already decided.')
         toast.error('Approval already decided')
+        onConflict?.()
       } else {
         const message = err instanceof Error ? err.message : 'Unknown error'
         setConflict(message)
@@ -238,7 +244,7 @@ export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskP
         )}
       </div>
       {approvals.map((approval) => (
-        <ApprovalCard key={approval.id} approval={approval} taskId={taskId} />
+        <ApprovalCard key={approval.id} approval={approval} taskId={taskId} onConflict={() => refetch()} />
       ))}
     </div>
   )

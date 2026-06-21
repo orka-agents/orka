@@ -231,4 +231,23 @@ describe('TaskEventTimeline', () => {
       expect(last.enabled).toBe(false)
     })
   })
+
+  it('auto-starts following when a task mounted before its phase was known becomes running', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 1,
+          events: [makeEvent({ seq: 1, type: 'TaskCreated' })],
+        }),
+      ),
+    )
+    // Mounted before status.phase is known (undefined) — following is off, no gap.
+    const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
+    await waitFor(() => expect(screen.getByText('TaskCreated')).toBeInTheDocument())
+    expect(streamCalls.every((c) => !c.enabled)).toBe(true)
+    // The task polls into a running phase; follow auto-starts so live events
+    // aren't missed, even though the user never clicked Follow.
+    view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
+    await waitFor(() => expect(streamCalls.some((c) => c.enabled)).toBe(true))
+  })
 })

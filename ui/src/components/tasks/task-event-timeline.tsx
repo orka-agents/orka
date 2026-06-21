@@ -20,10 +20,18 @@ export interface TaskEventTimelineProps {
 
 export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps) {
   const initial = useTaskEvents(taskId)
-  // Default to following for in-flight tasks; user can toggle.
-  const [following, setFollowing] = useState(() => isRunning(taskPhase))
+  // Explicit user choice for following, or null for "auto". When auto, we follow
+  // whenever the task is in a running phase — so a task that polls into Running
+  // after mount (e.g. just after creation, before status.phase was populated)
+  // starts following without the user clicking, while an explicit pause/start is
+  // still respected. Deriving this (rather than syncing via an effect) keeps it
+  // lint-clean and avoids a stale initial value.
+  const [followOverride, setFollowOverride] = useState<boolean | null>(null)
+  const following = followOverride ?? isRunning(taskPhase)
   // Fork-from-checkpoint dialog state, launched from an event row.
   const [forkEvent, setForkEvent] = useState<ExecutionEvent | null>(null)
+
+  const toggleFollow = () => setFollowOverride(!following)
 
   const initialEvents = useMemo<ExecutionEvent[]>(
     () => initial.data?.events ?? [],
@@ -100,7 +108,7 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
           error={loadError}
           onRetry={() => initial.refetch()}
           following={following}
-          onToggleFollow={() => setFollowing((v) => !v)}
+          onToggleFollow={toggleFollow}
           onFork={forkAvailable ? (event) => setForkEvent(event) : undefined}
           emptyMessage="No execution events recorded for this task yet."
         />
