@@ -3,9 +3,9 @@ entries:
   orka:
   - apiVersion: v2
     appVersion: 0.1.0
-    created: "2026-06-09T20:53:29.456025878Z"
+    created: "2026-06-21T05:04:10.904800199Z"
     description: Kubernetes-native task execution platform with AI agent support
-    digest: bcbfff1bd7861424abc70120b8a086ec0aec95bbeed2ac4a681f31d2e88dcf19
+    digest: 92fb9aaeab21fdc7ea856e2ab5b717a7751082042e940c934ba6b8d2fa18137e
     home: https://github.com/sozercan/orka
     keywords:
     - kubernetes
@@ -23,4 +23,4 @@ entries:
     urls:
     - https://sozercan.github.io/orka/charts/orka-0.1.0.tgz
     version: 0.1.0
-generated: "2026-06-09T20:53:29.455187459Z"
+generated: "2026-06-21T05:04:10.90353307Z"
