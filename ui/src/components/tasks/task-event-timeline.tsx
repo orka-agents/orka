@@ -38,7 +38,8 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
 
   // Track how far the live stream has replayed, so the backfill gap can close once
   // it catches up. Updated in an effect (not during render) to satisfy the
-  // refs-during-render rule.
+  // refs-during-render rule. The component is keyed by taskId at its mount site,
+  // so this resets naturally when the task target changes.
   const [streamedThrough, setStreamedThrough] = useState(0)
 
   // The list endpoint caps at 1000 events. When the server reports a higher

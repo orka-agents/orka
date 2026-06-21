@@ -55,21 +55,33 @@ export interface TaskTraceViewProps {
 // Approvals and fork provenance are not separate API arrays — they live in the
 // timeline keyed by category — so we surface them by filtering the timeline.
 export function TaskTraceView({ trace }: TaskTraceViewProps) {
-  const approvalEvents = trace.timeline.filter((e) => executionEventCategory(e.type) === 'approvals')
-  const forkEvents = trace.timeline.filter((e) => executionEventCategory(e.type) === 'fork')
+  // The Go backend marshals empty trace groups as JSON null (nil slices), so
+  // default every array before using array methods — otherwise a task with no
+  // events would crash the Trace tab instead of showing the empty state.
+  const timeline = trace.timeline ?? []
+  const modelRequests = trace.modelRequests ?? []
+  const toolCalls = trace.toolCalls ?? []
+  const childTasks = trace.childTasks ?? []
+  const workspace = trace.workspace ?? []
+  const artifacts = trace.artifacts ?? []
+  const errors = trace.errors ?? []
+  const warnings = trace.warnings ?? []
+
+  const approvalEvents = timeline.filter((e) => executionEventCategory(e.type) === 'approvals')
+  const forkEvents = timeline.filter((e) => executionEventCategory(e.type) === 'fork')
 
   // A trace with no derived groups and no timeline falls back to a clear empty
   // state; a trace with a timeline but no structured groups still shows the raw
   // timeline so nothing is hidden. Errors and warnings render their own visible
   // sections, so an error- or warning-only trace also counts as structured.
   const hasStructured =
-    trace.modelRequests.length > 0 ||
-    trace.toolCalls.length > 0 ||
-    trace.childTasks.length > 0 ||
-    trace.workspace.length > 0 ||
-    trace.artifacts.length > 0 ||
-    trace.errors.length > 0 ||
-    trace.warnings.length > 0 ||
+    modelRequests.length > 0 ||
+    toolCalls.length > 0 ||
+    childTasks.length > 0 ||
+    workspace.length > 0 ||
+    artifacts.length > 0 ||
+    errors.length > 0 ||
+    warnings.length > 0 ||
     approvalEvents.length > 0 ||
     forkEvents.length > 0
 
@@ -102,10 +114,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       </Section>
 
       {/* Errors — surfaced prominently above the structured detail. */}
-      {trace.errors.length > 0 && (
-        <Section icon={CircleAlert} title="Errors" count={trace.errors.length}>
+      {errors.length > 0 && (
+        <Section icon={CircleAlert} title="Errors" count={errors.length}>
           <ul className="space-y-1.5">
-            {trace.errors.map((issue, i) => (
+            {errors.map((issue, i) => (
               <li
                 key={`err-${i}`}
                 className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed-bg px-3 py-2 text-sm"
@@ -125,10 +137,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       )}
 
       {/* Model requests */}
-      {trace.modelRequests.length > 0 && (
-        <Section icon={Cpu} title="Model requests" count={trace.modelRequests.length}>
+      {modelRequests.length > 0 && (
+        <Section icon={Cpu} title="Model requests" count={modelRequests.length}>
           <ul className="space-y-1.5">
-            {trace.modelRequests.map((m) => (
+            {modelRequests.map((m) => (
               <li key={m.id} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
                 <TraceStatusPill status={m.status} />
                 {m.summary && <span className="min-w-0 break-words">{m.summary}</span>}
@@ -143,10 +155,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       )}
 
       {/* Tool calls */}
-      {trace.toolCalls.length > 0 && (
-        <Section icon={Wrench} title="Tool calls" count={trace.toolCalls.length}>
+      {toolCalls.length > 0 && (
+        <Section icon={Wrench} title="Tool calls" count={toolCalls.length}>
           <ul className="space-y-1.5">
-            {trace.toolCalls.map((t) => (
+            {toolCalls.map((t) => (
               <li key={t.id} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
                 <TraceStatusPill status={t.status} />
                 {t.name && <Badge variant="outline" className="text-[10px]">{t.name}</Badge>}
@@ -162,10 +174,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       )}
 
       {/* Child tasks — linkable to their detail pages. */}
-      {trace.childTasks.length > 0 && (
-        <Section icon={ListTree} title="Child tasks" count={trace.childTasks.length}>
+      {childTasks.length > 0 && (
+        <Section icon={ListTree} title="Child tasks" count={childTasks.length}>
           <ul className="space-y-1.5">
-            {trace.childTasks.map((c) => (
+            {childTasks.map((c) => (
               <li key={c.name} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
                 {c.status && <TraceStatusPill status={c.status} />}
                 <Link
@@ -184,10 +196,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       )}
 
       {/* Workspace */}
-      {trace.workspace.length > 0 && (
-        <Section icon={FolderGit2} title="Workspace" count={trace.workspace.length}>
+      {workspace.length > 0 && (
+        <Section icon={FolderGit2} title="Workspace" count={workspace.length}>
           <ul className="space-y-1.5">
-            {trace.workspace.map((w, i) => (
+            {workspace.map((w, i) => (
               <li key={`ws-${i}`} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
                 <TraceStatusPill status={w.status} />
                 {w.summary && <span className="min-w-0 break-words text-muted-foreground">{w.summary}</span>}
@@ -199,10 +211,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       )}
 
       {/* Artifacts */}
-      {trace.artifacts.length > 0 && (
-        <Section icon={Package} title="Artifacts" count={trace.artifacts.length}>
+      {artifacts.length > 0 && (
+        <Section icon={Package} title="Artifacts" count={artifacts.length}>
           <ul className="space-y-1.5">
-            {trace.artifacts.map((a, i) => (
+            {artifacts.map((a, i) => (
               <li key={`art-${i}`} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
                 <TraceStatusPill status={a.status} />
                 {a.name && <span className="font-mono text-xs">{a.name}</span>}
@@ -241,10 +253,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
       )}
 
       {/* Warnings */}
-      {trace.warnings.length > 0 && (
-        <Section icon={TriangleAlert} title="Warnings" count={trace.warnings.length}>
+      {warnings.length > 0 && (
+        <Section icon={TriangleAlert} title="Warnings" count={warnings.length}>
           <ul className="space-y-1.5">
-            {trace.warnings.map((issue, i) => (
+            {warnings.map((issue, i) => (
               <li key={`warn-${i}`} className="flex items-start gap-2 rounded-md border border-status-pending/40 bg-status-pending-bg px-3 py-2 text-sm">
                 <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-status-pending" aria-hidden="true" />
                 <span className="min-w-0 break-words">{issue.message}</span>
@@ -256,10 +268,10 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
 
       {/* Raw timeline fallback — shown when the trace has no structured groups
           but events exist, so nothing is hidden. */}
-      {!hasStructured && trace.timeline.length > 0 && (
-        <Section icon={Activity} title="Raw timeline" count={trace.timeline.length}>
+      {!hasStructured && timeline.length > 0 && (
+        <Section icon={Activity} title="Raw timeline" count={timeline.length}>
           <ul className="space-y-2">
-            {trace.timeline.map((e) => (
+            {timeline.map((e) => (
               <li key={`tl-${e.seq}`}>
                 <EventRow event={timelineToEvent(e, trace.task.namespace, trace.task.name)} />
               </li>
@@ -268,7 +280,7 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {!hasStructured && trace.timeline.length === 0 && (
+      {!hasStructured && timeline.length === 0 && (
         <p className="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
           No execution events recorded for this task yet.
         </p>

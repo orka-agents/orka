@@ -194,7 +194,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="timeline">
-          <TaskEventTimeline taskId={taskId} taskPhase={task.status?.phase} />
+          <TaskEventTimeline key={taskId} taskId={taskId} taskPhase={task.status?.phase} />
         </TabsContent>
 
         <TabsContent value="trace">

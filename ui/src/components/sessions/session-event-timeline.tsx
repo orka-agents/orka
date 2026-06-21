@@ -30,7 +30,8 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
   const latestSeq = initial.data?.latestSeq ?? 0
 
   // Track how far the live stream has replayed so the backfill gap can close once
-  // it catches up. Updated in an effect (not during render).
+  // it catches up. Updated in an effect (not during render). The component is
+  // keyed by sessionId at its mount site, so this resets on session change.
   const [streamedThrough, setStreamedThrough] = useState(0)
 
   // Backfill the tail when the server reports more events than we currently hold

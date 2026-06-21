@@ -157,4 +157,26 @@ describe('TaskTraceView', () => {
     expect(screen.getByText('tool call never completed')).toBeInTheDocument()
     expect(screen.queryByText(/no execution events recorded/i)).not.toBeInTheDocument()
   })
+
+  it('renders the empty state without crashing when the backend sends null arrays', () => {
+    // The Go backend marshals empty trace groups as JSON null (nil slices). The
+    // client casts the response without parsing, so the component must tolerate
+    // null arrays rather than throwing on .filter/.length.
+    const nullTrace = {
+      task: { namespace: 'default', name: 'tk', phase: 'Succeeded', resultAvailable: false },
+      latestSeq: 0,
+      generatedAt: '2026-06-13T00:00:00.000Z',
+      timeline: null,
+      modelRequests: null,
+      toolCalls: null,
+      childTasks: null,
+      workspace: null,
+      artifacts: null,
+      errors: null,
+      warnings: null,
+    } as unknown as import('@/schemas/execution-event').TaskTrace
+    render(<TaskTraceView trace={nullTrace} />)
+    expect(screen.getByTestId('task-trace')).toBeInTheDocument()
+    expect(screen.getByText(/no execution events recorded/i)).toBeInTheDocument()
+  })
 })
