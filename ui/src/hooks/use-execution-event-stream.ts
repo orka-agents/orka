@@ -132,6 +132,16 @@ export function useExecutionEventStream(
       }
 
       if (!response.ok) {
+        // 401 => expired/invalid bearer token. Match the shared API client:
+        // clear the token so the app routes the user back through auth, and stop
+        // retrying instead of reconnecting forever with the same bad header.
+        if (response.status === 401) {
+          useAuthStore.getState().clearToken()
+          if (generation === generationRef.current) {
+            setError('unauthorized: please sign in again')
+          }
+          return 'unsupported'
+        }
         // 501 => execution event storage not enabled. Treat as unsupported and do
         // not reconnect; the caller surfaces a clear unavailable message.
         if (response.status === 501) {

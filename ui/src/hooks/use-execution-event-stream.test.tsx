@@ -148,6 +148,28 @@ describe('useExecutionEventStream', () => {
     await waitFor(() => expect(result.current.status).toBe('unsupported'))
   })
 
+  it('clears the auth token and stops retrying on a 401', async () => {
+    const clearToken = vi.fn()
+    vi.spyOn(useAuthStore, 'getState').mockReturnValue({
+      token: 'expired',
+      setToken: vi.fn(),
+      clearToken,
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('unauthorized', { status: 401 }),
+    )
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true, reconnectDelayMs: 20 }),
+    )
+    // 401 => clear token (like the API client) and go to a terminal unsupported
+    // state instead of reconnecting forever with the dead token.
+    await waitFor(() => expect(result.current.status).toBe('unsupported'))
+    expect(clearToken).toHaveBeenCalled()
+    const callsAfter = fetchSpy.mock.calls.length
+    await new Promise((r) => setTimeout(r, 80))
+    expect(fetchSpy.mock.calls.length).toBe(callsAfter) // no further reconnect attempts
+  })
+
   it('reconnects from the latest seq after an unexpected close', async () => {
     const first = makeStreamResponse()
     const second = makeStreamResponse()

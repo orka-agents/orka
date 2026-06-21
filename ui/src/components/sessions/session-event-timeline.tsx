@@ -28,9 +28,15 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
   // tail fills the gap without dropping events.
   const seedSeq = maxSeq(initialEvents)
 
+  // Backfill the tail when the server reports more events than the capped page we
+  // loaded, even if the user paused following, so a session with >1000 events
+  // isn't stuck on its first page.
+  const hasBackfillGap = (initial.data?.latestSeq ?? 0) > seedSeq
+  const streamEnabled = (following || hasBackfillGap) && !!sessionId
+
   const stream = useExecutionEventStream({
     url: executionEventApi.sessionStream(sessionId),
-    enabled: following && !!sessionId,
+    enabled: streamEnabled,
     after: seedSeq,
   })
 
@@ -66,7 +72,7 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
         <EventTimeline
           title="Session timeline"
           events={events}
-          streamStatus={following ? stream.status : 'idle'}
+          streamStatus={streamEnabled ? stream.status : 'idle'}
           lastSeq={lastSeq}
           isLoading={initial.isLoading}
           error={loadError}

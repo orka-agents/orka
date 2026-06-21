@@ -169,4 +169,38 @@ describe('TaskEventTimeline', () => {
     await waitFor(() => expect(streamCalls.some((c) => c.enabled && c.after === 100)).toBe(true))
     expect(streamCalls.some((c) => c.enabled && c.after === 500)).toBe(false)
   })
+
+  it('backfills a completed task with more events than the loaded page, even when not following', async () => {
+    // Completed task (follow defaults off), loaded page tops at 100 but the server
+    // reports latestSeq 1500 — there's a tail to backfill.
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 1500,
+          events: [makeEvent({ seq: 100, type: 'ModelMessage', summary: 'loaded tail' })],
+        }),
+      ),
+    )
+    render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(screen.getByText('loaded tail')).toBeInTheDocument())
+    // The stream is enabled (to backfill 101..1500) even though following is off,
+    // seeded from the loaded tail.
+    await waitFor(() => expect(streamCalls.some((c) => c.enabled && c.after === 100)).toBe(true))
+  })
+
+  it('does not open the stream for a completed task with no backfill gap', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 2,
+          events: [makeEvent({ seq: 1, type: 'TaskStarted' }), makeEvent({ seq: 2, type: 'TaskSucceeded', summary: 'all loaded' })],
+        }),
+      ),
+    )
+    render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(screen.getByText('all loaded')).toBeInTheDocument())
+    // Everything is loaded (latestSeq == maxSeq) and we're not following, so the
+    // stream stays closed.
+    expect(streamCalls.every((c) => !c.enabled)).toBe(true)
+  })
 })

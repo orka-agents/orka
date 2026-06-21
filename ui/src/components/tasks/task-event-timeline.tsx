@@ -35,9 +35,17 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // event after it (filling the gap up to latestSeq and beyond) without skipping.
   const seedSeq = maxSeq(initialEvents)
 
+  // The list endpoint caps at 1000 events. When the server reports a higher
+  // latestSeq than the page we loaded, there's a tail to backfill — open the
+  // stream even if the user isn't actively following, so a completed task with
+  // >1000 events isn't stuck showing only its first page. The stream replays
+  // from seedSeq and stream_completes for a terminal task, then stops.
+  const hasBackfillGap = (initial.data?.latestSeq ?? 0) > seedSeq
+  const streamEnabled = (following || hasBackfillGap) && !!taskId
+
   const stream = useExecutionEventStream({
     url: executionEventApi.taskStream(taskId),
-    enabled: following && !!taskId,
+    enabled: streamEnabled,
     after: seedSeq,
   })
 
@@ -70,7 +78,7 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
         <EventTimeline
           title="Execution timeline"
           events={events}
-          streamStatus={following ? stream.status : 'idle'}
+          streamStatus={streamEnabled ? stream.status : 'idle'}
           lastSeq={lastSeq}
           isLoading={initial.isLoading}
           error={loadError}
