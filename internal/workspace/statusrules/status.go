@@ -103,6 +103,22 @@ func ValidInboundStatus(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
 	return true
 }
 
+func CleanupSucceeded(status *corev1alpha1.ExecutionWorkspaceStatus) bool {
+	if status == nil {
+		return false
+	}
+	switch status.Reason {
+	case corev1alpha1.ExecutionWorkspaceReasonRetained:
+		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseRetained
+	case corev1alpha1.ExecutionWorkspaceReasonDeleted:
+		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseDeleted
+	case corev1alpha1.ExecutionWorkspaceReasonReleased:
+		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseReleased
+	default:
+		return false
+	}
+}
+
 func PreserveReadyTelemetry(status *corev1alpha1.ExecutionWorkspaceStatus, previous *corev1alpha1.ExecutionWorkspaceStatus) {
 	if status == nil || previous == nil {
 		return

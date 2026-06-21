@@ -102,3 +102,24 @@ func TestPreserveReadyTelemetry(t *testing.T) {
 		t.Fatalf("unexpected telemetry preservation for readiness failure: %#v", status)
 	}
 }
+
+func TestCleanupSucceeded(t *testing.T) {
+	tests := map[string]struct {
+		status *corev1alpha1.ExecutionWorkspaceStatus
+		want   bool
+	}{
+		"nil":                   {status: nil, want: false},
+		"retained":              {status: &corev1alpha1.ExecutionWorkspaceStatus{Phase: corev1alpha1.ExecutionWorkspacePhaseRetained, Reason: corev1alpha1.ExecutionWorkspaceReasonRetained}, want: true},
+		"deleted":               {status: &corev1alpha1.ExecutionWorkspaceStatus{Phase: corev1alpha1.ExecutionWorkspacePhaseDeleted, Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted}, want: true},
+		"released":              {status: &corev1alpha1.ExecutionWorkspaceStatus{Phase: corev1alpha1.ExecutionWorkspacePhaseReleased, Reason: corev1alpha1.ExecutionWorkspaceReasonReleased}, want: true},
+		"phase reason mismatch": {status: &corev1alpha1.ExecutionWorkspaceStatus{Phase: corev1alpha1.ExecutionWorkspacePhaseFailed, Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted}, want: false},
+		"non cleanup reason":    {status: &corev1alpha1.ExecutionWorkspaceStatus{Phase: corev1alpha1.ExecutionWorkspacePhaseReady, Reason: corev1alpha1.ExecutionWorkspaceReasonReady}, want: false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := CleanupSucceeded(tt.status); got != tt.want {
+				t.Fatalf("CleanupSucceeded() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

@@ -45,6 +45,7 @@ import (
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
+	"github.com/sozercan/orka/internal/workspace/statusrules"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -1466,20 +1467,10 @@ func substratePoolActorLeaseActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
 }
 
 func taskExecutionWorkspaceCleanupSucceeded(task *corev1alpha1.Task) bool {
-	if task == nil || task.Status.ExecutionWorkspace == nil {
+	if task == nil {
 		return false
 	}
-	status := task.Status.ExecutionWorkspace
-	switch status.Reason {
-	case corev1alpha1.ExecutionWorkspaceReasonRetained:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseRetained
-	case corev1alpha1.ExecutionWorkspaceReasonDeleted:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseDeleted
-	case corev1alpha1.ExecutionWorkspaceReasonReleased:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseReleased
-	default:
-		return false
-	}
+	return statusrules.CleanupSucceeded(task.Status.ExecutionWorkspace)
 }
 
 func taskSubstratePoolActorCleanupRequired(task *corev1alpha1.Task) bool {
