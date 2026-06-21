@@ -74,13 +74,27 @@ func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.Ses
 	return sessions, rows.Err()
 }
 
-// DeleteSession removes a session and its messages (via CASCADE).
+// DeleteSession removes a session, its messages (via CASCADE), and its session-scoped execution event read model.
 func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM sessions WHERE namespace = ? AND name = ?`,
-		namespace, name,
-	)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE namespace = ? AND name = ?`, namespace, name); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE execution_events SET session_name = '', session_seq = 0 WHERE namespace = ? AND session_name = ?`,
+		namespace,
+		name,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM execution_event_session_sequences WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // AcquireLock atomically sets the active_task for a session.

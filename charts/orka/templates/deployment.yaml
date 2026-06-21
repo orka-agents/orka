@@ -87,6 +87,9 @@ spec:
             {{- if .taskDelete }}
             - {{ printf "--context-token-task-delete-scopes=%s" .taskDelete | quote }}
             {{- end }}
+            {{- if .taskUpdate }}
+            - {{ printf "--context-token-task-update-scopes=%s" .taskUpdate | quote }}
+            {{- end }}
             {{- if .toolRead }}
             - {{ printf "--context-token-tool-read-scopes=%s" .toolRead | quote }}
             {{- end }}
@@ -176,12 +179,6 @@ spec:
             - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
             - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
             - --worker-cluster-role-binding-prefix={{ include "orka.fullname" . }}
-            - --copilot-worker-image={{ .Values.workers.copilot.image.repository | default "ghcr.io/sozercan/orka/agent-worker-copilot" }}:{{ .Values.workers.copilot.image.tag | default "latest" }}
-            - --claude-worker-image={{ .Values.workers.claude.image.repository | default "ghcr.io/sozercan/orka/agent-worker-claude" }}:{{ .Values.workers.claude.image.tag | default "latest" }}
-            - --codex-worker-image={{ .Values.workers.codex.image.repository | default "ghcr.io/sozercan/orka/agent-worker-codex" }}:{{ .Values.workers.codex.image.tag | default "latest" }}
-            {{- if .Values.workers.codex.sandboxMode }}
-            - --codex-sandbox-mode={{ .Values.workers.codex.sandboxMode }}
-            {{- end }}
             {{- if .Values.controller.enforceNamespaceIsolation }}
             - --enforce-namespace-isolation=true
             {{- end }}
@@ -241,6 +238,12 @@ spec:
               value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
+            - name: ORKA_HARNESS_WRAPPER_ENDPOINT
+              value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
+            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+              value: /var/run/orka/harness-wrapper/token
+            - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
+              value: {{ printf "%s-agent-harness-wrapper" (include "orka.fullname" .) | quote }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:
@@ -313,9 +316,18 @@ spec:
               mountPath: /tmp
             - name: store
               mountPath: /data
+            - name: harness-wrapper-auth
+              mountPath: /var/run/orka/harness-wrapper
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: harness-wrapper-auth
+          secret:
+            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            items:
+              - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
+                path: token
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:

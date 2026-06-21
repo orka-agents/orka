@@ -610,16 +610,18 @@ func waitForRemoteBranchVisibilityWithGit(workDir, remote, branch string, timeou
 }
 
 func resetReservedWorkspacePaths(workDir string) {
-	// Runtime agents expose a repo-local symlink to /tmp/artifacts so scan and
-	// patch jobs can write required artifacts from inside the workspace. That
-	// symlink is infrastructure, not a user-facing code change.
-	execGit(workDir, "reset", "-q", "--", workspaceArtifactsDirName) //nolint:errcheck
+	// Runtime agents expose repo-local artifact links inside the workspace. Those
+	// links are infrastructure, not user-facing code changes.
+	_, _ = execGit(workDir, "reset", "-q", "--",
+		workspaceArtifactsDirName, ":(glob)**/"+workspaceArtifactsDirName,
+	)
 }
 
 // execGit runs a git command in the given directory and returns combined output.
 func execGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
+	cmd.SysProcAttr = gitCommandSysProcAttr()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -631,6 +633,7 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	stderr.limit = 64 * 1024
 	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
+	cmd.SysProcAttr = gitCommandSysProcAttr()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

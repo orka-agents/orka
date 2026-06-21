@@ -211,7 +211,7 @@ func newToolCmd() *cobra.Command {
 }
 
 func newSessionCmd() *cobra.Command {
-	return newCRUDResourceCmd(crudResourceSpec{
+	cmd := newCRUDResourceCmd(crudResourceSpec{
 		Use:      "session",
 		Short:    "Manage sessions",
 		BasePath: "/api/v1/sessions",
@@ -219,6 +219,9 @@ func newSessionCmd() *cobra.Command {
 		NoCreate: true,
 		NoUpdate: true,
 	})
+	cmd.AddCommand(newSessionEventsCmd())
+	cmd.AddCommand(newSessionFollowCmd())
+	return cmd
 }
 
 func newSecretCmd() *cobra.Command {

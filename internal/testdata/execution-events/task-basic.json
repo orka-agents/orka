@@ -1,0 +1,57 @@
+{
+  "namespace": "default",
+  "streamType": "task",
+  "streamID": "task-basic",
+  "afterSeq": 0,
+  "latestSeq": 4,
+  "events": [
+    {
+      "id": "default/task/task-basic/1",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-basic",
+      "seq": 1,
+      "type": "TaskCreated",
+      "severity": "info",
+      "taskName": "task-basic",
+      "summary": "Task was accepted by the controller.",
+      "createdAt": "2026-06-11T10:00:00Z"
+    },
+    {
+      "id": "default/task/task-basic/2",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-basic",
+      "seq": 2,
+      "type": "TaskStarted",
+      "severity": "info",
+      "taskName": "task-basic",
+      "summary": "Task execution started.",
+      "createdAt": "2026-06-11T10:00:01Z"
+    },
+    {
+      "id": "default/task/task-basic/3",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-basic",
+      "seq": 3,
+      "type": "ResultSubmitted",
+      "severity": "info",
+      "taskName": "task-basic",
+      "summary": "Worker submitted the task result.",
+      "createdAt": "2026-06-11T10:00:05Z"
+    },
+    {
+      "id": "default/task/task-basic/4",
+      "namespace": "default",
+      "streamType": "task",
+      "streamID": "task-basic",
+      "seq": 4,
+      "type": "TaskSucceeded",
+      "severity": "info",
+      "taskName": "task-basic",
+      "summary": "Task completed successfully.",
+      "createdAt": "2026-06-11T10:00:06Z"
+    }
+  ]
+}

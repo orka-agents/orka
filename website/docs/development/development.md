@@ -100,18 +100,16 @@ make ui-test-coverage   # Run UI tests with coverage
 ```bash
 # Build images
 make docker-build                  # Controller image
-make docker-build-claude-worker    # Claude agent worker
-make docker-build-copilot-worker   # Copilot agent worker
-make docker-build-codex-worker     # Codex agent worker
 make docker-build-ai-worker        # AI worker
 make docker-build-general-worker   # General worker
-make docker-build-all              # All images
+make docker-build-harness-wrapper  # Agent CLI harness wrapper (codex/claude/copilot)
+make docker-build-all              # Controller, workers, and harness wrapper
 
 # Push images
 make docker-push
-make docker-push-claude-worker
-make docker-push-copilot-worker
-make docker-push-codex-worker
+make docker-push-ai-worker
+make docker-push-general-worker
+make docker-push-harness-wrapper
 make docker-push-all
 ```
 
@@ -120,7 +118,8 @@ make docker-push-all
 ```bash
 kind create cluster
 make docker-build docker-push IMG=<registry>/orka:tag
-make deploy IMG=<registry>/orka:tag
+make docker-build-harness-wrapper docker-push-harness-wrapper HARNESS_WRAPPER_IMG=<registry>/agent-harness-wrapper:tag
+make deploy IMG=<registry>/orka:tag HARNESS_WRAPPER_IMG=<registry>/agent-harness-wrapper:tag
 ```
 
 ### Demo Cluster + Recordings

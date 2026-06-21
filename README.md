@@ -116,6 +116,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
+| [CLI Harness Wrapper](website/docs/guides/cli-harness-wrapper.md)                  | Harness protocol wrapper for Codex, Claude, and Copilot CLI runtimes |
 | [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |
 | [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](website/docs/guides/multi-agent-coordination.md) | Coordinator agents and task delegation                |

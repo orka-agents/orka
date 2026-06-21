@@ -203,37 +203,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the Codex job carries priorTaskRef and workspace wiring")
-		verifyJobCreatedForTask(codexTaskReadName, 2*time.Minute)
-		runtimeAssertJobBasics(
-			codexTaskReadName,
-			codexWorkerImage,
-			map[string]string{
-				"ORKA_MODEL":                gptModel,
-				"ORKA_MAX_TURNS":            "1",
-				"ORKA_ALLOW_BASH":           "true",
-				"ORKA_GIT_REPO":             liveRuntimeRepoURL,
-				"ORKA_GIT_REF":              liveRuntimeRepoRef,
-				"ORKA_PRIOR_TASK":           codexTaskWriteName,
-				"ORKA_PRIOR_TASK_NAMESPACE": namespace,
-			},
-			codexSecretName,
-			nil,
-			nil,
-		)
-
 		By("waiting for the Codex task to return the exact marker from the prior diff")
 		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
-		Eventually(func(g Gomega) {
-			task := fetchTaskSnapshot(codexTaskReadName)
-			g.Expect(task.Status.JobName).NotTo(BeEmpty())
-
-			cmd := exec.Command("kubectl", "logs", "job/"+task.Status.JobName, "-n", namespace)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring("successfully applied prior task diff from " + codexTaskWriteName))
-		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		// Harness-wrapper-backed agent tasks do not create a worker Job. The result
+		// assertion below verifies the priorTaskRef workspace diff was consumed.
 		Expect(strings.TrimSpace(fetchTaskResultSummaryViaAPI(apiBaseURL, token, codexTaskReadName))).To(Equal(codexMarker))
 	})
 
@@ -280,21 +254,6 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the Claude job wiring")
-		verifyJobCreatedForTask(claudeTaskName, 2*time.Minute)
-		runtimeAssertJobBasics(
-			claudeTaskName,
-			claudeWorkerImage,
-			map[string]string{
-				"ORKA_MODEL":        claudeModel,
-				"ORKA_MAX_TURNS":    "3",
-				"ORKA_SESSION_NAME": claudeSessionName,
-			},
-			claudeSecretName,
-			[]string{"ORKA_ALLOW_BASH"},
-			[]string{"fetch-session"},
-		)
-
 		By("waiting for the Claude task to return the exact sentinel")
 		Expect(waitForTaskCompletion(claudeTaskName, liveRuntimeTimeout)).To(Equal("Succeeded"))
 		verifyResultAvailable(claudeTaskName)
@@ -330,23 +289,6 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			nil,
 		))
 		Expect(err).NotTo(HaveOccurred())
-
-		By("verifying the Copilot job wiring")
-		verifyJobCreatedForTask(copilotTaskName, 2*time.Minute)
-		runtimeAssertJobBasics(
-			copilotTaskName,
-			copilotWorkerImage,
-			map[string]string{
-				"ORKA_MODEL":      geminiModel,
-				"ORKA_MAX_TURNS":  "4",
-				"ORKA_ALLOW_BASH": "true",
-				"ORKA_GIT_REPO":   liveRuntimeRepoURL,
-				"ORKA_GIT_REF":    liveRuntimeRepoRef,
-			},
-			"e2e-github-secret",
-			nil,
-			nil,
-		)
 
 		By("waiting for the Copilot task to return the exact README sentinel")
 		Expect(waitForTaskCompletion(copilotTaskName, liveRuntimeTimeout)).To(Equal("Succeeded"))

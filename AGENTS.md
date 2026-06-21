@@ -35,8 +35,8 @@ make generate           # Regenerate Go types
 make build              # Build (includes UI)
 make test               # Run tests
 make lint-fix           # Lint and fix
-make docker-build-all   # All Docker images
-make deploy IMG=<registry>/orka:tag
+make docker-build-all   # Controller, AI/general workers, harness wrapper image
+make deploy IMG=<registry>/orka:tag HARNESS_WRAPPER_IMG=<registry>/agent-harness-wrapper:tag
 ```
 
 UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/docs/development/development.md for full commands.
@@ -82,8 +82,13 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - AI worker truncates messages on context overflow — keeps system prompt + newest, drops middle atomically with structured metadata
 - `code_exec` timeout max is 60s — values above are ignored (30s default used)
 - Built-in AI worker tools: `web_search`, `code_exec`, `file_read`, `web_fetch`, `file_write`
+- Agent CLI runtimes (`codex`, `claude`, `copilot`) run through the `agent-harness-wrapper`; the old per-runtime worker images/entrypoints are gone.
+- Harness-wrapper success maps `TurnCompleted` to `AgentRuntimeCompleted` + terminal task events; do not expect a worker `ResultSubmitted` event on harness-backed agent tasks.
+- Harness wrapper `GET /v1/health` and `GET /v1/capabilities` are intentionally unauthenticated; mutating turn endpoints (`POST /v1/turns`, cancel) require the wrapper bearer token.
+- The harness wrapper may emit restricted PodSecurity warnings because it runs as root with limited capabilities for child process/credential setup; rollout success plus runtime live tests are the source of truth.
 - Coordination memory tools: `recall_memory`, `remember`, `propose_memory`, `search_transcript`
 - Do not store secrets, credentials, tokens, raw transcripts, or one-off task status in durable memory
 - Reviewing a memory proposal does not apply it; use the explicit proposal apply endpoint for accepted `memory` proposals when durable memory should be created
 - Kontxt TxTokens are accepted via `Txn-Token` by default; `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist
 - Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs
+- Harness-wrapper real-world validation should include at least one Codex/Claude task through Vekil, workspace clone/read, fork/checkpoint continuation, cancel/timeout, unsafe workspace URL rejection, and (when a GitHub token is available) branch push + PR creation/cleanup on a temporary branch.

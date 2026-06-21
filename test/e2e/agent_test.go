@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -45,7 +44,7 @@ var _ = Describe("Agent Task", Ordered, func() {
 		dumpDebugInfo(taskName)
 	})
 
-	It("should create a Job and complete for an agent-type task", func() {
+	It("should start a harness-wrapper turn for an agent-type task", func() {
 		By("creating an Agent CRD with claude runtime")
 		agentManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
@@ -93,66 +92,15 @@ var _ = Describe("Agent Task", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create agent Task")
 
-		By("verifying that a Job is created for the agent task")
-		verifyJobCreated := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName),
-				"-o", "jsonpath={.items[0].metadata.name}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to get Job for agent task")
-			g.Expect(output).NotTo(BeEmpty(), "Job name should not be empty")
-		}
-		Eventually(verifyJobCreated, 2*time.Minute, time.Second).Should(Succeed())
+		By("verifying harness-wrapper metadata is planned for the agent task")
+		verifyHarnessWrapperMetadataForTask(taskName, map[string]string{
+			"runtime":   "claude",
+			"wrapper":   "cli",
+			"maxTurns":  "3",
+			"allowBash": "false",
+		}, 2*time.Minute)
 
-		By("verifying the Job has the correct container image")
-		verifyContainerImage := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].image}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(ContainSubstring("claude"), "Image should be the Claude agent worker")
-		}
-		Eventually(verifyContainerImage, 30*time.Second, time.Second).Should(Succeed())
-
-		By("verifying the Job has required environment variables")
-		verifyEnvVars := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
-
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to parse env vars JSON")
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_TASK_NAME"))
-			g.Expect(envMap["ORKA_TASK_NAME"]).To(Equal(taskName))
-			g.Expect(envMap).To(HaveKey("ORKA_TASK_NAMESPACE"))
-			g.Expect(envMap["ORKA_TASK_NAMESPACE"]).To(Equal(namespace))
-			g.Expect(envMap).To(HaveKey("ORKA_RESULT_ENDPOINT"))
-			g.Expect(envMap).To(HaveKey("ORKA_CONTROLLER_URL"))
-			g.Expect(envMap).To(HaveKey("ORKA_PROMPT"))
-			g.Expect(envMap["ORKA_PROMPT"]).To(Equal("echo hello world"))
-			g.Expect(envMap).To(HaveKey("ORKA_MAX_TURNS"))
-			g.Expect(envMap["ORKA_MAX_TURNS"]).To(Equal("3"))
-		}
-		Eventually(verifyEnvVars, 30*time.Second, time.Second).Should(Succeed())
-
-		By("verifying the Task status transitions to Running")
+		By("verifying the Task status transitions from Pending")
 		verifyTaskRunning := func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "task", taskName,
 				"-o", "jsonpath={.status.phase}",
@@ -165,30 +113,8 @@ var _ = Describe("Agent Task", Ordered, func() {
 		}
 		Eventually(verifyTaskRunning, 2*time.Minute, time.Second).Should(Succeed())
 
-		By("verifying the Task has a jobName in status")
-		verifyJobName := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "task", taskName,
-				"-o", "jsonpath={.status.jobName}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty(), "Task should have a jobName in status")
-		}
-		Eventually(verifyJobName, 30*time.Second, time.Second).Should(Succeed())
-
-		By("verifying the Job pod template has the correct security context")
-		verifyPodSecurity := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).To(Equal("false"), "Pod should not allow privilege escalation")
-		}
-		Eventually(verifyPodSecurity, 30*time.Second, time.Second).Should(Succeed())
+		By("verifying the Task does not use a worker Job")
+		verifyNoJobForTask(taskName, 5*time.Second)
 	})
 })
 

@@ -281,7 +281,7 @@ See [Repository Monitors](../guides/repository-monitors.md) for the workflow, AP
 
 ### Execution
 
-Tasks and Agents both support `spec.execution` for worker pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` to request experimental workspace-backed execution through upstream `agent-sandbox` or Agent Substrate; see [Agent Sandbox Workspaces](agent-sandbox.md) and [Substrate Execution Workspaces](substrate.md).
+Tasks and Agents both support `spec.execution` for harness wrapper pod runtime selection and placement. Agent Tasks can also set `Task.spec.execution.workspace` to request experimental workspace-backed execution through upstream `agent-sandbox` or Agent Substrate; see [Agent Sandbox Workspaces](agent-sandbox.md) and [Substrate Execution Workspaces](substrate.md).
 
 ```yaml
 execution:
@@ -306,9 +306,9 @@ execution:
 | Field | Type | Description |
 |-------|------|-------------|
 | `runtimeClassName` | string | Selects a Kubernetes `RuntimeClass` such as `gvisor` or `kata-qemu` |
-| `nodeSelector` | map[string]string | Restricts worker pods to nodes with matching labels |
-| `tolerations` | list | Allows worker pods onto tainted runtime-specific node pools |
-| `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for worker pods |
+| `nodeSelector` | map[string]string | Restricts harness wrapper pods to nodes with matching labels |
+| `tolerations` | list | Allows harness wrapper pods onto tainted runtime-specific node pools |
+| `affinity` | object | Adds Kubernetes affinity or anti-affinity rules for harness wrapper pods |
 | `workspace` | object | Experimental execution workspace request under `Task.spec.execution.workspace`. Use only on `type: agent` Tasks. |
 
 Resolution order:
@@ -320,7 +320,7 @@ Resolution order:
 
 #### Execution Workspace Requests
 
-`Task.spec.execution.workspace` is alpha support for durable, claimable agent workspaces backed by an existing upstream `agent-sandbox` or Agent Substrate installation. When `workspace.enabled: true`, the Task controller validates the request, resolves defaults, and passes workspace settings to the agent worker Job. Orka still creates the outer Kubernetes worker Job; the worker wrapper claims and waits for the upstream workspace, runs the configured agent runtime inside it, and then deletes or retains/releases the workspace according to `cleanupPolicy`.
+`Task.spec.execution.workspace` is alpha support for durable, claimable agent workspaces backed by an existing upstream `agent-sandbox` or Agent Substrate installation. When `workspace.enabled: true`, the Task controller validates the request, resolves defaults, and passes workspace settings to the harness wrapper turn. Orka still creates the outer Kubernetes worker Job; the worker wrapper claims and waits for the upstream workspace, runs the configured agent runtime inside it, and then deletes or retains/releases the workspace according to `cleanupPolicy`.
 
 This field is distinct from `Task.spec.agentRuntime.workspace`, which configures the git checkout prepared for the agent runtime inside the current execution environment.
 
@@ -787,9 +787,9 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
 | `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
-| `--copilot-worker-image` | `ghcr.io/sozercan/orka/agent-worker-copilot:latest` | Copilot agent worker image |
-| `--claude-worker-image` | `ghcr.io/sozercan/orka/agent-worker-claude:latest` | Claude agent worker image |
-| `--codex-worker-image` | `ghcr.io/sozercan/orka/agent-worker-codex:latest` | Codex agent worker image |
+| `ORKA_HARNESS_WRAPPER_ENDPOINT` | unset | Required controller environment variable for agent Tasks; points at the CLI harness wrapper HTTP endpoint. |
+| `ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE` | unset | Optional controller token file for authenticated wrapper endpoints. |
+
 | `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |
@@ -811,7 +811,7 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 
 ### Agent Sandbox Controller Settings
 
-Agent sandbox settings are disabled by default. When enabled, the controller validates `Task.spec.execution.workspace`, resolves/defaults the effective `SandboxTemplate` and workspace settings, injects the resolved settings into agent worker Jobs, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
+Agent sandbox settings are disabled by default. When enabled, the controller validates `Task.spec.execution.workspace`, resolves/defaults the effective `SandboxTemplate` and workspace settings, injects the resolved settings into harness wrapper turns, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|
@@ -826,7 +826,7 @@ Agent sandbox settings are disabled by default. When enabled, the controller val
 
 Supported values are `disabled` or `template` for warm pool policy, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/template namespace. See [Agent Sandbox Workspaces](agent-sandbox.md) for examples, live smoke-test steps, and limitations.
 
-When this feature is enabled, worker pods need RBAC for the upstream sandbox API: create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these permissions; custom deployments must include equivalent rules for the worker ServiceAccount.
+When this feature is enabled, harness wrapper pods need RBAC for the upstream sandbox API: create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these permissions; custom deployments must include equivalent rules for the worker ServiceAccount.
 
 ### External API OIDC Authentication
 
