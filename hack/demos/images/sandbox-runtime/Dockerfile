@@ -6,7 +6,7 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./workers/agent/codex
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
 package main

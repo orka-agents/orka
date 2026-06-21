@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package api
 
 import (
@@ -114,6 +120,10 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
+	sessionName, err := h.existingSessionNameForTask(c.Context(), namespace, task)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+	}
 	actor := approvalDecisionActor(GetUserInfo(c))
 	content, err := json.Marshal(map[string]string{
 		"approvalID": approvalID,
@@ -129,12 +139,17 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		StreamType:  events.ExecutionEventStreamTypeTask,
 		StreamID:    taskName,
 		TaskName:    taskName,
-		SessionName: sessionNameForTask(task),
+		SessionName: sessionName,
 		Type:        eventType,
 		Severity:    events.ExecutionEventSeverityInfo,
-		ToolCallID:  current.ToolCallID,
-		Summary:     fmt.Sprintf("approval %s", decision),
-		Content:     content,
+		// Stamp the canonical approval ID into the stable top-level field (not
+		// current.ToolCallID, which is empty for harness-emitted approvals). This
+		// keeps approvals.Derive and the terminal-conflict guard able to match the
+		// decision to its pending approval even if a large reason truncates the
+		// JSON content (where approvalID would otherwise be the only copy).
+		ToolCallID: approvalID,
+		Summary:    fmt.Sprintf("approval %s", decision),
+		Content:    content,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {

@@ -8,6 +8,7 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -282,6 +283,16 @@ func RecordExecutionEventPayloadSanitization(streamType, eventType string, redac
 	if truncated {
 		ExecutionEventTruncationsTotal.WithLabelValues(streamType, eventType).Inc()
 	}
+}
+
+// CounterVecValue returns the current value of a CounterVec for the given label
+// values. It is intended for tests asserting metric accuracy across packages.
+func CounterVecValue(counter *prometheus.CounterVec, labels ...string) float64 {
+	var m dto.Metric
+	if err := counter.WithLabelValues(labels...).Write(&m); err != nil {
+		return 0
+	}
+	return m.GetCounter().GetValue()
 }
 
 // RecordExecutionEventDerivedLatency records one idempotent event-derived latency observation.

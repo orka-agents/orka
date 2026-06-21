@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -73,6 +74,32 @@ func (f *postP0FakeSessionStore) SearchTranscript(ctx context.Context, filter st
 }
 func (f *postP0FakeSessionStore) UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error {
 	return nil
+}
+
+type postP0FailingAppendEventStore struct {
+	store.ExecutionEventStore
+	failType  string
+	failAfter int
+	seen      int
+	failed    bool
+}
+
+func (s *postP0FailingAppendEventStore) AppendExecutionEvent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+) (*store.ExecutionEvent, error) {
+	if event != nil && event.Type == s.failType {
+		s.seen++
+		failAfter := s.failAfter
+		if failAfter <= 0 {
+			failAfter = 1
+		}
+		if s.seen >= failAfter {
+			s.failed = true
+			return nil, fmt.Errorf("injected append failure for %s", event.Type)
+		}
+	}
+	return s.ExecutionEventStore.AppendExecutionEvent(ctx, event)
 }
 
 func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
@@ -163,6 +190,96 @@ func TestGetTaskTraceAPI(t *testing.T) {
 	}
 }
 
+func TestGetTaskTraceAPIReadsFullEventStream(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "trace-long-task",
+		TaskName:   "trace-long-task",
+		Type:       events.ExecutionEventTypeTaskStarted,
+		Summary:    "first event must remain visible",
+	}); err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+	for i := range forkcontext.DefaultMaxEvents + 25 {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    "trace-long-task",
+			TaskName:    "trace-long-task",
+			Type:        events.ExecutionEventTypeModelMessage,
+			Summary:     fmt.Sprintf("model message %03d", i),
+			ContentText: fmt.Sprintf("message-%03d", i),
+		}); err != nil {
+			t.Fatalf("append model event %d: %v", i, err)
+		}
+	}
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "trace-long-task",
+		TaskName:   "trace-long-task",
+		Type:       events.ExecutionEventTypeTaskSucceeded,
+		Summary:    "terminal event",
+	}); err != nil {
+		t.Fatalf("append terminal event: %v", err)
+	}
+	task := testTask("default", "trace-long-task")
+	task.Spec.Type = corev1alpha1.TaskTypeAI
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Get("/api/v1/tasks/:id/trace", h.GetTaskTrace)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/trace-long-task/trace?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var trace tasktrace.TaskTrace
+	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if trace.LatestSeq != int64(forkcontext.DefaultMaxEvents+27) {
+		t.Fatalf("LatestSeq = %d", trace.LatestSeq)
+	}
+	if len(trace.Timeline) != forkcontext.DefaultMaxEvents+27 {
+		t.Fatalf("timeline length = %d, want full event count %d", len(trace.Timeline), forkcontext.DefaultMaxEvents+27)
+	}
+	if trace.Timeline[0].Seq != 1 || trace.Timeline[0].Summary != "first event must remain visible" {
+		t.Fatalf("first timeline event = %#v, want original first event", trace.Timeline[0])
+	}
+}
+
+func TestGetTaskTraceAPIRejectsTooManyEvents(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	for i := range maxTaskTraceEvents + 1 {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:  "default",
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   "trace-too-large-task",
+			TaskName:   "trace-too-large-task",
+			Type:       events.ExecutionEventTypeModelMessage,
+			Summary:    fmt.Sprintf("event %d", i),
+		}); err != nil {
+			t.Fatalf("append event %d: %v", i, err)
+		}
+	}
+	task := testTask("default", "trace-too-large-task")
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Get("/api/v1/tasks/:id/trace", h.GetTaskTrace)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/trace-too-large-task/trace?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
+	}
+}
+
 func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr", "riskSummary": "opens a PR"})
@@ -201,6 +318,118 @@ func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	}
 	if approved.Status != approvals.StatusApproved || approved.DecisionReason != "safe" {
 		t.Fatalf("approved=%#v", approved)
+	}
+}
+
+// Regression: a very large decision reason truncates the JSON content (dropping
+// the in-content approvalID), but the canonical approvalID is stamped into the
+// stable top-level ToolCallID field, so approvals.Derive still resolves the
+// decision and the terminal-conflict guard still fires on a second decision.
+func TestTaskApprovalDecisionAPISurvivesContentTruncation(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-big", "action": "create_pr", "riskSummary": "opens a PR"})
+	// ApprovalRequested carries approvalID only in content, with EMPTY ToolCallID
+	// (the shape harness-emitted approvals actually have in production).
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "approval-big-task",
+		TaskName:   "approval-big-task",
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		Content:    content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-big-task"))
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	// A reason larger than MaxExecutionEventContentJSONBytes (64 KiB) forces the
+	// content object to be replaced by a content-free preview at persistence,
+	// dropping the in-content approvalID.
+	bigReason := strings.Repeat("x", 70*1024)
+	body, _ := json.Marshal(map[string]string{"decision": "approve", "reason": bigReason})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-big-task/approvals/approval-big/decision?namespace=default", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decision status=%d, want 200", resp.StatusCode)
+	}
+	var approved approvals.Approval
+	if err := json.NewDecoder(resp.Body).Decode(&approved); err != nil {
+		t.Fatal(err)
+	}
+	// The approval must resolve to Approved, not remain stuck Pending.
+	if approved.Status != approvals.StatusApproved {
+		t.Fatalf("approval status = %q, want approved (truncated content must not orphan the decision)", approved.Status)
+	}
+
+	// The persisted terminal event must carry the canonical approvalID in the
+	// stable ToolCallID field even though the content was truncated.
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "approval-big-task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := listed[len(listed)-1]
+	if decision.Type != events.ExecutionEventTypeApprovalApproved {
+		t.Fatalf("last event type = %q, want ApprovalApproved", decision.Type)
+	}
+	if decision.ToolCallID != "approval-big" {
+		t.Fatalf("decision ToolCallID = %q, want canonical approvalID approval-big", decision.ToolCallID)
+	}
+
+	// A second, conflicting decision must be rejected (the one-decision conflict
+	// guard relies on resolving the approval identity, which now survives).
+	conflictBody, _ := json.Marshal(map[string]string{"decision": "decline", "reason": "changed mind"})
+	conflictReq := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-big-task/approvals/approval-big/decision?namespace=default", bytes.NewReader(conflictBody))
+	conflictReq.Header.Set("Content-Type", "application/json")
+	conflictResp, err := app.Test(conflictReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflictResp.StatusCode != http.StatusConflict {
+		t.Fatalf("conflicting decision status=%d, want 409", conflictResp.StatusCode)
+	}
+}
+
+func TestTaskApprovalDecisionAPIOmitsDeletedSession(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-stale", "action": "create_pr"})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "approval-stale-task",
+		TaskName:    "approval-stale-task",
+		SessionName: "deleted-session",
+		Type:        events.ExecutionEventTypeApprovalRequested,
+		ToolCallID:  "approval-stale",
+		Content:     content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := testTask("default", "approval-stale-task")
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "deleted-session"}
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	h.sessionStore = &postP0FakeSessionStore{records: map[string]*store.SessionRecord{}}
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-stale-task/approvals/approval-stale/decision?namespace=default", bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "approval-stale-task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := listed[len(listed)-1]
+	if decision.Type != events.ExecutionEventTypeApprovalApproved || decision.SessionName != "" {
+		t.Fatalf("decision event = %#v, want approved with no deleted session", decision)
 	}
 }
 
@@ -398,8 +627,15 @@ func TestForkTaskAPI(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "forked-task"}, created); err != nil {
 		t.Fatalf("get created: %v", err)
 	}
-	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" || created.Annotations[labels.AnnotationForkSourceSeq] != "1" || created.Spec.Prompt != "continue" {
-		t.Fatalf("created task = %#v", created)
+	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" ||
+		created.Annotations[labels.AnnotationForkSourceSeq] != "1" ||
+		created.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
+		t.Fatalf("created task annotations = %#v", created.Annotations)
+	}
+	if !strings.Contains(created.Spec.Prompt, "Fork context through execution event checkpoint") ||
+		!strings.Contains(created.Spec.Prompt, events.ExecutionEventTypeTaskStarted) ||
+		!strings.Contains(created.Spec.Prompt, "continue") {
+		t.Fatalf("created prompt = %q, want fork context and continuation", created.Spec.Prompt)
 	}
 	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "forked-task"})
 	if err != nil {
@@ -416,6 +652,173 @@ func TestForkTaskAPI(t *testing.T) {
 	}
 	if latest != 3 || len(sessionEvents) != 3 {
 		t.Fatalf("latest=%d sessionEvents=%#v, want fork request and created events in session timeline", latest, sessionEvents)
+	}
+}
+
+func TestForkTaskAPIDoesNotAppendRequestEventWhenCreateFails(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "source-task")
+	existingFork := testTask("default", "existing-fork")
+	h, app := setupTaskEventHandlers(t, eventStore, source, existingFork)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"existing-fork","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", resp.StatusCode)
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "source-task", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range listed {
+		if event.Type == events.ExecutionEventTypeTaskForkRequested {
+			t.Fatalf("fork request event was appended despite create failure: %#v", listed)
+		}
+	}
+}
+
+// After the ordering fix, fork timeline events are best-effort and appended
+// only AFTER the authoritative Task create succeeds. A failure appending the
+// fork-request event must NOT fail the fork or roll back the created Task — the
+// Task is the source of truth and is self-describing via its parent annotations.
+func TestForkTaskAPISucceedsWhenRequestEventAppendFails(t *testing.T) {
+	baseStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, baseStore, "source-task", events.ExecutionEventTypeTaskStarted)
+	eventStore := &postP0FailingAppendEventStore{
+		ExecutionEventStore: baseStore,
+		failType:            events.ExecutionEventTypeTaskForkRequested,
+	}
+	source := testTask("default", "source-task")
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"besteffort-fork","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d, want 201 (best-effort event append must not fail the fork)", resp.StatusCode)
+	}
+	if !eventStore.failed {
+		t.Fatal("expected injected append failure to run")
+	}
+	// The authoritative Task must exist.
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "besteffort-fork"}, created); err != nil {
+		t.Fatalf("forked task should exist despite event append failure: %v", err)
+	}
+	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" {
+		t.Fatalf("forked task missing fork lineage annotation: %#v", created.Annotations)
+	}
+}
+
+func TestForkTaskAPIAddsContextToLegacyTopLevelAIPrompt(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "legacy-ai-source", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "legacy-ai-source")
+	source.Spec.Type = corev1alpha1.TaskTypeAI
+	source.Spec.Prompt = "legacy top-level prompt"
+	source.Spec.AI = &corev1alpha1.AISpec{Prompt: "ai prompt"}
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/legacy-ai-source/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"legacy-ai-fork"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "legacy-ai-fork"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if !strings.Contains(created.Spec.Prompt, "Fork context through execution event checkpoint") ||
+		!strings.Contains(created.Spec.Prompt, "legacy top-level prompt") {
+		t.Fatalf("created top-level prompt = %q, want fork context and legacy prompt", created.Spec.Prompt)
+	}
+	if created.Spec.AI == nil ||
+		!strings.Contains(created.Spec.AI.Prompt, "Fork context through execution event checkpoint") ||
+		!strings.Contains(created.Spec.AI.Prompt, "ai prompt") {
+		t.Fatalf("created AI prompt = %#v, want fork context and AI prompt", created.Spec.AI)
+	}
+}
+
+func TestForkTaskAPIClearsScheduleForOneShotFork(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "scheduled-source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "scheduled-source-task")
+	source.Spec.Type = corev1alpha1.TaskTypeAI
+	source.Spec.AI = &corev1alpha1.AISpec{Prompt: "original"}
+	source.Spec.Schedule = "*/5 * * * *"
+	tz := "America/Boise"
+	source.Spec.TimeZone = &tz
+	suspend := true
+	source.Spec.Suspend = &suspend
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/scheduled-source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"scheduled-forked-task","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "scheduled-forked-task"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if created.Spec.Schedule != "" || created.Spec.TimeZone != nil || created.Spec.Suspend != nil {
+		t.Fatalf("created scheduling fields = schedule=%q timezone=%v suspend=%v, want cleared", created.Spec.Schedule, created.Spec.TimeZone, created.Spec.Suspend)
+	}
+	if created.Spec.AI == nil || !strings.Contains(created.Spec.AI.Prompt, "Fork context through execution event checkpoint") || !strings.Contains(created.Spec.AI.Prompt, "continue") {
+		t.Fatalf("created AI prompt = %#v, want fork context and continuation", created.Spec.AI)
+	}
+}
+
+func TestForkTaskAPIClearsDeletedSessionRef(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "stale-source-task", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "stale-source-task")
+	source.Spec.Type = corev1alpha1.TaskTypeAI
+	source.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "deleted-session"}
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	h.sessionStore = &postP0FakeSessionStore{records: map[string]*store.SessionRecord{}}
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/stale-source-task/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1,"newTaskName":"stale-forked-task","prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	created := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "stale-forked-task"}, created); err != nil {
+		t.Fatalf("get created: %v", err)
+	}
+	if created.Spec.SessionRef != nil {
+		t.Fatalf("created sessionRef = %#v, want stale deleted session cleared", created.Spec.SessionRef)
+	}
+	for _, streamID := range []string{"stale-source-task", "stale-forked-task"} {
+		listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: streamID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := listed[len(listed)-1]
+		if last.SessionName != "" {
+			t.Fatalf("%s last event sessionName = %q, want omitted", streamID, last.SessionName)
+		}
 	}
 }
 
@@ -448,10 +851,132 @@ func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 	}
 }
 
+// Oversize forked Task must be rejected with 413 BEFORE any create, so it never
+// orphans a fork event or returns a generic 500.
+func TestForkTaskAPIRejectsOversizeForkWith413(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "big-source", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "big-source")
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	// A source prompt larger than the serialized-size budget guarantees the
+	// forked Task exceeds the limit (the prompt is DeepCopied into the fork).
+	source.Spec.Prompt = strings.Repeat("x", maxForkedTaskSerializedBytes+4096)
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/big-source/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413", resp.StatusCode)
+	}
+	// No fork event must have been appended for the oversize attempt.
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "big-source", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range listed {
+		if event.Type == events.ExecutionEventTypeTaskForkRequested {
+			t.Fatalf("fork request event appended for oversize fork: %#v", listed)
+		}
+	}
+}
+
+// Bare auto-named forks (no Idempotency-Key) must mint DISTINCT Tasks, so a user
+// can fork one checkpoint into several divergent branches. Idempotency is opt-in
+// only — inferring it from (source, afterSeq) alone would silently alias a
+// second, differently-prompted fork onto the first.
+func TestForkTaskAPIAutoNameForksAreDistinct(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "branch-source", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "branch-source")
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+
+	doFork := func(prompt string) ForkTaskResponse {
+		t.Helper()
+		body := fmt.Sprintf(`{"afterSeq":1,"prompt":%q}`, prompt)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/branch-source/fork?namespace=default", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("status=%d, want 201", resp.StatusCode)
+		}
+		var out ForkTaskResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	first := doFork("branch A")
+	second := doFork("branch B")
+	if first.NewTaskName == second.NewTaskName {
+		t.Fatalf("two divergent auto-name forks got the same name %q (must be distinct)", first.NewTaskName)
+	}
+	taskList := &corev1alpha1.TaskList{}
+	if err := h.client.List(context.Background(), taskList, ctrlclient.InNamespace("default"), ctrlclient.MatchingLabels{labels.LabelParentTask: labels.SelectorValue("branch-source")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(taskList.Items) != 2 {
+		t.Fatalf("forked tasks = %d, want 2 distinct branches", len(taskList.Items))
+	}
+}
+
+// With an explicit Idempotency-Key, a retried fork must resolve to the SAME Task
+// (deterministic name + idempotent recovery), never a duplicate running fork.
+func TestForkTaskAPIIdempotencyKeyRetryIsIdempotent(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	appendTestTaskEvent(t, eventStore, "idem-source", events.ExecutionEventTypeTaskStarted)
+	source := testTask("default", "idem-source")
+	source.Spec.Type = corev1alpha1.TaskTypeAgent
+	h, app := setupTaskEventHandlers(t, eventStore, source)
+	app.Post("/api/v1/tasks/:id/fork", h.ForkTask)
+
+	doFork := func() ForkTaskResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/idem-source/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":1}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "fork-key-123")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d, want 201 or 200", resp.StatusCode)
+		}
+		var out ForkTaskResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	first := doFork()
+	second := doFork()
+	if first.NewTaskName != second.NewTaskName {
+		t.Fatalf("idempotency-key fork retry produced different names %q vs %q", first.NewTaskName, second.NewTaskName)
+	}
+	taskList := &corev1alpha1.TaskList{}
+	if err := h.client.List(context.Background(), taskList, ctrlclient.InNamespace("default"), ctrlclient.MatchingLabels{labels.LabelParentTask: labels.SelectorValue("idem-source")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(taskList.Items) != 1 {
+		t.Fatalf("forked tasks = %d, want exactly 1 (idempotency-key retry must not duplicate)", len(taskList.Items))
+	}
+}
+
 func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
+	appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "early-call")
 	for range store.MaxExecutionEventLimit {
-		appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "call")
+		appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeWorkerStarted)
 	}
 	appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeTaskSucceeded)
 	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "long-trace-task"))
@@ -468,8 +993,14 @@ func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
 		t.Fatal(err)
 	}
-	if trace.LatestSeq != store.MaxExecutionEventLimit+1 || trace.TerminalEvent == nil {
+	if trace.LatestSeq != store.MaxExecutionEventLimit+2 || trace.TerminalEvent == nil {
 		t.Fatalf("trace latest=%d terminal=%#v", trace.LatestSeq, trace.TerminalEvent)
+	}
+	if len(trace.Timeline) != store.MaxExecutionEventLimit+2 || trace.Timeline[0].Seq != 1 {
+		t.Fatalf("trace timeline len=%d first=%#v, want full stream from seq 1", len(trace.Timeline), trace.Timeline[0])
+	}
+	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].ID != "early-call" || trace.ToolCalls[0].StartSeq != 1 {
+		t.Fatalf("trace tool calls = %#v, want early tool call from seq 1", trace.ToolCalls)
 	}
 }
 

@@ -28,6 +28,7 @@ const sidebars = {
         'guides/multi-agent-coordination',
         'guides/autonomous-tasks',
         'guides/kontxt-quickstart',
+        'guides/cli-harness-wrapper',
         'guides/repository-security-scanning',
         'guides/repository-monitors',
         'guides/github-label-triggers',
@@ -40,6 +41,8 @@ const sidebars = {
       collapsed: false,
       items: [
         'reference/api-reference',
+        'reference/cli',
+        'reference/cli-commands',
         'reference/execution-events',
         'reference/openai-compat',
         'reference/anthropic-compat',

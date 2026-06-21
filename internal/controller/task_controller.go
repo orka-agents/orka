@@ -274,7 +274,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			span.SetStatus(codes.Error, err.Error())
 			return ctrl.Result{}, err
 		}
-		r.recordTaskLifecycleEvent(
+		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
 			execevents.ExecutionEventTypeTaskCreated,
@@ -305,19 +305,19 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 	eventType string,
 	severity string,
 	summary string,
-) {
+) error {
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return
+		return nil
 	}
 	if strings.TrimSpace(task.Namespace) == "" || strings.TrimSpace(task.Name) == "" {
-		return
+		return nil
 	}
 	_, err := r.ExecutionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   task.Namespace,
 		StreamType:  store.ExecutionEventStreamTypeTask,
 		StreamID:    task.Name,
 		TaskName:    task.Name,
-		SessionName: taskSessionName(task),
+		SessionName: r.executionEventSessionName(ctx, task),
 		Type:        eventType,
 		Severity:    severity,
 		Summary:     summary,
@@ -330,7 +330,33 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 			"task", task.Name,
 			"eventType", eventType,
 		)
+		return err
 	}
+	return nil
+}
+
+func (r *TaskReconciler) executionEventSessionName(ctx context.Context, task *corev1alpha1.Task) string {
+	sessionName := taskSessionName(task)
+	if sessionName == "" {
+		return ""
+	}
+	if r == nil || r.SessionManager == nil || r.SessionManager.store == nil {
+		return ""
+	}
+	if _, err := r.SessionManager.GetSession(ctx, task.Namespace, sessionName); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ""
+		}
+		logf.FromContext(ctx).Error(
+			err,
+			"failed to check session before recording task lifecycle execution event",
+			"namespace", task.Namespace,
+			"task", task.Name,
+			"session", sessionName,
+		)
+		return sessionName
+	}
+	return sessionName
 }
 
 func taskSessionName(task *corev1alpha1.Task) string {
@@ -351,13 +377,13 @@ func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
-func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.Context, task *corev1alpha1.Task) {
+func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.Context, task *corev1alpha1.Task) bool {
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return
+		return true
 	}
 	eventType := executionEventTypeForTaskPhase(task.Status.Phase)
 	if eventType == "" {
-		return
+		return true
 	}
 	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
 		Namespace:  task.Namespace,
@@ -374,18 +400,18 @@ func (r *TaskReconciler) recordTerminalTaskLifecycleEventIfMissing(ctx context.C
 			"task", task.Name,
 			"eventType", eventType,
 		)
-		return
+		return false
 	}
 	if len(listed) > 0 {
-		return
+		return true
 	}
-	r.recordTaskLifecycleEvent(
+	return r.recordTaskLifecycleEvent(
 		ctx,
 		task,
 		eventType,
 		executionEventSeverityForTaskPhase(task.Status.Phase),
 		task.Status.Message,
-	)
+	) == nil
 }
 
 func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
@@ -447,6 +473,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to delete execution events", "task", task.Name)
 				return ctrl.Result{}, err
 			}
+		}
+
+		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
+			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
 		}
 
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
@@ -567,6 +597,16 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.failTask(ctx, task, err.Error())
 	}
 
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		if reason := agentTaskJobBackendUnsupportedReason(task, agent); reason != "" {
+			return r.failTask(ctx, task, reason)
+		}
+		if taskHasPlannedHarnessWrapperTurn(task) {
+			return r.runHarnessWrapperTask(ctx, task, agent)
+		}
+		return r.runHarnessWrapperTask(ctx, task, agent)
+	}
+
 	return r.createTaskJob(ctx, task, agent, provider)
 }
 
@@ -576,6 +616,29 @@ func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
 	}
 	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
 	return err == nil && pending
+}
+
+func agentTaskJobBackendUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
+	if task == nil {
+		return ""
+	}
+	switch {
+	case task.Spec.Transaction != nil:
+		return "agent CLI runtime tasks do not support transaction token delegation with the harness wrapper yet"
+	case effectiveAgentResources(task, agent):
+		return "agent CLI runtime tasks do not support custom Kubernetes resources with the harness wrapper yet"
+	case resolveExecution(task, agent) != nil:
+		return "agent CLI runtime tasks do not support execution placement with the harness wrapper yet"
+	default:
+		return ""
+	}
+}
+
+func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task != nil && (len(task.Spec.Resources.Requests) > 0 || len(task.Spec.Resources.Limits) > 0) {
+		return true
+	}
+	return agent != nil && (len(agent.Spec.Resources.Requests) > 0 || len(agent.Spec.Resources.Limits) > 0)
 }
 
 func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
@@ -667,6 +730,19 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 	}
 
 	if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
+		if strings.Contains(err.Error(), "already locked") {
+			session, getErr := r.SessionManager.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+			if getErr != nil {
+				return ctrl.Result{}, getErr, true
+			}
+			if session.ActiveTask == task.Name {
+				return ctrl.Result{}, nil, false
+			}
+			if session.ActiveTask == "" {
+				return ctrl.Result{RequeueAfter: time.Second}, nil, true
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+		}
 		log.Error(err, "failed to acquire session lock")
 		if errors.Is(err, store.ErrNotFound) {
 			result, failErr := r.failTask(ctx, task, err.Error())
@@ -955,14 +1031,14 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 	if transitionedToRunning {
-		r.recordTaskLifecycleEvent(
+		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
 			execevents.ExecutionEventTypeTaskJobCreated,
 			execevents.ExecutionEventSeverityInfo,
 			fmt.Sprintf("Job %s created", jobName),
 		)
-		r.recordTaskLifecycleEvent(
+		_ = r.recordTaskLifecycleEvent(
 			ctx,
 			task,
 			execevents.ExecutionEventTypeTaskStarted,
@@ -1450,8 +1526,18 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if elapsed > task.Spec.Timeout.Duration {
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
+				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
+			}
 			return r.failTask(ctx, task, "task timed out")
 		}
+	}
+
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && taskHasHarnessWrapperTurn(task) {
+		return r.finishHarnessWrapperTask(ctx, task)
+	}
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
+		return r.failTask(ctx, task, "harness runtime turn identity is missing")
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks
@@ -1858,7 +1944,12 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
+	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
+	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
+			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
+		}
+	}
 
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
@@ -1893,6 +1984,9 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 
 	if err := r.enforceParentScheduledTaskHistory(ctx, task); err != nil {
 		return ctrl.Result{}, err
+	}
+	if !terminalEventRecorded {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -2054,7 +2148,7 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		log.Error(err, "failed to update completion status")
 		return ctrl.Result{}, err
 	}
-	r.recordTaskLifecycleEvent(
+	terminalEventErr := r.recordTaskLifecycleEvent(
 		ctx,
 		task,
 		executionEventTypeForTaskPhase(phase),
@@ -2067,6 +2161,9 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		if err := r.updateAgentLastUsed(ctx, task.Namespace, task.Spec.AgentRef.Name, now); err != nil && !apierrors.IsNotFound(err) {
 			log.Error(err, "failed to update agent LastUsed")
 		}
+	}
+	if terminalEventErr != nil {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -2623,6 +2720,19 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent.Spec.Runtime == nil {
 			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 		}
+		switch agent.Spec.Runtime.Type {
+		case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+		default:
+			return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
+		}
+		if taskRequestsReadOnlyAgent(task) {
+			switch agent.Spec.Runtime.Type {
+			case corev1alpha1.AgentRuntimeCodex:
+				return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
+			case corev1alpha1.AgentRuntimeCopilot:
+				return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
+			}
+		}
 		if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
 			return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 		}
@@ -2633,6 +2743,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		// Agent with runtime must not have a model provider set
 		if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
 			return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
+		}
+		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
+			return err
 		}
 		// Prompt is required for agent tasks
 		if task.Spec.Prompt == "" {

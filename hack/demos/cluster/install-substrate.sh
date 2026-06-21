@@ -201,7 +201,7 @@ if [[ "${AGENTIC}" == "1" ]]; then
   # ---- 1. Codex-capable Actor image -------------------------------------
   # The agentic run executes a real codex CLI INSIDE the gVisor Actor, so the
   # Actor image must carry codex + git (the e2e's stripped workspace-agent-root
-  # does not). The production agent-worker-codex image has the daemon + codex +
+  # does not). The production agent-harness-wrapper image has the daemon + codex +
   # git. Build it LOCALLY (the kind registry is on localhost; a remote builder
   # cannot push there) for the kind node arch, push to the registry, and point
   # the ActorTemplate at it.
@@ -209,12 +209,12 @@ if [[ "${AGENTIC}" == "1" ]]; then
     -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
   reg_ip="$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' "${KIND_REGISTRY_NAME}" 2>/dev/null || true)"
   [[ -n "${reg_ip}" ]] || die "could not determine ${KIND_REGISTRY_NAME} kind-network IP"
-  push_image="localhost:${KIND_REGISTRY_PORT}/orka/agent-worker-codex:${CODEX_ACTOR_TAG}"
-  actor_image="${reg_ip}:5000/orka/agent-worker-codex:${CODEX_ACTOR_TAG}"
+  push_image="localhost:${KIND_REGISTRY_PORT}/orka/agent-harness-wrapper:${CODEX_ACTOR_TAG}"
+  actor_image="${reg_ip}:5000/orka/agent-harness-wrapper:${CODEX_ACTOR_TAG}"
 
   log "Building codex Actor image ${push_image} (arch ${node_arch})"
   docker build --platform "linux/${node_arch}" -t "${push_image}" \
-    -f "${repo_root}/workers/agent/codex/Dockerfile" "${repo_root}"
+    -f "${repo_root}/workers/harness/Dockerfile" "${repo_root}"
   docker push "${push_image}"
 
   log "Pointing ActorTemplate ${SUBSTRATE_TEMPLATE_NS}/${SUBSTRATE_TEMPLATE_NAME} at the codex image"

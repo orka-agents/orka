@@ -208,6 +208,14 @@ type ExecutionEventStore interface {
 // SanitizeExecutionEventPayloadFields applies the shared event redaction and
 // truncation contract to store-facing event payload fields. Stores call this as
 // a defense-in-depth boundary so direct appends cannot persist obvious secrets.
+//
+// It deliberately does NOT record redaction/truncation metrics: this function is
+// invoked more than once per logical event (e.g. the harness mapper sanitizes,
+// then the store sanitizes again on append), and a worker may have already
+// redacted the payload in a different process before submission. Recording here
+// therefore over- or under-counts. The redaction/truncation metric is recorded
+// exactly once per persisted event at the store append boundary, from the final
+// event state (see ExecutionEventPayloadSanitizationSignals).
 func SanitizeExecutionEventPayloadFields(event *ExecutionEvent) error {
 	if event == nil {
 		return nil
@@ -220,13 +228,22 @@ func SanitizeExecutionEventPayloadFields(event *ExecutionEvent) error {
 	event.Content = payload.Content
 	event.ContentText = payload.ContentText
 	event.Truncation = MergeExecutionEventTruncation(event.Truncation, payload.Truncation)
-	metrics.RecordExecutionEventPayloadSanitization(
-		event.StreamType,
-		event.Type,
-		executionEventPayloadContainsRedactionMarker(event),
-		event.Truncation != nil && !event.Truncation.Empty(),
-	)
 	return nil
+}
+
+// ExecutionEventPayloadSanitizationSignals reports whether the final, persisted
+// event payload shows evidence of redaction (the redaction marker is present in
+// any text/JSON field) and/or truncation (truncation metadata is set). It is
+// derived from the event's terminal state so it is correct regardless of which
+// pass or process performed the sanitization, and is intended to be recorded
+// exactly once per successful append.
+func ExecutionEventPayloadSanitizationSignals(event *ExecutionEvent) (redacted, truncated bool) {
+	if event == nil {
+		return false, false
+	}
+	redacted = executionEventPayloadContainsRedactionMarker(event)
+	truncated = event.Truncation != nil && !event.Truncation.Empty()
+	return redacted, truncated
 }
 
 // MergeExecutionEventTruncation combines truncation metadata, preserving the
@@ -366,6 +383,8 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 		copy.Internal["sessionSeq"] = s.latestSession[sessionKey]
 	}
 	s.events = append(s.events, cloneExecutionEvent(copy))
+	redacted, truncated := ExecutionEventPayloadSanitizationSignals(&copy)
+	metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
 	success = true
 	return &copy, nil
 }

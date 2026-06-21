@@ -53,9 +53,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |
-| `workers/agent/copilot/` | `main_test.go` | Copilot agent worker |
-| `workers/agent/claude/` | `main_test.go` | Claude agent worker |
-| `workers/agent/codex/` | `main_test.go` | Codex agent worker |
+| `workers/harness/cliwrapper/` | adapter and server tests | CLI harness wrapper, including Codex, Claude, Copilot, generic, conformance, cancellation, and redaction |
 
 ### E2E Tests
 
@@ -129,7 +127,7 @@ It bootstraps a fresh Kind cluster, deploys the published multi-arch `docker.io/
 
 Model selection is endpoint-specific. Provider-backed `type: ai` tasks and `/api/v1/chat` probe the live proxy before choosing an OpenAI-compatible Chat Completions model, because a model can appear in the catalog while still being rejected for that endpoint. The Codex runtime uses GPT models that work with the Responses API, while the Claude and Copilot runtime matrix cases use Claude and Gemini families respectively. Keep these preferences in `test/e2e/helpers_test.go` aligned with the live proxy's allowed models rather than assuming one model family works across every endpoint.
 
-The live agent sandbox workflow (`.github/workflows/live-agent-sandbox-e2e.yml`) runs `scripts/live-agent-sandbox-e2e.sh`. It installs upstream `agent-sandbox` `v0.4.6`, builds the PR controller image, builds a fake Claude worker image that also hosts the sandbox `/execute` and file APIs, builds the pinned upstream sandbox router image, and validates that Orka can run an agent Task inside the claimed sandbox without external model access. The script asserts:
+The live agent sandbox workflow (`.github/workflows/live-agent-sandbox-e2e.yml`) runs `scripts/live-agent-sandbox-e2e.sh`. It installs upstream `agent-sandbox` `v0.4.6`, builds the PR controller image, builds a fake harness wrapper image that also hosts the sandbox `/execute` and file APIs, builds the pinned upstream sandbox router image, and validates that Orka can run an agent Task inside the claimed sandbox without external model access. The script asserts:
 
 - the outer worker re-execs inside the sandbox with `ORKA_AGENT_SANDBOX_DEPTH=1` and sandbox recursion disabled
 - the staged service account token is available to the inner worker while the command runs
@@ -156,7 +154,7 @@ The live GitHub OIDC workflow (`.github/workflows/live-github-oidc-e2e.yml`) run
 - top-level `requestedBy` and nested `spec.requestedBy` client tampering are rejected with `400`
 - a tampered `kontxt` TxToken is rejected with `401`
 
-The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/worker images, then validates:
+The Agent Substrate workflow (`.github/workflows/agent-substrate-e2e.yml`) is secret-free and runs `scripts/agent-substrate-e2e.sh` against a fresh Kind cluster. It pins the Substrate checkout with `SUBSTRATE_REF`, installs Substrate, initializes the local RustFS snapshot bucket, builds local Orka controller/workspace/harness images, then validates:
 
 - direct Substrate actor create/resume/router/daemon exec/suspend/delete
 - Orka `SubstrateActorPool` reconciliation and density reporting

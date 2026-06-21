@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package api
 
 import (
@@ -73,9 +79,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusForbidden, "terminal task and approval events must use controller-owned paths")
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
-		if strings.TrimSpace(event.TaskName) == "" {
-			event.TaskName = streamID
-		}
+		event.TaskName = streamID
 		if writerTask != nil {
 			expectedSessionName := sessionNameForTask(writerTask)
 			if expectedSessionName != "" && h.sessionStore != nil {

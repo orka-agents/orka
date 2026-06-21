@@ -63,8 +63,18 @@ const (
 )
 
 // StartTurnRequest is the Orka-to-harness request that starts one explicit turn.
-// All identity and policy fields are safe references or verified metadata; raw
-// credentials and TxTokens must never be serialized here.
+// Identity and policy fields are safe references or verified metadata. Resolved
+// literal credentials destined for the runtime subprocess ARE permitted in
+// Input.Env (see TurnEnvVar): this request is the controller-to-wrapper delivery
+// channel for credentials and is the architectural equivalent of mounting a
+// Secret into the wrapper pod. The prohibition on raw secrets/TxTokens applies to
+// OBSERVABLE and DURABLE surfaces only — Task status, persisted annotations,
+// execution events/frames, logs, and trace output — never to this in-memory
+// request body. Raw TxTokens remain disallowed entirely (use owner-referenced
+// child Secrets and fail-closed TTS exchanges). Callers MUST NOT log this request
+// or persist Input.Env, and the wrapper should drop Input.Env from retained turn
+// state once child env is materialized. Transport confidentiality (TLS) for this
+// channel is a deployment-posture concern tracked separately.
 type StartTurnRequest struct {
 	Version           string            `json:"version"`
 	Namespace         string            `json:"namespace"`
@@ -99,6 +109,19 @@ type PolicyRef struct {
 type TurnInput struct {
 	Prompt      string       `json:"prompt,omitempty"`
 	ContextRefs []ContextRef `json:"contextRefs,omitempty"`
+	Env         []TurnEnvVar `json:"env,omitempty"`
+}
+
+// TurnEnvVar is a resolved, literal environment variable passed to the
+// wrapper subprocess. It intentionally does not model SecretKeyRef/ValueFrom;
+// controller-side validation must reject UNRESOLVED references (SecretKeyRef/
+// ValueFrom) and raw TxTokens. Resolved literal credential values (e.g. a
+// provider API key or git token already read from a Secret by the controller)
+// ARE permitted here — this is the credential delivery channel — but must never
+// be logged, persisted, or surfaced in events/status/trace.
+type TurnEnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
 }
 
 type ContextRef struct {
@@ -196,6 +219,8 @@ type TurnCompleted struct {
 type TurnFailed struct {
 	Reason    string `json:"reason"`
 	Message   string `json:"message,omitempty"`
+	Result    string `json:"result,omitempty"`
+	OutputRef string `json:"outputRef,omitempty"`
 	Retryable bool   `json:"retryable,omitempty"`
 }
 
@@ -269,6 +294,14 @@ func (r StartTurnRequest) Validate() error {
 	if r.ApprovalPolicyRef != nil && strings.TrimSpace(r.ApprovalPolicyRef.Name) == "" {
 		return fmt.Errorf("approval policy ref name is required")
 	}
+	for i, env := range r.Input.Env {
+		if strings.TrimSpace(env.Name) == "" {
+			return fmt.Errorf("input env %d name is required", i)
+		}
+		if !isValidTurnEnvName(env.Name) {
+			return fmt.Errorf("input env %d name %q is invalid", i, env.Name)
+		}
+	}
 	for i, ref := range r.Input.ContextRefs {
 		if strings.TrimSpace(ref.Kind) == "" {
 			return fmt.Errorf("context ref %d kind is required", i)
@@ -281,6 +314,22 @@ func (r StartTurnRequest) Validate() error {
 		}
 	}
 	return nil
+}
+
+func isValidTurnEnvName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (r CancelTurnRequest) Validate() error {

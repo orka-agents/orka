@@ -18,10 +18,13 @@ import (
 	"github.com/sozercan/orka/internal/events"
 )
 
+const maxFetchTurnOutputBytes = 50 << 20
+
 type Client struct {
-	baseURL        *url.URL
-	httpClient     *http.Client
-	controlTimeout time.Duration
+	baseURL         *url.URL
+	httpClient      *http.Client
+	controlTimeout  time.Duration
+	authBearerValue string
 }
 
 const maxHarnessSSEFrameBytes = 1 << 20
@@ -43,6 +46,12 @@ func WithControlTimeout(timeout time.Duration) ClientOption {
 		if timeout > 0 {
 			c.controlTimeout = timeout
 		}
+	}
+}
+
+func WithBearerToken(token string) ClientOption {
+	return func(c *Client) {
+		c.authBearerValue = strings.TrimSpace(token)
 	}
 }
 
@@ -142,6 +151,47 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*Ca
 	return &response, nil
 }
 
+func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outputRef string) ([]byte, error) {
+	ctx, cancel := c.controlContext(ctx)
+	defer cancel()
+	if strings.TrimSpace(string(turnID)) == "" {
+		return nil, safeClientError("fetch_turn_output", 0, "turn id is required")
+	}
+	if err := validateHarnessTurnPathID(turnID); err != nil {
+		return nil, safeClientError("fetch_turn_output", 0, err.Error())
+	}
+	if strings.TrimSpace(outputRef) == "" {
+		return nil, safeClientError("fetch_turn_output", 0, "output ref is required")
+	}
+	rel := turnPath(turnID, "output")
+	u := c.resolve(rel)
+	q := u.Query()
+	q.Set("ref", outputRef)
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, safeClientError("fetch_turn_output", 0, err.Error())
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	c.setAuthHeader(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, safeClientError("fetch_turn_output", 0, err.Error())
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, c.statusError("fetch_turn_output", resp)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchTurnOutputBytes+1))
+	if err != nil {
+		return nil, safeClientError("fetch_turn_output", resp.StatusCode, err.Error())
+	}
+	if len(data) > maxFetchTurnOutputBytes {
+		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output exceeds harness fetch limit")
+	}
+	return data, nil
+}
+
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
 	if strings.TrimSpace(string(turnID)) == "" {
 		return safeClientError("stream_frames", 0, "turn id is required")
@@ -164,6 +214,7 @@ func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSe
 		return safeClientError("stream_frames", 0, err.Error())
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return safeClientError("stream_frames", 0, err.Error())
@@ -183,6 +234,7 @@ func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
 		return safeClientError("get", 0, err.Error())
 	}
 	req.Header.Set("Accept", "application/json")
+	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return safeClientError("get", 0, err.Error())
@@ -209,6 +261,7 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 		return safeClientError("post", 0, err.Error())
 	}
 	req.Header.Set("Accept", "application/json")
+	c.setAuthHeader(req)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -222,6 +275,13 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 		return safeClientError("post", resp.StatusCode, err.Error())
 	}
 	return nil
+}
+
+func (c *Client) setAuthHeader(req *http.Request) {
+	if c == nil || req == nil || c.authBearerValue == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+c.authBearerValue)
 }
 
 func (c *Client) controlContext(ctx context.Context) (context.Context, context.CancelFunc) {

@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-harness-wrapper
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: agent-harness-wrapper
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka
+      app.kubernetes.io/component: agent-harness-wrapper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka
+        app.kubernetes.io/component: agent-harness-wrapper
+    spec:
+      serviceAccountName: agent-harness-wrapper
+      automountServiceAccountToken: false
+      securityContext:
+        # The wrapper process runs as root only so it can read 0400 controller
+        # token volumes and set child credentials. Runtime commands are launched
+        # through commandSysProcAttr with ORKA_HARNESS_WRAPPER_CHILD_UID/GID.
+        runAsUser: 0
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: wrapper
+        image: ghcr.io/sozercan/orka/agent-harness-wrapper:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: ORKA_HARNESS_WRAPPER_RUNTIME
+          value: multi
+        - name: ORKA_HARNESS_WRAPPER_LISTEN_ADDR
+          value: :8080
+        - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+          value: /var/run/orka/harness-wrapper/token
+        - name: ORKA_ALLOW_BASH
+          value: "true"
+        # All turn subprocesses run under this unprivileged identity.
+        - name: ORKA_HARNESS_WRAPPER_CHILD_UID
+          value: "1000"
+        - name: ORKA_HARNESS_WRAPPER_CHILD_GID
+          value: "1000"
+        - name: ORKA_CODEX_SANDBOX_MODE
+          value: danger-full-access
+        - name: ORKA_SA_TOKEN_PATH
+          value: /var/run/orka/upload-token/token
+        volumeMounts:
+        - name: auth
+          mountPath: /var/run/orka/harness-wrapper
+          readOnly: true
+        - name: upload-token
+          mountPath: /var/run/orka/upload-token
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - SETUID
+            - SETGID
+            - CHOWN
+            - KILL
+            - FOWNER
+        livenessProbe:
+          httpGet:
+            path: /v1/health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /v1/health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+      volumes:
+      - name: upload-token
+        projected:
+          defaultMode: 0400
+          sources:
+          - serviceAccountToken:
+              path: token
+      - name: auth
+        secret:
+          secretName: harness-wrapper-auth
+          defaultMode: 0400
+      - name: tmp
+        emptyDir: {}

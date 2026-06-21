@@ -71,7 +71,7 @@ Every DTO carries `version: "orka.harness.v1"`. A missing or unsupported version
 
 ### Required turn fields
 
-`StartTurnRequest` requires namespace, task name, session name, runtime session id, turn id, correlation id, deadline, and a verified auth identity subject or username. Tool and approval policies are safe object references; raw credentials and TxTokens are not valid DTO fields.
+`StartTurnRequest` requires namespace, task name, session name, runtime session id, turn id, correlation id, deadline, and a verified auth identity subject or username. Tool and approval policies are safe object references. Raw TxTokens are not valid DTO fields. Resolved literal credentials destined for the runtime subprocess (provider API keys, git tokens already read from a Secret by the controller) ARE permitted in `input.env` (`TurnEnvVar`): the request body is the controller-to-wrapper credential delivery channel, equivalent to mounting a Secret into the wrapper pod. The prohibition below scopes raw secrets out of observable/durable surfaces, not this in-memory request body.
 
 ```json
 {
@@ -105,7 +105,7 @@ Harness frames are mapped to existing Orka execution event types so task/session
 | `ApprovalRequested` | `ApprovalRequested` | Reuses durable approval event lifecycle. |
 | `TurnCompleted` | `AgentRuntimeCompleted` | Terminal turn metadata is included in content. |
 | `TurnFailed` | `AgentRuntimeFailed` | Severity is forced to `error`. |
-| `TurnCancelled` | `TaskCancelled` | Cancellation is terminal for the turn/task path. |
+| `TurnCancelled` | `AgentRuntimeCancelled` | Cancellation is terminal for the harness turn, but not controller-owned task cancellation. |
 | `RuntimeLog` | `AgentRuntimeCommandStarted` | Used as a safe diagnostic/log event. |
 | Unknown frame | `AgentRuntimeCommandStarted` warning | Does not panic; produces a safe diagnostic event. |
 
@@ -133,7 +133,7 @@ Supported states are `Pending`, `Booting`, `Ready`, `TurnRunning`, `Idle`, `Rele
 ### Security requirements
 
 - Harness control calls are namespace-scoped and authenticated by Orka; per-turn credentials must be short-lived and scoped to the task/session.
-- Raw secrets, raw TxTokens, environment dumps, cookies, API keys, and JWTs must not appear in request DTOs, status, events, logs, or trace output.
+- Raw secrets, raw TxTokens, environment dumps, cookies, API keys, and JWTs must not appear in **persisted or observable** surfaces: Task status, persisted annotations, execution events/frames, logs, or trace output. Resolved literal credentials MAY be carried in the in-memory `StartTurnRequest.input.env` solely as the controller-to-wrapper delivery channel (see "Required turn fields"); the wrapper must not log the request and should drop `input.env` from retained turn state once child env is materialized. Raw TxTokens are disallowed even on the delivery channel — use owner-referenced child Secrets and fail-closed TTS exchanges. Confidentiality of the delivery channel in transit (TLS/mTLS) is a deployment-posture concern.
 - Cross-namespace runtime reuse is denied by ownership validation.
 - Lifecycle transitions and cleanup failures must be evented with safe metadata only.
 

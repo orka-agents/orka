@@ -110,7 +110,11 @@ func newTaskForkCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bodyMap := map[string]any{}
-			if after >= 0 {
+			// Forward an explicitly-set --after (including negatives) so the
+			// server can validate it. Distinguishing "flag set" from the
+			// default sentinel ensures `--after -5` returns a 400 instead of
+			// being silently dropped and forking from latest.
+			if cmd.Flags().Changed("after") {
 				bodyMap["afterSeq"] = after
 			}
 			if newName != "" {
@@ -245,6 +249,7 @@ func newExecutionFollowCmd(use, short, basePath string) *cobra.Command {
 			}
 			if ctx.Err() != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Resume with --after %d\n", lastSeq) //nolint:errcheck
+				return nil
 			}
 			return reader.Err()
 		},

@@ -28,6 +28,7 @@ const (
 	ExecutionEventTypeAgentRuntimeCommandStarted    = "AgentRuntimeCommandStarted"
 	ExecutionEventTypeAgentRuntimeCompleted         = "AgentRuntimeCompleted"
 	ExecutionEventTypeAgentRuntimeFailed            = "AgentRuntimeFailed"
+	ExecutionEventTypeAgentRuntimeCancelled         = "AgentRuntimeCancelled"
 	ExecutionEventTypeResultSubmitted               = "ResultSubmitted"
 	ExecutionEventTypeArtifactUploadCompleted       = "ArtifactUploadCompleted"
 	ExecutionEventTypeArtifactUploadFailed          = "ArtifactUploadFailed"
@@ -80,6 +81,7 @@ var validExecutionEventTypes = map[string]struct{}{
 	ExecutionEventTypeAgentRuntimeCommandStarted:    {},
 	ExecutionEventTypeAgentRuntimeCompleted:         {},
 	ExecutionEventTypeAgentRuntimeFailed:            {},
+	ExecutionEventTypeAgentRuntimeCancelled:         {},
 	ExecutionEventTypeResultSubmitted:               {},
 	ExecutionEventTypeArtifactUploadCompleted:       {},
 	ExecutionEventTypeArtifactUploadFailed:          {},
@@ -120,6 +122,7 @@ func ExecutionEventTypes() []string {
 		ExecutionEventTypeAgentRuntimeCommandStarted,
 		ExecutionEventTypeAgentRuntimeCompleted,
 		ExecutionEventTypeAgentRuntimeFailed,
+		ExecutionEventTypeAgentRuntimeCancelled,
 		ExecutionEventTypeResultSubmitted,
 		ExecutionEventTypeArtifactUploadCompleted,
 		ExecutionEventTypeArtifactUploadFailed,

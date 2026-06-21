@@ -8,7 +8,10 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
-const DefaultMaxEvents = 200
+const (
+	DefaultMaxEvents       = 200
+	DefaultMaxContextBytes = 256 * 1024
+)
 
 type Context struct {
 	SourceNamespace string         `json:"sourceNamespace"`
@@ -31,8 +34,25 @@ type EventSummary struct {
 
 // BuildContext returns a bounded, already-sanitized summary of events up to afterSeq.
 func BuildContext(namespace, taskName string, afterSeq int64, events []store.ExecutionEvent, maxEvents int) Context {
+	return BuildContextWithLimits(namespace, taskName, afterSeq, events, maxEvents, DefaultMaxContextBytes)
+}
+
+// BuildContextWithLimits returns a bounded, already-sanitized summary of events up to afterSeq.
+// Events are selected newest-first, then returned in chronological order. The byte limit bounds
+// the marshaled Context payload that may be embedded into a forked Task prompt.
+func BuildContextWithLimits(
+	namespace,
+	taskName string,
+	afterSeq int64,
+	events []store.ExecutionEvent,
+	maxEvents int,
+	maxBytes int,
+) Context {
 	if maxEvents <= 0 {
 		maxEvents = DefaultMaxEvents
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxContextBytes
 	}
 	ordered := make([]store.ExecutionEvent, 0, len(events))
 	for _, event := range events {
@@ -47,19 +67,75 @@ func BuildContext(namespace, taskName string, afterSeq int64, events []store.Exe
 		ordered = ordered[len(ordered)-maxEvents:]
 	}
 	ctx := Context{SourceNamespace: namespace, SourceTask: taskName, AfterSeq: afterSeq, Truncated: truncated}
-	for _, event := range ordered {
-		ctx.Events = append(ctx.Events, EventSummary{
-			Seq:         event.Seq,
-			Type:        event.Type,
-			Severity:    event.Severity,
-			Summary:     event.Summary,
-			ToolName:    event.ToolName,
-			ToolCallID:  event.ToolCallID,
-			Content:     cloneRaw(event.Content),
-			ContentText: event.ContentText,
-		})
+	for i := len(ordered) - 1; i >= 0; i-- {
+		summary := eventSummaryFromStore(ordered[i])
+		kept, compacted := prependEventWithinLimit(&ctx, summary, maxBytes)
+		if !kept {
+			truncated = true
+			continue
+		}
+		if compacted {
+			truncated = true
+		}
 	}
+	ctx.Truncated = truncated
 	return ctx
+}
+
+func prependEventWithinLimit(ctx *Context, summary EventSummary, maxBytes int) (kept bool, compacted bool) {
+	candidate := append([]EventSummary{summary}, ctx.Events...)
+	ctx.Events = candidate
+	if marshaledContextLen(*ctx) <= maxBytes {
+		return true, false
+	}
+	compact := summary
+	compact.Content = nil
+	compact.ContentText = ""
+	candidate[0] = compact
+	ctx.Events = candidate
+	if marshaledContextLen(*ctx) <= maxBytes {
+		return true, true
+	}
+	compact.Summary = truncateForkContextText(compact.Summary, 1024)
+	candidate[0] = compact
+	ctx.Events = candidate
+	if marshaledContextLen(*ctx) <= maxBytes {
+		return true, true
+	}
+	ctx.Events = candidate[1:]
+	return false, true
+}
+
+func eventSummaryFromStore(event store.ExecutionEvent) EventSummary {
+	return EventSummary{
+		Seq:         event.Seq,
+		Type:        event.Type,
+		Severity:    event.Severity,
+		Summary:     event.Summary,
+		ToolName:    event.ToolName,
+		ToolCallID:  event.ToolCallID,
+		Content:     cloneRaw(event.Content),
+		ContentText: event.ContentText,
+	}
+}
+
+func marshaledContextLen(ctx Context) int {
+	data, err := json.Marshal(ctx)
+	if err != nil {
+		return maxInt
+	}
+	return len(data)
+}
+
+const maxInt = int(^uint(0) >> 1)
+
+func truncateForkContextText(value string, maxChars int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if maxChars <= 0 || len(runes) <= maxChars {
+		return value
+	}
+	return string(runes[:maxChars]) + "...[truncated]"
 }
 
 func ValidateAfterSeq(afterSeq int64, events []store.ExecutionEvent) bool {

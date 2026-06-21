@@ -21,12 +21,20 @@ import (
 )
 
 const (
-	artifactsDir              = "/tmp/artifacts/"
+	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
+	defaultArtifactsDir       = "/tmp/artifacts"
 	workspaceArtifactsDirName = ".orka-artifacts"
 	maxTotalSize              = 50 << 20 // 50 MB
 	maxFileSize               = 10 << 20 // 10 MB
 	artifactPath              = "internal/v1/artifacts"
 )
+
+func artifactsDir() string {
+	if dir := strings.TrimSpace(os.Getenv(artifactsDirEnv)); dir != "" {
+		return filepath.Clean(dir)
+	}
+	return defaultArtifactsDir
+}
 
 // EnsureWorkspaceArtifactsLink exposes /tmp/artifacts inside the repo root so
 // runtime agents can write artifacts using a workspace-relative path.
@@ -34,7 +42,8 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	if workspaceDir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+	artifactRoot := artifactsDir()
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
@@ -51,7 +60,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 				if !filepath.IsAbs(resolved) {
 					resolved = filepath.Join(filepath.Dir(linkPath), resolved)
 				}
-				if filepath.Clean(resolved) == filepath.Clean(artifactsDir) {
+				if filepath.Clean(resolved) == filepath.Clean(artifactRoot) {
 					return nil
 				}
 			}
@@ -62,7 +71,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 		return fmt.Errorf("failed to inspect workspace artifact path: %w", err)
 	}
 
-	if err := os.Symlink(artifactsDir, linkPath); err != nil {
+	if err := os.Symlink(artifactRoot, linkPath); err != nil {
 		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
 	}
 	return nil
@@ -73,7 +82,7 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 func MissingArtifacts(filenames []string) ([]string, error) {
 	missing := make([]string, 0, len(filenames))
 	for _, filename := range filenames {
-		info, err := os.Stat(filepath.Join(artifactsDir, filename))
+		info, err := os.Stat(filepath.Join(artifactsDir(), filename))
 		switch {
 		case os.IsNotExist(err):
 			missing = append(missing, filename)
@@ -92,53 +101,55 @@ func WriteArtifactFile(filename string, data []byte) error {
 	if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\") {
 		return fmt.Errorf("invalid artifact filename %q", filename)
 	}
-	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+	artifactRoot := artifactsDir()
+	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(artifactsDir, filename), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(artifactRoot, filename), data, 0o644); err != nil {
 		return fmt.Errorf("failed to write artifact %s: %w", filename, err)
 	}
 	return nil
 }
 
-// UploadArtifacts scans /tmp/artifacts/ and uploads each file to the controller.
+// UploadArtifacts scans /tmp/artifacts and uploads each file to the controller.
 // It is called after SubmitResult to persist any files the agent wrote.
 // Returns nil if the artifacts directory does not exist or is empty.
 func UploadArtifacts() error {
-	if _, err := os.Stat(artifactsDir); os.IsNotExist(err) {
+	artifactRoot := artifactsDir()
+	info, err := os.Lstat(artifactRoot)
+	if os.IsNotExist(err) {
 		return nil
 	}
-
-	entries, err := os.ReadDir(artifactsDir)
 	if err != nil {
+		return fmt.Errorf("failed to inspect artifacts directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("artifacts directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("artifacts path is not a directory")
+	}
+
+	dirFile, err := openNoFollow(artifactRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to open artifacts directory: %w", err)
+	}
+	defer dirFile.Close() //nolint:errcheck
+	entries, err := dirFile.ReadDir(-1)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to read artifacts directory: %w", err)
 	}
 	if len(entries) == 0 {
 		return nil
 	}
 
-	// Compute total size, excluding symlinks and oversized files
 	var totalSize int64
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		filePath := filepath.Join(artifactsDir, e.Name())
-		fi, err := os.Lstat(filePath)
-		if err != nil {
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		if fi.Size() > maxFileSize {
-			continue
-		}
-		totalSize += fi.Size()
-	}
-	if totalSize > maxTotalSize {
-		return fmt.Errorf("total artifact size %d bytes exceeds limit of %d bytes", totalSize, maxTotalSize)
-	}
 
 	baseEndpoint, err := artifactEndpointBase()
 	if err != nil {
@@ -147,6 +158,13 @@ func UploadArtifacts() error {
 
 	saToken := workerServiceAccountToken()
 
+	type pendingArtifact struct {
+		filename    string
+		data        []byte
+		contentType string
+	}
+
+	pending := make([]pendingArtifact, 0, len(entries))
 	var uploadErrors []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -159,20 +177,50 @@ func UploadArtifacts() error {
 			fmt.Fprintf(os.Stderr, "artifact: skipping invalid filename %q\n", filename)
 			continue
 		}
-		filePath := filepath.Join(artifactsDir, filename)
-
-		// Reject symlinks to prevent exfiltration of sensitive files
-		fi, err := os.Lstat(filePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "artifact: failed to stat %s: %v\n", filename, err)
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
+		if e.Type()&os.ModeSymlink != 0 {
 			fmt.Fprintf(os.Stderr, "artifact: skipping symlink %s\n", filename)
 			continue
 		}
-
-		data, err := os.ReadFile(filePath)
+		info, err := e.Info()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "artifact: failed to inspect %s: %v\n", filename, err)
+			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", filename, err))
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "artifact: skipping non-regular file %s\n", filename)
+			continue
+		}
+		// Reject symlinks and open relative to the already-open artifact directory
+		// so the artifact root path is not re-resolved after the no-follow check.
+		file, err := openAtNoFollow(dirFile, filename)
+		if err != nil {
+			if isNoFollowSkippable(err) {
+				fmt.Fprintf(os.Stderr, "artifact: skipping unsafe or missing file %s: %v\n", filename, err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "artifact: failed to open %s: %v\n", filename, err)
+			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", filename, err))
+			continue
+		}
+		fi, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			fmt.Fprintf(os.Stderr, "artifact: failed to stat %s: %v\n", filename, err)
+			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", filename, err))
+			continue
+		}
+		if fi.IsDir() {
+			_ = file.Close()
+			continue
+		}
+		if fi.Size() > maxFileSize {
+			_ = file.Close()
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, fi.Size(), maxFileSize)
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
+		_ = file.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "artifact: failed to read %s: %v\n", filename, err)
 			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", filename, err))
@@ -183,15 +231,24 @@ func UploadArtifacts() error {
 			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, len(data), maxFileSize)
 			continue
 		}
+		totalSize += int64(len(data))
+		if totalSize > maxTotalSize {
+			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, maxTotalSize)
+		}
+		pending = append(pending, pendingArtifact{
+			filename:    filename,
+			data:        data,
+			contentType: detectContentType(filename, data),
+		})
+	}
 
-		contentType := detectContentType(filename, data)
-		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(filename))
-
-		if err := doPostWithContentType(endpoint, data, saToken, contentType); err != nil {
-			fmt.Fprintf(os.Stderr, "artifact: failed to upload %s: %v\n", filename, err)
-			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", filename, err))
+	for _, artifact := range pending {
+		endpoint := fmt.Sprintf("%s/%s", baseEndpoint, url.PathEscape(artifact.filename))
+		if err := doPostWithContentType(endpoint, artifact.data, saToken, artifact.contentType); err != nil {
+			fmt.Fprintf(os.Stderr, "artifact: failed to upload %s: %v\n", artifact.filename, err)
+			uploadErrors = append(uploadErrors, fmt.Sprintf("%s: %v", artifact.filename, err))
 		} else {
-			fmt.Printf("artifact: uploaded %s (%d bytes, %s)\n", filename, len(data), contentType)
+			fmt.Printf("artifact: uploaded %s (%d bytes, %s)\n", artifact.filename, len(artifact.data), artifact.contentType)
 		}
 	}
 

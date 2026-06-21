@@ -62,6 +62,8 @@ func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.Execution
 	for attempt := range maxAttempts {
 		appended, err := s.appendExecutionEventOnce(ctx, copy, contentJSON, truncationJSON)
 		if err == nil {
+			redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
+			metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
 			success = true
 			return appended, nil
 		}
