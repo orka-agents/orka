@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent } from '@/components/ui/card'
 import { EventTimeline } from '@/components/events/event-timeline'
@@ -27,11 +27,18 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
   // every event between the loaded tail and latestSeq. Replaying from the loaded
   // tail fills the gap without dropping events.
   const seedSeq = maxSeq(initialEvents)
+  const latestSeq = initial.data?.latestSeq ?? 0
 
-  // Backfill the tail when the server reports more events than the capped page we
-  // loaded, even if the user paused following, so a session with >1000 events
-  // isn't stuck on its first page.
-  const hasBackfillGap = (initial.data?.latestSeq ?? 0) > seedSeq
+  // Track how far the live stream has replayed so the backfill gap can close once
+  // it catches up. Updated in an effect (not during render).
+  const [streamedThrough, setStreamedThrough] = useState(0)
+
+  // Backfill the tail when the server reports more events than we currently hold
+  // (the freshly-loaded page or the streamed tail), even if the user paused
+  // following, so a session with >1000 events isn't stuck on its first page. Once
+  // the stream catches up the gap closes and "Stop following" actually pauses it.
+  const highestHeld = Math.max(seedSeq, streamedThrough)
+  const hasBackfillGap = latestSeq > highestHeld
   const streamEnabled = (following || hasBackfillGap) && !!sessionId
 
   const stream = useExecutionEventStream({
@@ -40,12 +47,19 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
     after: seedSeq,
   })
 
+  useEffect(() => {
+    // Grow-only: converges and bails out once caught up (Math.max returns the
+    // same value), so this does not cascade renders.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStreamedThrough((prev) => Math.max(prev, stream.lastSeq))
+  }, [stream.lastSeq])
+
   const events = useMemo(
     () => mergeEventsBySeq(initialEvents, stream.events),
     [initialEvents, stream.events],
   )
   // Show the true latest session sequence for the resume helper.
-  const lastSeq = Math.max(initial.data?.latestSeq ?? 0, stream.lastSeq, maxSeq(events))
+  const lastSeq = Math.max(latestSeq, highestHeld, stream.lastSeq, maxSeq(events))
 
   const notImplemented =
     initial.error instanceof ApiError && initial.error.status === 501

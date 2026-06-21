@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { EventTimeline } from '@/components/events/event-timeline'
 import { ForkDialog } from './fork-dialog'
@@ -34,13 +34,21 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // of what we hold. Seeding from the loaded tail lets the stream replay every
   // event after it (filling the gap up to latestSeq and beyond) without skipping.
   const seedSeq = maxSeq(initialEvents)
+  const latestSeq = initial.data?.latestSeq ?? 0
+
+  // Track how far the live stream has replayed, so the backfill gap can close once
+  // it catches up. Updated in an effect (not during render) to satisfy the
+  // refs-during-render rule.
+  const [streamedThrough, setStreamedThrough] = useState(0)
 
   // The list endpoint caps at 1000 events. When the server reports a higher
-  // latestSeq than the page we loaded, there's a tail to backfill — open the
-  // stream even if the user isn't actively following, so a completed task with
-  // >1000 events isn't stuck showing only its first page. The stream replays
-  // from seedSeq and stream_completes for a terminal task, then stops.
-  const hasBackfillGap = (initial.data?.latestSeq ?? 0) > seedSeq
+  // latestSeq than the highest seq we currently hold (the freshly-loaded page or
+  // the streamed tail), there's more to backfill — open the stream even if the
+  // user isn't actively following, so a completed task or long session with
+  // >1000 events isn't stuck on its first page. Once the stream catches up the
+  // gap closes and "Stop following" actually pauses the stream.
+  const highestHeld = Math.max(seedSeq, streamedThrough)
+  const hasBackfillGap = latestSeq > highestHeld
   const streamEnabled = (following || hasBackfillGap) && !!taskId
 
   const stream = useExecutionEventStream({
@@ -49,6 +57,13 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
     after: seedSeq,
   })
 
+  useEffect(() => {
+    // Grow-only: converges and bails out once caught up (Math.max returns the
+    // same value), so this does not cascade renders.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStreamedThrough((prev) => Math.max(prev, stream.lastSeq))
+  }, [stream.lastSeq])
+
   const events = useMemo(
     () => mergeEventsBySeq(initialEvents, stream.events),
     [initialEvents, stream.events],
@@ -56,7 +71,7 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // Display the true latest sequence the server reported, even if our loaded
   // page or live tail hasn't reached it yet, so the resume-from-seq helper is
   // accurate.
-  const lastSeq = Math.max(initial.data?.latestSeq ?? 0, stream.lastSeq, maxSeq(events))
+  const lastSeq = Math.max(latestSeq, highestHeld, stream.lastSeq, maxSeq(events))
 
   const notImplemented =
     initial.error instanceof ApiError && initial.error.status === 501

@@ -203,4 +203,32 @@ describe('TaskEventTimeline', () => {
     // stream stays closed.
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
+
+  it('closes the backfill stream once it has caught up so pausing follow works', async () => {
+    // First page caps at seq 100, server reports latestSeq 1500 (a gap), and the
+    // mocked stream has already replayed through 1500 (caught up).
+    streamState.current = {
+      events: [makeEvent({ seq: 1500, type: 'ModelMessage', summary: 'caught up' })],
+      lastSeq: 1500,
+      status: 'streaming',
+    }
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 1500,
+          events: [makeEvent({ seq: 100, type: 'ModelMessage', summary: 'first page tail' })],
+        }),
+      ),
+    )
+    // Completed task, follow off. The gap forced the stream open, but the merged
+    // events now reach latestSeq (1500), so the gap is closed.
+    render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(screen.getByText('caught up')).toBeInTheDocument())
+    // The most recent stream call reflects the closed gap: not enabled, because
+    // following is off and there's no longer a tail to backfill.
+    await waitFor(() => {
+      const last = streamCalls[streamCalls.length - 1]
+      expect(last.enabled).toBe(false)
+    })
+  })
 })
