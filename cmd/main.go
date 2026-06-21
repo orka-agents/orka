@@ -74,10 +74,6 @@ func main() {
 	var enableHTTP2 bool
 	var apiPort int
 	var watchNamespace string
-	var copilotWorkerImage string
-	var claudeWorkerImage string
-	var codexWorkerImage string
-	var codexSandboxMode string
 	var generalWorkerImage string
 	var aiWorkerClusterRoleName string
 	var vendorWorkerClusterRoleName string
@@ -114,6 +110,7 @@ func main() {
 	var contextTokenTaskReadScopes string
 	var contextTokenTaskListScopes string
 	var contextTokenTaskDeleteScopes string
+	var contextTokenTaskUpdateScopes string
 	var contextTokenToolReadScopes string
 	var contextTokenToolUseScopes string
 	var contextTokenProviderUseScopes string
@@ -185,14 +182,6 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&apiPort, "api-port", 8080, "The port the REST API server binds to.")
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to watch for resources. Empty for all namespaces.")
-	flag.StringVar(&copilotWorkerImage, "copilot-worker-image",
-		controller.DefaultCopilotWorkerImage, "Container image for Copilot agent worker.")
-	flag.StringVar(&claudeWorkerImage, "claude-worker-image",
-		controller.DefaultClaudeWorkerImage, "Container image for Claude agent worker.")
-	flag.StringVar(&codexWorkerImage, "codex-worker-image",
-		controller.DefaultCodexWorkerImage, "Container image for Codex agent worker.")
-	flag.StringVar(&codexSandboxMode, "codex-sandbox-mode", "",
-		"Sandbox mode for Codex agent worker. Empty uses worker default.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -335,6 +324,9 @@ func main() {
 	flag.StringVar(&contextTokenTaskDeleteScopes, "context-token-task-delete-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_DELETE_SCOPES"),
 		"Comma-separated context-token scopes that authorize Task deletion. Defaults to orka:tasks:delete.")
+	flag.StringVar(&contextTokenTaskUpdateScopes, "context-token-task-update-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_TASK_UPDATE_SCOPES"),
+		"Comma-separated context-token scopes that authorize Task-adjacent mutations. Defaults to orka:tasks:update.")
 	flag.StringVar(&contextTokenToolReadScopes, "context-token-tool-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Tool reads. Defaults to orka:tools:read.")
@@ -473,6 +465,7 @@ func main() {
 		TaskReadScopes:             contextTokenTaskReadScopes,
 		TaskListScopes:             contextTokenTaskListScopes,
 		TaskDeleteScopes:           contextTokenTaskDeleteScopes,
+		TaskUpdateScopes:           contextTokenTaskUpdateScopes,
 		ToolReadScopes:             contextTokenToolReadScopes,
 		ToolUseScopes:              contextTokenToolUseScopes,
 		ProviderUseScopes:          contextTokenProviderUseScopes,
@@ -641,10 +634,6 @@ func main() {
 	webhookNotifier := controller.NewWebhookNotifier()
 	webhookNotifier.SetKubeClient(mgr.GetClient())
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
-	jobBuilder.CopilotWorkerImage = copilotWorkerImage
-	jobBuilder.ClaudeWorkerImage = claudeWorkerImage
-	jobBuilder.CodexWorkerImage = codexWorkerImage
-	jobBuilder.CodexSandboxMode = codexSandboxMode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	if contextTokenTTSConfig.Enabled() {
@@ -666,10 +655,6 @@ func main() {
 	}
 	setupLog.Info("worker images configured",
 		"ai", aiWorkerImage,
-		"copilot", copilotWorkerImage,
-		"claude", claudeWorkerImage,
-		"codex", codexWorkerImage,
-		"codexSandboxMode", codexSandboxMode,
 		"general", generalWorkerImage,
 	)
 	jobBuilder.ControllerURL = controllerURL
@@ -704,6 +689,7 @@ func main() {
 		PlanStore:                          sqliteStore,
 		MessageStore:                       sqliteStore,
 		ArtifactStore:                      sqliteStore,
+		ExecutionEventStore:                sqliteStore,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
@@ -825,6 +811,7 @@ func main() {
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
+		ExecutionEventStore:       sqliteStore,
 		HealthChecker:             sqliteStore,
 		Clientset:                 kubeClient,
 		Chat: api.ChatConfig{

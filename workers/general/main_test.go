@@ -8,12 +8,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/sozercan/orka/internal/workerenv"
 )
 
 func TestRun_Success(t *testing.T) {
@@ -48,6 +54,85 @@ func TestRun_CommandFromEnv(t *testing.T) {
 	if err != nil {
 		t.Errorf("run() returned error: %v", err)
 	}
+}
+
+func TestRun_EmitsWorkerEventsOnSuccess(t *testing.T) {
+	eventTypes := captureGeneralWorkerHTTPEvents(t, "general-success-task", func() {
+		origArgs := os.Args
+		t.Cleanup(func() { os.Args = origArgs })
+		os.Args = []string{"worker", "printf", "hello"}
+
+		if err := run(); err != nil {
+			t.Fatalf("run() error = %v", err)
+		}
+	})
+
+	want := []string{"WorkerStarted", "ResultSubmitted", "WorkerCompleted"}
+	if !reflect.DeepEqual(eventTypes, want) {
+		t.Fatalf("event types = %#v, want %#v", eventTypes, want)
+	}
+}
+
+func TestRun_EmitsWorkerFailedEventOnError(t *testing.T) {
+	eventTypes := captureGeneralWorkerHTTPEvents(t, "general-failure-task", func() {
+		origArgs := os.Args
+		t.Cleanup(func() { os.Args = origArgs })
+		os.Args = []string{"worker", "nonexistent_command_12345"}
+
+		if err := run(); err == nil {
+			t.Fatal("run() error = nil, want command error")
+		}
+	})
+
+	want := []string{"WorkerStarted", "WorkerFailed"}
+	if !reflect.DeepEqual(eventTypes, want) {
+		t.Fatalf("event types = %#v, want %#v", eventTypes, want)
+	}
+}
+
+func captureGeneralWorkerHTTPEvents(t *testing.T, taskName string, runWorker func()) []string {
+	t.Helper()
+
+	var mu sync.Mutex
+	var eventTypes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/events/default/task/"+taskName):
+			defer r.Body.Close() //nolint:errcheck
+			var body struct {
+				Type     string `json:"type"`
+				TaskName string `json:"taskName"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode event body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if body.TaskName != taskName {
+				t.Errorf("event taskName = %q, want %q", body.TaskName, taskName)
+			}
+			mu.Lock()
+			eventTypes = append(eventTypes, body.Type)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasPrefix(r.URL.Path, "/internal/v1/results/default/"+taskName):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskName, taskName)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv("ORKA_ARTIFACTS_DIR", filepath.Join(t.TempDir(), "artifacts"))
+	runWorker()
+
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), eventTypes...)
 }
 
 func TestWorkspaceRootUsesSubPath(t *testing.T) {

@@ -20,32 +20,33 @@ import (
 
 func cleanupArtifactsDir(t *testing.T) {
 	t.Helper()
-	if err := os.RemoveAll(artifactsDir); err != nil {
+	t.Setenv(artifactsDirEnv, filepath.Join(t.TempDir(), "artifacts"))
+	if err := os.RemoveAll(artifactsDir()); err != nil {
 		t.Fatalf("failed to clean artifacts dir: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.RemoveAll(artifactsDir)
+		_ = os.RemoveAll(artifactsDir())
 	})
 }
 
 func prepareArtifactsDir(t *testing.T) {
 	t.Helper()
 	cleanupArtifactsDir(t)
-	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
+	if err := os.MkdirAll(artifactsDir(), 0o755); err != nil {
 		t.Fatalf("failed to create artifacts dir: %v", err)
 	}
 }
 
 func writeArtifactFile(t *testing.T, name string, data []byte) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(artifactsDir, name), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(artifactsDir(), name), data, 0o644); err != nil {
 		t.Fatalf("failed to write artifact %q: %v", name, err)
 	}
 }
 
 func createSparseArtifactFile(t *testing.T, name string, size int64) {
 	t.Helper()
-	f, err := os.Create(filepath.Join(artifactsDir, name))
+	f, err := os.Create(filepath.Join(artifactsDir(), name))
 	if err != nil {
 		t.Fatalf("failed to create artifact %q: %v", name, err)
 	}
@@ -118,8 +119,8 @@ func TestEnsureWorkspaceArtifactsLink_CreatesRepoLocalSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Readlink(%q) error = %v", linkPath, err)
 	}
-	if filepath.Clean(target) != filepath.Clean(artifactsDir) {
-		t.Fatalf("symlink target = %q, want %q", target, artifactsDir)
+	if filepath.Clean(target) != filepath.Clean(artifactsDir()) {
+		t.Fatalf("symlink target = %q, want %q", target, artifactsDir())
 	}
 }
 
@@ -195,6 +196,22 @@ func TestUploadArtifacts_URLEscapesFilename(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactsRejectsSymlinkArtifactRoot(t *testing.T) {
+	cleanupArtifactsDir(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, artifactsDir()); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
+	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
+	t.Setenv("ORKA_TASK_NAME", "test-task")
+
+	err := UploadArtifacts()
+	if err == nil || !strings.Contains(err.Error(), "artifacts directory must not be a symlink") {
+		t.Fatalf("UploadArtifacts() error = %v, want symlink root rejection", err)
+	}
+}
+
 func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	prepareArtifactsDir(t)
 	// Create multiple files each under maxFileSize but totalling over maxTotalSize
@@ -204,7 +221,11 @@ func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 		createSparseArtifactFile(t, fmt.Sprintf("file-%d.bin", i), fileSize)
 	}
 
-	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("UploadArtifacts() uploaded %s before enforcing total size", r.URL.Path)
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_CONTROLLER_URL", srv.URL)
 	t.Setenv("ORKA_TASK_NAMESPACE", "test-ns")
 	t.Setenv("ORKA_TASK_NAME", "test-task")
 

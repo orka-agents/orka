@@ -57,7 +57,7 @@ func TestPrepareSecurityReviewContextWritesManifestAndAppendsPrompt(t *testing.T
 		t.Fatalf("cfg.Prompt = %q, want original prompt plus deterministic context", cfg.Prompt)
 	}
 
-	manifestPath := filepath.Join(artifactsDir, security.ReviewContextArtifactName("slice_app"))
+	manifestPath := filepath.Join(artifactsDir(), security.ReviewContextArtifactName("slice_app"))
 	manifestData, err := os.ReadFile(manifestPath)
 	if err != nil {
 		t.Fatalf("ReadFile(manifest) error = %v", err)

@@ -10,7 +10,6 @@ MIT License - see LICENSE file for details.
 package e2e
 
 import (
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
@@ -100,44 +99,26 @@ var _ = Describe("Agent Session Continuity", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create first Task")
 
-		By("verifying a Job is created for the first task")
-		verifyJob1Created := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s,orka.ai/task-type=agent", taskName1),
-				"-o", "jsonpath={.items[0].metadata.name}",
-				"-n", namespace,
-			)
-			output, err := utils.Run(cmd)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to get Job for first task")
-			g.Expect(output).NotTo(BeEmpty(), "Job name should not be empty")
-		}
-		Eventually(verifyJob1Created, 2*time.Minute, time.Second).Should(Succeed())
+		By("verifying harness-wrapper metadata is planned for the first session task")
+		verifyHarnessWrapperMetadataForTask(taskName1, map[string]string{
+			"runtime":   "claude",
+			"wrapper":   "cli",
+			"maxTurns":  "3",
+			"allowBash": "false",
+		}, 2*time.Minute)
 
-		By("verifying the first task has session env vars")
-		verifySessionEnvVars := func(g Gomega) {
-			cmd := exec.Command("kubectl", "get", "jobs",
-				"-l", fmt.Sprintf("orka.ai/task=%s", taskName1),
-				"-o", "jsonpath={.items[0].spec.template.spec.containers[0].env}",
+		By("verifying the runtime session identity includes the shared session")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "task", taskName1,
+				"-o", "jsonpath={.metadata.annotations.orka\\.ai/harness-wrapper-runtime-session-id}",
 				"-n", namespace,
 			)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(output).NotTo(BeEmpty())
+			g.Expect(output).To(ContainSubstring(sessionID))
+		}, 30*time.Second, time.Second).Should(Succeed())
 
-			var envVars []envVar
-			err = json.Unmarshal([]byte(output), &envVars)
-			g.Expect(err).NotTo(HaveOccurred(), "Failed to parse env vars JSON")
-
-			envMap := make(map[string]string)
-			for _, e := range envVars {
-				envMap[e.Name] = e.Value
-			}
-
-			g.Expect(envMap).To(HaveKey("ORKA_SESSION_NAME"))
-			g.Expect(envMap["ORKA_SESSION_NAME"]).To(Equal(sessionID))
-		}
-		Eventually(verifySessionEnvVars, 30*time.Second, time.Second).Should(Succeed())
-
+		By("creating the second Task with the same sessionID")
 		By("creating the second Task with the same sessionID")
 		task2Manifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",

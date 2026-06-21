@@ -47,6 +47,7 @@ type ServerConfig struct {
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
+	ExecutionEventStore       store.ExecutionEventStore
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 }
@@ -71,6 +72,7 @@ type Server struct {
 	MemoryProposalStore    store.MemoryProposalStore
 	SecurityStore          store.SecurityStore
 	RepositoryMonitorStore store.RepositoryMonitorStore
+	ExecutionEventStore    store.ExecutionEventStore
 }
 
 // NewServer creates a new API server
@@ -95,6 +97,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore:    config.MemoryProposalStore,
 		SecurityStore:          config.SecurityStore,
 		RepositoryMonitorStore: config.RepositoryMonitorStore,
+		ExecutionEventStore:    config.ExecutionEventStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -112,6 +115,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore:       config.MemoryProposalStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
+		ExecutionEventStore:       config.ExecutionEventStore,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -205,6 +209,12 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id", s.handlers.GetTask)
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
+	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
+	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
+	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
+	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
+	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
 	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
 	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
@@ -214,6 +224,8 @@ func (s *Server) setupRoutes() {
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
 	api.Get("/sessions/:id", s.handlers.GetSession)
+	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
+	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
 
 	// Memory endpoints
@@ -339,6 +351,7 @@ func (s *Server) setupRoutes() {
 				Client:              s.client,
 				MemoryStore:         s.MemoryStore,
 				MemoryProposalStore: s.MemoryProposalStore,
+				ExecutionEventStore: s.ExecutionEventStore,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -351,6 +364,7 @@ func (s *Server) setupRoutes() {
 		internal.Get("/plans/:namespace/:taskName", s.internalHandlers.GetPlan)
 		internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
 		internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
+		internal.Post("/events/:namespace/:streamType/:streamID", s.internalHandlers.SubmitExecutionEvent)
 		internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
 		internal.Get("/memories/:namespace", s.internalHandlers.ListMemories)
 		internal.Post("/memories/:namespace", s.internalHandlers.CreateMemory)
@@ -375,7 +389,8 @@ func (s *Server) hasInternalStores() bool {
 		s.MessageStore != nil ||
 		s.ArtifactStore != nil ||
 		s.MemoryStore != nil ||
-		s.MemoryProposalStore != nil
+		s.MemoryProposalStore != nil ||
+		s.ExecutionEventStore != nil
 }
 
 // Start starts the API server

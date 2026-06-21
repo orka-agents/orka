@@ -18,6 +18,7 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
+- ../harness-wrapper
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook
@@ -32,12 +33,14 @@ patches:
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
+    name: controller-manager
 
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- path: manager_webhook_patch.yaml
 #  target:
 #    kind: Deployment
+#    name: controller-manager
 
 # Webhook CA injection replacements are intentionally not configured here.
 # Future webhook CA bundle injection should be wired into the manager runtime.

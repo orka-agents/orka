@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-harness-wrapper
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: agent-harness-wrapper
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: agent-harness-wrapper
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

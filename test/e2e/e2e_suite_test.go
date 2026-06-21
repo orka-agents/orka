@@ -30,12 +30,10 @@ var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "ghcr.io/sozercan/orka:latest"
 
-	// Worker images to build and load for e2e testing.
-	aiWorkerImage      = "ghcr.io/sozercan/orka/ai-worker:latest"
-	generalWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
-	copilotWorkerImage = "ghcr.io/sozercan/orka/agent-worker-copilot:latest"
-	claudeWorkerImage  = "ghcr.io/sozercan/orka/agent-worker-claude:latest"
-	codexWorkerImage   = "ghcr.io/sozercan/orka/agent-worker-codex:latest"
+	// Worker and harness images to build and load for e2e testing.
+	aiWorkerImage       = "ghcr.io/sozercan/orka/ai-worker:latest"
+	generalWorkerImage  = "ghcr.io/sozercan/orka/general-worker:latest"
+	harnessWrapperImage = "ghcr.io/sozercan/orka/agent-harness-wrapper:latest"
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
@@ -62,9 +60,7 @@ var _ = BeforeSuite(func() {
 		fmt.Sprintf("IMG=%s", managerImage),
 		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerImage),
 		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerImage),
-		fmt.Sprintf("COPILOT_WORKER_IMG=%s", copilotWorkerImage),
-		fmt.Sprintf("CLAUDE_WORKER_IMG=%s", claudeWorkerImage),
-		fmt.Sprintf("CODEX_WORKER_IMG=%s", codexWorkerImage),
+		fmt.Sprintf("HARNESS_WRAPPER_IMG=%s", harnessWrapperImage),
 	)
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
@@ -74,9 +70,7 @@ var _ = BeforeSuite(func() {
 		managerImage,
 		aiWorkerImage,
 		generalWorkerImage,
-		copilotWorkerImage,
-		claudeWorkerImage,
-		codexWorkerImage,
+		harnessWrapperImage,
 	} {
 		err = utils.LoadImageToKindClusterWithName(img)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))

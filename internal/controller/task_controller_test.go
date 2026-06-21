@@ -1361,6 +1361,23 @@ var _ = Describe("Task Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("does not have a runtime configured"))
 		})
 
+		It("should allow agent tasks with copilot harness runtime", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAgent,
+					Prompt: "test",
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+				},
+			}
+			Expect(r.validateTaskAgentCompatibility(task, agent)).To(Succeed())
+		})
+
 		It("should fail for agent tasks when agent has both runtime and providerRef", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{
@@ -1372,7 +1389,7 @@ var _ = Describe("Task Controller", func() {
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
 				Spec: corev1alpha1.AgentSpec{
-					Runtime:     &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+					Runtime:     &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 					ProviderRef: &corev1alpha1.ProviderReference{Name: "p"},
 				},
 			}
@@ -1392,7 +1409,7 @@ var _ = Describe("Task Controller", func() {
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
 				Spec: corev1alpha1.AgentSpec{
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 					Model:   &corev1alpha1.ModelConfig{Provider: "openai"},
 				},
 			}
@@ -1411,7 +1428,7 @@ var _ = Describe("Task Controller", func() {
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
 				Spec: corev1alpha1.AgentSpec{
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 				},
 			}
 			err := r.validateTaskAgentCompatibility(task, agent)
@@ -1430,7 +1447,7 @@ var _ = Describe("Task Controller", func() {
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
 				Spec: corev1alpha1.AgentSpec{
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 				},
 			}
 			Expect(r.validateTaskAgentCompatibility(task, agent)).To(Succeed())
