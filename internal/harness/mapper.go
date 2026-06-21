@@ -122,14 +122,7 @@ func mapFrameType(frame HarnessEventFrame) (eventType, severity, summary string)
 
 func buildMappedContent(frame HarnessEventFrame) (json.RawMessage, error) {
 	content := map[string]any{
-		"harness": map[string]any{
-			"version":          frame.Version,
-			"frameType":        frame.Type,
-			"runtimeSessionID": frame.RuntimeSessionID,
-			"turnID":           frame.TurnID,
-			"correlationID":    frame.CorrelationID,
-			"seq":              frame.Seq,
-		},
+		"harness": MappedFrameIdentityFromFrame(frame),
 	}
 	if len(frame.Metadata) > 0 {
 		content["metadata"] = frame.Metadata
