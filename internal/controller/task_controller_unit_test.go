@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
@@ -67,7 +69,7 @@ func newTestScheme() *runtime.Scheme {
 func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskReconciler {
 	fb := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).
 		WithIndex(&corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex).
 		WithIndex(&corev1.Event{}, eventReasonField, eventReasonIndex)
 	if len(objs) > 0 {
@@ -81,20 +83,54 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 	}
 	ss := sqlite.NewStore(db, ":memory:")
 	return &TaskReconciler{
-		Client:         fc,
-		Scheme:         scheme,
-		JobBuilder:     NewJobBuilder(fc),
-		SessionManager: NewSessionManager(ss),
-		Recorder:       record.NewFakeRecorder(100),
-		ResultStore:    ss,
-		PlanStore:      ss,
+		Client:              fc,
+		Scheme:              scheme,
+		JobBuilder:          NewJobBuilder(fc),
+		SessionManager:      NewSessionManager(ss),
+		Recorder:            record.NewFakeRecorder(100),
+		ResultStore:         ss,
+		PlanStore:           ss,
+		ExecutionEventStore: ss,
 	}
+}
+
+type failingGetSessionStore struct {
+	store.SessionStore
+	err error
+}
+
+func (s failingGetSessionStore) GetSession(context.Context, string, string) (*store.SessionRecord, error) {
+	return nil, s.err
 }
 
 type recordingTaskWorkspaceExecutor struct {
 	deleteReqs  []workspace.DeleteRequest
 	deleteErr   error
 	closeCalled bool
+}
+
+type failingExecutionEventStore struct {
+	err error
+}
+
+func (s failingExecutionEventStore) AppendExecutionEvent(context.Context, *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return nil, s.err
+}
+
+func (s failingExecutionEventStore) ListExecutionEvents(context.Context, store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	return nil, s.err
+}
+
+func (s failingExecutionEventStore) ListSessionExecutionEvents(context.Context, store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, s.err
+}
+
+func (s failingExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
+	return 0, s.err
+}
+
+func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
+	return s.err
 }
 
 func (e *recordingTaskWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -411,6 +447,41 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskCopilotRuntime(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for copilot harness runtime", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCopilot},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support copilot") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only copilot rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -419,7 +490,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime:     &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime:     &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			ProviderRef: &corev1alpha1.ProviderReference{Name: "p1"},
 		},
 	}
@@ -436,7 +507,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskAgentExecutionWorkspace(t *test
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Execution: &corev1alpha1.ExecutionSpec{
 				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true},
 			},
@@ -459,7 +530,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndModelProvider(t *test
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			Model:   &corev1alpha1.ModelConfig{Provider: "openai"},
 		},
 	}
@@ -476,7 +547,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskNoPrompt(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err == nil {
@@ -492,7 +563,7 @@ func TestValidateTaskAgentCompatibility_AgentTaskValid(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: "copilot"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
@@ -2524,6 +2595,88 @@ func TestHandleDeletion_WithResultRef(t *testing.T) {
 	}
 }
 
+func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-events",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "del-events",
+		TaskName:   "del-events",
+		Type:       events.ExecutionEventTypeTaskStarted,
+		Severity:   events.ExecutionEventSeverityInfo,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent task: %v", err)
+	}
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "other-task",
+		TaskName:   "other-task",
+		Type:       events.ExecutionEventTypeTaskStarted,
+		Severity:   events.ExecutionEventSeverityInfo,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent other task: %v", err)
+	}
+
+	_, err := r.handleDeletion(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	deletedEvents, err := r.ExecutionEventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "del-events",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents deleted task: %v", err)
+	}
+	if len(deletedEvents) != 0 {
+		t.Fatalf("deleted task events len = %d, want 0", len(deletedEvents))
+	}
+	otherEvents, err := r.ExecutionEventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "other-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents other task: %v", err)
+	}
+	if len(otherEvents) != 1 {
+		t.Fatalf("other task events len = %d, want 1", len(otherEvents))
+	}
+}
+
+func TestHandleDeletionKeepsFinalizerWhenExecutionEventCleanupFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-events-fail",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	r.ExecutionEventStore = failingExecutionEventStore{err: errors.New("store unavailable")}
+
+	_, err := r.handleDeletion(context.Background(), task)
+	if err == nil {
+		t.Fatal("handleDeletion() error = nil, want execution event cleanup error")
+	}
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		t.Fatal("task finalizer was removed after execution event cleanup failed")
+	}
+}
+
 func TestHandleDeletion_WithResultRefNilResultStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -3569,7 +3722,7 @@ func TestCreateTaskJob_RBACReconcileFailureEmitsWarningAndContinues(t *testing.T
 
 	fc := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).
 		WithObjects(task).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
@@ -4650,6 +4803,89 @@ func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	}
 }
 
+func TestHandlePending_AgentRuntimeWithoutSecretUsesHarnessWrapperNotJob(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-no-secret", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, harnessWrapperEndpointEnv) {
+		t.Fatalf("message = %q, want harness wrapper endpoint failure", updated.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
+func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-with-resources", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "custom Kubernetes resources") {
+		t.Fatalf("message = %q, want resource unsupported failure", updated.Status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
 func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
@@ -5207,6 +5443,109 @@ func TestHandleRunning_ChildTasksSortedByName(t *testing.T) {
 // completeTask — with plan store cleanup
 // ---------------------------------------------------------------------------
 
+func TestHandleCompletedRecordsMissingCancelledExecutionEvent(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancelled-event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			Message: "cancelled by tool",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+
+	_, err := r.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleCompleted() error = %v", err)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "cancelled-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 ||
+		listed[0].Type != events.ExecutionEventTypeTaskCancelled ||
+		listed[0].Summary != "cancelled by tool" {
+		t.Fatalf("terminal events = %#v, want TaskCancelled with summary", listed)
+	}
+}
+
+func TestCompleteTaskRecordsTerminalExecutionEvent(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "terminal-event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+
+	_, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "terminal-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 ||
+		listed[0].Type != events.ExecutionEventTypeTaskSucceeded ||
+		listed[0].Summary != "done" {
+		t.Fatalf("terminal events = %#v, want TaskSucceeded with summary", listed)
+	}
+}
+
+func TestHandleCompletedRecordsCancelledExecutionEventOnce(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancelled-event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			Message: "cancelled by parent task",
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
+
+	for range 2 {
+		if _, err := r.handleCompleted(context.Background(), task); err != nil {
+			t.Fatalf("handleCompleted() error = %v", err)
+		}
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "cancelled-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 ||
+		listed[0].Type != events.ExecutionEventTypeTaskCancelled ||
+		listed[0].Summary != "cancelled by parent task" {
+		t.Fatalf("terminal events = %#v, want one TaskCancelled event", listed)
+	}
+}
+
 func TestCompleteTask_WithPlanStore(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -5370,6 +5709,8 @@ func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	stale.Status = corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
 
 	r := newUnitReconciler(scheme, current)
+	eventStore := store.NewFakeExecutionEventStore()
+	r.ExecutionEventStore = eventStore
 	result, err := r.createTaskJob(context.Background(), stale, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -5392,6 +5733,18 @@ func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 	}
 	if len(jobs.Items) != 0 {
 		t.Fatalf("expected no jobs to be created, got %d", len(jobs.Items))
+	}
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   current.Name,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("start events = %#v, want none for cancelled task", listed)
 	}
 }
 
@@ -5814,3 +6167,396 @@ func TestEnsureWorkerRBAC_SAExistsButCRBMissing(t *testing.T) {
 
 // Ensure the store.ErrNotFound sentinel is used correctly in tests above.
 var _ = store.ErrNotFound
+
+type failingTaskExecutionEventStore struct{}
+
+func (failingTaskExecutionEventStore) AppendExecutionEvent(context.Context, *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return nil, errors.New("execution event append failed")
+}
+
+func (failingTaskExecutionEventStore) ListExecutionEvents(context.Context, store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) ListSessionExecutionEvents(
+	context.Context,
+	store.SessionExecutionEventFilter,
+) ([]store.SessionExecutionEvent, int64, error) {
+	return nil, 0, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) GetLatestExecutionEventSeq(context.Context, string, string, string) (int64, error) {
+	return 0, errors.New("not implemented")
+}
+
+func (failingTaskExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
+	return errors.New("not implemented")
+}
+
+func TestTaskReconcilerRecordsTaskCreatedEventOnStatusInitialization(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "event-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	controllerutil.AddFinalizer(task, labels.TaskFinalizer)
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "event-task"}})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "event-task"}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending", updated.Status.Phase)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Type != events.ExecutionEventTypeTaskCreated || listed[0].Seq != 1 || listed[0].TaskName != "event-task" {
+		t.Fatalf("listed events = %#v, want one TaskCreated event", listed)
+	}
+}
+
+func TestTaskControllerLifecycleEvents(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "lifecycle-task",
+			Namespace: "default",
+			UID:       "12345678-abcd-efgh-ijkl-1234567890ab",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox:latest",
+			Command: []string{"echo", "hello"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	if _, err := reconciler.createTaskJob(context.Background(), task, nil, nil); err != nil {
+		t.Fatalf("createTaskJob() error = %v", err)
+	}
+	if _, err := reconciler.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "task completed"); err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "lifecycle-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	wantTypes := map[string]bool{
+		events.ExecutionEventTypeTaskJobCreated: false,
+		events.ExecutionEventTypeTaskStarted:    false,
+		events.ExecutionEventTypeTaskSucceeded:  false,
+	}
+	var previousSeq int64
+	for _, event := range listed {
+		if event.Seq <= previousSeq {
+			t.Fatalf("events are not strictly increasing: %#v", listed)
+		}
+		previousSeq = event.Seq
+		if _, ok := wantTypes[event.Type]; ok {
+			wantTypes[event.Type] = true
+		}
+	}
+	for typ, seen := range wantTypes {
+		if !seen {
+			t.Fatalf("lifecycle events missing %s: %#v", typ, listed)
+		}
+	}
+	afterFirst, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "lifecycle-task",
+		AfterSeq:   listed[0].Seq,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents after first seq: %v", err)
+	}
+	for _, event := range afterFirst {
+		if event.Seq <= listed[0].Seq {
+			t.Fatalf("after query returned old seq <= %d: %#v", listed[0].Seq, afterFirst)
+		}
+	}
+}
+
+func TestTaskLifecycleEventOmitsMissingSessionName(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "missing-session-event-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "deleted-session"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	_ = reconciler.recordTaskLifecycleEvent(
+		context.Background(),
+		task,
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventSeverityInfo,
+		"task completed",
+	)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "missing-session-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionName != "" {
+		t.Fatalf("listed events = %#v, want lifecycle event without deleted session name", listed)
+	}
+}
+
+func TestTaskLifecycleEventKeepsSessionNameOnLookupFailure(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup-failure-session-event-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "session-a"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	reconciler.SessionManager = NewSessionManager(failingGetSessionStore{err: errors.New("session store unavailable")})
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	_ = reconciler.recordTaskLifecycleEvent(
+		context.Background(),
+		task,
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventSeverityInfo,
+		"task completed",
+	)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "lookup-failure-session-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionName != "session-a" {
+		t.Fatalf("listed events = %#v, want lifecycle event to keep session name on ambiguous lookup failure", listed)
+	}
+}
+
+func TestTaskLifecycleEventKeepsExistingSessionName(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "existing-session-event-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{Name: "session-a"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	now := time.Now()
+	if err := reconciler.SessionManager.store.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-a",
+		SessionType: "task",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+
+	_ = reconciler.recordTaskLifecycleEvent(
+		context.Background(),
+		task,
+		events.ExecutionEventTypeTaskSucceeded,
+		events.ExecutionEventSeverityInfo,
+		"task completed",
+	)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "existing-session-event-task",
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionName != "session-a" {
+		t.Fatalf("listed events = %#v, want lifecycle event with existing session name", listed)
+	}
+}
+
+func TestTaskDeletionDeletesExecutionEvents(t *testing.T) {
+	scheme := newTestScheme()
+	now := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "delete-events-task",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	eventStore := store.NewFakeExecutionEventStore()
+	reconciler.ExecutionEventStore = eventStore
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "delete-events-task",
+		TaskName:   "delete-events-task",
+		Type:       events.ExecutionEventTypeTaskStarted,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+
+	if _, err := reconciler.handleDeletion(context.Background(), task); err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	remaining, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "delete-events-task",
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents after deletion: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining events = %#v, want none after task deletion", remaining)
+	}
+}
+
+func TestHandleCompletedCleansJobWhenTerminalEventAppendFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "terminal-cleanup-event-failure-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseCancelled,
+			JobName: "terminal-cleanup-event-failure-job",
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "terminal-cleanup-event-failure-job", Namespace: "default"}}
+	reconciler := newUnitReconciler(scheme, task, job)
+	reconciler.ExecutionEventStore = failingTaskExecutionEventStore{}
+	result, err := reconciler.handleCompleted(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleCompleted() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("handleCompleted() result = %#v, want requeue after terminal event append failure", result)
+	}
+	remaining := &batchv1.Job{}
+	err = reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "terminal-cleanup-event-failure-job"}, remaining)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("Get job after handleCompleted() error = %v, want NotFound", err)
+	}
+}
+
+func TestCompleteTaskRequeuesWhenTerminalEventAppendFails(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "terminal-event-failure-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	reconciler.ExecutionEventStore = failingTaskExecutionEventStore{}
+	result, err := reconciler.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("completeTask() result = %#v, want requeue after terminal event append failure", result)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "terminal-event-failure-task"}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded despite event write failure", updated.Status.Phase)
+	}
+}
+
+func TestCompleteTaskUpdatesAgentLastUsedDespiteTerminalEventAppendFailure(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-terminal-event-failure-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: "agent-a"},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task, agent)
+	reconciler.ExecutionEventStore = failingTaskExecutionEventStore{}
+	result, err := reconciler.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done")
+	if err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("completeTask() result = %#v, want requeue after terminal event append failure", result)
+	}
+	updated := &corev1alpha1.Agent{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "agent-a"}, updated); err != nil {
+		t.Fatalf("Get updated agent: %v", err)
+	}
+	if updated.Status.LastUsed == nil {
+		t.Fatalf("agent LastUsed was not updated after terminal event append failure")
+	}
+}
+
+func TestTaskEventWriteFailureDoesNotBreakStatusUpdate(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "event-failure-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	controllerutil.AddFinalizer(task, labels.TaskFinalizer)
+	reconciler := newUnitReconciler(scheme, task)
+	reconciler.ExecutionEventStore = failingTaskExecutionEventStore{}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "event-failure-task"}})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := reconciler.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "event-failure-task"}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending despite event write failure", updated.Status.Phase)
+	}
+}

@@ -547,7 +547,22 @@ deploy_orka() {
 
   cp -R "${ROOT_DIR}/config" "${tmp_config}/config"
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
+  (
+    cd "${tmp_config}/config/harness-wrapper"
+    "${ROOT_DIR}/bin/kustomize" edit set image "ghcr.io/sozercan/orka/agent-harness-wrapper=${codex_image}"
+  )
+  kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+  if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then
+    local wrapper_token_file
+    wrapper_token_file="$(mktemp "${TMP_ROOT}/harness-wrapper-token.XXXXXX")"
+    chmod 0600 "${wrapper_token_file}"
+    dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n' >"${wrapper_token_file}"
+    kubectl -n orka-system create secret generic harness-wrapper-auth --from-file=token="${wrapper_token_file}" >/dev/null
+    rm -f "${wrapper_token_file}"
+  fi
   "${ROOT_DIR}/bin/kustomize" build "${tmp_config}/config/default" | kubectl apply -f -
+  kubectl -n orka-system set env deployment/orka-agent-harness-wrapper CODEX_CLI_PATH=/bin/true
+  kubectl -n orka-system rollout status deployment/orka-agent-harness-wrapper --timeout=5m
 
   local patch
   patch="$(jq -cn \
@@ -584,7 +599,6 @@ deploy_orka() {
                   "--leader-elect",
                   "--health-probe-bind-address=:8081",
                   "--controller-url=http://orka-api.orka-system.svc:8080",
-                  "--codex-worker-image=" + $codex_image,
                   "--execution-workspace-default-provider=substrate",
                   "--agent-sandbox-enabled=false",
                   "--substrate-enabled=true",
@@ -649,9 +663,6 @@ spec:
   agentRuntime:
     maxTurns: 1
     allowBash: true
-  env:
-    - name: CODEX_CLI_PATH
-      value: /bin/true
   execution:
     workspace:
 ${workspace_yaml}
@@ -1068,27 +1079,7 @@ exercise_orka_tasks() {
   verify_mcp_tool_boots_actor_once "${tool_client_image}"
   verify_mcp_tool_cleanup
 
-  run_default_workspace_task "codex-substrate-default-ci"
-  run_pooled_workspace_task "codex-substrate-pool-ci"
-
-  if [[ "${SUBSTRATE_E2E_EXTENDED}" == "1" ]]; then
-    run_retained_workspace_task "codex-substrate-retain-ci"
-  fi
-
-  log "Running missing-template negative task"
-  apply_task "codex-substrate-missing-template-ci" "      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-missing-template-ci
-        namespace: ate-demo
-      cleanupPolicy: delete"
-  wait_task_phase "codex-substrate-missing-template-ci" "Failed" 300
-  local message
-  message="$(kubectl -n default get task codex-substrate-missing-template-ci -o jsonpath='{.status.message}')"
-  if [[ "${message}" != *"not found"* ]]; then
-    echo "missing-template task failed with unexpected message: ${message}" >&2
-    exit 1
-  fi
+  log "Skipping agent Task execution-workspace checks: harness-wrapper runtime is service-backed and no longer runs agent tasks as Substrate Jobs"
 }
 
 wait_http_ok() {
@@ -1212,7 +1203,7 @@ main() {
   fi
   registry_addr="localhost:${KIND_REGISTRY_PORT}"
   controller_image="${registry_addr}/orka/controller:${IMAGE_TAG}"
-  codex_image="${registry_addr}/orka/agent-worker-codex:${IMAGE_TAG}"
+  codex_image="${registry_addr}/orka/agent-harness-wrapper:${IMAGE_TAG}"
   workspace_push_image="${registry_addr}/orka/workspace-agent-root:${IMAGE_TAG}"
   workspace_actor_image="${registry_ip}:5000/orka/workspace-agent-root:${IMAGE_TAG}"
   mcp_push_image="${registry_addr}/orka/mcp-e2e-server:${IMAGE_TAG}"
@@ -1221,7 +1212,7 @@ main() {
 
   log "Building and pushing Orka images"
   docker build -t "${controller_image}" -f "${ROOT_DIR}/Dockerfile" "${ROOT_DIR}"
-  docker build -t "${codex_image}" -f "${ROOT_DIR}/workers/agent/codex/Dockerfile.substrate-e2e" "${ROOT_DIR}"
+  docker build -t "${codex_image}" -f "${ROOT_DIR}/workers/harness/Dockerfile" "${ROOT_DIR}"
   docker build -t "${workspace_push_image}" -f "${ROOT_DIR}/cmd/orka-workspace-agent/Dockerfile" "${ROOT_DIR}"
   docker build -t "${mcp_push_image}" -f "${ROOT_DIR}/cmd/orka-mcp-e2e-server/Dockerfile" "${ROOT_DIR}"
   docker build -t "${tool_client_image}" -f "${ROOT_DIR}/cmd/orka-tool-e2e-client/Dockerfile" "${ROOT_DIR}"

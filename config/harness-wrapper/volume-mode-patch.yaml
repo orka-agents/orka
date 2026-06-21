@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-harness-wrapper
+spec:
+  template:
+    spec:
+      volumes:
+      - name: upload-token
+        projected:
+          defaultMode: 0400
+      - name: auth
+        secret:
+          defaultMode: 0400

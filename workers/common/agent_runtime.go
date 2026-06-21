@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/redact"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
@@ -514,6 +516,8 @@ func getAgentSandboxWorkspaceExecutor() workspace.WorkspaceExecutor {
 	return agentSandboxWorkspaceExecutor
 }
 
+var newEventRecorderFromEnv = NewHTTPEventRecorderFromEnv
+
 func setAgentSandboxWorkspaceExecutorForTest(executor workspace.WorkspaceExecutor) func() {
 	agentSandboxWorkspaceExecutorMu.Lock()
 	previous := agentSandboxWorkspaceExecutor
@@ -577,12 +581,14 @@ func getSubstrateWorkspaceExecutor() (workspace.WorkspaceExecutor, error) {
 // RunAgent orchestrates the common agent worker lifecycle: signal handling,
 // config loading, git setup, workspace preparation, agent execution, and
 // result submission.
-func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExecutor) error {
+func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExecutor) (err error) {
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGTERM, syscall.SIGINT,
 	)
 	defer cancel()
+	eventRecorder := newEventRecorderFromEnv()
+	taskName := os.Getenv(workerenv.TaskName)
 
 	// Populate git credential env vars before the sandbox handoff so the inner
 	// worker can clone private repositories without mounting the outer secret.
@@ -590,53 +596,149 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 
 	if workspaceEnv := workerenv.ParseExecutionWorkspaceEnv(os.Getenv); workspaceEnv.Enabled {
 		if workspaceEnv.Depth > 0 {
-			return fmt.Errorf(
+			err := fmt.Errorf(
 				"execution workspace recursion detected: %s=%d",
 				workerenv.ExecutionWorkspaceDepth,
 				workspaceEnv.Depth,
 			)
+			recordAgentWorkerFailedEvent(eventRecorder, name, taskName, err)
+			return err
 		}
-		return runAgentInWorkspace(ctx, name, workspaceDir, workspaceEnv)
+		if err := runAgentInWorkspace(ctx, name, workspaceDir, workspaceEnv); err != nil {
+			recordAgentWorkerFailedEvent(eventRecorder, name, taskName, err)
+			return err
+		}
+		return nil
 	}
 
 	if sandboxEnv := workerenv.ParseAgentSandboxEnv(os.Getenv); sandboxEnv.Enabled {
 		if depth := agentSandboxDepth(os.Getenv(workerenv.AgentSandboxDepth)); depth > 0 {
-			return fmt.Errorf("agent sandbox recursion detected: %s=%d", workerenv.AgentSandboxDepth, depth)
+			err := fmt.Errorf("agent sandbox recursion detected: %s=%d", workerenv.AgentSandboxDepth, depth)
+			recordAgentWorkerFailedEvent(eventRecorder, name, taskName, err)
+			return err
 		}
-		return runAgentInSandbox(ctx, name, workspaceDir, sandboxEnv)
+		if err := runAgentInSandbox(ctx, name, workspaceDir, sandboxEnv); err != nil {
+			recordAgentWorkerFailedEvent(eventRecorder, name, taskName, err)
+			return err
+		}
+		return nil
 	}
+
+	defer func() {
+		if err != nil {
+			recordAgentWorkerFailedEvent(eventRecorder, name, taskName, err)
+			return
+		}
+		RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeWorkerCompleted, 0,
+			WithEventTaskName(taskName),
+			WithEventAgentName(name),
+			WithEventSummary("agent worker completed"),
+		)
+	}()
 
 	cfg, err := LoadConfig(defaultMaxTurns)
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
+	taskName = cfg.TaskName
 
 	fmt.Printf("Worker %s started task=%s/%s%s\n",
 		name, cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
-
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkerStarted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("agent worker started"),
+		WithEventContent(agentRuntimeEventContent(map[string]any{
+			"runtime": name,
+			"model":   cfg.Model,
+		})),
+	)
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationStarted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("workspace preparation started"),
+	)
 	preparedWorkspace, err := prepareGitWorkspaceForRun(ctx, cfg, workspaceDir)
 	if err != nil {
+		RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
+			WithEventSeverity(events.ExecutionEventSeverityError),
+			WithEventTaskName(cfg.TaskName),
+			WithEventAgentName(name),
+			WithEventSummary(err.Error()),
+		)
 		return err
 	}
 
 	// Apply prior task diff if iterating
 	if !preparedWorkspace {
 		if err := PrepareWorkspace(workspaceDir); err != nil {
+			RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
+				WithEventSeverity(events.ExecutionEventSeverityError),
+				WithEventTaskName(cfg.TaskName),
+				WithEventAgentName(name),
+				WithEventSummary(err.Error()),
+			)
 			return fmt.Errorf("workspace preparation failed: %w", err)
 		}
 		if err := PreparePullRequestReviewContext(workspaceDir, cfg); err != nil {
+			RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
+				WithEventSeverity(events.ExecutionEventSeverityError),
+				WithEventTaskName(cfg.TaskName),
+				WithEventAgentName(name),
+				WithEventSummary(err.Error()),
+			)
 			return fmt.Errorf("pull request review context preparation failed: %w", err)
 		}
 	}
 	if err := EnsureWorkspaceArtifactsLink(workspaceDir); err != nil {
+		RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
+			WithEventSeverity(events.ExecutionEventSeverityError),
+			WithEventTaskName(cfg.TaskName),
+			WithEventAgentName(name),
+			WithEventSummary(err.Error()),
+		)
 		return fmt.Errorf("artifact workspace setup failed: %w", err)
 	}
 	if err := PrepareSecurityReviewContext(workspaceDir, cfg); err != nil {
+		RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
+			WithEventSeverity(events.ExecutionEventSeverityError),
+			WithEventTaskName(cfg.TaskName),
+			WithEventAgentName(name),
+			WithEventSummary(err.Error()),
+		)
 		return fmt.Errorf("security review context preparation failed: %w", err)
 	}
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationCompleted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("workspace preparation completed"),
+	)
 
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeAgentRuntimeStarted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("agent runtime started"),
+		WithEventContent(agentRuntimeEventContent(map[string]any{
+			"runtime": name,
+			"model":   cfg.Model,
+		})),
+	)
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeAgentRuntimeCommandStarted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("agent runtime command started"),
+		WithEventContent(agentRuntimeEventContent(map[string]any{
+			"runtime": name,
+		})),
+	)
 	result, err := executor(ctx, cfg)
 	if err != nil {
+		RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeAgentRuntimeFailed, 0,
+			WithEventSeverity(events.ExecutionEventSeverityError),
+			WithEventTaskName(cfg.TaskName),
+			WithEventAgentName(name),
+			WithEventSummary(err.Error()),
+		)
 		// On failure, still try to submit partial result with any diffs
 		errorOutput := fmt.Sprintf("Error: %v\n\n%s", err, result)
 		resultDir := ""
@@ -650,15 +752,31 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		}
 		if submitErr := SubmitResult(resultBytes); submitErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to submit error result: %v\n", submitErr)
+		} else {
+			RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeResultSubmitted, 0,
+				WithEventTaskName(cfg.TaskName),
+				WithEventAgentName(name),
+				WithEventSummary("agent worker submitted partial result"),
+				WithEventContent(agentRuntimeEventContent(map[string]any{"resultBytes": len(resultBytes)})),
+			)
 		}
 		if restoreErr := RestoreSecurityReviewContextArtifact(cfg); restoreErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to restore security review context artifact: %v\n", restoreErr)
 		}
 		if artifactErr := UploadArtifacts(); artifactErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", artifactErr)
+			recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, false, artifactErr)
+		} else {
+			recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, true, nil)
 		}
 		return fmt.Errorf("%s execution failed: %w", name, err)
 	}
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeAgentRuntimeCompleted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("agent runtime completed"),
+		WithEventContent(agentRuntimeEventContent(map[string]any{"resultChars": len([]rune(result))})),
+	)
 
 	// Build structured result with diff if workspace has changes
 	if result == "" {
@@ -676,16 +794,67 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if err := SubmitResult(resultBytes); err != nil {
 		return fmt.Errorf("failed to submit result: %w", err)
 	}
+	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
+		WithEventTaskName(cfg.TaskName),
+		WithEventAgentName(name),
+		WithEventSummary("agent worker submitted result"),
+		WithEventContent(agentRuntimeEventContent(map[string]any{"resultBytes": len(resultBytes)})),
+	)
 	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
 		return fmt.Errorf("failed to restore security review context artifact: %w", err)
 	}
 	if err := UploadArtifacts(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, false, err)
+	} else {
+		recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, true, nil)
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
 		cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
 	return nil
+}
+
+func agentRuntimeEventContent(values map[string]any) json.RawMessage {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
+}
+
+func recordAgentArtifactUploadEvent(recorder EventRecorder, agentName, taskName string, success bool, err error) {
+	eventType := events.ExecutionEventTypeArtifactUploadCompleted
+	severity := events.ExecutionEventSeverityInfo
+	summary := "agent worker artifact upload completed"
+	content := map[string]any{"artifact": "all"}
+	if !success {
+		eventType = events.ExecutionEventTypeArtifactUploadFailed
+		severity = events.ExecutionEventSeverityWarning
+		summary = "agent worker artifact upload failed"
+		if err != nil {
+			content["error"] = err.Error()
+		}
+	}
+	RecordEventWithTimeout(recorder, eventType, 0,
+		WithEventSeverity(severity),
+		WithEventTaskName(taskName),
+		WithEventAgentName(agentName),
+		WithEventSummary(summary),
+		WithEventContent(agentRuntimeEventContent(content)),
+	)
+}
+
+func recordAgentWorkerFailedEvent(recorder EventRecorder, agentName, taskName string, err error) {
+	if err == nil {
+		return
+	}
+	RecordEventWithTimeout(recorder, events.ExecutionEventTypeWorkerFailed, 0,
+		WithEventSeverity(events.ExecutionEventSeverityError),
+		WithEventTaskName(taskName),
+		WithEventAgentName(agentName),
+		WithEventSummary(err.Error()),
+	)
 }
 
 func prepareGitWorkspaceForRun(ctx context.Context, cfg *AgentConfig, workspaceDir string) (bool, error) {

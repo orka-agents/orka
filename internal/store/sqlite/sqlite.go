@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -112,10 +113,45 @@ func migrate(db *sql.DB) error {
 			updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (namespace, task_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS execution_events (
+			id              TEXT PRIMARY KEY,
+			namespace       TEXT NOT NULL,
+			stream_type     TEXT NOT NULL,
+			stream_id       TEXT NOT NULL,
+			seq             INTEGER NOT NULL,
+			session_seq     INTEGER NOT NULL DEFAULT 0,
+			type            TEXT NOT NULL,
+			severity        TEXT NOT NULL DEFAULT 'info',
+			task_name       TEXT NOT NULL DEFAULT '',
+			session_name    TEXT NOT NULL DEFAULT '',
+			agent_name      TEXT NOT NULL DEFAULT '',
+			tool_name       TEXT NOT NULL DEFAULT '',
+			tool_call_id    TEXT NOT NULL DEFAULT '',
+			summary         TEXT NOT NULL DEFAULT '',
+			content_json    TEXT,
+			content_text    TEXT NOT NULL DEFAULT '',
+			truncation_json TEXT,
+			created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(namespace, stream_type, stream_id, seq)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_messages_order ON session_messages(namespace, session_name, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_namespace ON sessions(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_results_namespace ON results(namespace)`,
 		`CREATE INDEX IF NOT EXISTS idx_plan_states_namespace ON plan_states(namespace)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_stream_seq
+			ON execution_events(namespace, stream_type, stream_id, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_type
+			ON execution_events(namespace, stream_type, stream_id, type, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_task
+			ON execution_events(namespace, task_name, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_session
+			ON execution_events(namespace, session_name, seq)`,
+		`CREATE TABLE IF NOT EXISTS execution_event_session_sequences (
+			namespace    TEXT NOT NULL,
+			session_name TEXT NOT NULL,
+			latest_seq   INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (namespace, session_name)
+		)`,
 		`CREATE TABLE IF NOT EXISTS memories (
 			id                 TEXT PRIMARY KEY,
 			namespace          TEXT NOT NULL,
@@ -515,6 +551,27 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
+		{Name: "session_seq", Definition: "session_seq INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_execution_events_session_seq
+		ON execution_events(namespace, session_name, session_seq)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS execution_event_session_sequences (
+		namespace    TEXT NOT NULL,
+		session_name TEXT NOT NULL,
+		latest_seq   INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (namespace, session_name)
+	)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := backfillExecutionEventSessionCursors(db); err != nil {
+		return err
+	}
+
 	if err := ensureSQLiteColumns(db, "memories", []sqliteColumnMigration{
 		{Name: "source_proposal_id", Definition: "source_proposal_id TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
@@ -591,6 +648,24 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
+	return nil
+}
+
+func backfillExecutionEventSessionCursors(db *sql.DB) error {
+	_, err := db.Exec(`INSERT INTO execution_event_session_sequences(namespace, session_name, latest_seq)
+		SELECT namespace, session_name, MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END)
+		FROM execution_events
+		WHERE session_name <> ''
+		GROUP BY namespace, session_name
+		ON CONFLICT(namespace, session_name) DO UPDATE SET latest_seq =
+			CASE
+				WHEN execution_event_session_sequences.latest_seq > excluded.latest_seq
+				THEN execution_event_session_sequences.latest_seq
+				ELSE excluded.latest_seq
+			END`)
+	if err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
 	return nil
 }
 
@@ -742,8 +817,9 @@ func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db               *sql.DB
+	dbPath           string
+	executionEventMu sync.Mutex
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.

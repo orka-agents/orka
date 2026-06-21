@@ -405,8 +405,8 @@ Review output uses schema version 2 and must cite evidence from the review conte
   "scan": {
     "mode": "initial",
     "sliceId": "slice_...",
-  "changedFiles": ["internal/security/security.go"],
-  "changedLineRanges": [{"path": "internal/security/security.go", "startLine": 120, "endLine": 148}],
+    "changedFiles": ["internal/security/security.go"],
+    "changedLineRanges": [{"path": "internal/security/security.go", "startLine": 120, "endLine": 148}],
     "summary": "Reviewed one bounded slice."
   },
   "findings": [

@@ -626,6 +626,39 @@ func TestFinalizeResult_IgnoresWorkspaceArtifactsSymlink(t *testing.T) {
 	}
 }
 
+func TestFinalizeResult_IncludesUserSkillsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	skillDir := filepath.Join(dir, ".skills", "example")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Generated skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := FinalizeResult(dir, "skills only")
+	if err != nil {
+		t.Fatalf("FinalizeResult() error = %v", err)
+	}
+
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if !strings.Contains(sr.Diff, ".skills/example/SKILL.md") {
+		t.Fatalf("expected .skills user edit in diff, got %q", sr.Diff)
+	}
+}
+
 func TestFinalizeResult_PushBranchNoRemote(t *testing.T) {
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")

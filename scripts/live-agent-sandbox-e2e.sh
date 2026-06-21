@@ -50,7 +50,7 @@ orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
 e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
-fake_claude_image="${ORKA_FAKE_CLAUDE_WORKER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
+fake_claude_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 agent_name="${ORKA_AGENT_SANDBOX_AGENT:-orka-agent-sandbox-e2e-agent}"
@@ -277,7 +277,7 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./workers/agent/claude
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -o /out/worker ./cmd/orka-agent-harness-wrapper
 
 RUN cat >/tmp/sandbox-runtime.go <<'GO'
 package main
@@ -583,7 +583,6 @@ patch_controller_for_agent_sandbox() {
       .spec.template.spec.containers |= map(
         if .name == "manager" then
           .imagePullPolicy = "IfNotPresent"
-          | .args = ((.args // []) | upsert_arg("--claude-worker-image"; $claudeImage))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-enabled"; "true"))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-router-url"; $routerURL))
           | .args = ((.args // []) | upsert_arg("--agent-sandbox-default-template"; $template))
@@ -899,59 +898,12 @@ main() {
 
   log "Port-forwarding Orka API service"
   api_pf_pid="$(start_port_forward "${orka_namespace}" "svc/${orka_api_service}" "${orka_api_local_port}" "${orka_api_service_port}" "${api_pf_log}")"
-  local api_base token
+  local api_base
   api_base="http://127.0.0.1:${orka_api_local_port}"
   wait_for_http "${api_base}/readyz" "Orka API /readyz"
-  token="$(kubectl -n "${orka_namespace}" create token orka-controller-manager --duration="$(api_token_duration)")"
-  [[ -n "${token}" ]] || die "failed to create Orka API token"
 
-  log "Running delete-policy sandbox smoke task"
-  apply_agent_task "${delete_task_name}" "delete policy sandbox smoke" "none" "delete"
-  wait_for_task_succeeded "${delete_task_name}"
-  local delete_result delete_logs
-  delete_result="$(fetch_result "${api_base}" "${token}" "${delete_task_name}")"
-  assert_result_contains "${delete_result}" "ORKA_LIVE_SANDBOX_OK"
-  assert_result_contains "${delete_result}" "depth=1"
-  assert_result_contains "${delete_result}" "enabled=false"
-  assert_result_contains "${delete_result}" "retained_marker=absent"
-  delete_logs="$(task_logs "${delete_task_name}")"
-  assert_result_contains "${delete_logs}" "completed in agent-sandbox workspace"
-  verify_delete_cleanup "${delete_logs}"
-
-  log "Running retained session sandbox task"
-  local session_claim
-  session_claim="$(session_claim_name)"
-  apply_agent_task "${retain_task_one}" "write retained marker" "session" "retain"
-  wait_for_task_succeeded "${retain_task_one}"
-  local retain_one_result
-  retain_one_result="$(fetch_result "${api_base}" "${token}" "${retain_task_one}")"
-  assert_result_contains "${retain_one_result}" "ORKA_LIVE_SANDBOX_OK"
-  assert_result_contains "${retain_one_result}" "retained_marker=absent"
-  verify_retained_claim_reused "${session_claim}"
-
-  log "Running second retained session task to verify reattach"
-  apply_agent_task "${retain_task_two}" "read retained marker" "session" "retain"
-  wait_for_task_succeeded "${retain_task_two}"
-  local retain_two_result
-  retain_two_result="$(fetch_result "${api_base}" "${token}" "${retain_task_two}")"
-  assert_result_contains "${retain_two_result}" "ORKA_LIVE_SANDBOX_OK"
-  assert_result_contains "${retain_two_result}" "retained_marker=present"
-  verify_retained_claim_reused "${session_claim}"
-
-  log "Verifying staged token files were scrubbed from retained workspace"
-  local sandbox pod
-  sandbox="$(kubectl -n "${orka_namespace}" get sandboxclaim "${session_claim}" -o jsonpath='{.status.sandbox.name}')"
-  pod="$(sandbox_pod_name "${sandbox}")"
-  if kubectl -n "${orka_namespace}" exec "pod/${pod}" -c agent -- /bin/sh -c 'test ! -e /app/orka-sa-token && test ! -e /app/orka-transaction-token && test ! -e /app/orka-context-subject-token'; then
-    log "Retained workspace token scrub verified"
-  else
-    die "retained workspace still contains staged token files"
-  fi
-
-  log "Cleaning up retained session claim"
-  run kubectl -n "${orka_namespace}" delete sandboxclaim "${session_claim}" --ignore-not-found=true --wait=true --timeout=2m
-
-  log "Live agent-sandbox e2e passed"
+  log "Skipping agent-sandbox Task smoke: harness-wrapper runtime is service-backed and no longer runs agent tasks as Job-backed sandbox workspaces"
+  log "Live agent-sandbox installation/configuration e2e passed"
 }
 
 main "$@"

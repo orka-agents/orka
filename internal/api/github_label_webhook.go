@@ -592,7 +592,7 @@ func (h *Handlers) githubWebhookNamespace() string {
 	if h.watchNamespace != "" {
 		return h.watchNamespace
 	}
-	return "default"
+	return defaultNamespace
 }
 
 func githubAgentForAction(action string) string {

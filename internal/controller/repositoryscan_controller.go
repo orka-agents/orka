@@ -38,6 +38,7 @@ import (
 )
 
 const (
+	maxThreatModelFallbackBytes  = 1 << 20
 	repositoryScanPhasePending   = "Pending"
 	repositoryScanPhaseScanning  = "Scanning"
 	repositoryScanPhaseReady     = "Ready"
@@ -447,11 +448,49 @@ func (r *RepositoryScanReconciler) hasActiveScanRunWithIdempotencyKey(
 	if err != nil {
 		return false, err
 	}
-	for _, run := range runs {
-		if run.IdempotencyKey != key {
+	for i := range runs {
+		run := &runs[i]
+		if run.IdempotencyKey != key || !activeScanRunPhase(run.Phase) {
 			continue
 		}
-		if run.Phase == scanRunPhasePending || run.Phase == scanRunPhaseRunning {
+		hasActiveTask, err := r.scanRunHasActivePipelineTask(ctx, scan, run.ID)
+		if err != nil {
+			return false, err
+		}
+		if hasActiveTask {
+			return true, nil
+		}
+		now := time.Now()
+		run.Phase = scanRunPhaseFailed
+		run.CompletedAt = &now
+		run.ErrorMessage = "scan run has no active pipeline task for its idempotency key"
+		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func (r *RepositoryScanReconciler) scanRunHasActivePipelineTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, runID string) (bool, error) {
+	if r.Client == nil || strings.TrimSpace(runID) == "" {
+		return false, nil
+	}
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		client.InNamespace(scan.Namespace),
+		client.MatchingLabels(map[string]string{
+			labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+			labels.LabelSecurityScanID: runID,
+		}),
+	); err != nil {
+		return false, err
+	}
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		if !isScanPipelineStage(taskSecurityStage(task)) {
+			continue
+		}
+		if isActiveTaskPhase(task.Status.Phase) {
 			return true, nil
 		}
 	}
@@ -1245,12 +1284,32 @@ func threatModelLooksLikeToolTranscript(content string) bool {
 	return false
 }
 
+func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
+	var lastErr error
+	for range 5 {
+		data, _, err := r.ArtifactStore.GetArtifact(ctx, namespace, taskName, filename)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return nil, lastErr
+}
+
 func (r *RepositoryScanReconciler) loadThreatModelArtifact(ctx context.Context, task *corev1alpha1.Task) (string, string, error) {
 	if r.ArtifactStore == nil {
 		return "", "", nil
 	}
 
-	threatModelData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
+	threatModelData, err := r.getArtifactWithRetry(ctx, task.Namespace, task.Name, security.ArtifactThreatModel)
 	switch {
 	case err == nil:
 		content := strings.TrimSpace(string(threatModelData))
@@ -1262,10 +1321,38 @@ func (r *RepositoryScanReconciler) loadThreatModelArtifact(ctx context.Context, 
 		}
 		return content, "", nil
 	case errors.Is(err, store.ErrNotFound):
+		content, ok, resultErr := r.threatModelFromTaskResult(ctx, task)
+		if resultErr != nil {
+			return "", "", resultErr
+		}
+		if ok {
+			return content, "", nil
+		}
 		return "", fmt.Sprintf("%s is missing", security.ArtifactThreatModel), nil
 	default:
 		return "", "", err
 	}
+}
+
+func (r *RepositoryScanReconciler) threatModelFromTaskResult(ctx context.Context, task *corev1alpha1.Task) (string, bool, error) {
+	if r.ResultStore == nil || task == nil {
+		return "", false, nil
+	}
+	data, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if len(data) > maxThreatModelFallbackBytes {
+		return "", false, nil
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(content, "#") || threatModelLooksLikeToolTranscript(content) {
+		return "", false, nil
+	}
+	return content, true, nil
 }
 
 func (r *RepositoryScanReconciler) loadDiscoveryFindingsV2Artifact(ctx context.Context, task *corev1alpha1.Task) (*security.FindingsV2Artifact, *security.ReviewContextManifest, string, error) {

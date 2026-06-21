@@ -654,7 +654,19 @@ func TestRepositoryScanIdempotencySkipsDuplicateActiveRun(t *testing.T) {
 	if err := store.CreateScanRun(ctx, &storepkg.ScanRun{ID: "scan_existing", Namespace: defaultNS, RepositoryScan: "kaset", TaskName: "existing", Mode: scanModeIncremental, Phase: scanRunPhaseRunning, IdempotencyKey: key, PolicyDigest: policyDigest, StartedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan).Build()
+	existingTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-pipeline",
+			Namespace: defaultNS,
+			Labels: map[string]string{
+				labels.LabelSecurityTarget: labels.SelectorValue(scan.Name),
+				labels.LabelSecurityScanID: "scan_existing",
+				labels.LabelSecurityStage:  security.StageThreatModel,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, existingTask).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
 	if err := reconciler.createScanRun(ctx, scan, scanModeIncremental, "base", ""); err != nil {
 		t.Fatalf("createScanRun() error = %v", err)
@@ -663,8 +675,46 @@ func TestRepositoryScanIdempotencySkipsDuplicateActiveRun(t *testing.T) {
 	if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
 		t.Fatalf("List(Task) error = %v", err)
 	}
-	if len(tasks.Items) != 0 {
-		t.Fatalf("created %d tasks for duplicate active scan, want none", len(tasks.Items))
+	if len(tasks.Items) != 1 || tasks.Items[0].Name != "existing-pipeline" {
+		t.Fatalf("tasks = %#v, want existing active pipeline only", tasks.Items)
+	}
+}
+
+func TestRepositoryScanIdempotencyMarksOrphanedRunFailedAndStartsReplacement(t *testing.T) {
+	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec:       corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"}},
+	}
+	policyDigest := security.ScannerPolicyDigest(security.ScannerPolicy{})
+	key := security.ScanRunIdempotencyKey(defaultNS, "kaset", scanModeIncremental, "base", "", "", policyDigest)
+	if err := store.CreateScanRun(ctx, &storepkg.ScanRun{ID: "scan_orphaned", Namespace: defaultNS, RepositoryScan: "kaset", TaskName: "missing", Mode: scanModeIncremental, Phase: scanRunPhaseRunning, IdempotencyKey: key, PolicyDigest: policyDigest, StartedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
+	if err := reconciler.createScanRun(ctx, scan, scanModeIncremental, "base", ""); err != nil {
+		t.Fatalf("createScanRun() error = %v", err)
+	}
+	orphaned, err := store.GetScanRun(ctx, defaultNS, "scan_orphaned")
+	if err != nil {
+		t.Fatalf("GetScanRun(orphaned) error = %v", err)
+	}
+	if orphaned.Phase != scanRunPhaseFailed || !strings.Contains(orphaned.ErrorMessage, "no active pipeline task") {
+		t.Fatalf("orphaned run = %#v, want failed stale run", orphaned)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
+		t.Fatalf("List(Task) error = %v", err)
+	}
+	if len(tasks.Items) != 1 || taskSecurityStage(&tasks.Items[0]) != security.StageThreatModel {
+		t.Fatalf("tasks = %#v, want replacement threat-model task", tasks.Items)
 	}
 }
 

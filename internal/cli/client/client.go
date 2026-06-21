@@ -280,6 +280,28 @@ func (c *Client) DoJSON(ctx context.Context, method, path string, query map[stri
 	return out, nil
 }
 
+// Stream opens a streaming GET request for Server-Sent Events. The caller must close the returned body.
+func (c *Client) Stream(ctx context.Context, path string, query map[string]string) (io.ReadCloser, error) {
+	reqURL, err := c.resourceURL(path, query)
+	if err != nil {
+		return nil, err
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return resp.Body, nil
+}
+
 // GetRaw gets a raw response body and content type.
 func (c *Client) GetRaw(ctx context.Context, path string, query map[string]string) ([]byte, string, error) {
 	reqURL, err := c.resourceURL(path, query)

@@ -30,14 +30,8 @@ jobs:
           - image: general-worker
             dockerfile: workers/general/Dockerfile
             context: .
-          - image: agent-worker-copilot
-            dockerfile: workers/agent/copilot/Dockerfile
-            context: .
-          - image: agent-worker-claude
-            dockerfile: workers/agent/claude/Dockerfile
-            context: .
-          - image: agent-worker-codex
-            dockerfile: workers/agent/codex/Dockerfile
+          - image: agent-harness-wrapper
+            dockerfile: workers/harness/Dockerfile
             context: .
     steps:
       - name: Checkout
@@ -98,9 +92,7 @@ jobs:
           - image: controller
           - image: ai-worker
           - image: general-worker
-          - image: agent-worker-copilot
-          - image: agent-worker-claude
-          - image: agent-worker-codex
+          - image: agent-harness-wrapper
     steps:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e0f18c8ea69db56b # v0

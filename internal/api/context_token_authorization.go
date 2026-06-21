@@ -27,6 +27,8 @@ import (
 )
 
 const (
+	defaultTaskUpdateScope = "orka:tasks:update"
+
 	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
 	ContextTokenAuthorizationModeOff = "off"
 	// ContextTokenAuthorizationModeAudit logs context-token authorization failures but allows the request.
@@ -88,6 +90,7 @@ type ContextTokenAuthorizationConfig struct {
 	TaskReadScopes                []string
 	TaskListScopes                []string
 	TaskDeleteScopes              []string
+	TaskUpdateScopes              []string
 	ToolReadScopes                []string
 	ToolUseScopes                 []string
 	ProviderUseScopes             []string
@@ -106,7 +109,7 @@ type ContextTokenAuthorizationConfig struct {
 	MonitorOperateScopes          []string
 	SkillReadScopes               []string
 	SkillWriteScopes              []string
-	ConfigMapReadScopes           []string
+	ConfigMapReadScopeList        []string
 }
 
 // ContextTokenAuthorizationConfigOptions names the inputs used to build
@@ -117,6 +120,7 @@ type ContextTokenAuthorizationConfigOptions struct {
 	TaskReadScopes             string
 	TaskListScopes             string
 	TaskDeleteScopes           string
+	TaskUpdateScopes           string
 	ToolReadScopes             string
 	ToolUseScopes              string
 	ProviderUseScopes          string
@@ -154,6 +158,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	readScopes := defaultScopes(opts.TaskReadScopes, ContextTokenScopeTaskGet)
 	listScopes := defaultScopes(opts.TaskListScopes, ContextTokenScopeTaskList)
 	deleteScopes := defaultScopes(opts.TaskDeleteScopes, ContextTokenScopeTaskDelete)
+	updateScopes := defaultScopes(opts.TaskUpdateScopes, defaultTaskUpdateScope)
 	toolRead := defaultScopes(opts.ToolReadScopes, ContextTokenScopeToolsRead)
 	toolUse := defaultScopes(opts.ToolUseScopes, ContextTokenScopeToolsUse)
 	providerUse := defaultScopes(opts.ProviderUseScopes, ContextTokenScopeProvidersUse)
@@ -179,6 +184,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		TaskReadScopes:                readScopes,
 		TaskListScopes:                listScopes,
 		TaskDeleteScopes:              deleteScopes,
+		TaskUpdateScopes:              updateScopes,
 		ToolReadScopes:                toolRead,
 		ToolUseScopes:                 toolUse,
 		ProviderUseScopes:             providerUse,
@@ -197,7 +203,7 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 		MonitorOperateScopes:          monitorOperate,
 		SkillReadScopes:               skillRead,
 		SkillWriteScopes:              skillWrite,
-		ConfigMapReadScopes:           configMapRead,
+		ConfigMapReadScopeList:        configMapRead,
 	}, nil
 }
 
@@ -218,8 +224,8 @@ func (c ContextTokenAuthorizationConfig) SecretCredentialReadScopes() []string {
 	return c.SecretCredentialReadScopeList
 }
 
-func (c ContextTokenAuthorizationConfig) ConfigMapReadScopeList() []string {
-	return c.ConfigMapReadScopes
+func (c ContextTokenAuthorizationConfig) ConfigMapReadScopes() []string {
+	return c.ConfigMapReadScopeList
 }
 
 type contextTokenTaskCreateAuthorizationContext struct {
@@ -435,7 +441,7 @@ func authorizeContextTokenConfigMapRead(token *ContextToken, cfg ContextTokenAut
 		return nil
 	}
 	failures := []string{}
-	requiredScopes := cfg.ConfigMapReadScopeList()
+	requiredScopes := cfg.ConfigMapReadScopes()
 	if !hasAnyScope(token.Scopes, requiredScopes) {
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(requiredScopes, ",")))
 	}

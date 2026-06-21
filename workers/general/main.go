@@ -42,7 +42,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
@@ -54,11 +54,29 @@ func run() error {
 	}
 
 	baseEnv := workerenv.ParseBaseEnv(os.Getenv)
+	taskName := baseEnv.TaskName
+	taskNamespace := baseEnv.TaskNamespace
+	eventRecorder := common.NewHTTPEventRecorderFromEnv()
+	defer func() {
+		if err != nil {
+			recordGeneralWorkerFailed(eventRecorder, taskName, err)
+			return
+		}
+		common.RecordEventWithTimeout(eventRecorder, "WorkerCompleted", 0,
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("General worker completed"),
+		)
+	}()
+
 	transactionLogFields := workerenv.TransactionLogFields(
 		baseEnv.TransactionID, baseEnv.TransactionProfile,
 	)
 	fmt.Printf("Worker general started task=%s/%s%s\n",
-		baseEnv.TaskNamespace, baseEnv.TaskName, transactionLogFields)
+		taskNamespace, taskName, transactionLogFields)
+	common.RecordEvent(ctx, eventRecorder, "WorkerStarted",
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("General worker started"),
+	)
 
 	workDir, err := prepareWorkspaceIfConfigured(ctx)
 	if err != nil {
@@ -102,21 +120,57 @@ func run() error {
 		fmt.Fprint(os.Stderr, stderr.String())
 	}
 
+	output := stdout.String() + stderr.String()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			_ = submitResult(workDir, stdout.String()+stderr.String())
+			if submitErr := submitResult(workDir, output); submitErr == nil {
+				recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
+			}
+			recordGeneralWorkerFailed(
+				eventRecorder,
+				taskName,
+				fmt.Errorf("command exited with code %d: %w", exitErr.ExitCode(), err),
+			)
 			os.Exit(exitErr.ExitCode())
 		}
 		return err
 	}
 
-	if err := submitResult(workDir, stdout.String()+stderr.String()); err != nil {
+	if err := submitResult(workDir, output); err != nil {
 		return err
 	}
+	recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
-		baseEnv.TaskNamespace, baseEnv.TaskName, transactionLogFields)
+		taskNamespace, taskName, transactionLogFields)
 	return nil
+}
+
+func recordGeneralResultSubmitted(recorder common.EventRecorder, taskName string, resultLength int) {
+	common.RecordEventWithTimeout(recorder, "ResultSubmitted", 0,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("General worker submitted result"),
+		common.WithEventContent(generalEventContent(map[string]any{"resultLength": resultLength})),
+	)
+}
+
+func recordGeneralWorkerFailed(recorder common.EventRecorder, taskName string, err error) {
+	if err == nil {
+		return
+	}
+	common.RecordEventWithTimeout(recorder, "WorkerFailed", 0,
+		common.WithEventSeverity("error"),
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary(err.Error()),
+	)
+}
+
+func generalEventContent(value map[string]any) json.RawMessage {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func prepareWorkspaceIfConfigured(ctx context.Context) (string, error) {

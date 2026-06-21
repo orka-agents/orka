@@ -52,7 +52,7 @@ func TestEnsureRequiredSecurityArtifactsFollowUpWritesMissingArtifact(t *testing
 		t.Fatalf("result = %q, want follow-up confirmation appended", result)
 	}
 
-	saved, err := os.ReadFile(filepath.Join(artifactsDir, security.ArtifactFindingsV2))
+	saved, err := os.ReadFile(filepath.Join(artifactsDir(), security.ArtifactFindingsV2))
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestEnsureRequiredSecurityArtifactsRecoversFromTranscript(t *testing.T) {
 		t.Fatalf("EnsureRequiredSecurityArtifacts() error = %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(artifactsDir, security.ArtifactFindingsV2)); err != nil {
+	if _, err := os.Stat(filepath.Join(artifactsDir(), security.ArtifactFindingsV2)); err != nil {
 		t.Fatalf("artifact not recovered: %v", err)
 	}
 }
@@ -126,14 +126,14 @@ func TestEnsureRequiredSecurityArtifactsRecoversPatchArtifactsFromTranscript(t *
 		t.Fatalf("EnsureRequiredSecurityArtifacts() error = %v", err)
 	}
 
-	savedDiff, err := os.ReadFile(filepath.Join(artifactsDir, diffName))
+	savedDiff, err := os.ReadFile(filepath.Join(artifactsDir(), diffName))
 	if err != nil {
 		t.Fatalf("ReadFile(diff) error = %v", err)
 	}
 	if string(savedDiff) != strings.TrimSuffix(diff, "\n") {
 		t.Fatalf("saved diff = %q, want %q", string(savedDiff), strings.TrimSuffix(diff, "\n"))
 	}
-	savedSummary, err := os.ReadFile(filepath.Join(artifactsDir, summaryName))
+	savedSummary, err := os.ReadFile(filepath.Join(artifactsDir(), summaryName))
 	if err != nil {
 		t.Fatalf("ReadFile(summary) error = %v", err)
 	}
@@ -188,7 +188,7 @@ func TestEnsureRequiredSecurityArtifactsRestoresGeneratedReviewContextManifest(t
 		t.Fatalf("EnsureRequiredSecurityArtifacts() error = %v", err)
 	}
 
-	manifestData, err := os.ReadFile(filepath.Join(artifactsDir, contextArtifact))
+	manifestData, err := os.ReadFile(filepath.Join(artifactsDir(), contextArtifact))
 	if err != nil {
 		t.Fatalf("ReadFile(context artifact) error = %v", err)
 	}
@@ -203,10 +203,11 @@ func TestEnsureRequiredSecurityArtifactsRestoresGeneratedReviewContextManifest(t
 
 func cleanupSecurityArtifactsDir(t *testing.T) {
 	t.Helper()
-	if err := os.RemoveAll(artifactsDir); err != nil {
-		t.Fatalf("RemoveAll(%q) error = %v", artifactsDir, err)
+	t.Setenv(artifactsDirEnv, filepath.Join(t.TempDir(), "artifacts"))
+	if err := os.RemoveAll(artifactsDir()); err != nil {
+		t.Fatalf("RemoveAll(%q) error = %v", artifactsDir(), err)
 	}
 	t.Cleanup(func() {
-		_ = os.RemoveAll(artifactsDir)
+		_ = os.RemoveAll(artifactsDir())
 	})
 }

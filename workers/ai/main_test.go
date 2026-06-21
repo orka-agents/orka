@@ -20,8 +20,12 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
+	toolspkg "github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const roleUser = "user"
@@ -603,6 +607,177 @@ func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
 	}
 }
 
+func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
+	provider := &mockProvider{
+		response: &llm.CompletionResponse{
+			Content:      "Task completed successfully",
+			StopReason:   "end_turn",
+			InputTokens:  12,
+			OutputTokens: 8,
+			Model:        "test-model",
+		},
+	}
+	recorder := common.NewFakeEventRecorder()
+	common.RecordEvent(context.Background(), recorder, events.ExecutionEventTypeWorkerStarted,
+		common.WithEventTaskName("task-events"),
+		common.WithEventContent(eventContent(map[string]any{"provider": provider.Name(), "model": "test-model"})),
+	)
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "hello"}}, "", "test-model",
+		nil, nil, nil, recorder,
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	common.RecordEvent(context.Background(), recorder, events.ExecutionEventTypeResultSubmitted,
+		common.WithEventTaskName("task-events"),
+		common.WithEventContent(eventContent(map[string]any{"resultLength": len(result)})),
+	)
+	common.RecordEvent(context.Background(), recorder, events.ExecutionEventTypeWorkerCompleted,
+		common.WithEventTaskName("task-events"),
+	)
+
+	assertRecordedEventTypesEventually(t, recorder, []string{
+		events.ExecutionEventTypeWorkerStarted,
+		events.ExecutionEventTypeModelRequestStarted,
+		events.ExecutionEventTypeModelRequestCompleted,
+		events.ExecutionEventTypeModelMessage,
+		events.ExecutionEventTypeResultSubmitted,
+		events.ExecutionEventTypeWorkerCompleted,
+	})
+	data, err := json.Marshal(recorder.Events())
+	if err != nil {
+		t.Fatalf("marshal events: %v", err)
+	}
+	if strings.Contains(string(data), "sk-test12345678901234567890") {
+		t.Fatalf("AI worker events leaked fake API key: %s", data)
+	}
+}
+
+func TestAIWorkerEventToolCallCompleteness(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(staticTestTool{name: customToolName})
+	llmTools := toolspkg.DefaultRegistry.ToLLMTools([]string{customToolName})
+	provider := &mockProvider{responses: []*llm.CompletionResponse{
+		{
+			Content: "calling tool",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call-1",
+				Name:      customToolName,
+				Arguments: json.RawMessage(`{"path":"README.md"}`),
+			}},
+			StopReason: "tool_use",
+			Model:      "test-model",
+		},
+		{Content: "done", StopReason: "end_turn", Model: "test-model"},
+	}}
+	recorder := common.NewFakeEventRecorder()
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "use tool"}}, "", "test-model",
+		llmTools, nil, nil, recorder,
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "done" {
+		t.Fatalf("result = %q, want done", result)
+	}
+	assertRecordedEventTypesEventually(t, recorder, []string{
+		events.ExecutionEventTypeToolCallStarted,
+		events.ExecutionEventTypeToolCallCompleted,
+	})
+	captured := recorder.Events()
+	var sawToolMetadata bool
+	for _, event := range captured {
+		if event.Type == events.ExecutionEventTypeToolCallCompleted &&
+			event.ToolName == customToolName &&
+			event.ToolCallID == "call-1" {
+			sawToolMetadata = true
+		}
+	}
+	if !sawToolMetadata {
+		t.Fatalf("tool call metadata missing in events: %#v", captured)
+	}
+}
+
+func TestAIWorkerEventContextTruncated(t *testing.T) {
+	provider := &mockProvider{
+		errs:      []error{&llm.ProviderError{StatusCode: http.StatusBadRequest, Message: "context window too long"}},
+		responses: []*llm.CompletionResponse{{Content: "ok", StopReason: "end_turn", Model: "test-model"}},
+	}
+	recorder := common.NewFakeEventRecorder()
+	result, err := executeAgentLoopWithEvents(
+		context.Background(), provider,
+		[]llm.Message{{Role: "user", Content: strings.Repeat("hello ", 200)}},
+		"", "test-model", nil, nil, nil, recorder,
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("result = %q, want ok", result)
+	}
+	assertRecordedEventTypesEventually(t, recorder, []string{events.ExecutionEventTypeContextTruncated})
+}
+
+func TestAIWorkerEventRecorderFailureDoesNotChangeResult(t *testing.T) {
+	provider := &mockProvider{response: &llm.CompletionResponse{Content: "ok", StopReason: "end_turn"}}
+	result, err := executeAgentLoopWithEvents(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "hello"}}, "", "test-model",
+		nil, nil, nil, panicEventRecorder{},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("result = %q, want ok", result)
+	}
+}
+
+func TestAIWorkerEventRecordsValidationFailure(t *testing.T) {
+	gotBody := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/events/default/task/invalid-ai-task" {
+			t.Errorf("path = %s, want internal event path", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotBody <- body
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "invalid-ai-task")
+	t.Setenv(workerenv.AIProvider, "")
+	t.Setenv(workerenv.AIModel, "")
+	t.Setenv(workerenv.AIPrompt, "")
+
+	err := run()
+	if err == nil {
+		t.Fatal("run() error = nil, want validation failure")
+	}
+	select {
+	case body := <-gotBody:
+		if body["type"] != events.ExecutionEventTypeWorkerFailed {
+			t.Fatalf("event type = %#v, want WorkerFailed", body["type"])
+		}
+		if body["taskName"] != "invalid-ai-task" {
+			t.Fatalf("taskName = %#v, want invalid-ai-task", body["taskName"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for WorkerFailed event")
+	}
+}
+
 func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 	provider := &mockProvider{
 		err: fmt.Errorf("provider error"),
@@ -728,11 +903,26 @@ func TestLoadPlanContext_MalformedJSON(t *testing.T) {
 
 // mockProvider implements llm.Provider for testing.
 type mockProvider struct {
-	response *llm.CompletionResponse
-	err      error
+	response  *llm.CompletionResponse
+	responses []*llm.CompletionResponse
+	err       error
+	errs      []error
 }
 
-func (m *mockProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func (m *mockProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	_ = req
+	if len(m.errs) > 0 {
+		err := m.errs[0]
+		m.errs = m.errs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(m.responses) > 0 {
+		resp := m.responses[0]
+		m.responses = m.responses[1:]
+		return resp, nil
+	}
 	return m.response, m.err
 }
 
@@ -742,4 +932,73 @@ func (m *mockProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-ch
 
 func (m *mockProvider) Name() string {
 	return "mock"
+}
+
+type staticTestTool struct {
+	name string
+}
+
+func (t staticTestTool) Name() string { return t.name }
+
+func (t staticTestTool) Description() string { return "test tool" }
+
+func (t staticTestTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
+
+func (t staticTestTool) Execute(context.Context, json.RawMessage) (string, error) {
+	return "tool result", nil
+}
+
+type panicEventRecorder struct{}
+
+func (panicEventRecorder) Record(context.Context, string, ...common.EventOption) {
+	panic("event recorder failed")
+}
+
+func replaceDefaultToolRegistryForTest(t *testing.T) func() {
+	t.Helper()
+	original := toolspkg.DefaultRegistry
+	toolspkg.DefaultRegistry = toolspkg.NewRegistry()
+	return func() { toolspkg.DefaultRegistry = original }
+}
+
+func assertEventTypesPresent(t *testing.T, got []string, want []string) {
+	t.Helper()
+	seen := make(map[string]bool, len(got))
+	for _, typ := range got {
+		seen[typ] = true
+	}
+	for _, typ := range want {
+		if !seen[typ] {
+			t.Fatalf("event types %v missing %s", got, typ)
+		}
+	}
+}
+
+func assertRecordedEventTypesEventually(t *testing.T, recorder *common.FakeEventRecorder, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var got []string
+	for time.Now().Before(deadline) {
+		got = recorder.EventTypes()
+		if hasEventTypes(got, want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	assertEventTypesPresent(t, got, want)
+}
+
+func hasEventTypes(got []string, want []string) bool {
+	seen := make(map[string]bool, len(got))
+	for _, typ := range got {
+		seen[typ] = true
+	}
+	for _, typ := range want {
+		if !seen[typ] {
+			return false
+		}
+	}
+	return true
 }

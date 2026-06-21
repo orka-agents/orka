@@ -303,12 +303,12 @@ metadata:
 The daemon port must match the daemon container's literal
 `ORKA_WORKSPACE_AGENT_LISTEN_ADDR` value, or the daemon default `:8080` when
 that environment variable is omitted. The pinned Substrate router currently
-forwards actor HTTP traffic to port `80`, so Orka agent worker images grant the
+forwards actor HTTP traffic to port `80`, so Orka agent harness wrapper images grant the
 workspace daemon `cap_net_bind_service` while still running it as a non-root
 user. The staging root is currently required to be `/app`, because the worker
 handoff stages the inner worker binary and secret scrub paths under that
 directory.
-Use the Orka agent worker image for the runtime, not the daemon-only image; the
+Use the Orka agent harness wrapper image for the runtime, not the daemon-only image; the
 ActorTemplate container must include `/orka-workspace-agent`, the selected CLI,
 and normal workspace tools such as `git`.
 The controller also validates that the workspace-daemon ActorTemplate container
@@ -347,7 +347,7 @@ spec:
   pauseImage: registry.k8s.io/pause:3.10.2
   containers:
     - name: workspace
-      image: registry.example.com/orka/agent-worker-codex:tag
+      image: registry.example.com/orka/agent-harness-wrapper:tag
       command:
         - /orka-workspace-agent
       env:
