@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
 )
 
 const (
@@ -95,14 +97,14 @@ func newWorkspaceAgentServer() *workspaceAgentServer {
 
 func (s *workspaceAgentServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(daemonprotocol.HealthPath, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("/v1/exec", s.requireAuth(s.handleExec))
-	mux.HandleFunc("/v1/exec/", s.requireAuth(s.handleExecStatus))
-	mux.HandleFunc("/v1/files", s.requireAuth(s.handleFiles))
-	mux.HandleFunc("/v1/files/download", s.requireAuth(s.handleDownload))
-	mux.HandleFunc("/v1/scrub", s.requireAuth(s.handleScrub))
+	mux.HandleFunc(daemonprotocol.ExecPath, s.requireAuth(s.handleExec))
+	mux.HandleFunc(daemonprotocol.ExecStatusPrefix, s.requireAuth(s.handleExecStatus))
+	mux.HandleFunc(daemonprotocol.FilesPath, s.requireAuth(s.handleFiles))
+	mux.HandleFunc(daemonprotocol.FilesDownloadPath, s.requireAuth(s.handleDownload))
+	mux.HandleFunc(daemonprotocol.ScrubPath, s.requireAuth(s.handleScrub))
 	return mux
 }
 
@@ -136,7 +138,7 @@ func handoffBootstrapAllowedForTokenError(err error) bool {
 }
 
 func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *http.Request) (bool, bool) {
-	if r.Method != http.MethodPut || r.URL.Path != "/v1/files" {
+	if r.Method != http.MethodPut || r.URL.Path != daemonprotocol.FilesPath {
 		return false, false
 	}
 	if s.bootstrapToken == "" {
@@ -297,7 +299,7 @@ func (s *workspaceAgentServer) handleExecStatus(w http.ResponseWriter, r *http.R
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/exec/"), "/")
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, daemonprotocol.ExecStatusPrefix), "/")
 	if id == "" {
 		http.Error(w, "execution id is required", http.StatusBadRequest)
 		return
@@ -542,71 +544,17 @@ func appendUniquePath(paths []string, path string) []string {
 	return append(paths, path)
 }
 
-type execRequest struct {
-	Command        []string          `json:"command"`
-	Env            map[string]string `json:"env,omitempty"`
-	WorkDir        string            `json:"workDir,omitempty"`
-	Stdin          []byte            `json:"stdin,omitempty"`
-	TimeoutSeconds int64             `json:"timeoutSeconds,omitempty"`
-	MaxOutputBytes int64             `json:"maxOutputBytes,omitempty"`
-	Detach         bool              `json:"detach,omitempty"`
-	Resident       bool              `json:"resident,omitempty"`
-	ResidentKey    string            `json:"residentKey,omitempty"`
-}
-
-type execResponse struct {
-	ExecID          string    `json:"execId,omitempty"`
-	Running         bool      `json:"running,omitempty"`
-	Stdout          string    `json:"stdout"`
-	Stderr          string    `json:"stderr"`
-	ExitCode        int       `json:"exitCode"`
-	StdoutTruncated bool      `json:"stdoutTruncated"`
-	StderrTruncated bool      `json:"stderrTruncated"`
-	StartedAt       time.Time `json:"startedAt"`
-	FinishedAt      time.Time `json:"finishedAt"`
-}
-
-type uploadRequest struct {
-	Files []uploadFile `json:"files"`
-}
-
-type uploadFile struct {
-	Path    string    `json:"path"`
-	Data    []byte    `json:"data"`
-	Mode    uint32    `json:"mode,omitempty"`
-	ModTime time.Time `json:"modTime,omitempty"`
-}
-
-type uploadResponse struct {
-	Artifacts []artifact `json:"artifacts"`
-}
-
-type downloadRequest struct {
-	Paths []string `json:"paths,omitempty"`
-}
-
-type downloadResponse struct {
-	Artifacts []downloadedArtifact `json:"artifacts"`
-}
-
-type scrubRequest struct {
-	Paths []string `json:"paths"`
-}
-
-type artifact struct {
-	Path    string    `json:"path"`
-	Size    int64     `json:"size"`
-	Digest  string    `json:"digest"`
-	Mode    uint32    `json:"mode"`
-	ModTime time.Time `json:"modTime"`
-}
-
-type downloadedArtifact struct {
-	Artifact
-	Data []byte `json:"data"`
-}
-
-type Artifact = artifact
+type execRequest = daemonprotocol.ExecRequest
+type execResponse = daemonprotocol.ExecResponse
+type uploadRequest = daemonprotocol.UploadRequest
+type uploadFile = daemonprotocol.UploadFile
+type uploadResponse = daemonprotocol.UploadResponse
+type downloadRequest = daemonprotocol.DownloadRequest
+type downloadResponse = daemonprotocol.DownloadResponse
+type scrubRequest = daemonprotocol.ScrubRequest
+type artifact = daemonprotocol.Artifact
+type downloadedArtifact = daemonprotocol.DownloadedArtifact
+type Artifact = daemonprotocol.Artifact
 
 func (s *workspaceAgentServer) decodeJSON(r *http.Request, out any) error {
 	limit := s.maxRequestBytes

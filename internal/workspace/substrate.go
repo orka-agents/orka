@@ -23,6 +23,7 @@ import (
 	"time"
 
 	ateapipb "github.com/sozercan/orka/internal/substratepb"
+	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -411,7 +412,7 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 					ResumeLatency: resumeLatency,
 				}, nil
 			}
-			if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/healthz", nil, nil); err == nil {
+			if err := e.daemonRequest(ctx, actorID, http.MethodGet, daemonprotocol.HealthPath, nil, nil); err == nil {
 				readyAt := e.now()
 				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)
 				placement, density := e.substrateTelemetry(ctx, actor)
@@ -463,8 +464,8 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 		)
 	}
 
-	var resp substrateExecResponse
-	body := substrateExecRequest{
+	var resp daemonprotocol.ExecResponse
+	body := daemonprotocol.ExecRequest{
 		Command:        append([]string(nil), req.Command...),
 		Env:            copyStringMap(req.Env),
 		WorkDir:        req.WorkDir,
@@ -473,7 +474,7 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 		MaxOutputBytes: req.MaxOutputBytes,
 		Detach:         true,
 	}
-	if err := e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/exec", body, &resp); err != nil {
+	if err := e.daemonRequest(ctx, actorID, http.MethodPost, daemonprotocol.ExecPath, body, &resp); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("exec", ctxErr)
 		}
@@ -506,11 +507,11 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 	return result, nil
 }
 
-func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*substrateExecResponse, error) {
+func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*daemonprotocol.ExecResponse, error) {
 	backoff := substrateExecInitialPollInterval
 	for {
-		var resp substrateExecResponse
-		if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/v1/exec/"+url.PathEscape(execID), nil, &resp); err != nil {
+		var resp daemonprotocol.ExecResponse
+		if err := e.daemonRequest(ctx, actorID, http.MethodGet, daemonprotocol.ExecStatusPath(execID), nil, &resp); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, contextError("exec", ctxErr)
 			}
@@ -540,16 +541,16 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 	if actorID == "" {
 		return nil, NewError("upload", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
-	files := make([]substrateUploadFile, 0, len(req.Artifacts))
+	files := make([]daemonprotocol.UploadFile, 0, len(req.Artifacts))
 	for _, artifact := range req.Artifacts {
-		files = append(files, substrateUploadFile{
+		files = append(files, daemonprotocol.UploadFile{
 			Path:    artifact.Path,
 			Data:    append([]byte(nil), artifact.Data...),
 			Mode:    artifact.Mode,
 			ModTime: artifact.ModTime,
 		})
 	}
-	var resp substrateUploadResponse
+	var resp daemonprotocol.UploadResponse
 	authToken := e.handoffToken
 	if req.BootstrapHandoff {
 		bootstrapToken, err := e.requireBootstrapToken("upload")
@@ -570,14 +571,14 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 		ctx,
 		actorID,
 		http.MethodPut,
-		"/v1/files",
-		substrateUploadRequest{Files: files},
+		daemonprotocol.FilesPath,
+		daemonprotocol.UploadRequest{Files: files},
 		&resp,
 		authToken,
 	); err != nil {
 		return nil, err
 	}
-	return &UploadResult{Ref: req.Ref, Artifacts: resp.Artifacts}, nil
+	return &UploadResult{Ref: req.Ref, Artifacts: daemonArtifactsToWorkspace(resp.Artifacts)}, nil
 }
 
 func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context.Context, ref WorkspaceRef) (string, error) {
@@ -615,7 +616,7 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	return token, nil
 }
 
-func replaceSubstrateHandoffUploadToken(files []substrateUploadFile, token string) {
+func replaceSubstrateHandoffUploadToken(files []daemonprotocol.UploadFile, token string) {
 	if len(files) == 1 {
 		files[0].Data = []byte(token)
 		return
@@ -627,6 +628,37 @@ func replaceSubstrateHandoffUploadToken(files []substrateUploadFile, token strin
 	}
 }
 
+func daemonArtifactsToWorkspace(in []daemonprotocol.Artifact) []Artifact {
+	out := make([]Artifact, 0, len(in))
+	for _, artifact := range in {
+		out = append(out, Artifact{
+			Path:    artifact.Path,
+			Size:    artifact.Size,
+			Digest:  artifact.Digest,
+			Mode:    artifact.Mode,
+			ModTime: artifact.ModTime,
+		})
+	}
+	return out
+}
+
+func daemonDownloadedArtifactsToWorkspace(in []daemonprotocol.DownloadedArtifact) []DownloadedArtifact {
+	out := make([]DownloadedArtifact, 0, len(in))
+	for _, artifact := range in {
+		out = append(out, DownloadedArtifact{
+			Artifact: Artifact{
+				Path:    artifact.Path,
+				Size:    artifact.Size,
+				Digest:  artifact.Digest,
+				Mode:    artifact.Mode,
+				ModTime: artifact.ModTime,
+			},
+			Data: append([]byte(nil), artifact.Data...),
+		})
+	}
+	return out
+}
+
 func (e *SubstrateWorkspaceExecutor) Download(ctx context.Context, req DownloadRequest) (*DownloadResult, error) {
 	ctx, cancel := contextWithTimeout(ctx, req.Timeout)
 	defer cancel()
@@ -634,11 +666,11 @@ func (e *SubstrateWorkspaceExecutor) Download(ctx context.Context, req DownloadR
 	if actorID == "" {
 		return nil, NewError("download", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
-	var resp substrateDownloadResponse
-	if err := e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/files/download", substrateDownloadRequest{Paths: req.Paths}, &resp); err != nil {
+	var resp daemonprotocol.DownloadResponse
+	if err := e.daemonRequest(ctx, actorID, http.MethodPost, daemonprotocol.FilesDownloadPath, daemonprotocol.DownloadRequest{Paths: req.Paths}, &resp); err != nil {
 		return nil, err
 	}
-	return &DownloadResult{Ref: req.Ref, Artifacts: resp.Artifacts}, nil
+	return &DownloadResult{Ref: req.Ref, Artifacts: daemonDownloadedArtifactsToWorkspace(resp.Artifacts)}, nil
 }
 
 func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
@@ -1109,7 +1141,7 @@ func substrateDensity(workers []substrateWorker, actors []substrateActor) Densit
 }
 
 func (e *SubstrateWorkspaceExecutor) scrubDaemon(ctx context.Context, actorID string) error {
-	return e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/scrub", substrateScrubRequest{Paths: defaultSubstrateScrubPaths()}, nil)
+	return e.daemonRequest(ctx, actorID, http.MethodPost, daemonprotocol.ScrubPath, daemonprotocol.ScrubRequest{Paths: defaultSubstrateScrubPaths()}, nil)
 }
 
 func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, actorID string) error {
@@ -1131,9 +1163,9 @@ func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, ac
 		restoreCtx,
 		actorID,
 		http.MethodPut,
-		"/v1/files",
-		substrateUploadRequest{
-			Files: []substrateUploadFile{{
+		daemonprotocol.FilesPath,
+		daemonprotocol.UploadRequest{
+			Files: []daemonprotocol.UploadFile{{
 				Path: substrateHandoffTokenUploadPath,
 				Data: []byte(e.handoffToken),
 				Mode: 0o600,
@@ -1275,57 +1307,6 @@ func defaultSubstrateScrubPaths() []string {
 		"/app/" + substrateSessionCertUploadPath,
 		"/app/" + substrateSessionKeyUploadPath,
 	}
-}
-
-type substrateExecRequest struct {
-	Command        []string          `json:"command"`
-	Env            map[string]string `json:"env,omitempty"`
-	WorkDir        string            `json:"workDir,omitempty"`
-	Stdin          []byte            `json:"stdin,omitempty"`
-	TimeoutSeconds int64             `json:"timeoutSeconds,omitempty"`
-	MaxOutputBytes int64             `json:"maxOutputBytes,omitempty"`
-	Detach         bool              `json:"detach,omitempty"`
-	Resident       bool              `json:"resident,omitempty"`
-	ResidentKey    string            `json:"residentKey,omitempty"`
-}
-
-type substrateExecResponse struct {
-	ExecID          string    `json:"execId,omitempty"`
-	Running         bool      `json:"running,omitempty"`
-	Stdout          string    `json:"stdout"`
-	Stderr          string    `json:"stderr"`
-	ExitCode        int       `json:"exitCode"`
-	StdoutTruncated bool      `json:"stdoutTruncated"`
-	StderrTruncated bool      `json:"stderrTruncated"`
-	StartedAt       time.Time `json:"startedAt"`
-	FinishedAt      time.Time `json:"finishedAt"`
-}
-
-type substrateUploadRequest struct {
-	Files []substrateUploadFile `json:"files"`
-}
-
-type substrateUploadFile struct {
-	Path    string    `json:"path"`
-	Data    []byte    `json:"data"`
-	Mode    uint32    `json:"mode,omitempty"`
-	ModTime time.Time `json:"modTime,omitempty"`
-}
-
-type substrateUploadResponse struct {
-	Artifacts []Artifact `json:"artifacts"`
-}
-
-type substrateDownloadRequest struct {
-	Paths []string `json:"paths,omitempty"`
-}
-
-type substrateDownloadResponse struct {
-	Artifacts []DownloadedArtifact `json:"artifacts"`
-}
-
-type substrateScrubRequest struct {
-	Paths []string `json:"paths"`
 }
 
 type grpcSubstrateControlClient struct {
