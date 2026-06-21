@@ -145,6 +145,12 @@ describe('executionEventCategory', () => {
     expect(executionEventCategory('ApprovalRequested')).toBe('approvals')
     expect(executionEventCategory('TaskForkCreated')).toBe('fork')
     expect(executionEventCategory('WorkerStarted')).toBe('worker')
+    // Agent-runtime lifecycle, including cancellation, groups under worker.
+    expect(executionEventCategory('AgentRuntimeCancelled')).toBe('worker')
+    expect(executionEventCategory('AgentRuntimeFailed')).toBe('worker')
+    // TaskDeleted is a synthetic stream event (not in the persisted taxonomy);
+    // it is intentionally categorized as lifecycle.
+    expect(executionEventCategory('TaskDeleted')).toBe('lifecycle')
   })
 
   it('maps unknown types to other', () => {

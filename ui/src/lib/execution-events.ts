@@ -64,6 +64,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   AgentRuntimeCommandStarted: 'worker',
   AgentRuntimeCompleted: 'worker',
   AgentRuntimeFailed: 'worker',
+  AgentRuntimeCancelled: 'worker',
   ModelRequestStarted: 'model',
   ModelRequestCompleted: 'model',
   ModelRequestFailed: 'model',
