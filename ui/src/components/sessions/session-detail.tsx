@@ -85,7 +85,7 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
         </TabsContent>
 
         <TabsContent value="timeline">
-          <SessionEventTimeline key={session.name} sessionId={session.name} />
+          <SessionEventTimeline key={`${session.namespace}/${session.name}`} sessionId={session.name} />
         </TabsContent>
       </Tabs>
     </div>
