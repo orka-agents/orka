@@ -1,0 +1,15 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+# name: omitted on purpose — kindctl always overrides via derived --name
+nodes:
+  - role: control-plane
+    # Uncomment for ingress-style local HTTP/HTTPS access. If multiple clusters
+    # run concurrently, choose distinct hostPort values per repo/worktree.
+    # extraPortMappings:
+    #   - containerPort: 80
+    #     hostPort: 8080
+    #     protocol: TCP
+    #   - containerPort: 443
+    #     hostPort: 8443
+    #     protocol: TCP
+  # - role: worker
