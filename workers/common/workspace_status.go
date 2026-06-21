@@ -29,28 +29,7 @@ type executionWorkspaceStatusOption func(*executionWorkspaceStatusUpdate)
 
 func withExecutionWorkspaceReadyResult(ready *workspace.ReadyResult) executionWorkspaceStatusOption {
 	return func(update *executionWorkspaceStatusUpdate) {
-		if ready == nil {
-			return
-		}
-		if !ready.Placement.IsZero() {
-			update.Placement = &corev1alpha1.ExecutionWorkspacePlacementStatus{
-				WorkerNamespace: ready.Placement.WorkerNamespace,
-				WorkerPool:      ready.Placement.WorkerPool,
-				WorkerPodName:   ready.Placement.WorkerPodName,
-			}
-		}
-		if !ready.Density.IsZero() {
-			update.Density = &corev1alpha1.ExecutionWorkspaceDensityStatus{
-				WorkerCount:         int32(max(ready.Density.WorkerCount, 0)),
-				ActorCount:          int32(max(ready.Density.ActorCount, 0)),
-				RunningActorCount:   int32(max(ready.Density.RunningActorCount, 0)),
-				SuspendedActorCount: int32(max(ready.Density.SuspendedActorCount, 0)),
-				ActorsPerWorker:     ready.Density.ActorsPerWorker,
-			}
-		}
-		if ready.ResumeLatency > 0 {
-			update.ResumeLatency = &metav1.Duration{Duration: ready.ResumeLatency}
-		}
+		statusrules.ApplyReadyResult(update, ready)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sozercan/orka/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -148,5 +149,34 @@ func TestValidationFailedStatus(t *testing.T) {
 	}
 	if !strings.HasSuffix(status.Message, "...<truncated>") {
 		t.Fatalf("message was not sanitized/truncated: len=%d", len(status.Message))
+	}
+}
+
+func TestApplyReadyResult(t *testing.T) {
+	update := &Update{}
+	ApplyReadyResult(update, &workspace.ReadyResult{
+		Placement: workspace.Placement{
+			WorkerNamespace: "substrate-system",
+			WorkerPool:      "pool-a",
+			WorkerPodName:   "actor-pod",
+			PodIP:           "10.0.0.1",
+		},
+		Density: workspace.Density{
+			WorkerCount:         -1,
+			ActorCount:          5,
+			RunningActorCount:   -2,
+			SuspendedActorCount: 3,
+			ActorsPerWorker:     "2.50",
+		},
+		ResumeLatency: 2 * time.Second,
+	})
+	if update.Placement == nil || update.Placement.WorkerNamespace != "substrate-system" || update.Placement.WorkerPool != "pool-a" || update.Placement.WorkerPodName != "actor-pod" {
+		t.Fatalf("placement = %#v", update.Placement)
+	}
+	if update.Density == nil || update.Density.WorkerCount != 0 || update.Density.ActorCount != 5 || update.Density.RunningActorCount != 0 || update.Density.SuspendedActorCount != 3 || update.Density.ActorsPerWorker != "2.50" {
+		t.Fatalf("density = %#v", update.Density)
+	}
+	if update.ResumeLatency == nil || update.ResumeLatency.Duration != 2*time.Second {
+		t.Fatalf("resume latency = %#v", update.ResumeLatency)
 	}
 }
