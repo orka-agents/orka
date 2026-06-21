@@ -18,24 +18,12 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
+	"github.com/sozercan/orka/internal/workspace/statusrules"
 )
 
 const workspaceStatusMaxRetries = 3
 
-type executionWorkspaceStatusUpdate struct {
-	Provider      corev1alpha1.WorkspaceProvider                  `json:"provider"`
-	TemplateRef   *corev1alpha1.WorkspaceTemplateReference        `json:"templateRef,omitempty"`
-	Phase         corev1alpha1.ExecutionWorkspacePhase            `json:"phase"`
-	Reason        corev1alpha1.ExecutionWorkspaceReason           `json:"reason"`
-	ReusePolicy   corev1alpha1.WorkspaceReusePolicy               `json:"reusePolicy,omitempty"`
-	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy             `json:"cleanupPolicy,omitempty"`
-	Reused        bool                                            `json:"reused,omitempty"`
-	Placement     *corev1alpha1.ExecutionWorkspacePlacementStatus `json:"placement,omitempty"`
-	Density       *corev1alpha1.ExecutionWorkspaceDensityStatus   `json:"density,omitempty"`
-	ResumeLatency *metav1.Duration                                `json:"resumeLatency,omitempty"`
-	Message       string                                          `json:"message,omitempty"`
-	ObservedAt    time.Time                                       `json:"observedAt"`
-}
+type executionWorkspaceStatusUpdate = statusrules.Update
 
 type executionWorkspaceStatusOption func(*executionWorkspaceStatusUpdate)
 
@@ -90,8 +78,9 @@ func submitExecutionWorkspaceStatus(
 		CleanupPolicy: corev1alpha1.WorkspaceCleanupPolicy(env.CleanupPolicy),
 		Reused:        reused,
 		Message:       message,
-		ObservedAt:    time.Now().UTC(),
 	}
+	observedAt := metav1.NewTime(time.Now().UTC())
+	update.ObservedAt = &observedAt
 	for _, option := range options {
 		option(&update)
 	}
