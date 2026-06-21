@@ -264,6 +264,9 @@ func TestValidateCustomPolicyTextRejectsOversizedAndSecret(t *testing.T) {
 	if err := ValidateCustomPolicyText("token " + "g" + "hp_" + strings.Repeat("x", 32)); err == nil {
 		t.Fatal("ValidateCustomPolicyText() accepted secret-like policy")
 	}
+	if err := ValidateCustomPolicyText("Use risk-sk-score as a false-positive category name."); err != nil {
+		t.Fatalf("ValidateCustomPolicyText() rejected benign sk substring: %v", err)
+	}
 }
 
 func TestValidationArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {

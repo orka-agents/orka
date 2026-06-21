@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -52,14 +53,15 @@ func ValidateCustomPolicyText(text string) error {
 	return nil
 }
 
+var policySensitivePrefixPattern = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])(?:(?:github` + `_pat_|` + `g` + `hp_|xo` + `xb-|s` + `k-)[A-Za-z0-9_./+=:-]{8,}|(?:A` + `KIA|A` + `SIA)[A-Z0-9]{16})`)
+
 func LooksLikeSecret(text string) bool {
+	if policySensitivePrefixPattern.MatchString(text) {
+		return true
+	}
 	lower := strings.ToLower(text)
 	for _, marker := range []string{
 		"-----" + "begin ",
-		"github" + "_pat_",
-		"g" + "hp_",
-		"xo" + "xb-",
-		"s" + "k-",
 		"authorization" + ": bearer",
 		"api" + "_key=",
 		"api" + "key=",
