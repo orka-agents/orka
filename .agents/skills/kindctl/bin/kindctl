@@ -86,8 +86,16 @@ kindctl_sanitize_slug() {
     | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-//; s/-$//'
 }
 
+kindctl_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
 kindctl_hash6() {
-  printf '%s' "$1" | shasum -a 256 | cut -c1-6
+  printf '%s' "$1" | kindctl_sha256 | cut -c1-6
 }
 
 kindctl_find_kind_marker_or_pwd() {
@@ -384,7 +392,7 @@ try:
 except FileNotFoundError:
     data = {"clusters": {}}
 for name, entry in sorted(data.get("clusters", {}).items()):
-    print("\t".join([
+    print("\x1f".join([
         name,
         entry.get("root", ""),
         entry.get("kubeconfig", ""),
@@ -435,6 +443,10 @@ kindctl_parse_tag_options() {
         raw_tag="$1"; shift ;;
       --tag=*)
         raw_tag="${arg#--tag=}" ;;
+      --)
+        # Stop parsing kindctl flags at the kubectl command separator; forward
+        # the separator and all remaining args verbatim to the container command.
+        out+=("$arg" "$@"); break ;;
       *)
         out+=("$arg") ;;
     esac
@@ -627,7 +639,17 @@ kindctl_cmd_hibernate_resume() {
 }
 
 kindctl_kind_clusters() {
-  kind get clusters 2>/dev/null || true
+  # Fail closed: distinguish a real discovery failure (e.g. Docker unreachable)
+  # from a legitimately empty list. `kind get clusters` exits 0 with no output
+  # when no clusters exist, but nonzero when it cannot reach Docker. Returning
+  # empty on failure would let `prune --dead` classify every still-existing
+  # tracked cluster as dead and delete its registry/kubeconfig state.
+  local out status=0
+  out="$(kind get clusters 2>/dev/null)" || status=$?
+  if [ "$status" -ne 0 ]; then
+    kindctl_die "failed to list kind clusters (kind get clusters exited $status); Docker may be unreachable — refusing to proceed so tracked clusters are not treated as dead"
+  fi
+  printf '%s\n' "$out"
 }
 
 kindctl_docker_cluster_status() {
@@ -677,7 +699,7 @@ kindctl_cmd_list() {
   root_filter="$KINDCTL_ROOT"
   live="$(kindctl_kind_clusters)"
   printf 'NAME\tSTATUS\tROOT\tKUBECONFIG\n'
-  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+  while IFS=$'\x1f' read -r name root kubeconfig context tag managed setup; do
     [ -n "$name" ] || continue
     if [ "$scope" = "workspace" ] && [ "$root" != "$root_filter" ]; then
       continue
@@ -726,7 +748,7 @@ kindctl_confirm_targets() {
 kindctl_delete_named_owned() {
   local name root kubeconfig context tag managed setup
   name="$1"
-  while IFS=$'\t' read -r r_name root kubeconfig context tag managed setup; do
+  while IFS=$'\x1f' read -r r_name root kubeconfig context tag managed setup; do
     [ "$r_name" = "$name" ] || continue
     kindctl_cmd_delete_one "$r_name" "$kubeconfig" "$context"
     return 0
@@ -750,7 +772,7 @@ kindctl_cmd_prune() {
   kindctl_preflight_kind
   kindctl_derive ""
   live="$(kindctl_kind_clusters)"
-  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+  while IFS=$'\x1f' read -r name root kubeconfig context tag managed setup; do
     [ "$managed" = "true" ] || continue
     case "$mode" in
       workspace)
@@ -774,7 +796,7 @@ EOF_REGISTRY
     [ -n "$line" ] || continue
     if [ "$mode" = "dead" ]; then
       # Dead clusters are not live; remove only registry/kubeconfig.
-      while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+      while IFS=$'\x1f' read -r name root kubeconfig context tag managed setup; do
         if [ "$name" = "$line" ]; then
           rm -f -- "$kubeconfig"
           kindctl_registry_delete "$name"
@@ -800,7 +822,7 @@ kindctl_cmd_nuke() {
     esac
   done
   kindctl_preflight_kind
-  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+  while IFS=$'\x1f' read -r name root kubeconfig context tag managed setup; do
     [ "$managed" = "true" ] || continue
     targets="${targets}${name}
 "
@@ -837,7 +859,7 @@ kindctl_cmd_doctor() {
   fi
   live="$(kindctl_kind_clusters)"
   printf 'doctor: store=%s\n' "$(kindctl_store)"
-  while IFS=$'\t' read -r name root kubeconfig context tag managed setup; do
+  while IFS=$'\x1f' read -r name root kubeconfig context tag managed setup; do
     [ -n "$name" ] || continue
     if [ -f "$kubeconfig" ]; then
       chmod 600 "$kubeconfig" 2>/dev/null || true

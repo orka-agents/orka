@@ -237,11 +237,20 @@ kindctl nuke [--yes]
 - Unmanaged kind clusters are reported but not deleted.
 - `hibernate`/`resume` select containers by kind's Docker label, not by name glob.
 
-## GitHub Actions security and dependency updates
+## GitHub Actions security and dependency updates (upstream)
 
-Workflow actions are pinned to full commit SHAs, and `make lint` includes a workflow pinning check so unpinned `uses:` references fail CI. Dependabot is configured for GitHub Actions updates, and a Dependabot automerge workflow merges successful non-draft Dependabot PRs after the main CI workflow passes.
+The CI and Dependabot setup below applies to the upstream repository at
+<https://github.com/sozercan/kindctl>, not this vendored copy (which excludes
+the Makefile and `.github/` workflows). Upstream, workflow actions are pinned to
+full commit SHAs, and `make lint` includes a workflow pinning check so unpinned
+`uses:` references fail CI. Dependabot is configured for GitHub Actions updates,
+and a Dependabot automerge workflow merges successful non-draft Dependabot PRs
+after the main CI workflow passes.
 
-## Testing
+## Testing (upstream)
+
+The Makefile and test suite are not vendored here — run these from a clone of the
+upstream repository at <https://github.com/sozercan/kindctl>.
 
 Fast mocked tests:
 
