@@ -84,7 +84,7 @@ func filterDropReason(finding *store.Finding) string {
 		}
 	}
 	if containsAny(text, "rate limit", "rate-limit", "rate limiting", "throttle") {
-		if !containsAuthConcept(text) && !containsAny(text, "auth bypass", "brute force", "login", "password", "account takeover", "credential stuffing", "tenant", "cross-tenant", "billing", "cost", "quota", "security boundary", "credential", "token", "privileged") {
+		if !rateLimitHasSecurityImpact(text) {
 			return "generic rate-limit finding without security-boundary impact"
 		}
 	}
@@ -120,7 +120,7 @@ func filterDropReason(finding *store.Finding) string {
 		}
 	}
 	if containsAny(text, "prompt injection", "tool injection", "user prompt inclusion", "untrusted prompt", "llm injection") {
-		if !containsAny(text, "privileged tool", "tool use", "credential", "secret", "memory", "artifact", "task spec", "task status", "patch", "pull request", "pr creation", "git", "txtoken", "context token") {
+		if !promptInjectionHasPrivilegedEffect(text) {
 			return "generic prompt-injection finding without privileged Orka effect"
 		}
 	}
@@ -159,11 +159,11 @@ func likelyCredentialDisclosure(text string) bool {
 	if containsAny(text, "contain", "contains", "contained") && containsStrongCredentialConcept(text) && !credentialCheckBypassNoise(text) {
 		return true
 	}
-	return !credentialCheckBypassNoise(text)
+	return containsStrongCredentialConcept(text) && !credentialCheckBypassNoise(text)
 }
 
 func credentialCheckBypassNoise(text string) bool {
-	return containsAny(text, "bypass", "bypasses", "bypassed", "gate", "check", "client state", "changing client state")
+	return containsAny(text, "bypass", "bypasses", "bypassed", "check", "client state", "changing client state")
 }
 
 func likelyAuditableSensitiveDisclosure(text string) bool {
@@ -253,6 +253,29 @@ func containsAny(text string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func containsWord(text, word string) bool {
+	return slices.Contains(strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}), word)
+}
+
+func rateLimitHasSecurityImpact(text string) bool {
+	if containsAuthConcept(text) || containsAny(text, "auth bypass", "brute force", "login", "password", "account takeover", "credential stuffing", "tenant", "cross-tenant", "billing", "cost", "quota", "security boundary", "credential", "auth token", "access token", "bearer token", "refresh token", "token refresh", "session token", "reset token", "recovery token", "api token", "token endpoint", "token redemption", "token renewal", "token issuance", "token minting", "jwt", "privileged") {
+		return true
+	}
+	if !containsWord(text, "token") && !containsWord(text, "tokens") {
+		return false
+	}
+	if !containsAny(text, "token bucket", "token-bucket", "token buckets", "token-buckets") {
+		return true
+	}
+	return containsAny(text, "verification", "validate", "validates", "validated", "validation", "guessing", "unlimited attempts", "issuance", "minting", "redemption", "redeem", "invite token", "invitation token", "magic link", "magic-link")
+}
+
+func promptInjectionHasPrivilegedEffect(text string) bool {
+	return containsWord(text, "git") || containsAny(text, "privileged tool", "tool use", "credential", "secret", "memory", "artifact", "task spec", "task status", "patch", "pull request", "pr creation", "github token", "github_token", "github app", "github issue", "github issues", "github comment", "github action", "github workflow", "github api", "github mutation", "github repo", "github repository", "github write", "write to github", "push changes to github", "github app token", "github app installation token", "installation token", "github access token", "github personal access token", "personal access token", "github pat", "github_pat", "git command", "git commands", "run git", "invoke git", "git clone", "git push", "git checkout", "git commit", "git apply", "git reset", "git rm", "git tag", "git merge", "git credential", "repository settings", "repository write", "repository mutation", "repo settings", "txtoken", "context token")
 }
 
 func containsDocsOnlyClassification(text string) bool {

@@ -75,7 +75,7 @@ func TestFilterFindingsDropsTestOnlyTokenFixture(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding(
 		"JWT fixture helper",
 		"internal/api/auth_test.go",
-		"Test-only fixture contains a JWT token value for auth checks.",
+		"Test-only fixture contains a JWT token value.",
 	)}, FindingFilterOptions{})
 	assertFilterDropped(t, got, "test-only")
 }
@@ -123,6 +123,51 @@ func TestFilterFindingsDropsGenericRateLimit(t *testing.T) {
 	assertFilterDropped(t, got, "rate-limit")
 }
 
+func TestFilterFindingsDropsTokenBucketRateLimitWithoutSecurityBoundary(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Missing token bucket",
+		"internal/api/status.go",
+		"Endpoint should add a token-bucket rate limiting mechanism.",
+	)}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "rate-limit")
+}
+
+func TestFilterFindingsKeepsRefreshTokenRateLimit(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Refresh token endpoint missing rate limit",
+		"internal/api/oauth.go",
+		"Endpoint lacks rate limiting for recovery token, enabling guessing.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsRecoveryTokenBucketRateLimit(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Recovery token verification lacks rate limit",
+		"internal/api/recovery.go",
+		"Magic-link token verification lacks a token bucket rate limit, enabling guessing.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsPluralTokenGuessingRateLimit(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Magic-link tokens lack rate limit",
+		"internal/api/recovery.go",
+		"Missing rate limiting allows guessing magic-link tokens.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsInviteTokenValidationRateLimit(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Invite token validation lacks rate limit",
+		"internal/api/invite.go",
+		"Invite token validation lacks a token bucket rate limit, allowing unlimited attempts.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsKeepsConcreteTenantBoundaryRateLimit(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding("Tenant quota bypass", "internal/api/auth.go", "Missing rate limit permits cross-tenant cost exhaustion across a security boundary.")}, FindingFilterOptions{})
 	assertFilterKept(t, got)
@@ -142,8 +187,98 @@ func TestFilterFindingsDropsGenericPromptInjection(t *testing.T) {
 	assertFilterDropped(t, got, "prompt-injection")
 }
 
+func TestFilterFindingsDropsPromptInjectionWithLegitimateSubstring(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Prompt injection",
+		"internal/api/chat.go",
+		"User prompt inclusion may change legitimate prompt output.",
+	)}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "prompt-injection")
+}
+
 func TestFilterFindingsKeepsPrivilegedToolPromptInjection(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding("Privileged tool prompt injection", "internal/api/chat.go", "Untrusted prompt injection can influence privileged tool use and artifact contents.")}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitHubTokenPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"GitHub token prompt injection",
+		"internal/api/chat.go",
+		"Untrusted prompt injection can exfiltrate the GitHub personal access token.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitHubTokenIdentifierPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"GitHub token tool injection",
+		"internal/api/chat.go",
+		"GITHUB_PAT prompt injection can exfiltrate GITHUB_PAT.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitHubAppInstallationTokenPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"GitHub App token prompt injection",
+		"internal/api/chat.go",
+		"Prompt injection can exfiltrate the GitHub App installation token.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitHubIssuePromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"GitHub App issue mutation prompt injection",
+		"internal/api/chat.go",
+		"Prompt injection can create GitHub issues via the GitHub App.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitHubRepoWritePromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"GitHub repo write prompt injection",
+		"internal/api/chat.go",
+		"Prompt injection can write to the GitHub repo.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitApplyPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Repository-impacting tool injection",
+		"internal/api/chat.go",
+		"Tool injection can run git apply against the repository.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsArbitraryGitCommandPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Repository-impacting tool injection",
+		"internal/api/chat.go",
+		"Tool injection can execute git, altering repository state.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsInvokeGitPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Repository-impacting prompt injection",
+		"internal/api/chat.go",
+		"Prompt injection can use git to modify repository state.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsGitHubRepositorySettingsPromptInjection(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Repository settings prompt injection",
+		"internal/api/chat.go",
+		"Prompt injection can change GitHub repository settings.",
+	)}, FindingFilterOptions{})
 	assertFilterKept(t, got)
 }
 
@@ -394,6 +529,17 @@ func TestFilterFindingsKeepsBundledClientSecretDisclosure(t *testing.T) {
 		"Client secret bundled in app",
 		"ui/src/AuthGate.tsx",
 		"OAuth client secret is bundled in the React app.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsStrongCredentialFindingWithoutDisclosureVerb(t *testing.T) {
+	finding := filterFinding(
+		"API key in config",
+		"ui/src/AuthGate.tsx",
+		"API key in frontend configuration.",
 	)
 	finding.Category = filterTestAuthzCategory
 	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
