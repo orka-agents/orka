@@ -71,6 +71,42 @@ func TestFilterFindingsDropsTestOnlyFindings(t *testing.T) {
 	assertFilterDropped(t, got, "test-only")
 }
 
+func TestFilterFindingsDropsTestOnlyTokenFixture(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"JWT fixture helper",
+		"internal/api/auth_test.go",
+		"Test-only fixture contains a JWT token value for auth checks.",
+	)}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "test-only")
+}
+
+func TestFilterFindingsKeepsTestOnlyCredentialDisclosure(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Test fixture credential leak",
+		"internal/api/auth_test.go",
+		"Test fixture contains an API key committed to the repository.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsDropsTestOnlyCredentialCheckFixture(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"API key validation fixture",
+		"internal/api/auth_test.go",
+		"Test-only fixture contains API key validation check logic.",
+	)}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "test-only")
+}
+
+func TestFilterFindingsKeepsDocsPIIDisclosure(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Docs contain customer PII",
+		"docs/examples/users.json",
+		"Documentation fixture contains customer PII and private data committed to the repository.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsKeepsNegatedTestOnlyProductionFinding(t *testing.T) {
 	finding := filterFinding(
 		"Production authorization bypass is not a test-only issue",
@@ -89,6 +125,15 @@ func TestFilterFindingsDropsGenericRateLimit(t *testing.T) {
 
 func TestFilterFindingsKeepsConcreteTenantBoundaryRateLimit(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding("Tenant quota bypass", "internal/api/auth.go", "Missing rate limit permits cross-tenant cost exhaustion across a security boundary.")}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsAuthImpactDenialOfService(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Login account lockout denial of service",
+		"internal/api/login.go",
+		"Attacker-controlled requests can cause denial of service against login sessions and password reset handling.",
+	)}, FindingFilterOptions{})
 	assertFilterKept(t, got)
 }
 

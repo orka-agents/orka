@@ -63,7 +63,7 @@ func filterDropReason(finding *store.Finding) string {
 	}
 
 	if allPathsAreDocsOnly(allPaths) || containsDocsOnlyClassification(classificationText) {
-		if likelySensitiveLeak(text) {
+		if likelyAuditableSensitiveDisclosure(text) {
 			return ""
 		}
 		if !containsAny(text, "generates runtime", "generated runtime", "runtime config", "executable example", "automation consumes", "loaded by production") {
@@ -71,7 +71,7 @@ func filterDropReason(finding *store.Finding) string {
 		}
 	}
 	if allPathsAreTestOnly(allPaths) || containsTestOnlyClassification(classificationText) {
-		if likelySensitiveLeak(text) {
+		if likelyAuditableSensitiveDisclosure(text) {
 			return ""
 		}
 		if !containsAny(text, "loaded by production", "shipped", "production fixture", "embedded fixture", "runtime loads") {
@@ -89,7 +89,7 @@ func filterDropReason(finding *store.Finding) string {
 		}
 	}
 	if containsAny(text, "denial of service", "resource exhaustion", "generic dos", "cpu exhaustion", "memory exhaustion", "unbounded loop") {
-		if !containsAny(text, "cluster", "control-plane", "control plane", "tenant", "cross-tenant", "billing", "cost", "quota", "privileged service", "namespace isolation") {
+		if !containsAuthConcept(text) && !containsAny(text, "cluster", "control-plane", "control plane", "tenant", "cross-tenant", "billing", "cost", "quota", "privileged service", "namespace isolation", "login", "password", "password-reset", "password reset", "account", "session", "credential stuffing", "brute force") {
 			return "generic dos/resource-exhaustion finding without concrete security impact"
 		}
 	}
@@ -156,7 +156,35 @@ func likelyCredentialDisclosure(text string) bool {
 	) {
 		return true
 	}
-	return !containsAny(text, "bypass", "bypasses", "bypassed", "gate", "check", "client state", "changing client state")
+	if containsAny(text, "contain", "contains", "contained") && containsStrongCredentialConcept(text) && !credentialCheckBypassNoise(text) {
+		return true
+	}
+	return !credentialCheckBypassNoise(text)
+}
+
+func credentialCheckBypassNoise(text string) bool {
+	return containsAny(text, "bypass", "bypasses", "bypassed", "gate", "check", "client state", "changing client state")
+}
+
+func likelyAuditableSensitiveDisclosure(text string) bool {
+	return likelyCredentialDisclosure(text) || likelyNonCredentialSensitiveDisclosure(text)
+}
+
+func containsStrongCredentialConcept(text string) bool {
+	return containsAny(text,
+		"secret", "credential", "credentials", "api key", "api_key", "api-key", "apikey", "private key", "private_key", "private-key",
+		"github pat", "github_pat", "github-pat", "g"+"hp", "access key", "access_key", "aws key", "aws credential", "a"+"kia", "a"+"sia", "password", "authorization bearer", "bearer token",
+	)
+}
+
+func likelyNonCredentialSensitiveDisclosure(text string) bool {
+	if !containsAny(text, "pii", "personal data", "private data", "customer data", "sensitive data", "email address", "ssn", "social security", "phone number") {
+		return false
+	}
+	return containsAny(text,
+		"leak", "leaks", "leaked", "expose", "exposes", "exposed", "disclosure", "disclose", "discloses", "disclosed",
+		"contain", "contains", "contained", "committed", "logged", "logging", "stored", "persisted", "published", "public",
+	)
 }
 
 func normalizedFindingText(finding *store.Finding) string {
