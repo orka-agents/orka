@@ -56,7 +56,7 @@ func filterDropReason(finding *store.Finding) string {
 		allPaths = []string{primaryPath}
 	}
 
-	if allPathsAreDocsOnly(allPaths) || containsAny(classificationText, "docs-only", "documentation only", "only documentation", "markdown only") {
+	if allPathsAreDocsOnly(allPaths) || containsDocsOnlyClassification(classificationText) {
 		if likelySensitiveLeak(text) {
 			return ""
 		}
@@ -202,6 +202,19 @@ func containsAny(text string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func containsDocsOnlyClassification(text string) bool {
+	if !containsAny(text, "docs-only", "documentation only", "only documentation", "markdown only") {
+		return false
+	}
+	return !containsAny(text,
+		"not docs-only",
+		"not docs only",
+		"not documentation only",
+		"not only documentation",
+		"not markdown only",
+	)
 }
 
 func normalizedFindingPath(finding *store.Finding) string {

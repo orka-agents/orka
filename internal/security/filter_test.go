@@ -13,6 +13,17 @@ func TestFilterFindingsDropsDocsOnlyFindings(t *testing.T) {
 	assertFilterDropped(t, got, "docs-only")
 }
 
+func TestFilterFindingsKeepsNegatedDocsOnlyProductionFinding(t *testing.T) {
+	finding := filterFinding(
+		"Production authorization bypass is not docs-only",
+		"internal/api/auth.go",
+		"This is not only documentation; a runtime handler skips the tenant authorization check.",
+	)
+	finding.Category = "authz"
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsDropsTestOnlyFindings(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding("Test helper command injection", "internal/api/auth_test.go", "Test-only helper has command injection.")}, FindingFilterOptions{})
 	assertFilterDropped(t, got, "test-only")

@@ -361,7 +361,11 @@ func changedFilesForSecurityScan(
 			)
 			return true, files, nil, diffSummary, "", headCommit
 		}
-		return false, nil, nil, "", err.Error(), headCommit
+		diffSummary := fmt.Sprintf(
+			"%d changed files; changed line ranges omitted because diff could not be parsed: %s",
+			len(files), err,
+		)
+		return true, files, nil, diffSummary, "", headCommit
 	}
 	diffSummary := fmt.Sprintf("%d changed files; %d changed line ranges", len(files), len(lineRanges))
 	return true, files, lineRanges, diffSummary, "", headCommit
@@ -373,9 +377,12 @@ const (
 	maxChangedDiffLinesForLineRanges = 20000
 )
 
-var errChangedDiffTooLarge = errors.New("changed diff exceeds changed-line metadata safety cap")
+var (
+	errChangedDiffTooLarge           = errors.New("changed diff exceeds changed-line metadata safety cap")
+	changedLineRangesForSecurityScan = defaultChangedLineRangesForSecurityScan
+)
 
-func changedLineRangesForSecurityScan(
+func defaultChangedLineRangesForSecurityScan(
 	ctx context.Context,
 	workDir, baseCommit, headCommit string,
 ) ([]security.ChangedLineRange, error) {
@@ -468,8 +475,11 @@ func parseChangedLineRangesFromUnifiedDiffReader(r io.Reader) ([]security.Change
 				if matches[2] != "" {
 					count = atoiDiffNumber(matches[2])
 				}
-				if start <= 0 || count <= 0 || len(ranges) >= maxChangedLineRangesForArtifact {
+				if start <= 0 || len(ranges) >= maxChangedLineRangesForArtifact {
 					break
+				}
+				if count <= 0 {
+					count = 1
 				}
 				ranges = append(ranges, security.ChangedLineRange{Path: currentPath, StartLine: start, EndLine: start + count - 1})
 			}

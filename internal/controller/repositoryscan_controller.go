@@ -546,8 +546,15 @@ func ensureScanRunPolicyDigest(run *store.ScanRun, policy security.ScannerPolicy
 }
 
 func (r *RepositoryScanReconciler) recordTerminalScanRunError(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, failure error) error {
+	if err := r.markScanRunTerminalError(ctx, scan, run, failure); err != nil {
+		return errors.Join(failure, err)
+	}
+	return failure
+}
+
+func (r *RepositoryScanReconciler) markScanRunTerminalError(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, failure error) error {
 	if r.SecurityStore == nil || run == nil || failure == nil {
-		return failure
+		return nil
 	}
 	now := time.Now()
 	message := failure.Error()
@@ -556,15 +563,15 @@ func (r *RepositoryScanReconciler) recordTerminalScanRunError(ctx context.Contex
 	run.ErrorMessage = message
 	run.Summary = message
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
-		return errors.Join(failure, err)
+		return err
 	}
 	if scan == nil {
-		return failure
+		return nil
 	}
 	if err := r.refreshScanRunStatus(ctx, scan, run, run.ID, true); err != nil {
-		return errors.Join(failure, err)
+		return err
 	}
-	return failure
+	return nil
 }
 
 func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
@@ -1909,6 +1916,9 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 		}
 		if run != nil && activeScanRunPhase(run.Phase) {
 			if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+				if errors.Is(err, errScannerPolicyDigestChanged) {
+					return r.markScanRunTerminalError(ctx, scan, run, err)
+				}
 				return err
 			}
 		}

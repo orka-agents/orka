@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -391,6 +392,65 @@ func TestChangedLineRangesIgnoresAddedLinesThatLookLikeFileHeaders(t *testing.T)
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ranges = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedLineRangesPreservesDeletionOnlyHunkAnchor(t *testing.T) {
+	diff := []byte(strings.Join([]string{
+		"diff --git a/app.go b/app.go",
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -6 +6,0 @@",
+		"-removedSecurityCheck()",
+		"",
+	}, "\n"))
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{{Path: "app.go", StartLine: 6, EndLine: 6}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want deletion anchor %#v", got, want)
+	}
+}
+
+func TestChangedFilesForSecurityScanKeepsFilesWhenLineRangeParseFails(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatalf("Mkdir(source) error = %v", err)
+	}
+	runGit(t, source, "init", "-b", "main")
+	runGit(t, source, "config", "user.email", "orka@example.com")
+	runGit(t, source, "config", "user.name", "Orka Test")
+	if err := os.WriteFile(filepath.Join(source, "app.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(base) error = %v", err)
+	}
+	runGit(t, source, "add", "app.go")
+	runGit(t, source, "commit", "-m", "base")
+	baseCommit := runGit(t, source, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(source, "app.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(head) error = %v", err)
+	}
+	runGit(t, source, "commit", "-am", "head")
+	headCommit := runGit(t, source, "rev-parse", "HEAD")
+
+	original := changedLineRangesForSecurityScan
+	changedLineRangesForSecurityScan = func(context.Context, string, string, string) ([]security.ChangedLineRange, error) {
+		return nil, fmt.Errorf("parse changed line ranges: unsupported hunk header")
+	}
+	t.Cleanup(func() { changedLineRangesForSecurityScan = original })
+
+	computed, files, lineRanges, diffSummary, message, _ := changedFilesForSecurityScan(
+		context.Background(), source, baseCommit, headCommit,
+	)
+	if !computed || message != "" {
+		t.Fatalf("computed=%v message=%q, want file-level fallback without error message", computed, message)
+	}
+	if !reflect.DeepEqual(files, []string{"app.go"}) || len(lineRanges) != 0 {
+		t.Fatalf("files/ranges = %#v/%#v, want app.go and no ranges", files, lineRanges)
+	}
+	if !strings.Contains(diffSummary, "changed line ranges omitted") {
+		t.Fatalf("diffSummary = %q, want line-range omission", diffSummary)
 	}
 }
 
