@@ -48,7 +48,12 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
 
   function reset() {
     submissionRef.current += 1
-    idempotencyKeyRef.current = ''
+    // Preserve the idempotency key while a submission is still in flight: the
+    // POST can't be aborted, so if it succeeds server-side after the dialog was
+    // dismissed (Escape/overlay/X), a retry of the same blank-name fork must
+    // reuse this key so the backend collapses the duplicate instead of minting a
+    // second task. Once the mutation has settled, clear it normally.
+    if (!fork.isPending) idempotencyKeyRef.current = ''
     setNewTaskName('')
     setAgentName('')
     setPrompt('')

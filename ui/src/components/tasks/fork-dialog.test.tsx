@@ -246,4 +246,51 @@ describe('ForkDialog', () => {
     // Editing invalidated the key, so the retry carries a DIFFERENT one.
     expect(keys[1]).not.toBe(keys[0])
   })
+
+  it('preserves the idempotency key when closed while a submission is in flight', async () => {
+    const keys: string[] = []
+    let attempt = 0
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        attempt += 1
+        // First attempt is slow so we can close mid-flight; it still succeeds
+        // server-side (the client ignores the result).
+        if (attempt === 1) await delay(80)
+        return HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-dup', afterSeq: 4,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 4, events: [], truncated: false },
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>reopen</button>
+          <ForkDialog taskId="tk" event={makeEvent({ seq: 4 })} open={open} onOpenChange={setOpen} />
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<Harness />)
+    // Start a blank-name fork (slow), then close via Escape while it's pending.
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    // Let the in-flight request settle (it created the fork server-side).
+    await new Promise((r) => setTimeout(r, 150))
+    // Reopen and re-submit the same blank-name fork.
+    await user.click(screen.getByRole('button', { name: 'reopen' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(keys.length).toBe(2))
+    expect(keys[0]).toBeTruthy()
+    // The retry must reuse the SAME key so the backend collapses the duplicate,
+    // even though the dialog was reset on the pending close.
+    expect(keys[1]).toBe(keys[0])
+  })
 })
