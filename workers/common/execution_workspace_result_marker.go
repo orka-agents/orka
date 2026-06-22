@@ -8,11 +8,8 @@ package common
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/sozercan/orka/internal/workerenv"
