@@ -33,6 +33,7 @@ import (
 
 const (
 	testAgentSandboxTemplateNamespace = "template-ns"
+	testTaskNamespace                 = "task-ns"
 	executorResultDone                = "done"
 )
 
@@ -1589,7 +1590,7 @@ func TestRunAgent_AgentSandboxCleanupUsesFreshContextAfterCancellation(t *testin
 
 func TestRunAgent_ExecutionWorkspaceCleanupFailureRetriedByDeferredCleanup(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 	t.Setenv(workerenv.ServiceAccountToken, "")
 	t.Setenv(workerenv.ServiceAccountTokenPath, filepath.Join(t.TempDir(), "missing-token"))
 
@@ -1636,7 +1637,7 @@ func TestRunAgent_ExecutionWorkspaceCleanupFailureRetriedByDeferredCleanup(t *te
 
 func TestRunAgent_SubstratePreHandoffRetainFailureDeletesNewWorkspace(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 	t.Setenv(workspaceHandoffTokenEnv, "handoff-token")
 
 	recorder := newRecordingWorkspaceExecutor()
@@ -1685,7 +1686,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesNewWorkspace(t *testing
 
 func TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarker(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 	t.Setenv(workerenv.ResultStdout, "true")
 	t.Setenv(workerenv.ServiceAccountToken, "")
 	t.Setenv(workerenv.ServiceAccountTokenPath, filepath.Join(t.TempDir(), "missing-token"))
@@ -1744,7 +1745,7 @@ func TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarker(t *testing.T) {
 
 func TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarkerOnCommandFailure(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 	t.Setenv(workerenv.ResultStdout, "true")
 	t.Setenv(workerenv.ServiceAccountToken, "")
 	t.Setenv(workerenv.ServiceAccountTokenPath, filepath.Join(t.TempDir(), "missing-token"))
@@ -1806,7 +1807,7 @@ func TestRunAgent_ExecutionWorkspaceForwardsStdoutResultMarkerOnCommandFailure(t
 
 func TestRunAgent_SubstratePreHandoffRetainFailureDeletesPooledWorkspace(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 	t.Setenv(workspaceHandoffTokenEnv, "handoff-token")
 
 	recorder := newRecordingWorkspaceExecutor()
@@ -1857,7 +1858,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesPooledWorkspace(t *test
 
 func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *testing.T) {
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 	t.Setenv(workspaceHandoffTokenEnv, "handoff-token")
 
 	recorder := newRecordingWorkspaceExecutor()
@@ -1924,7 +1925,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *te
 
 func TestExecutionWorkspaceCompletionMessageOmitsSubstrateActorID(t *testing.T) {
 	got := executionWorkspaceCompletionMessage(
-		"task-ns",
+		testTaskNamespace,
 		"task-name",
 		workerenv.ExecutionWorkspaceEnv{Provider: string(corev1alpha1.WorkspaceProviderSubstrate)},
 		workspace.WorkspaceRef{ClaimName: "actor-1", ID: "actor-1"},
@@ -1940,7 +1941,7 @@ func TestExecutionWorkspaceCompletionMessageOmitsSubstrateActorID(t *testing.T) 
 
 func TestExecutionWorkspaceCompletionMessageKeepsAgentSandboxClaimName(t *testing.T) {
 	got := executionWorkspaceCompletionMessage(
-		"task-ns",
+		testTaskNamespace,
 		"task-name",
 		workerenv.ExecutionWorkspaceEnv{Provider: string(corev1alpha1.WorkspaceProviderAgentSandbox)},
 		workspace.WorkspaceRef{ClaimName: "claim-1"},
@@ -1988,10 +1989,10 @@ func TestRunAgent_AgentSandboxDefaultsTemplateNamespaceToTaskNamespace(t *testin
 	if len(claimReqs) != 1 {
 		t.Fatalf("recorded %d claim requests, want 1", len(claimReqs))
 	}
-	if claimReqs[0].Namespace != "task-ns" {
+	if claimReqs[0].Namespace != testTaskNamespace {
 		t.Errorf("claim namespace = %q, want task-ns", claimReqs[0].Namespace)
 	}
-	if claimReqs[0].Template.Namespace != "task-ns" {
+	if claimReqs[0].Template.Namespace != testTaskNamespace {
 		t.Errorf("claim template namespace = %q, want task-ns", claimReqs[0].Template.Namespace)
 	}
 }
@@ -2086,7 +2087,7 @@ func TestRunAgent_AgentSandboxSessionUsesDeterministicClaimName(t *testing.T) {
 	want := agentSandboxSessionClaimName(
 		workerenv.ParseAgentSandboxEnv(os.Getenv),
 		testAgentSandboxTemplateNamespace,
-		"task-ns",
+		testTaskNamespace,
 		testAgentSandboxTemplateNamespace,
 	)
 	if claimReqs[0].ClaimName != want || claimReqs[0].ClaimName == "" {
@@ -2712,7 +2713,7 @@ func setRequiredAgentSandboxEnv(t *testing.T, cleanupPolicy string) {
 	t.Setenv(workerenv.AgentSandboxCommandTimeoutSeconds, "9")
 	t.Setenv(workerenv.AgentSandboxCleanupPolicy, cleanupPolicy)
 	t.Setenv(workerenv.TaskName, "task-name")
-	t.Setenv(workerenv.TaskNamespace, "task-ns")
+	t.Setenv(workerenv.TaskNamespace, testTaskNamespace)
 }
 
 func assertOperationOrder(t *testing.T, got []string, want ...string) {
