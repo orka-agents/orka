@@ -231,6 +231,15 @@ func TestFilterFindingsKeepsServerRoutesAPIAuthFinding(t *testing.T) {
 	assertFilterKept(t, got)
 }
 
+func TestFilterFindingsKeepsGenericBackendRoutesAuthFinding(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Backend route authorization bypass",
+		"src/routes/admin.ts",
+		"Attacker-controlled request bypasses authorization and exposes tenant data.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsKeepsClientAuthFindingWithBackendEvidence(t *testing.T) {
 	finding := filterFinding(
 		"Authorization bypass spans frontend and backend",

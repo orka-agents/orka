@@ -20,6 +20,7 @@ const (
 	maxReviewContextChangedLineRanges = 64
 	maxReviewContextChangedBlockBytes = 4096
 	maxReviewContextChangedSeekBytes  = 8 * 1024 * 1024
+	reviewContextChangedLineContext   = 4
 )
 
 var errReviewContextChangedSeekLimit = errors.New("changed line range is beyond review context seek limit")
@@ -342,7 +343,10 @@ func reviewContextExcerptRangesForChangedLines(ranges []store.ChangedLineRange) 
 	}
 	expanded := make([]ReviewContextLineRange, 0, len(ranges))
 	for _, lineRange := range ranges {
-		expanded = append(expanded, ReviewContextLineRange{StartLine: lineRange.StartLine, EndLine: lineRange.EndLine})
+		expanded = append(expanded, ReviewContextLineRange{
+			StartLine: lineRange.StartLine,
+			EndLine:   lineRange.EndLine + reviewContextChangedLineContext,
+		})
 	}
 	sort.Slice(expanded, func(i, j int) bool {
 		if expanded[i].StartLine != expanded[j].StartLine {

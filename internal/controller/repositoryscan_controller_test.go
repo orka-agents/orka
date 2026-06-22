@@ -68,6 +68,19 @@ func TestApplyScanRunProgressPreservesTerminalErrorWithActiveTasks(t *testing.T)
 	}
 }
 
+func TestIngestMapperTaskSkipsFailedRun(t *testing.T) {
+	reconciler := &RepositoryScanReconciler{}
+	run := &storepkg.ScanRun{Phase: scanRunPhaseFailed, ErrorMessage: "scanner policy digest changed"}
+	task := &corev1alpha1.Task{Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
+
+	if err := reconciler.ingestMapperTask(context.Background(), &corev1alpha1.RepositoryScan{}, task, run); err != nil {
+		t.Fatalf("ingestMapperTask() error = %v", err)
+	}
+	if run.Phase != scanRunPhaseFailed || run.ErrorMessage == "" {
+		t.Fatalf("run = %#v, want failed run unchanged", run)
+	}
+}
+
 func TestLatestTerminalScanTaskPrefersNewestCompletedScan(t *testing.T) {
 	tasks := []corev1alpha1.Task{
 		{

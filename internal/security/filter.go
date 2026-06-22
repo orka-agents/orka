@@ -380,7 +380,7 @@ func isServerSideEvidencePath(value string) bool {
 func frontendJSPath(p string) bool {
 	return strings.HasPrefix(p, "ui/") || strings.HasPrefix(p, "web/") || strings.HasPrefix(p, "frontend/") ||
 		strings.Contains(p, "/client/") || strings.Contains(p, "/browser/") || strings.Contains(p, "/components/") ||
-		strings.Contains(p, "/pages/") || strings.Contains(p, "/routes/")
+		strings.Contains(p, "/pages/")
 }
 
 func serverSideJSPath(p string) bool {

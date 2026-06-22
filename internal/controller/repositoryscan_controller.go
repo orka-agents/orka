@@ -2464,6 +2464,9 @@ func (r *RepositoryScanReconciler) reviewSliceForTaskRun(
 }
 
 func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun) error {
+	if run.Phase == scanRunPhaseFailed {
+		return nil
+	}
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 		artifact, validationProblem, err := r.loadReviewSlicesArtifact(ctx, task)
 		if err != nil {

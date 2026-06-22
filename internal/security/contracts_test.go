@@ -586,6 +586,9 @@ func TestBuildReviewContextUsesChangedLineRangesForLateFileExcerpt(t *testing.T)
 	if included.StartLine > 20 || included.EndLine < 30 {
 		t.Fatalf("included range = %#v, want it to cover changed lines 20-30", included)
 	}
+	if included.StartLine != 20 || included.EndLine != 34 {
+		t.Fatalf("included range = %#v, want bounded context around changed lines", included)
+	}
 	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].StartLine != 20 || manifest.ChangedLineRanges[0].EndLine != 30 {
 		t.Fatalf("changed ranges = %#v, want 20-30 preserved", manifest.ChangedLineRanges)
 	}
