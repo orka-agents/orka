@@ -57,6 +57,17 @@ func TestRepositoryScanConditionMessageTruncatesToKubernetesLimit(t *testing.T) 
 	}
 }
 
+func TestApplyScanRunProgressPreservesTerminalErrorWithActiveTasks(t *testing.T) {
+	completed := mustParseTime(t, "2026-05-04T03:02:01Z")
+	run := &storepkg.ScanRun{Phase: scanRunPhaseFailed, ErrorMessage: "scanner policy digest changed", CompletedAt: &completed}
+
+	applyScanRunProgress(run, scanRunProgress{hasActive: true})
+
+	if run.Phase != scanRunPhaseFailed || run.Summary != run.ErrorMessage || run.CompletedAt == nil || !run.CompletedAt.Equal(completed) {
+		t.Fatalf("run = %#v, want terminal failure preserved", run)
+	}
+}
+
 func TestLatestTerminalScanTaskPrefersNewestCompletedScan(t *testing.T) {
 	tasks := []corev1alpha1.Task{
 		{

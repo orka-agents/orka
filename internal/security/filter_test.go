@@ -213,6 +213,15 @@ func TestFilterFindingsKeepsWebAPIAuthFinding(t *testing.T) {
 	assertFilterKept(t, got)
 }
 
+func TestFilterFindingsKeepsFrontendTreeServerModuleAuthFinding(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Server module authorization bypass",
+		"ui/src/entry.server.tsx",
+		"Attacker-controlled request bypasses authorization and exposes tenant data.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsKeepsServerRoutesAPIAuthFinding(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding(
 		"Admin route authorization bypass",
@@ -366,6 +375,17 @@ func TestFilterFindingsDropsWebClientAuthFindingWithOnlyFrontendAPIWrapperEviden
 	)
 	finding.Category = filterTestAuthzCategory
 	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "web/src/api/auth.ts", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "client-side auth")
+}
+
+func TestFilterFindingsDropsFrontendServerNamedComponentAuthFinding(t *testing.T) {
+	finding := filterFinding(
+		"Client authorization bypass",
+		"ui/src/components/server-status.tsx",
+		"Client auth gate bypasses authorization without backend trust boundary evidence.",
+	)
+	finding.Category = filterTestAuthzCategory
 	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
 	assertFilterDropped(t, got, "client-side auth")
 }

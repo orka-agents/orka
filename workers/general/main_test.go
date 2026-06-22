@@ -414,6 +414,25 @@ func TestChangedLineRangesPreservesDeletionOnlyHunkAnchor(t *testing.T) {
 	}
 }
 
+func TestChangedLineRangesPreservesFirstLineDeletionAnchor(t *testing.T) {
+	diff := []byte(strings.Join([]string{
+		"diff --git a/app.go b/app.go",
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1 +0,0 @@",
+		"-removedSecurityCheck()",
+		"",
+	}, "\n"))
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{{Path: "app.go", StartLine: 1, EndLine: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want deletion anchor %#v", got, want)
+	}
+}
+
 func TestChangedFilesForSecurityScanKeepsFilesWhenLineRangeParseFails(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "source")
 	if err := os.Mkdir(source, 0o755); err != nil {

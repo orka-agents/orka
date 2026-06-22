@@ -1688,6 +1688,11 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 }
 
 func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
+	if run.ErrorMessage != "" {
+		run.Phase = scanRunPhaseFailed
+		run.Summary = run.ErrorMessage
+		return
+	}
 	if progress.hasActive {
 		run.Phase = scanRunPhaseRunning
 		run.CompletedAt = nil

@@ -386,14 +386,18 @@ func frontendJSPath(p string) bool {
 func serverSideJSPath(p string) bool {
 	if strings.Contains(p, "/server/") || strings.Contains(p, "/backend/") || strings.Contains(p, "/pages/api/") || strings.Contains(p, "/app/api/") ||
 		strings.HasPrefix(p, "pages/api/") || strings.HasPrefix(p, "app/api/") ||
-		strings.HasPrefix(p, "server/") || strings.HasPrefix(p, "api/") || strings.HasPrefix(p, "backend/") ||
-		strings.Contains(path.Base(p), "server") {
+		strings.HasPrefix(p, "server/") || strings.HasPrefix(p, "api/") || strings.HasPrefix(p, "backend/") || serverNamedJSModule(p) {
 		return true
 	}
 	if strings.Contains(p, "/api/") && !frontendAPIPath(p) {
 		return true
 	}
 	return strings.Contains(p, "/routes/api/") && !frontendRouteAPIPath(p)
+}
+
+func serverNamedJSModule(p string) bool {
+	base := path.Base(p)
+	return strings.HasPrefix(base, "server.") || strings.Contains(base, ".server.")
 }
 
 func frontendAPIPath(p string) bool {
