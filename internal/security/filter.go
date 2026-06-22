@@ -12,6 +12,11 @@ import (
 
 const maxDroppedSampleValueBytes = 160
 
+var (
+	docsOnlyNegationPattern = regexp.MustCompile(`\bnot(?:\s+\w+){0,3}\s+(?:docs-only|docs only|documentation only|only documentation|markdown only)\b`)
+	testOnlyNegationPattern = regexp.MustCompile(`\bnot(?:\s+\w+){0,3}\s+(?:test-only|test only|only test|test fixture only)\b`)
+)
+
 type FindingFilterOptions struct {
 	RepositoryScan string
 	ScanRunID      string
@@ -64,7 +69,7 @@ func filterDropReason(finding *store.Finding) string {
 			return "docs-only finding without runtime behavior"
 		}
 	}
-	if allPathsAreTestOnly(allPaths) || containsAny(classificationText, "test-only", "only test", "test fixture only") {
+	if allPathsAreTestOnly(allPaths) || containsTestOnlyClassification(classificationText) {
 		if likelySensitiveLeak(text) {
 			return ""
 		}
@@ -208,13 +213,14 @@ func containsDocsOnlyClassification(text string) bool {
 	if !containsAny(text, "docs-only", "documentation only", "only documentation", "markdown only") {
 		return false
 	}
-	return !containsAny(text,
-		"not docs-only",
-		"not docs only",
-		"not documentation only",
-		"not only documentation",
-		"not markdown only",
-	)
+	return !docsOnlyNegationPattern.MatchString(text)
+}
+
+func containsTestOnlyClassification(text string) bool {
+	if !containsAny(text, "test-only", "only test", "test fixture only") {
+		return false
+	}
+	return !testOnlyNegationPattern.MatchString(text)
 }
 
 func normalizedFindingPath(finding *store.Finding) string {

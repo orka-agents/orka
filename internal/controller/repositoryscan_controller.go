@@ -577,6 +577,9 @@ func (r *RepositoryScanReconciler) markScanRunTerminalError(ctx context.Context,
 func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
 	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 	if err != nil {
+		if run != nil && activeScanRunPhase(run.Phase) && terminalScannerPolicyLoadError(err) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
 		return err
 	}
 	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
@@ -834,6 +837,9 @@ func trustedFindingsBranch(scan *corev1alpha1.RepositoryScan) string {
 func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, threatModel string, reviewSlices []store.ReviewSlice) error {
 	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 	if err != nil {
+		if run != nil && activeScanRunPhase(run.Phase) && terminalScannerPolicyLoadError(err) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
 		return err
 	}
 	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
@@ -1018,6 +1024,41 @@ func reviewSliceTaskExists(tasks []corev1alpha1.Task, runID, sliceID string) boo
 			continue
 		}
 		if strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID]) == sliceID {
+			return true
+		}
+	}
+	return false
+}
+
+func terminalScannerPolicyLoadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr apierrors.APIStatus
+	if errors.As(err, &statusErr) {
+		switch statusErr.Status().Reason {
+		case metav1.StatusReasonNotFound,
+			metav1.StatusReasonInvalid,
+			metav1.StatusReasonBadRequest,
+			metav1.StatusReasonForbidden:
+			return true
+		default:
+			return false
+		}
+	}
+	message := err.Error()
+	return containsAnyPolicyLoadError(message,
+		"name is required",
+		" is missing in ConfigMap ",
+		"must be labeled or annotated",
+		"policy exceeds ",
+		"policy appears to contain a secret or token",
+	)
+}
+
+func containsAnyPolicyLoadError(message string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(message, needle) {
 			return true
 		}
 	}
@@ -1905,22 +1946,27 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 	if r.Client == nil {
 		return nil
 	}
-	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
-	if err != nil {
-		return err
-	}
+	var run *store.ScanRun
 	if r.SecurityStore != nil && strings.TrimSpace(finding.ScanRunID) != "" {
-		run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, finding.ScanRunID)
+		var err error
+		run, err = r.SecurityStore.GetScanRun(ctx, scan.Namespace, finding.ScanRunID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		if run != nil && activeScanRunPhase(run.Phase) {
-			if err := ensureScanRunPolicyDigest(run, policy); err != nil {
-				if errors.Is(err, errScannerPolicyDigestChanged) {
-					return r.markScanRunTerminalError(ctx, scan, run, err)
-				}
-				return err
+	}
+	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
+	if err != nil {
+		if run != nil && activeScanRunPhase(run.Phase) && terminalScannerPolicyLoadError(err) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
+		return err
+	}
+	if run != nil && activeScanRunPhase(run.Phase) {
+		if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+			if errors.Is(err, errScannerPolicyDigestChanged) {
+				return r.recordTerminalScanRunError(ctx, scan, run, err)
 			}
+			return err
 		}
 	}
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
@@ -2206,6 +2252,9 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 }
 
 func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, run *store.ScanRun) error {
+	if run.Phase == scanRunPhaseFailed {
+		return nil
+	}
 	sliceID := strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID])
 	reviewSlice, staleReviewTask, err := r.reviewSliceForTaskRun(ctx, scan, sliceID, run.ID)
 	if err != nil {

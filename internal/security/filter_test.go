@@ -29,6 +29,17 @@ func TestFilterFindingsDropsTestOnlyFindings(t *testing.T) {
 	assertFilterDropped(t, got, "test-only")
 }
 
+func TestFilterFindingsKeepsNegatedTestOnlyProductionFinding(t *testing.T) {
+	finding := filterFinding(
+		"Production authorization bypass is not a test-only issue",
+		"internal/api/auth.go",
+		"This is not merely test-only; a runtime handler skips the tenant authorization check.",
+	)
+	finding.Category = "authz"
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsDropsGenericRateLimit(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding("Missing rate limit", "internal/api/status.go", "Endpoint should add generic rate limiting.")}, FindingFilterOptions{})
 	assertFilterDropped(t, got, "rate-limit")

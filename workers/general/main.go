@@ -475,8 +475,11 @@ func parseChangedLineRangesFromUnifiedDiffReader(r io.Reader) ([]security.Change
 				if matches[2] != "" {
 					count = atoiDiffNumber(matches[2])
 				}
-				if start <= 0 || len(ranges) >= maxChangedLineRangesForArtifact {
+				if start <= 0 {
 					break
+				}
+				if len(ranges) >= maxChangedLineRangesForArtifact {
+					return nil, errChangedDiffTooLarge
 				}
 				if count <= 0 {
 					count = 1

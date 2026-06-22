@@ -16,9 +16,11 @@ import (
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -2854,8 +2856,8 @@ func TestRepositoryScanPolicyDigestDriftFailsValidationTaskCreationWithoutRequeu
 	}
 	finding := &storepkg.Finding{ID: "finding_policy", Namespace: defaultNS, RepositoryScan: "kaset", ScanRunID: run.ID, Severity: "high", Confidence: "high"}
 
-	if err := reconciler.createValidationTask(ctx, scan, finding); err != nil {
-		t.Fatalf("createValidationTask() error = %v, want policy drift recorded without requeue", err)
+	if err := reconciler.createValidationTask(ctx, scan, finding); err == nil || !strings.Contains(err.Error(), "scanner policy digest changed") {
+		t.Fatalf("createValidationTask() error = %v, want policy drift propagated", err)
 	}
 	storedRun, err := store.GetScanRun(ctx, defaultNS, run.ID)
 	if err != nil {
@@ -2870,5 +2872,66 @@ func TestRepositoryScanPolicyDigestDriftFailsValidationTaskCreationWithoutRequeu
 	}
 	if len(tasks.Items) != 0 {
 		t.Fatalf("validation tasks = %d, want none on policy drift", len(tasks.Items))
+	}
+}
+
+func TestRepositoryScanUnreadablePolicyRefFailsMapperTaskCreation(t *testing.T) {
+	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme() error = %v", err)
+	}
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:                   "https://github.com/example/repo",
+			AnalysisAgentRef:          corev1alpha1.AgentReference{Name: "scan-reviewer"},
+			CustomScanInstructionsRef: &corev1alpha1.PolicyConfigMapKeyRef{Name: "missing-policy"},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
+	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", Mode: "initial", Phase: scanRunPhaseRunning}
+	if err := store.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+
+	err := reconciler.createMapperTask(ctx, scan, run)
+	if err == nil || !strings.Contains(err.Error(), "customScanInstructionsRef") {
+		t.Fatalf("createMapperTask() error = %v, want missing policy ref error", err)
+	}
+	storedRun, err := store.GetScanRun(ctx, defaultNS, run.ID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if storedRun.Phase != scanRunPhaseFailed || !strings.Contains(storedRun.ErrorMessage, "customScanInstructionsRef") {
+		t.Fatalf("stored run = %#v, want terminal missing-policy failure", storedRun)
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(RepositoryScan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError {
+		t.Fatalf("RepositoryScan phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
+	}
+}
+
+func TestTerminalScannerPolicyLoadErrorOnlyTerminalForDeterministicErrors(t *testing.T) {
+	if !terminalScannerPolicyLoadError(fmt.Errorf("customScanInstructionsRef: key %q is missing in ConfigMap %q", "policy", "scan-policy")) {
+		t.Fatal("terminalScannerPolicyLoadError() = false, want true for policy validation/config error")
+	}
+	if !terminalScannerPolicyLoadError(fmt.Errorf("customScanInstructionsRef: %w", apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "configmaps"}, "policy"))) {
+		t.Fatal("terminalScannerPolicyLoadError() = false, want true for missing ConfigMap")
+	}
+	if terminalScannerPolicyLoadError(apierrors.NewInternalError(fmt.Errorf("apiserver temporarily unavailable"))) {
+		t.Fatal("terminalScannerPolicyLoadError() = true, want false for transient API error")
+	}
+	if terminalScannerPolicyLoadError(fmt.Errorf("customScanInstructionsRef: %w", context.DeadlineExceeded)) {
+		t.Fatal("terminalScannerPolicyLoadError() = true, want false for context deadline")
 	}
 }

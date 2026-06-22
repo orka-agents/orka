@@ -463,6 +463,18 @@ func TestChangedLineRangeParserStopsAtSafetyCap(t *testing.T) {
 	}
 }
 
+func TestChangedLineRangeParserStopsAtRangeCountCap(t *testing.T) {
+	var diff strings.Builder
+	diff.WriteString("diff --git a/app.go b/app.go\n--- a/app.go\n+++ b/app.go\n")
+	for i := 1; i <= maxChangedLineRangesForArtifact+1; i++ {
+		fmt.Fprintf(&diff, "@@ -%d +%d @@\n+line\n", i, i)
+	}
+	_, err := parseChangedLineRangesFromUnifiedDiff([]byte(diff.String()))
+	if !errors.Is(err, errChangedDiffTooLarge) {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v, want range count cap", err)
+	}
+}
+
 func TestChangedLineRangesRejectsUnsafePaths(t *testing.T) {
 	diff := []byte("diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n+secret\n")
 	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
