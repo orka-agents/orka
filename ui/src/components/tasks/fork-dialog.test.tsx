@@ -338,4 +338,36 @@ describe('ForkDialog', () => {
     // key-derived auto-name doesn't collide with the first fork.
     expect(keys[1]).not.toBe(keys[0])
   })
+
+  it('mints a fresh key when the form body changes after a pending close', async () => {
+    const keys: string[] = []
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        if (keys.length === 1) await delay(80)
+        return HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-y', afterSeq: 4,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 4, events: [], truncated: false },
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    const user = userEvent.setup()
+    render(<ForkDialog taskId="tk" event={makeEvent({ seq: 4 })} open onOpenChange={() => {}} />)
+    // Submit with a prompt, then close via Escape while pending (key preserved,
+    // form fields cleared by reset).
+    await user.type(screen.getByLabelText(/prompt override/i), 'original prompt')
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await user.keyboard('{Escape}')
+    await new Promise((r) => setTimeout(r, 150))
+    // The dialog stays mounted (onOpenChange is a no-op here); the form is now
+    // blank. Submit the blank form — its request body differs from the in-flight
+    // one, so it must carry a different key, not the prompt-bound one.
+    await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(keys.length).toBe(2))
+    expect(keys[1]).not.toBe(keys[0])
+  })
 })

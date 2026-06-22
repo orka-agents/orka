@@ -39,28 +39,36 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
   // dialog was closed (via Escape/overlay/X while pending) does not repopulate
   // state on the now-closed, mounted component.
   const submissionRef = useRef(0)
-  // A stable idempotency key per logical submission, reused across retries from
-  // the error state so a network drop after the server created the fork resolves
-  // to the same task instead of minting a duplicate. Regenerated on reset.
+  // The checkpoint (afterSeq) and request body the current key was minted for.
+  // The backend derives the deterministic auto-name solely from the key, so a key
+  // reused for a different request (a different checkpoint, or a name/agent/prompt
+  // that no longer matches the visible form) would return or create a fork for
+  // the wrong request. Bind the key to its request signature and mint a fresh one
+  // when any of it changes. The key is reused across retries of the same request
+  // (and preserved across a pending close) so a network drop doesn't duplicate.
   const idempotencyKeyRef = useRef<string>('')
-  // The checkpoint (afterSeq) the current key was minted for. The backend derives
-  // the deterministic auto-name solely from the key, so a key reused for a
-  // different checkpoint would collide with the earlier fork; bind the key to its
-  // afterSeq and mint a fresh one when the checkpoint changes.
-  const idempotencyKeySeqRef = useRef<number | null>(null)
+  const idempotencyKeySignatureRef = useRef<string | null>(null)
 
   const afterSeq = event?.seq ?? 0
+  // Signature of the request this key represents. Trimmed to match what submit()
+  // actually sends.
+  const requestSignature = JSON.stringify([
+    afterSeq,
+    newTaskName.trim(),
+    agentName.trim(),
+    prompt.trim(),
+  ])
 
   function reset() {
     submissionRef.current += 1
     // Preserve the idempotency key while a submission is still in flight: the
     // POST can't be aborted, so if it succeeds server-side after the dialog was
-    // dismissed (Escape/overlay/X), a retry of the same blank-name fork must
-    // reuse this key so the backend collapses the duplicate instead of minting a
-    // second task. Once the mutation has settled, clear it normally.
+    // dismissed (Escape/overlay/X), a retry of the *same* request must reuse this
+    // key so the backend collapses the duplicate instead of minting a second
+    // task. Once the mutation has settled, clear it normally.
     if (!fork.isPending) {
       idempotencyKeyRef.current = ''
-      idempotencyKeySeqRef.current = null
+      idempotencyKeySignatureRef.current = null
     }
     setNewTaskName('')
     setAgentName('')
@@ -74,13 +82,15 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
     if (fork.isPending) return
     setError(null)
     const submission = submissionRef.current
-    // Reuse the key across retries of this submission, but mint a fresh one if it
-    // was minted for a different checkpoint (e.g. a key preserved from a pending
-    // close on another event) — the backend's deterministic auto-name derives
-    // from the key alone, so reusing it for a different afterSeq would collide.
-    if (!idempotencyKeyRef.current || idempotencyKeySeqRef.current !== afterSeq) {
+    // Reuse the key across retries of the same request, but mint a fresh one
+    // whenever the request signature differs from what the key was minted for
+    // (a different checkpoint, name, agent, or prompt — e.g. a key preserved from
+    // a pending close whose form fields were then cleared). The backend's
+    // deterministic auto-name derives from the key alone, so a stale key would
+    // resolve to the wrong fork.
+    if (!idempotencyKeyRef.current || idempotencyKeySignatureRef.current !== requestSignature) {
       idempotencyKeyRef.current = newIdempotencyKey()
-      idempotencyKeySeqRef.current = afterSeq
+      idempotencyKeySignatureRef.current = requestSignature
     }
     try {
       const result = await fork.mutateAsync({
@@ -103,20 +113,10 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
     }
   }
 
-  // Editing any fork parameter invalidates the current idempotency key. If a
-  // prior attempt actually created the fork (an ambiguous failure), reusing the
-  // key after changing prompt/agent/name would resolve to that original task and
-  // silently ignore the new overrides; minting a fresh key on the next submit
-  // makes the edited fork a distinct request.
-  function onEdit<T>(setter: (value: T) => void) {
-    return (value: T) => {
-      idempotencyKeyRef.current = ''
-      setter(value)
-    }
-  }
-  const setNewTaskNameEdited = onEdit(setNewTaskName)
-  const setAgentNameEdited = onEdit(setAgentName)
-  const setPromptEdited = onEdit(setPrompt)
+  // The idempotency key is bound to the request signature (checkpoint + name +
+  // agent + prompt), so editing any field naturally invalidates it: submit()
+  // mints a fresh key whenever the current signature differs from the key's. No
+  // separate per-field key clearing is needed.
 
   // Single close path so every dismissal — Escape, overlay, the X button, and the
   // footer Close/Cancel buttons — resets form and result state. The dialog stays
@@ -169,7 +169,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
                 id="fork-name"
                 type="text"
                 value={newTaskName}
-                onChange={(e) => setNewTaskNameEdited(e.target.value)}
+                onChange={(e) => setNewTaskName(e.target.value)}
                 placeholder="auto-generated if blank"
                 className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                 disabled={fork.isPending}
@@ -183,7 +183,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
                 id="fork-agent"
                 type="text"
                 value={agentName}
-                onChange={(e) => setAgentNameEdited(e.target.value)}
+                onChange={(e) => setAgentName(e.target.value)}
                 placeholder="keep source agent if blank"
                 className="h-9 w-full rounded-md border bg-background px-3 text-sm"
                 disabled={fork.isPending}
@@ -196,7 +196,7 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
               <textarea
                 id="fork-prompt"
                 value={prompt}
-                onChange={(e) => setPromptEdited(e.target.value)}
+                onChange={(e) => setPrompt(e.target.value)}
                 placeholder="keep source prompt if blank"
                 rows={3}
                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"

@@ -75,7 +75,9 @@ describe('evented execution UI smoke', () => {
     // The approval flips to approved once a decision is posted, like the backend.
     let approvalDecided = false
     server.use(
-      http.get(`${API}/tasks/:id`, () => HttpResponse.json(mockTask())),
+      // The task is still Running so its pending approval is actionable (the
+      // backend rejects decisions once a task is terminal).
+      http.get(`${API}/tasks/:id`, () => HttpResponse.json(mockTask({ status: { phase: 'Running' } }))),
       http.get(`${API}/tasks/:id/events`, () =>
         HttpResponse.json({
           namespace: 'default', streamType: 'task', streamID: 'smoke-task', afterSeq: 0, latestSeq: 3,

@@ -51,10 +51,15 @@ function formatTimestamp(ts?: string): string {
 function ApprovalCard({
   approval,
   taskId,
+  taskTerminal,
   onConflict,
 }: {
   approval: Approval
   taskId: string
+  // Whether the owning task has reached a terminal phase. The backend rejects
+  // decisions on terminal tasks (409), so such approvals are non-actionable even
+  // if still derived as pending.
+  taskTerminal?: boolean
   // Called when a decision returns 409 so the panel can refetch settled state.
   onConflict?: () => void
 }) {
@@ -62,6 +67,8 @@ function ApprovalCard({
   const [reason, setReason] = useState('')
   const [conflict, setConflict] = useState<string | null>(null)
   const isPending = approval.status === 'pending'
+  // A pending approval on a completed task can't be decided — show it read-only.
+  const actionable = isPending && !taskTerminal
   const submitting = decide.isPending
 
   async function submit(decision: 'approve' | 'decline') {
@@ -137,7 +144,13 @@ function ApprovalCard({
           </p>
         )}
 
-        {isPending && (
+        {isPending && taskTerminal && (
+          <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            This approval can no longer be decided because the task has completed.
+          </p>
+        )}
+
+        {actionable && (
           <div className="space-y-2">
             <input
               type="text"
@@ -178,6 +191,9 @@ export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskP
   // Poll while approvals are pending or the task is still running, so a live
   // ApprovalRequested surfaces even if the panel opened before any existed.
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
+  // The backend rejects decisions on terminal tasks, so their pending approvals
+  // render read-only.
+  const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
   const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning)
   const approvals = data?.approvals ?? []
   const pending = approvals.filter((a) => a.status === 'pending')
@@ -244,7 +260,7 @@ export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskP
         )}
       </div>
       {approvals.map((approval) => (
-        <ApprovalCard key={approval.id} approval={approval} taskId={taskId} onConflict={() => refetch()} />
+        <ApprovalCard key={approval.id} approval={approval} taskId={taskId} taskTerminal={taskTerminal} onConflict={() => refetch()} />
       ))}
     </div>
   )

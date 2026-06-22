@@ -185,4 +185,17 @@ describe('TaskApprovalPanel', () => {
     await waitFor(() => expect(screen.getByText('Failed to load approvals.')).toBeInTheDocument())
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })
+
+  it('renders a pending approval read-only when the task has completed', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () => HttpResponse.json(listResponse([approval()]))),
+    )
+    // The task is terminal, so the backend would 409 any decision — the card must
+    // not offer Approve/Decline.
+    render(<TaskApprovalPanel taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(screen.getByTestId('approval-card')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Decline' })).not.toBeInTheDocument()
+    expect(screen.getByText(/can no longer be decided because the task has completed/i)).toBeInTheDocument()
+  })
 })
