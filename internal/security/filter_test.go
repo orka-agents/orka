@@ -270,6 +270,94 @@ func TestFilterFindingsDropsClientAuthFindingWithOnlyFrontendAPIWrapperEvidence(
 	assertFilterDropped(t, got, "client-side auth")
 }
 
+func TestFilterFindingsDropsClientTokenGateWithoutCredentialDisclosure(t *testing.T) {
+	finding := filterFinding(
+		"Client token gate bypass",
+		"ui/src/AuthGate.tsx",
+		"A JWT token check in the UI can be bypassed by changing client state.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "client-side auth")
+}
+
+func TestFilterFindingsDropsClientLoginTokenGateWithoutCredentialDisclosure(t *testing.T) {
+	finding := filterFinding(
+		"Client login token gate bypass",
+		"ui/src/AuthGate.tsx",
+		"A login token gate in the UI can be bypassed by changing client state.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "client-side auth")
+}
+
+func TestFilterFindingsKeepsClientCredentialDisclosure(t *testing.T) {
+	finding := filterFinding(
+		"Client token disclosure",
+		"ui/src/AuthGate.tsx",
+		"The UI logs a bearer token to browser logs.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientCredentialExfiltration(t *testing.T) {
+	finding := filterFinding(
+		"Client token exfiltration",
+		"ui/src/AuthGate.tsx",
+		"The UI sends an OAuth access token to a third-party analytics endpoint.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsBundledClientSecretDisclosure(t *testing.T) {
+	finding := filterFinding(
+		"Client secret bundled in app",
+		"ui/src/AuthGate.tsx",
+		"OAuth client secret is bundled in the React app.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientCredentialAvailableOnWindow(t *testing.T) {
+	finding := filterFinding(
+		"Client token available globally",
+		"ui/src/AuthGate.tsx",
+		"Access token is available on window auth state.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientCredentialInURL(t *testing.T) {
+	finding := filterFinding(
+		"Client token in URL",
+		"ui/src/AuthGate.tsx",
+		"OAuth access token is in the URL query string hash.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientCredentialSentToEmbeddedFrame(t *testing.T) {
+	finding := filterFinding(
+		"Client token sent to frame",
+		"ui/src/AuthGate.tsx",
+		"The SPA puts the bearer token in a request header to an embedded frame.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsDropsWebClientAuthFindingWithOnlyFrontendAPIWrapperEvidence(t *testing.T) {
 	finding := filterFinding(
 		"Client authorization bypass",

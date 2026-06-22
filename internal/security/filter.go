@@ -94,7 +94,7 @@ func filterDropReason(finding *store.Finding) string {
 		}
 	}
 	if isClientSidePath(primaryPath) && !hasServerSideEvidencePath(allPaths) && containsAuthConcept(text) {
-		if likelySensitiveLeak(text) {
+		if likelyCredentialDisclosure(text) {
 			return ""
 		}
 		if !containsAny(text, "server trusts", "server-side", "server side", "api exposes", "sensitive data", "backend trusts", "bypass server") {
@@ -140,6 +140,23 @@ func likelySensitiveLeak(text string) bool {
 		"txtoken", "tx token", "tx_token", "tx-token", "request token", "request_token", "password",
 		"authorization bearer", "bearer token",
 	)
+}
+
+func likelyCredentialDisclosure(text string) bool {
+	if !likelySensitiveLeak(text) {
+		return false
+	}
+	if containsAny(text,
+		"leak", "leaks", "leaked", "expose", "exposes", "exposed", "disclosure", "disclose", "discloses", "disclosed",
+		"reveal", "reveals", "revealed", "visible", "available", "embedded", "bundled", "included", "render", "renders", "rendered",
+		"exfiltrate", "exfiltrates", "exfiltrated", "send", "sends", "sent", "transmit", "transmits", "transmitted", "upload", "uploads", "uploaded",
+		"third-party", "third party", "analytics endpoint", "external endpoint", "url", "query string", "hash", "header", "frame", "iframe", "localstorage", "sessionstorage",
+		"logs", "logged", "logging", "print", "prints", "printed", "store", "stores", "stored", "persist", "persists", "persisted",
+		"committed", "hardcoded", "hard-coded", "plain text", "plaintext",
+	) {
+		return true
+	}
+	return !containsAny(text, "bypass", "bypasses", "bypassed", "gate", "check", "client state", "changing client state")
 }
 
 func normalizedFindingText(finding *store.Finding) string {

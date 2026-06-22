@@ -2048,6 +2048,26 @@ func (r *RepositoryScanReconciler) createValidationTask(ctx context.Context, sca
 	return r.SecurityStore.UpsertFinding(ctx, finding)
 }
 
+func (r *RepositoryScanReconciler) ensureActiveScanRunPolicyCurrent(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
+	if run == nil || !activeScanRunPhase(run.Phase) {
+		return nil
+	}
+	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
+	if err != nil {
+		if terminalScannerPolicyLoadError(err) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
+		return err
+	}
+	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+		if errors.Is(err, errScannerPolicyDigestChanged) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
+		return err
+	}
+	return nil
+}
+
 func mergeEvidenceRefs(existing []store.FindingEvidenceRef, refs ...store.FindingEvidenceRef) []store.FindingEvidenceRef {
 	merged := append([]store.FindingEvidenceRef{}, existing...)
 	seen := map[string]struct{}{}
@@ -2329,6 +2349,9 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		TrustedRepository:    trustedRepo,
 		UseTrustedRepository: true,
 	})
+	if err := r.ensureActiveScanRunPolicyCurrent(ctx, scan, run); err != nil {
+		return err
+	}
 	filterResult := security.FilterFindings(partition.Accepted, security.FindingFilterOptions{
 		RepositoryScan: scan.Name,
 		ScanRunID:      run.ID,
