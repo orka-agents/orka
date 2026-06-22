@@ -228,13 +228,7 @@ func TestSubstrateConvergeActorsDeletesDeterministicActorsAboveTarget(t *testing
 			{ActorID: "other-pool-00099", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 2, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err != nil {
@@ -263,13 +257,7 @@ func TestSubstratePruneActorsDeletesDeterministicActorsAboveTarget(t *testing.T)
 			{ActorID: "other-pool-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	deleted, err := executor.PruneSubstrateActors(t.Context(), prefix, 1)
 	if err != nil {
@@ -300,13 +288,7 @@ func TestSubstrateConvergeActorsReturnsPartialPruneCountOnError(t *testing.T) {
 			NewError("delete actor", ErrorKindUnknown, "delete failed", false, nil),
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err == nil {
@@ -326,13 +308,7 @@ func TestSubstrateConvergeActorsRejectsTemplateMismatchBelowTarget(t *testing.T)
 	control := &recordingSubstrateControlClient{
 		templateName: "old-template",
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 2, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err == nil {
@@ -372,13 +348,7 @@ func TestSubstrateConvergeActorsRevalidatesConcurrentCreateAlreadyExists(t *test
 				createErr:    NewError("create actor", ErrorKindAlreadyExists, "actor already exists", false, nil),
 				templateName: tt.templateName,
 			}
-			executor := &SubstrateWorkspaceExecutor{
-				control:        control,
-				httpClient:     http.DefaultClient,
-				routerURL:      "http://router.test",
-				actorDNSSuffix: "actors.test",
-				now:            time.Now,
-			}
+			executor := &SubstrateActorPoolExecutor{control: control}
 
 			created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 			if tt.wantErr {
@@ -420,13 +390,7 @@ func TestSubstrateConvergeActorsDeletesStaleTemplateActorsWhenTargetZero(t *test
 			{ActorID: "other-pool-00099", TemplateNamespace: "ate-demo", TemplateName: "old-template", Status: substrateStatusSuspended},
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 0, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err != nil {

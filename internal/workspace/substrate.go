@@ -845,50 +845,6 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 	}, nil
 }
 
-// SubstratePoolTelemetry reports safe actor/worker density for a single Orka pool.
-func (e *SubstrateWorkspaceExecutor) SubstratePoolTelemetry(
-	ctx context.Context,
-	prefix string,
-	template TemplateRef,
-	workerPool TemplateRef,
-) (Density, error) {
-	return e.substrateActorControl().SubstratePoolTelemetry(ctx, prefix, template, workerPool)
-}
-
-// EnsureSubstrateActors creates deterministic actor records for a pool target.
-func (e *SubstrateWorkspaceExecutor) EnsureSubstrateActors(
-	ctx context.Context,
-	prefix string,
-	target int,
-	template TemplateRef,
-) (int, error) {
-	return e.substrateActorControl().EnsureSubstrateActors(ctx, prefix, target, template)
-}
-
-// ConvergeSubstrateActors creates missing deterministic actors below target and
-// deletes deterministic pool actors at or above target.
-func (e *SubstrateWorkspaceExecutor) ConvergeSubstrateActors(
-	ctx context.Context,
-	prefix string,
-	target int,
-	template TemplateRef,
-) (int, int, error) {
-	return e.substrateActorControl().ConvergeSubstrateActors(ctx, prefix, target, template)
-}
-
-// PruneSubstrateActors deletes deterministic pool actors at or above target.
-func (e *SubstrateWorkspaceExecutor) PruneSubstrateActors(
-	ctx context.Context,
-	prefix string,
-	target int,
-) (int, error) {
-	return e.substrateActorControl().PruneSubstrateActors(ctx, prefix, target)
-}
-
-func (e *SubstrateWorkspaceExecutor) substrateActorControl() *SubstrateActorPoolExecutor {
-	return &SubstrateActorPoolExecutor{control: e.control}
-}
-
 func deterministicSubstratePoolActorID(prefix string, ordinal int) string {
 	return fmt.Sprintf("%s-%05d", prefix, ordinal)
 }
