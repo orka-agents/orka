@@ -206,11 +206,13 @@ describe('TaskEventTimeline', () => {
 
   it('closes the backfill stream once it has caught up so pausing follow works', async () => {
     // First page caps at seq 100, server reports latestSeq 1500 (a gap), and the
-    // mocked stream has already replayed through 1500 (caught up).
+    // mocked stream has already replayed through 1500 and completed (the terminal
+    // stream_complete frame arrived).
     streamState.current = {
       events: [makeEvent({ seq: 1500, type: 'ModelMessage', summary: 'caught up' })],
       lastSeq: 1500,
-      status: 'streaming',
+      status: 'complete',
+      streamComplete: { lastSeq: 1500, type: 'TaskSucceeded' },
     }
     server.use(
       http.get(`${API}/tasks/:id/events`, () =>
@@ -249,5 +251,69 @@ describe('TaskEventTimeline', () => {
     // aren't missed, even though the user never clicked Follow.
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
     await waitFor(() => expect(streamCalls.some((c) => c.enabled)).toBe(true))
+  })
+
+  it('keeps the stream open through a terminal phase until stream_complete arrives', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 5,
+          events: [makeEvent({ seq: 5, type: 'ModelMessage', summary: 'mid run' })],
+        }),
+      ),
+    )
+    // Auto-followed running task; stream is open and has caught up to latestSeq
+    // (so the backfill gap is closed and only `following`/terminal-catch-up keep
+    // it open).
+    streamState.current = { events: [], lastSeq: 5, status: 'streaming' }
+    const view = render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
+    await waitFor(() => expect(screen.getByText('mid run')).toBeInTheDocument())
+    expect(streamCalls[streamCalls.length - 1].enabled).toBe(true)
+
+    // The controller persists the terminal phase before the terminal event, so
+    // the poll flips taskPhase to Succeeded while the stream is still streaming
+    // (no stream_complete yet). The stream must stay open to receive the final
+    // TaskSucceeded + stream_complete.
+    streamCalls.length = 0
+    view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(streamCalls.length).toBeGreaterThan(0))
+    expect(streamCalls[streamCalls.length - 1].enabled).toBe(true)
+
+    // Once stream_complete is observed, the catch-up releases and the stream
+    // disables.
+    streamCalls.length = 0
+    streamState.current = {
+      events: [],
+      lastSeq: 6,
+      status: 'complete',
+      streamComplete: { lastSeq: 6, type: 'TaskSucceeded' },
+    }
+    view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => {
+      const last = streamCalls[streamCalls.length - 1]
+      expect(last && last.enabled).toBe(false)
+    })
+  })
+
+  it('does not force the stream open on a terminal phase the user explicitly paused', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 3,
+          events: [makeEvent({ seq: 3, type: 'ModelMessage', summary: 'paused run' })],
+        }),
+      ),
+    )
+    streamState.current = { events: [], lastSeq: 3, status: 'streaming' }
+    const user = userEvent.setup()
+    const view = render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
+    await waitFor(() => expect(screen.getByText('paused run')).toBeInTheDocument())
+    // User explicitly stops following.
+    await user.click(screen.getByRole('button', { name: /stop following/i }))
+    streamCalls.length = 0
+    // Task completes — but since the user paused, we do NOT force the stream open.
+    view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() => expect(streamCalls.length).toBeGreaterThan(0))
+    expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
 })

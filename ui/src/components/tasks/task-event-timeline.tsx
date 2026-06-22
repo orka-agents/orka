@@ -13,6 +13,12 @@ function isRunning(phase?: TaskPhase): boolean {
   return phase === 'Running' || phase === 'Pending'
 }
 
+function isTerminal(phase?: TaskPhase): boolean {
+  return phase === 'Succeeded' || phase === 'Failed' || phase === 'Cancelled'
+}
+
+const TERMINAL_EVENT_TYPES = new Set(['TaskSucceeded', 'TaskFailed', 'TaskCancelled'])
+
 export interface TaskEventTimelineProps {
   taskId: string
   taskPhase?: TaskPhase
@@ -49,6 +55,9 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // refs-during-render rule. The component is keyed by taskId at its mount site,
   // so this resets naturally when the task target changes.
   const [streamedThrough, setStreamedThrough] = useState(0)
+  // Whether we've observed the terminal stream_complete frame for this task.
+  // Keyed-by-taskId mount resets this naturally when the target changes.
+  const [terminalFrameSeen, setTerminalFrameSeen] = useState(false)
 
   // The list endpoint caps at 1000 events. When the server reports a higher
   // latestSeq than the highest seq we currently hold (the freshly-loaded page or
@@ -58,13 +67,40 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // gap closes and "Stop following" actually pauses the stream.
   const highestHeld = Math.max(seedSeq, streamedThrough)
   const hasBackfillGap = latestSeq > highestHeld
-  const streamEnabled = (following || hasBackfillGap) && !!taskId
+  // The controller persists the terminal status.phase before it appends the
+  // terminal lifecycle event, so the task-detail poll can flip taskPhase to a
+  // terminal value while the final TaskSucceeded/TaskFailed event and the
+  // stream_complete frame are still in flight. If we let `following` drop to
+  // false here, the SSE connection would abort and permanently miss that frame.
+  // Keep the stream open through a terminal phase (unless the user paused) until
+  // we either already hold the terminal event or have observed stream_complete.
+  // This only fires during the live→terminal window — a task whose terminal
+  // event is already loaded needs no catch-up, so settled tasks don't re-stream.
+  // Wait for the initial events query to resolve before deciding, so an empty
+  // pre-load list doesn't transiently force the stream open.
+  const hasLoadedTerminalEvent = initialEvents.some((e) => TERMINAL_EVENT_TYPES.has(e.type))
+  const awaitingTerminalFrame =
+    initial.isSuccess &&
+    isTerminal(taskPhase) &&
+    followOverride !== false &&
+    !terminalFrameSeen &&
+    !hasLoadedTerminalEvent
+  const streamEnabled = (following || hasBackfillGap || awaitingTerminalFrame) && !!taskId
 
   const stream = useExecutionEventStream({
     url: executionEventApi.taskStream(taskId),
     enabled: streamEnabled,
     after: seedSeq,
   })
+
+  // Record once the stream delivers its terminal stream_complete frame, so the
+  // terminal-catch-up above stops keeping the connection open afterward.
+  useEffect(() => {
+    if (stream.status === 'complete') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTerminalFrameSeen(true)
+    }
+  }, [stream.status])
 
   useEffect(() => {
     // Grow-only: converges and bails out once caught up (Math.max returns the
