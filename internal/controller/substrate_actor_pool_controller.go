@@ -221,12 +221,10 @@ func (r *SubstrateActorPoolReconciler) substratePoolExecutor() (SubstratePoolExe
 	if r.SubstrateExecutorFactory != nil {
 		return r.SubstrateExecutorFactory(cfg)
 	}
-	return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
+	return workspace.NewSubstrateActorPoolExecutor(workspace.SubstrateConfig{
 		APIEndpoint:           cfg.APIEndpoint,
 		APICAFile:             cfg.APICAFile,
 		APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-		RouterURL:             cfg.RouterURL,
-		ActorDNSSuffix:        cfg.ActorDNSSuffix,
 	})
 }
 

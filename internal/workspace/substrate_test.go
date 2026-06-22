@@ -1797,3 +1797,13 @@ func TestWorkspaceDaemonErrorMapsRetryability(t *testing.T) {
 		})
 	}
 }
+
+func TestNewSubstrateActorPoolExecutorDoesNotRequireRouterConfig(t *testing.T) {
+	executor, err := NewSubstrateActorPoolExecutor(SubstrateConfig{ControlClient: &recordingSubstrateControlClient{}})
+	if err != nil {
+		t.Fatalf("NewSubstrateActorPoolExecutor() error = %v", err)
+	}
+	if executor == nil || executor.control == nil {
+		t.Fatalf("executor = %#v, want control-only adapter", executor)
+	}
+}
