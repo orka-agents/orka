@@ -346,6 +346,11 @@ func (r *RepositoryScanReconciler) createScanRun(ctx context.Context, scan *core
 
 	policy, err := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 	if err != nil {
+		if terminalScannerPolicyLoadError(err) {
+			if statusErr := r.updateRepositoryScanPolicyError(ctx, scan, err); statusErr != nil {
+				return errors.Join(err, statusErr)
+			}
+		}
 		return err
 	}
 	taskName := security.ScanStageTaskName(scan.Name, mode, security.StageThreatModel, "")
@@ -550,6 +555,24 @@ func (r *RepositoryScanReconciler) recordTerminalScanRunError(ctx context.Contex
 		return errors.Join(failure, err)
 	}
 	return failure
+}
+
+func (r *RepositoryScanReconciler) updateRepositoryScanPolicyError(ctx context.Context, scan *corev1alpha1.RepositoryScan, failure error) error {
+	if scan == nil || failure == nil {
+		return nil
+	}
+	message := failure.Error()
+	return r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+		s.Status.Phase = repositoryScanPhaseError
+		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "ScanFailed",
+			Message:            repositoryScanConditionMessage(message, "scanner policy could not be loaded"),
+			LastTransitionTime: metav1.Now(),
+			ObservedGeneration: s.Generation,
+		})
+	})
 }
 
 func (r *RepositoryScanReconciler) markScanRunTerminalError(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, failure error) error {

@@ -3,6 +3,7 @@ package security
 import (
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -92,7 +93,7 @@ func filterDropReason(finding *store.Finding) string {
 			return "generic dos/resource-exhaustion finding without concrete security impact"
 		}
 	}
-	if isClientSidePath(primaryPath) && containsAuthConcept(text) {
+	if isClientSidePath(primaryPath) && !hasServerSideEvidencePath(allPaths) && containsAuthConcept(text) {
 		if likelySensitiveLeak(text) {
 			return ""
 		}
@@ -283,8 +284,31 @@ func allPathsAreTestOnly(paths []string) bool {
 
 func isDocsPath(value string) bool {
 	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
+	if strings.HasPrefix(p, "docs/") || strings.HasPrefix(p, "website/docs/") {
+		return true
+	}
 	ext := path.Ext(p)
-	return ext == ".md" || ext == ".mdx" || strings.HasPrefix(p, "docs/") || strings.HasPrefix(p, "website/docs/") || strings.Contains(p, "/docs/")
+	switch ext {
+	case ".md", ".mdx", ".rst", ".adoc":
+		return true
+	case ".txt":
+		return isDocsDirectoryPath(p)
+	default:
+		return strings.Contains(p, "/docs/") && !isRuntimeSourcePath(p)
+	}
+}
+
+func isDocsDirectoryPath(p string) bool {
+	return strings.HasPrefix(p, "docs/") || strings.HasPrefix(p, "website/docs/") || strings.Contains(p, "/docs/")
+}
+
+func isRuntimeSourcePath(p string) bool {
+	switch path.Ext(p) {
+	case ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rb", ".rs", ".java", ".kt", ".cs", ".php", ".scala", ".ex", ".exs", ".sh", ".bash", ".zsh":
+		return true
+	default:
+		return false
+	}
 }
 
 func isTestPath(value string) bool {
@@ -307,18 +331,61 @@ func isClientSidePath(value string) bool {
 		if serverSideJSPath(p) {
 			return false
 		}
-		return strings.HasPrefix(p, "ui/") || strings.HasPrefix(p, "web/") || strings.HasPrefix(p, "frontend/") ||
-			strings.Contains(p, "/client/") || strings.Contains(p, "/browser/") || strings.Contains(p, "/components/") ||
-			strings.Contains(p, "/pages/") || strings.Contains(p, "/routes/")
+		return frontendJSPath(p)
 	default:
 		return false
 	}
 }
 
+func hasServerSideEvidencePath(paths []string) bool {
+	return slices.ContainsFunc(paths, isServerSideEvidencePath)
+}
+
+func isServerSideEvidencePath(value string) bool {
+	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
+	if p == "" || isDocsPath(p) || isTestPath(p) {
+		return false
+	}
+	if serverSideJSPath(p) {
+		return true
+	}
+	if frontendJSPath(p) {
+		return false
+	}
+	switch path.Ext(p) {
+	case ".go", ".py", ".rb", ".rs", ".java", ".kt", ".cs", ".php", ".scala", ".ex", ".exs":
+		return true
+	default:
+		return false
+	}
+}
+
+func frontendJSPath(p string) bool {
+	return strings.HasPrefix(p, "ui/") || strings.HasPrefix(p, "web/") || strings.HasPrefix(p, "frontend/") ||
+		strings.Contains(p, "/client/") || strings.Contains(p, "/browser/") || strings.Contains(p, "/components/") ||
+		strings.Contains(p, "/pages/") || strings.Contains(p, "/routes/")
+}
+
 func serverSideJSPath(p string) bool {
-	return strings.Contains(p, "/server/") || strings.Contains(p, "/api/") || strings.Contains(p, "/backend/") ||
+	if strings.Contains(p, "/server/") || strings.Contains(p, "/backend/") || strings.Contains(p, "/pages/api/") || strings.Contains(p, "/app/api/") ||
+		strings.HasPrefix(p, "pages/api/") || strings.HasPrefix(p, "app/api/") ||
 		strings.HasPrefix(p, "server/") || strings.HasPrefix(p, "api/") || strings.HasPrefix(p, "backend/") ||
-		strings.Contains(path.Base(p), "server")
+		strings.Contains(path.Base(p), "server") {
+		return true
+	}
+	if strings.Contains(p, "/api/") && !frontendAPIPath(p) {
+		return true
+	}
+	return strings.Contains(p, "/routes/api/") && !frontendRouteAPIPath(p)
+}
+
+func frontendAPIPath(p string) bool {
+	return strings.HasPrefix(p, "ui/") || strings.HasPrefix(p, "frontend/") || strings.HasPrefix(p, "web/src/") ||
+		strings.Contains(p, "/client/") || strings.Contains(p, "/browser/") || strings.Contains(p, "/components/")
+}
+
+func frontendRouteAPIPath(p string) bool {
+	return frontendAPIPath(p)
 }
 
 func isReactPath(value string) bool {

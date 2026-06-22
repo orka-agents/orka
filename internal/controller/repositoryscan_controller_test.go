@@ -32,6 +32,8 @@ import (
 	"github.com/sozercan/orka/workers/common"
 )
 
+const readyReasonScanFailed = "ScanFailed"
+
 func TestRepositoryScanConditionMessageUsesFallback(t *testing.T) {
 	got := repositoryScanConditionMessage("  \n\t ", "scan completed successfully")
 	if got != "scan completed successfully" {
@@ -632,10 +634,21 @@ func TestRepositoryScanCustomPolicyMissingConfigMapFails(t *testing.T) {
 			CustomScanInstructionsRef: &corev1alpha1.PolicyConfigMapKeyRef{Name: "missing", Key: "policy"},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
 	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: setupControllerSQLiteStore(t)}
 	if err := reconciler.createScanRun(ctx, scan, "initial", "", ""); err == nil || !strings.Contains(err.Error(), "customScanInstructionsRef") {
 		t.Fatalf("createScanRun() error = %v, want missing custom policy error", err)
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(RepositoryScan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError {
+		t.Fatalf("RepositoryScan phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason != readyReasonScanFailed || !strings.Contains(ready.Message, "customScanInstructionsRef") {
+		t.Fatalf("Ready condition = %#v, want ScanFailed policy error", ready)
 	}
 }
 
@@ -888,7 +901,7 @@ func TestProgressLatestScanRunFailsMapperArtifactValidationProblem(t *testing.T)
 	if ready == nil {
 		t.Fatal("Ready condition missing")
 	}
-	if ready.Status != metav1.ConditionFalse || ready.Reason != "ScanFailed" {
+	if ready.Status != metav1.ConditionFalse || ready.Reason != readyReasonScanFailed {
 		t.Fatalf("Ready condition = %#v, want failed condition", ready)
 	}
 }
@@ -2823,7 +2836,7 @@ func TestRepositoryScanPolicyDigestDriftFailsReviewTaskCreation(t *testing.T) {
 		t.Fatalf("RepositoryScan phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
 	}
 	ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
-	if ready == nil || ready.Reason != "ScanFailed" || !strings.Contains(ready.Message, "scanner policy digest changed") {
+	if ready == nil || ready.Reason != readyReasonScanFailed || !strings.Contains(ready.Message, "scanner policy digest changed") {
 		t.Fatalf("Ready condition = %#v, want ScanFailed policy-drift message", ready)
 	}
 }

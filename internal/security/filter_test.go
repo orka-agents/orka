@@ -8,6 +8,8 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const filterTestAuthzCategory = "authz"
+
 func TestFilterFindingsDropsDocsOnlyFindings(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding("README rate limit", "docs/security.md", "Documentation says rate limiting is missing.")}, FindingFilterOptions{})
 	assertFilterDropped(t, got, "docs-only")
@@ -19,7 +21,47 @@ func TestFilterFindingsKeepsNegatedDocsOnlyProductionFinding(t *testing.T) {
 		"internal/api/auth.go",
 		"This is not only documentation; a runtime handler skips the tenant authorization check.",
 	)
-	finding.Category = "authz"
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsCodeUnderDocsDirectory(t *testing.T) {
+	finding := filterFinding(
+		"Docs preview server auth bypass",
+		"cmd/docs/server.go",
+		"The docs preview service skips authorization for a runtime handler.",
+	)
+	finding.Category = filterTestAuthzCategory
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsDropsNonCodeDocsAssetsUnderDocsDirectory(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"OpenAPI rate limit note",
+		"docs/openapi.yaml",
+		"Documentation says rate limiting is missing.",
+	)}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "docs-only")
+}
+
+func TestFilterFindingsDropsSourceSnippetUnderRootDocsDirectory(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Docs example auth bypass",
+		"docs/examples/auth.go",
+		"Documentation example code skips authorization.",
+	)}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "docs-only")
+}
+
+func TestFilterFindingsKeepsRuntimeTextArtifacts(t *testing.T) {
+	finding := filterFinding(
+		"Dependency confusion risk",
+		"requirements.txt",
+		"Production dependency constraints can install a malicious package from an untrusted source.",
+	)
+	finding.Category = "dependency-confusion"
 	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
 	assertFilterKept(t, got)
 }
@@ -35,7 +77,7 @@ func TestFilterFindingsKeepsNegatedTestOnlyProductionFinding(t *testing.T) {
 		"internal/api/auth.go",
 		"This is not merely test-only; a runtime handler skips the tenant authorization check.",
 	)
-	finding.Category = "authz"
+	finding.Category = filterTestAuthzCategory
 	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
 	assertFilterKept(t, got)
 }
@@ -138,10 +180,106 @@ func TestFilterFindingsDroppedDiagnosticsRedactEmbeddedKeyValueSecrets(t *testin
 func TestFilterFindingsKeepsServerSideTypeScriptAuthFinding(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding(
 		"Authorization bypass",
-		"src/server/auth.ts",
+		"server/routes/auth.ts",
 		"Attacker-controlled request bypasses authorization and exposes tenant data.",
 	)}, FindingFilterOptions{})
 	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsNextJSServerAPIAuthFinding(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Admin API authorization bypass",
+		"pages/api/admin.ts",
+		"Attacker-controlled request bypasses authorization and exposes tenant data.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsNextJSAppRouterAPIAuthFinding(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Admin API authorization bypass",
+		"web/app/api/admin/route.ts",
+		"Attacker-controlled request bypasses authorization and exposes tenant data.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsWebAPIAuthFinding(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Web API authorization bypass",
+		"web/api/admin.ts",
+		"Attacker-controlled request bypasses authorization and exposes tenant data.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsServerRoutesAPIAuthFinding(t *testing.T) {
+	got := FilterFindings([]*store.Finding{filterFinding(
+		"Admin route authorization bypass",
+		"src/routes/api/admin.ts",
+		"Attacker-controlled request bypasses authorization and exposes tenant data.",
+	)}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientAuthFindingWithBackendEvidence(t *testing.T) {
+	finding := filterFinding(
+		"Authorization bypass spans frontend and backend",
+		"ui/src/AuthGate.tsx",
+		"A runtime backend route fails to enforce the tenant authorization decision.",
+	)
+	finding.Category = filterTestAuthzCategory
+	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "internal/api/auth.go", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientAuthFindingWithNextJSBackendEvidence(t *testing.T) {
+	finding := filterFinding(
+		"Authorization bypass spans frontend and backend",
+		"ui/src/AuthGate.tsx",
+		"A backend API route fails to enforce the tenant authorization decision.",
+	)
+	finding.Category = filterTestAuthzCategory
+	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "pages/api/admin.ts", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsKeepsClientAuthFindingWithSrcAPIBackendEvidence(t *testing.T) {
+	finding := filterFinding(
+		"Authorization bypass spans frontend and backend",
+		"ui/src/AuthGate.tsx",
+		"A backend API route fails to enforce the tenant authorization decision.",
+	)
+	finding.Category = filterTestAuthzCategory
+	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "src/api/auth.ts", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsDropsClientAuthFindingWithOnlyFrontendAPIWrapperEvidence(t *testing.T) {
+	finding := filterFinding(
+		"Client authorization bypass",
+		"ui/src/AuthGate.tsx",
+		"Client auth gate bypasses authorization without backend trust boundary evidence.",
+	)
+	finding.Category = filterTestAuthzCategory
+	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "ui/src/api/auth.ts", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "client-side auth")
+}
+
+func TestFilterFindingsDropsWebClientAuthFindingWithOnlyFrontendAPIWrapperEvidence(t *testing.T) {
+	finding := filterFinding(
+		"Client authorization bypass",
+		"web/src/AuthGate.tsx",
+		"Client auth gate bypasses authorization without backend trust boundary evidence.",
+	)
+	finding.Category = filterTestAuthzCategory
+	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "web/src/api/auth.ts", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterDropped(t, got, "client-side auth")
 }
 
 func TestFilterFindingsKeepsDocsCredentialLeak(t *testing.T) {
