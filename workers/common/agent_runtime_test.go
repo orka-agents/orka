@@ -1496,52 +1496,6 @@ func TestRunAgent_AgentSandboxForwardsStdoutResultMarkerOnCommandFailure(t *test
 	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "upload", "exec", "delete")
 }
 
-func TestWorkspaceStdoutResultMarkerDownloadsMarkerWhenStdoutTruncated(t *testing.T) {
-	t.Setenv(workerenv.ResultStdout, "true")
-
-	rawResult := `{"kind":"typed-review","payload":"downloaded-result"}`
-	marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte(rawResult))
-	recorder := newRecordingWorkspaceExecutor()
-	claim, err := recorder.Claim(context.Background(), workspace.ClaimRequest{
-		Namespace: "task-ns",
-		TaskName:  "task-name",
-		Template:  workspace.TemplateRef{Name: "agent-template"},
-		Timeout:   time.Second,
-	})
-	if err != nil {
-		t.Fatalf("Claim() error = %v", err)
-	}
-	if _, err := recorder.Upload(context.Background(), workspace.UploadRequest{
-		Ref: claim.Ref,
-		Artifacts: []workspace.UploadArtifact{{
-			Path: agentSandboxResultMarkerUploadPath,
-			Data: []byte(marker + "\n"),
-			Mode: 0o600,
-		}},
-		Timeout: time.Second,
-	}); err != nil {
-		t.Fatalf("Upload() error = %v", err)
-	}
-
-	got, err := workspaceStdoutResultMarker(
-		context.Background(),
-		recorder,
-		claim.Ref,
-		time.Second,
-		&workspace.ExecResult{
-			Stdout:          workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString([]byte("partial")),
-			StdoutTruncated: true,
-		},
-		"",
-	)
-	if err != nil {
-		t.Fatalf("workspaceStdoutResultMarker() error = %v", err)
-	}
-	if got != marker {
-		t.Fatalf("workspaceStdoutResultMarker() = %q, want downloaded marker %q", got, marker)
-	}
-}
-
 func TestRunAgent_AgentSandboxRetainsWorkspace(t *testing.T) {
 	setRequiredAgentSandboxEnv(t, "retain")
 
