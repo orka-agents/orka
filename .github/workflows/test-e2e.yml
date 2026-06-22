@@ -22,6 +22,8 @@ jobs:
   test-e2e:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    env:
+      KIND_VERSION: v0.31.0
     steps:
       - name: Clone the code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -52,9 +54,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          curl -fsSL --retry 3 --retry-delay 2 -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
