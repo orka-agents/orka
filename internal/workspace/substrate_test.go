@@ -9,6 +9,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
 )
 
 const (
@@ -1743,4 +1746,54 @@ func (c *recordingSubstrateControlClient) ListActors(ctx context.Context) ([]sub
 		return nil, c.listActorsErr
 	}
 	return append([]substrateActor(nil), c.actors...), nil
+}
+
+func TestWorkspaceDaemonErrorMapsRetryability(t *testing.T) {
+	tests := map[string]struct {
+		err       error
+		kind      ErrorKind
+		retryable bool
+		contains  string
+	}{
+		"invalid url": {
+			err:      &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonInvalidURL, Message: "invalid router URL"},
+			kind:     ErrorKindInvalidArgument,
+			contains: "invalid router URL",
+		},
+		"status 401": {
+			err:      &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonStatus, Message: "daemon returned HTTP 401: unauthorized", StatusCode: http.StatusUnauthorized, Retryable: false},
+			kind:     ErrorKindUnknown,
+			contains: "HTTP 401",
+		},
+		"status 503": {
+			err:       &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonStatus, Message: "daemon returned HTTP 503: warming", StatusCode: http.StatusServiceUnavailable, Retryable: true},
+			kind:      ErrorKindUnknown,
+			retryable: true,
+			contains:  "HTTP 503",
+		},
+		"decode": {
+			err:      &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonDecodeResponse, Message: "failed to decode response"},
+			kind:     ErrorKindUnknown,
+			contains: "decode",
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			mapped := executor.workspaceDaemonError(tt.err)
+			if KindOf(mapped) != tt.kind {
+				t.Fatalf("kind = %s, want %s (err=%v)", KindOf(mapped), tt.kind, mapped)
+			}
+			var workspaceErr *Error
+			if !errors.As(mapped, &workspaceErr) {
+				t.Fatalf("mapped error = %T %[1]v, want workspace Error", mapped)
+			}
+			if workspaceErr.Retryable != tt.retryable {
+				t.Fatalf("Retryable = %t, want %t", workspaceErr.Retryable, tt.retryable)
+			}
+			if tt.contains != "" && !strings.Contains(mapped.Error(), tt.contains) {
+				t.Fatalf("error = %q, want contains %q", mapped.Error(), tt.contains)
+			}
+		})
+	}
 }
