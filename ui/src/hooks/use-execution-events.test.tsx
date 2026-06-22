@@ -183,6 +183,34 @@ describe('use-execution-events hooks', () => {
     await waitFor(() => expect(calls).toBeGreaterThan(1), { timeout: 1000 })
   })
 
+  it('useTaskApprovals stops polling once the task is terminal even with a pending approval', async () => {
+    let calls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+        calls += 1
+        // A pending approval on a terminal task (e.g. no expiry/cancel event was
+        // ever written). It renders read-only and the backend rejects decisions,
+        // so polling it would refetch the same row forever — it must stop.
+        return HttpResponse.json({
+          namespace: 'default',
+          taskName: params.id,
+          approvals: [{ id: 'ap-1', action: 'web_fetch', status: 'pending', createdAt: '2026-06-13T00:00:00Z' }],
+        })
+      }),
+    )
+    const { result } = renderHook(
+      // pollIntervalMs set, not running, taskTerminal = true.
+      () => useTaskApprovals('tk', true, 50, /* taskRunning */ false, /* taskTerminal */ true),
+      { wrapper: createWrapper() },
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const afterFirst = calls
+    // Wait well beyond several poll intervals; a terminal task must not keep
+    // refetching its stuck-pending approval.
+    await new Promise((r) => setTimeout(r, 250))
+    expect(calls).toBe(afterFirst)
+  })
+
   it('useDecideApproval posts the decision body', async () => {
     let capturedBody: unknown = null
     let capturedPath = ''

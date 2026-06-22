@@ -61,12 +61,16 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
 
   function reset() {
     submissionRef.current += 1
-    // Preserve the idempotency key while a submission is still in flight: the
-    // POST can't be aborted, so if it succeeds server-side after the dialog was
-    // dismissed (Escape/overlay/X), a retry of the *same* request must reuse this
-    // key so the backend collapses the duplicate instead of minting a second
-    // task. Once the mutation has settled, clear it normally.
-    if (!fork.isPending) {
+    // Preserve the idempotency key unless the fork is confirmed created. The POST
+    // can't be aborted, and even a settled *error* is ambiguous — the request may
+    // have reached the backend and created the task before the response was lost
+    // (network drop, timeout). If we cleared the key here, reopening and retrying
+    // the same request would mint a fresh key, so the backend couldn't collapse
+    // the duplicate and would create a second task. Only a confirmed success means
+    // the fork exists and the key has served its purpose, so clear it then; keep
+    // it across pending and error closes. A genuinely different next request
+    // rotates the key in submit() via its request signature anyway.
+    if (fork.isSuccess) {
       idempotencyKeyRef.current = ''
       idempotencyKeySignatureRef.current = null
     }

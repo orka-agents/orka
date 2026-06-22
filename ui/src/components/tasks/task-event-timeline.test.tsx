@@ -338,15 +338,20 @@ describe('TaskEventTimeline', () => {
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
 
-  it('refetches events when a fast task jumps from unknown straight to terminal', async () => {
+  it('keeps retrying terminal catch-up across the controller race until the terminal event lands', async () => {
+    // The controller persists the terminal phase before appending the terminal
+    // event (and retries that append ~1s later), so the first catch-up probe can
+    // race ahead and still see no terminal event. A one-shot refetch would give
+    // up here and leave the tab stale; the bounded poll must keep probing until
+    // the event appears.
     let getCalls = 0
-    let phase = 0
     server.use(
       http.get(`${API}/tasks/:id/events`, () => {
         getCalls += 1
-        // First load (phase unknown): empty. After the task completes, the
-        // refetch returns the now-recorded events including the terminal one.
-        if (phase === 0) {
+        // Initial load (call 1) and the first catch-up probe (call 2) still see no
+        // terminal event; it only appears from the third response on, mirroring the
+        // controller's delayed append.
+        if (getCalls <= 2) {
           return HttpResponse.json({
             namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 0, events: [],
           })
@@ -355,21 +360,44 @@ describe('TaskEventTimeline', () => {
           namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 2,
           events: [
             makeEvent({ seq: 1, type: 'TaskStarted', summary: 'started' }),
-            makeEvent({ seq: 2, type: 'TaskSucceeded', summary: 'finished fast' }),
+            makeEvent({ seq: 2, type: 'TaskSucceeded', summary: 'finished after race' }),
           ],
         })
       }),
     )
-    // Mounted before the phase is known; the task then jumps straight to
-    // Succeeded without the timeline ever observing a running phase.
+    // Mounted before the phase is known, then jumps straight to Succeeded.
     const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
     await waitFor(() => expect(getCalls).toBe(1))
-    const callsBefore = getCalls
-    phase = 1
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
-    // The terminal transition triggers a one-shot refetch that surfaces the
-    // events, even though catch-up streaming never engaged.
-    await waitFor(() => expect(getCalls).toBeGreaterThan(callsBefore))
-    await waitFor(() => expect(screen.getByText('finished fast')).toBeInTheDocument())
-  })
+    // The terminal event only surfaces because catch-up probed more than once;
+    // allow time for the spaced retries.
+    await waitFor(() => expect(screen.getByText('finished after race')).toBeInTheDocument(), {
+      timeout: 4000,
+    })
+    expect(getCalls).toBeGreaterThanOrEqual(3)
+  }, 8000)
+
+  it('stops terminal catch-up after a bounded number of attempts when no terminal event ever lands', async () => {
+    // A settled task that genuinely has no terminal event (events disabled, or
+    // recorded before the feature). Catch-up must not poll forever.
+    let getCalls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () => {
+        getCalls += 1
+        return HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 0, events: [],
+        })
+      }),
+    )
+    const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
+    await waitFor(() => expect(getCalls).toBe(1))
+    view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    // The catch-up issues exactly TERMINAL_REFETCH_MAX_ATTEMPTS (5) probes — the
+    // first immediate, the rest spaced ~1.5s — on top of the initial load, so the
+    // total settles at 1 + 5 = 6. Wait for the full bounded sequence to run.
+    await waitFor(() => expect(getCalls).toBe(6), { timeout: 6000 })
+    // Then confirm it actually stops: no further probes after the cap is hit.
+    await new Promise((r) => setTimeout(r, 1500))
+    expect(getCalls).toBe(6)
+  }, 12000)
 })

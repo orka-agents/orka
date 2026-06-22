@@ -192,9 +192,10 @@ export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskP
   // ApprovalRequested surfaces even if the panel opened before any existed.
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
   // The backend rejects decisions on terminal tasks, so their pending approvals
-  // render read-only.
+  // render read-only — and polling them is pointless since no event will flip
+  // their status. Gate both on taskTerminal.
   const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
-  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning)
+  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal)
   const approvals = data?.approvals ?? []
   const pending = approvals.filter((a) => a.status === 'pending')
 

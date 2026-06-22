@@ -19,6 +19,17 @@ function isTerminal(phase?: TaskPhase): boolean {
 
 const TERMINAL_EVENT_TYPES = new Set(['TaskSucceeded', 'TaskFailed', 'TaskCancelled'])
 
+// After a task reaches a terminal phase but we don't yet hold its terminal event,
+// re-probe the events list a bounded number of times. The controller persists the
+// terminal status.phase BEFORE it appends the terminal lifecycle event, and
+// retries that append ~1s later if it fails, so a single refetch can land in that
+// gap and leave the Timeline stale until a manual retry. A few spaced probes close
+// the race window; the bound ensures an already-settled task that simply has no
+// terminal event (events disabled, or recorded before this feature) stops probing
+// instead of polling forever.
+const TERMINAL_REFETCH_MAX_ATTEMPTS = 5
+const TERMINAL_REFETCH_INTERVAL_MS = 800
+
 export interface TaskEventTimelineProps {
   taskId: string
   taskPhase?: TaskPhase
@@ -63,9 +74,11 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // were live-following when it completed — never to an already-settled task
   // opened fresh, whose empty/quiet stream would otherwise stay open forever.
   const [wasFollowing, setWasFollowing] = useState(false)
-  // Whether we've already done the one-shot refetch after the task became
-  // terminal. Reset per task by the keyed mount.
-  const [refetchedForTerminal, setRefetchedForTerminal] = useState(false)
+  // How many bounded terminal catch-up refetches we've issued. Reset per task by
+  // the keyed mount. Replaces a single one-shot refetch, which could race the
+  // controller appending the terminal event and then give up while the Timeline
+  // was still stale.
+  const [terminalRefetchAttempts, setTerminalRefetchAttempts] = useState(0)
 
   // The list endpoint caps at 1000 events. When the server reports a higher
   // latestSeq than the highest seq we currently hold (the freshly-loaded page or
@@ -118,18 +131,41 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
     }
   }, [stream.status])
 
-  // A one-shot refetch when the task reaches a terminal phase but we don't yet
-  // hold its terminal event. This covers fast tasks that complete before the
-  // poll ever observed a running phase (so wasFollowing/streaming never engaged)
-  // and the initial one-shot events query returned an empty/stale page. It is
-  // bounded (a single refetch), so an empty settled task doesn't keep polling.
+  // A bounded catch-up when the task reaches a terminal phase but we don't yet
+  // hold its terminal event. This covers two races against the controller, which
+  // persists the terminal status.phase BEFORE appending the terminal lifecycle
+  // event (and retries that append ~1s later on failure):
+  //   1. fast tasks that complete before the poll ever observed a running phase
+  //      (so wasFollowing/streaming never engaged), and
+  //   2. the window where taskPhase is already terminal but the terminal event
+  //      hasn't been written yet.
+  // A single refetch could land in that window and then give up, leaving the tab
+  // stale until manual retry. Instead, re-probe on an interval up to a bound, and
+  // stop as soon as the terminal event is loaded. The bound prevents an
+  // already-settled task that genuinely has no terminal event (events disabled,
+  // or recorded before this feature) from polling forever.
+  const needsTerminalCatchUp =
+    isTerminal(taskPhase) &&
+    initial.isSuccess &&
+    !hasLoadedTerminalEvent &&
+    terminalRefetchAttempts < TERMINAL_REFETCH_MAX_ATTEMPTS
   useEffect(() => {
-    if (isTerminal(taskPhase) && initial.isSuccess && !hasLoadedTerminalEvent && !refetchedForTerminal) {
-      setRefetchedForTerminal(true)
-      void initial.refetch()
-    }
+    if (!needsTerminalCatchUp) return
+    const timer = setTimeout(
+      () => {
+        setTerminalRefetchAttempts((n) => n + 1)
+        void initial.refetch()
+      },
+      // Probe promptly the first time (the event is usually appended within a
+      // beat), then space out subsequent retries to ride out the ~1s append
+      // retry without hammering the endpoint.
+      terminalRefetchAttempts === 0 ? 0 : TERMINAL_REFETCH_INTERVAL_MS,
+    )
+    return () => clearTimeout(timer)
+    // initial.refetch is stable; depending on it would re-arm the timer on every
+    // query state change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskPhase, initial.isSuccess, hasLoadedTerminalEvent, refetchedForTerminal])
+  }, [needsTerminalCatchUp, terminalRefetchAttempts])
 
   useEffect(() => {
     // Grow-only: converges and bails out once caught up (Math.max returns the

@@ -60,15 +60,19 @@ export function useTaskTrace(taskId: string, enabled = true) {
 }
 
 // Poll while an approval is still pending OR the task can still emit new
-// approvals (it is not in a terminal phase). Polling stops only once nothing is
-// pending AND the task has finished, so a settled panel doesn't refetch forever
-// while a still-running task's first ApprovalRequested is never missed. Pass
-// pollIntervalMs to enable polling; omit it to never poll.
+// approvals (it is not in a terminal phase). Polling stops once the task has
+// reached a terminal phase, OR nothing is pending and the task isn't running —
+// so a settled panel doesn't refetch forever while a still-running task's first
+// ApprovalRequested is never missed. A terminal task is the key stop condition:
+// its pending approvals render read-only (the backend rejects decisions), and no
+// further events will flip their status, so polling them would never terminate.
+// Pass pollIntervalMs to enable polling; omit it to never poll.
 export function useTaskApprovals(
   taskId: string,
   enabled = true,
   pollIntervalMs?: number,
   taskRunning = false,
+  taskTerminal = false,
 ) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
@@ -80,6 +84,9 @@ export function useTaskApprovals(
     enabled: enabled && !!taskId,
     refetchInterval: (query) => {
       if (!pollIntervalMs) return false
+      // A settled task won't change a pending approval (it's read-only), so stop
+      // polling instead of refetching the same pending row indefinitely.
+      if (taskTerminal) return false
       const approvals = query.state.data?.approvals ?? []
       const hasPending = approvals.some((a) => a.status === 'pending')
       return hasPending || taskRunning ? pollIntervalMs : false
