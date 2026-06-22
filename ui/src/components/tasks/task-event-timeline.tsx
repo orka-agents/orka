@@ -63,6 +63,9 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // were live-following when it completed — never to an already-settled task
   // opened fresh, whose empty/quiet stream would otherwise stay open forever.
   const [wasFollowing, setWasFollowing] = useState(false)
+  // Whether we've already done the one-shot refetch after the task became
+  // terminal. Reset per task by the keyed mount.
+  const [refetchedForTerminal, setRefetchedForTerminal] = useState(false)
 
   // The list endpoint caps at 1000 events. When the server reports a higher
   // latestSeq than the highest seq we currently hold (the freshly-loaded page or
@@ -103,7 +106,6 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // only applies to a task we were live-following when it completed.
   useEffect(() => {
     if (following) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setWasFollowing(true)
     }
   }, [following])
@@ -112,15 +114,26 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // terminal-catch-up above stops keeping the connection open afterward.
   useEffect(() => {
     if (stream.status === 'complete') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTerminalFrameSeen(true)
     }
   }, [stream.status])
 
+  // A one-shot refetch when the task reaches a terminal phase but we don't yet
+  // hold its terminal event. This covers fast tasks that complete before the
+  // poll ever observed a running phase (so wasFollowing/streaming never engaged)
+  // and the initial one-shot events query returned an empty/stale page. It is
+  // bounded (a single refetch), so an empty settled task doesn't keep polling.
+  useEffect(() => {
+    if (isTerminal(taskPhase) && initial.isSuccess && !hasLoadedTerminalEvent && !refetchedForTerminal) {
+      setRefetchedForTerminal(true)
+      void initial.refetch()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskPhase, initial.isSuccess, hasLoadedTerminalEvent, refetchedForTerminal])
+
   useEffect(() => {
     // Grow-only: converges and bails out once caught up (Math.max returns the
     // same value), so this does not cascade renders.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStreamedThrough((prev) => Math.max(prev, stream.lastSeq))
   }, [stream.lastSeq])
 

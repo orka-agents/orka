@@ -43,6 +43,11 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
   // the error state so a network drop after the server created the fork resolves
   // to the same task instead of minting a duplicate. Regenerated on reset.
   const idempotencyKeyRef = useRef<string>('')
+  // The checkpoint (afterSeq) the current key was minted for. The backend derives
+  // the deterministic auto-name solely from the key, so a key reused for a
+  // different checkpoint would collide with the earlier fork; bind the key to its
+  // afterSeq and mint a fresh one when the checkpoint changes.
+  const idempotencyKeySeqRef = useRef<number | null>(null)
 
   const afterSeq = event?.seq ?? 0
 
@@ -53,7 +58,10 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
     // dismissed (Escape/overlay/X), a retry of the same blank-name fork must
     // reuse this key so the backend collapses the duplicate instead of minting a
     // second task. Once the mutation has settled, clear it normally.
-    if (!fork.isPending) idempotencyKeyRef.current = ''
+    if (!fork.isPending) {
+      idempotencyKeyRef.current = ''
+      idempotencyKeySeqRef.current = null
+    }
     setNewTaskName('')
     setAgentName('')
     setPrompt('')
@@ -66,8 +74,14 @@ export function ForkDialog({ taskId, event, open, onOpenChange }: ForkDialogProp
     if (fork.isPending) return
     setError(null)
     const submission = submissionRef.current
-    // Reuse the key across retries of this submission; mint one on first attempt.
-    if (!idempotencyKeyRef.current) idempotencyKeyRef.current = newIdempotencyKey()
+    // Reuse the key across retries of this submission, but mint a fresh one if it
+    // was minted for a different checkpoint (e.g. a key preserved from a pending
+    // close on another event) — the backend's deterministic auto-name derives
+    // from the key alone, so reusing it for a different afterSeq would collide.
+    if (!idempotencyKeyRef.current || idempotencyKeySeqRef.current !== afterSeq) {
+      idempotencyKeyRef.current = newIdempotencyKey()
+      idempotencyKeySeqRef.current = afterSeq
+    }
     try {
       const result = await fork.mutateAsync({
         afterSeq,

@@ -337,4 +337,39 @@ describe('TaskEventTimeline', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
+
+  it('refetches events when a fast task jumps from unknown straight to terminal', async () => {
+    let getCalls = 0
+    let phase = 0
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () => {
+        getCalls += 1
+        // First load (phase unknown): empty. After the task completes, the
+        // refetch returns the now-recorded events including the terminal one.
+        if (phase === 0) {
+          return HttpResponse.json({
+            namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 0, events: [],
+          })
+        }
+        return HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 2,
+          events: [
+            makeEvent({ seq: 1, type: 'TaskStarted', summary: 'started' }),
+            makeEvent({ seq: 2, type: 'TaskSucceeded', summary: 'finished fast' }),
+          ],
+        })
+      }),
+    )
+    // Mounted before the phase is known; the task then jumps straight to
+    // Succeeded without the timeline ever observing a running phase.
+    const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
+    await waitFor(() => expect(getCalls).toBe(1))
+    const callsBefore = getCalls
+    phase = 1
+    view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    // The terminal transition triggers a one-shot refetch that surfaces the
+    // events, even though catch-up streaming never engaged.
+    await waitFor(() => expect(getCalls).toBeGreaterThan(callsBefore))
+    await waitFor(() => expect(screen.getByText('finished fast')).toBeInTheDocument())
+  })
 })

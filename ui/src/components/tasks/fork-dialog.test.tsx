@@ -293,4 +293,49 @@ describe('ForkDialog', () => {
     // even though the dialog was reset on the pending close.
     expect(keys[1]).toBe(keys[0])
   })
+
+  it('mints a fresh key when a preserved key is reused for a different checkpoint', async () => {
+    const keys: string[] = []
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key') ?? '')
+        // First request is slow so we can close mid-flight; it succeeds server-side.
+        if (keys.length === 1) await delay(80)
+        return HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: 'tk', newTaskName: 'tk-fork-x', afterSeq: 0,
+            forkContext: { sourceNamespace: 'default', sourceTask: 'tk', afterSeq: 0, events: [], truncated: false },
+          },
+          { status: 201 },
+        )
+      }),
+    )
+    // The dialog stays mounted while the launching event (checkpoint) changes,
+    // mirroring opening "Fork from here" on a different timeline row.
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      const [seq, setSeq] = useState(4)
+      return (
+        <>
+          <button onClick={() => { setSeq(10); setOpen(true) }}>reopen-other</button>
+          <ForkDialog taskId="tk" event={makeEvent({ seq })} open={open} onOpenChange={setOpen} />
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(<Harness />)
+    // Start a blank-name fork on checkpoint seq 4, close via Escape while pending.
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await new Promise((r) => setTimeout(r, 150))
+    // Reopen on a DIFFERENT checkpoint (seq 10) and submit without editing.
+    await user.click(screen.getByRole('button', { name: 'reopen-other' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /create fork/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create fork/i }))
+    await waitFor(() => expect(keys.length).toBe(2))
+    // A different checkpoint must carry a DIFFERENT key, so the backend's
+    // key-derived auto-name doesn't collide with the first fork.
+    expect(keys[1]).not.toBe(keys[0])
+  })
 })
