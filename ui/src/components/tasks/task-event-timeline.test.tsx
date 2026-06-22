@@ -316,4 +316,25 @@ describe('TaskEventTimeline', () => {
     await waitFor(() => expect(streamCalls.length).toBeGreaterThan(0))
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
+
+  it('does not open a stream for an already-terminal task opened fresh with no events', async () => {
+    // A settled task with an empty event stream (e.g. created before execution
+    // events were recorded). The backend never emits stream_complete here, so
+    // terminal catch-up must not fire — we were never following this task.
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 0,
+          events: [],
+        }),
+      ),
+    )
+    render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
+    await waitFor(() =>
+      expect(screen.getByText(/no execution events recorded for this task/i)).toBeInTheDocument(),
+    )
+    // Give any spurious catch-up a chance to enable the stream.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(streamCalls.every((c) => !c.enabled)).toBe(true)
+  })
 })

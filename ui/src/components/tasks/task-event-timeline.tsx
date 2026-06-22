@@ -58,6 +58,11 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // Whether we've observed the terminal stream_complete frame for this task.
   // Keyed-by-taskId mount resets this naturally when the target changes.
   const [terminalFrameSeen, setTerminalFrameSeen] = useState(false)
+  // Whether this timeline was ever actively following (the task was running) at
+  // some point during this mount. Terminal catch-up only applies to a task we
+  // were live-following when it completed — never to an already-settled task
+  // opened fresh, whose empty/quiet stream would otherwise stay open forever.
+  const [wasFollowing, setWasFollowing] = useState(false)
 
   // The list endpoint caps at 1000 events. When the server reports a higher
   // latestSeq than the highest seq we currently hold (the freshly-loaded page or
@@ -80,6 +85,7 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
   // pre-load list doesn't transiently force the stream open.
   const hasLoadedTerminalEvent = initialEvents.some((e) => TERMINAL_EVENT_TYPES.has(e.type))
   const awaitingTerminalFrame =
+    wasFollowing &&
     initial.isSuccess &&
     isTerminal(taskPhase) &&
     followOverride !== false &&
@@ -92,6 +98,15 @@ export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps)
     enabled: streamEnabled,
     after: seedSeq,
   })
+
+  // Remember that we were following (the task was running) so terminal catch-up
+  // only applies to a task we were live-following when it completed.
+  useEffect(() => {
+    if (following) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setWasFollowing(true)
+    }
+  }, [following])
 
   // Record once the stream delivers its terminal stream_complete frame, so the
   // terminal-catch-up above stops keeping the connection open afterward.
