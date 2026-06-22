@@ -80,6 +80,8 @@ const (
 	repositoryScanConditionMessageSuffix = "\n...[truncated]"
 )
 
+var errScannerPolicyDigestChanged = errors.New("scanner policy digest changed during scan run")
+
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 
 // RepositoryScanReconciler reconciles RepositoryScan resources.
@@ -538,9 +540,31 @@ func ensureScanRunPolicyDigest(run *store.ScanRun, policy security.ScannerPolicy
 		return nil
 	}
 	if policy.Digest != "" && run.PolicyDigest != policy.Digest {
-		return fmt.Errorf("scanner policy digest changed during scan run: recorded %s current %s", run.PolicyDigest, policy.Digest)
+		return fmt.Errorf("%w: recorded %s current %s", errScannerPolicyDigestChanged, run.PolicyDigest, policy.Digest)
 	}
 	return nil
+}
+
+func (r *RepositoryScanReconciler) recordTerminalScanRunError(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, failure error) error {
+	if r.SecurityStore == nil || run == nil || failure == nil {
+		return failure
+	}
+	now := time.Now()
+	message := failure.Error()
+	run.Phase = scanRunPhaseFailed
+	run.CompletedAt = &now
+	run.ErrorMessage = message
+	run.Summary = message
+	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+		return errors.Join(failure, err)
+	}
+	if scan == nil {
+		return failure
+	}
+	if err := r.refreshScanRunStatus(ctx, scan, run, run.ID, true); err != nil {
+		return errors.Join(failure, err)
+	}
+	return failure
 }
 
 func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
@@ -549,6 +573,9 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 		return err
 	}
 	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+		if errors.Is(err, errScannerPolicyDigestChanged) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
 		return err
 	}
 	timeout := metav1.Duration{Duration: 30 * time.Minute}
@@ -803,6 +830,9 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		return err
 	}
 	if err := ensureScanRunPolicyDigest(run, policy); err != nil {
+		if errors.Is(err, errScannerPolicyDigestChanged) {
+			return r.recordTerminalScanRunError(ctx, scan, run, err)
+		}
 		return err
 	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}

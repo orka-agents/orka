@@ -2778,6 +2778,7 @@ func TestEnqueueAutoValidationTasksHonorsRunCapAcrossExistingTasks(t *testing.T)
 
 func TestRepositoryScanPolicyDigestDriftFailsReviewTaskCreation(t *testing.T) {
 	ctx := context.Background()
+	store := setupControllerSQLiteStore(t)
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
@@ -2795,11 +2796,32 @@ func TestRepositoryScanPolicyDigestDriftFailsReviewTaskCreation(t *testing.T) {
 		},
 	}
 	policyConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: defaultNS, Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": "new policy text"}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, policyConfig).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan, policyConfig).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: store}
 	run := &storepkg.ScanRun{ID: "scan_policy", Namespace: defaultNS, RepositoryScan: "kaset", Mode: "initial", Phase: scanRunPhaseRunning, PolicyDigest: "sha256:old"}
+	if err := store.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
 	err := reconciler.createReviewTasks(ctx, scan, run, "", []storepkg.ReviewSlice{{ID: "slice_api", RepositoryScan: "kaset", Source: "deterministic", Title: "API", Kind: "package", Status: reviewSliceStatusPending}})
 	if err == nil || !strings.Contains(err.Error(), "scanner policy digest changed") {
 		t.Fatalf("createReviewTasks() error = %v, want policy drift error", err)
+	}
+	storedRun, err := store.GetScanRun(ctx, defaultNS, run.ID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if storedRun.Phase != scanRunPhaseFailed || storedRun.CompletedAt == nil || !strings.Contains(storedRun.ErrorMessage, "scanner policy digest changed") {
+		t.Fatalf("stored run = %#v, want terminal failed policy-drift run", storedRun)
+	}
+	current := &corev1alpha1.RepositoryScan{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(scan), current); err != nil {
+		t.Fatalf("Get(RepositoryScan) error = %v", err)
+	}
+	if current.Status.Phase != repositoryScanPhaseError {
+		t.Fatalf("RepositoryScan phase = %q, want %q", current.Status.Phase, repositoryScanPhaseError)
+	}
+	ready := meta.FindStatusCondition(current.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason != "ScanFailed" || !strings.Contains(ready.Message, "scanner policy digest changed") {
+		t.Fatalf("Ready condition = %#v, want ScanFailed policy-drift message", ready)
 	}
 }

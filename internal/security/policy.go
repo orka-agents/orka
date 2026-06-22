@@ -53,10 +53,20 @@ func ValidateCustomPolicyText(text string) error {
 	return nil
 }
 
-var policySensitivePrefixPattern = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])(?:(?:github` + `_pat_|` + `g` + `hp_|xo` + `xb-|s` + `k-)[A-Za-z0-9_./+=:-]{8,}|(?:A` + `KIA|A` + `SIA)[A-Z0-9]{16})`)
+var (
+	policySensitivePrefixPattern     = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])(?:(?:github` + `_pat_|` + `g` + `hp_|xo` + `xb-|s` + `k-)[A-Za-z0-9_./+=:-]{8,}|(?:A` + `KIA|A` + `SIA)[A-Z0-9]{16})`)
+	policySensitiveAssignmentPattern = regexp.MustCompile(`(?i)\b(?:api[_-]?key|access[_-]?` + `token|refresh[_-]?` + `token|id[_-]?` + `token|auth[_-]?` + `token|to` + `ken|pass` + `word|client[_-]?` + `secret|private[_-]?` + `key)\s*[:=]\s*["']?[A-Za-z0-9_./+=:-]{16,}`)
+	policyJWTPattern                 = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_-])ey` + `J[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}([^A-Za-z0-9_-]|$)`)
+)
 
 func LooksLikeSecret(text string) bool {
 	if policySensitivePrefixPattern.MatchString(text) {
+		return true
+	}
+	if policySensitiveAssignmentPattern.MatchString(text) {
+		return true
+	}
+	if policyJWTPattern.MatchString(text) {
 		return true
 	}
 	lower := strings.ToLower(text)

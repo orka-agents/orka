@@ -264,8 +264,19 @@ func TestValidateCustomPolicyTextRejectsOversizedAndSecret(t *testing.T) {
 	if err := ValidateCustomPolicyText("token " + "g" + "hp_" + strings.Repeat("x", 32)); err == nil {
 		t.Fatal("ValidateCustomPolicyText() accepted secret-like policy")
 	}
+	assignment := "to" + "ken" + "=" + strings.Repeat("x", 32)
+	if err := ValidateCustomPolicyText("Never send " + assignment + " to scanners."); err == nil {
+		t.Fatal("ValidateCustomPolicyText() accepted generic token assignment")
+	}
+	jwt := "ey" + "JhbGciOiJIUzI1NiJ9." + strings.Repeat("a", 16) + "." + strings.Repeat("b", 16)
+	if err := ValidateCustomPolicyText("Do not include " + jwt + " in policies."); err == nil {
+		t.Fatal("ValidateCustomPolicyText() accepted JWT-like policy")
+	}
 	if err := ValidateCustomPolicyText("Use risk-sk-score as a false-positive category name."); err != nil {
 		t.Fatalf("ValidateCustomPolicyText() rejected benign sk substring: %v", err)
+	}
+	if err := ValidateCustomPolicyText("Prefer token-based reasoning about auth boundaries, without embedding credentials."); err != nil {
+		t.Fatalf("ValidateCustomPolicyText() rejected benign token wording: %v", err)
 	}
 }
 
