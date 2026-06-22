@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Sandbox Deploy"
+  short_description: "Stand up agent-sandbox workspaces on kind for Orka"
+  default_prompt: "Use $agent-sandbox-deploy to stand up the kubernetes-sigs agent-sandbox workspace provider on a local kind cluster and run an Orka agent Task through a sandbox-backed workspace."
