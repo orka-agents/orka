@@ -420,6 +420,9 @@ func serverSideJSPath(p string) bool {
 	if strings.Contains(p, "/api/") && !frontendAPIPath(p) {
 		return true
 	}
+	if strings.Contains(p, "/routes/") && !frontendJSPath(p) {
+		return true
+	}
 	return strings.Contains(p, "/routes/api/") && !frontendRouteAPIPath(p)
 }
 

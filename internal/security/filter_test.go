@@ -321,6 +321,18 @@ func TestFilterFindingsKeepsClientAuthFindingWithSrcAPIBackendEvidence(t *testin
 	assertFilterKept(t, got)
 }
 
+func TestFilterFindingsKeepsClientAuthFindingWithBackendRouteEvidence(t *testing.T) {
+	finding := filterFinding(
+		"Authorization bypass spans frontend and route handler",
+		"ui/src/AuthGate.tsx",
+		"A backend route handler fails to enforce the tenant authorization decision.",
+	)
+	finding.Category = filterTestAuthzCategory
+	finding.Evidence = append(finding.Evidence, store.FindingEvidenceRef{Kind: "file", Path: "src/routes/admin.ts", StartLine: 10, EndLine: 20})
+	got := FilterFindings([]*store.Finding{finding}, FindingFilterOptions{})
+	assertFilterKept(t, got)
+}
+
 func TestFilterFindingsDropsClientAuthFindingWithOnlyFrontendAPIWrapperEvidence(t *testing.T) {
 	finding := filterFinding(
 		"Client authorization bypass",
