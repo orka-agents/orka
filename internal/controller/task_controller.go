@@ -235,6 +235,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
+	ctx = tracing.ExtractTaskTraceContext(ctx, task)
 	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
 		trace.WithAttributes(spanAttributes...),

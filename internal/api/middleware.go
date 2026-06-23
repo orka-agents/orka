@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -73,7 +74,8 @@ func NewMetricsMiddleware() fiber.Handler {
 func NewTracingMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		tracer := tracing.Tracer("orka.api")
-		ctx, span := tracer.Start(c.Context(), fmt.Sprintf("%s %s", c.Method(), c.Route().Path),
+		ctx := otel.GetTextMapPropagator().Extract(c.Context(), fiberHeaderCarrier{c: c})
+		ctx, span := tracer.Start(ctx, fmt.Sprintf("%s %s", c.Method(), c.Route().Path),
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				attribute.String("http.method", c.Method()),
@@ -83,6 +85,7 @@ func NewTracingMiddleware() fiber.Handler {
 		)
 		defer span.End()
 
+		// Make the extracted server span context visible to downstream handlers.
 		c.SetContext(ctx)
 
 		if reqID := requestid.FromContext(c); reqID != "" {
@@ -99,4 +102,29 @@ func NewTracingMiddleware() fiber.Handler {
 
 		return err
 	}
+}
+
+type fiberHeaderCarrier struct {
+	c fiber.Ctx
+}
+
+func (c fiberHeaderCarrier) Get(key string) string {
+	if c.c == nil {
+		return ""
+	}
+	return c.c.Get(key)
+}
+
+func (c fiberHeaderCarrier) Set(string, string) {}
+
+func (c fiberHeaderCarrier) Keys() []string {
+	if c.c == nil {
+		return nil
+	}
+	headers := c.c.GetReqHeaders()
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	return keys
 }

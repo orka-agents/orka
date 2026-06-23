@@ -33,13 +33,17 @@ const (
 	apiModeChatCompletions         // OpenAI Chat Completions API
 )
 
-const eventTypeFunctionCall = "function_call"
+const (
+	eventTypeFunctionCall   = "function_call"
+	providerTypeOpenAI      = "openai"
+	providerTypeAzureOpenAI = "azure-openai"
+)
 
 func init() {
-	llm.RegisterProvider("openai", func(config llm.ProviderConfig) (llm.Provider, error) {
+	llm.RegisterProvider(providerTypeOpenAI, func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
-	llm.RegisterProvider("azure-openai", func(config llm.ProviderConfig) (llm.Provider, error) {
+	llm.RegisterProvider(providerTypeAzureOpenAI, func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
 }
@@ -50,6 +54,7 @@ func init() {
 type Provider struct {
 	client                              openai.Client
 	baseURL                             string
+	providerType                        string
 	mode                                atomic.Int32 // apiMode
 	allowBareResponsesForbiddenFallback bool
 }
@@ -61,7 +66,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	}
 
 	var opts []option.RequestOption
-	if config.ProviderType == "azure-openai" {
+	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
 		if apiVersion == "" {
 			apiVersion = "2025-03-01-preview"
@@ -77,16 +82,31 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 	client := openai.NewClient(opts...)
 
+	providerType := config.ProviderType
+	if providerType == "" {
+		providerType = providerTypeOpenAI
+	}
+
 	return &Provider{
 		client:                              client,
 		baseURL:                             config.BaseURL,
+		providerType:                        providerType,
 		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
 }
 
-// Name returns the provider name
+// Name returns the provider name. It remains "openai" for Azure because
+// callers historically used this as the implementation family. Use
+// TelemetryProviderName for the concrete GenAI provider identity.
 func (p *Provider) Name() string {
-	return "openai"
+	return providerTypeOpenAI
+}
+
+func (p *Provider) TelemetryProviderName() string {
+	if p.providerType == "" {
+		return providerTypeOpenAI
+	}
+	return p.providerType
 }
 
 // isUnsupportedAPIError returns true when the error indicates the endpoint
@@ -137,7 +157,7 @@ func isUnsupportedAPIError(err error) bool {
 }
 
 func isCustomOpenAIBaseURL(providerType, baseURL string) bool {
-	if providerType != "" && providerType != "openai" {
+	if providerType != "" && providerType != providerTypeOpenAI {
 		return false
 	}
 	baseURL = strings.TrimSpace(baseURL)
@@ -343,6 +363,8 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	}
 
 	result := &llm.CompletionResponse{
+		Provider:     p.TelemetryProviderName(),
+		ID:           resp.ID,
 		Content:      resp.OutputText(),
 		StopReason:   string(resp.Status),
 		InputTokens:  int(resp.Usage.InputTokens),
@@ -819,7 +841,7 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 		return nil, toProviderError(err)
 	}
 
-	result := &llm.CompletionResponse{Model: resp.Model}
+	result := &llm.CompletionResponse{Model: resp.Model, Provider: p.TelemetryProviderName(), ID: resp.ID}
 	result.InputTokens = int(resp.Usage.PromptTokens)
 	result.OutputTokens = int(resp.Usage.CompletionTokens)
 	if len(resp.Choices) > 0 {

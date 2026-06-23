@@ -36,6 +36,7 @@ import (
 	_ "github.com/sozercan/orka/internal/llm/openai"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/worker"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
@@ -98,6 +99,20 @@ func run() (err error) {
 	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
+	}
+	tracingShutdown, err := tracing.Init("orka-ai-worker", workerEnv.EnableTelemetry)
+	if err != nil {
+		return fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := tracingShutdown(shutdownCtx); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to shutdown telemetry: %v\n", shutdownErr)
+		}
+	}()
+	if workerEnv.TraceParent != "" {
+		ctx = tracing.ExtractContext(ctx, tracing.MapCarrier{"traceparent": workerEnv.TraceParent})
 	}
 
 	transactionLogFields := workerenv.TransactionLogFields(
@@ -170,6 +185,10 @@ func run() (err error) {
 			llmProvider = fp
 		}
 	}
+
+	// Wrap with GenAI tracing after retry/fallback composition so spans report the
+	// concrete serving provider while still covering the whole logical model call.
+	llmProvider = llm.NewTracingProvider(llmProvider)
 
 	// Parse enabled tools
 	enabledTools := normalizeEnabledTools(workerEnv.Tools)

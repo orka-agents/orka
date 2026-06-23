@@ -59,6 +59,10 @@ func (p *Provider) Name() string {
 	return "anthropic"
 }
 
+func (p *Provider) TelemetryProviderName() string {
+	return "anthropic"
+}
+
 // Complete sends a completion request
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	messages := buildMessages(req.Messages)
@@ -72,6 +76,8 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 
 	// Convert response
 	resp := &llm.CompletionResponse{
+		Provider:     p.TelemetryProviderName(),
+		ID:           message.ID,
 		Model:        message.Model,
 		StopReason:   string(message.StopReason),
 		InputTokens:  int(message.Usage.InputTokens),

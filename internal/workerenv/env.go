@@ -66,6 +66,10 @@ const (
 	AITools           = "ORKA_AI_TOOLS"
 	AIFallbackCount   = "ORKA_AI_FALLBACK_COUNT"
 
+	// Telemetry env vars.
+	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
+	TraceParent     = "ORKA_TRACEPARENT"
+
 	// Coordination/autonomous env vars used by AI worker and coordination tools.
 	CoordinationEnabled       = "ORKA_COORDINATION_ENABLED"
 	CoordinationMaxDepth      = "ORKA_COORDINATION_MAX_DEPTH"
@@ -429,6 +433,8 @@ type AIWorkerEnv struct {
 	AzureAPIVersion string
 	Tools           []string
 	Fallbacks       []FallbackProviderEnv
+	EnableTelemetry bool
+	TraceParent     string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -470,6 +476,8 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		AzureAPIVersion: getenv(AIAzureAPIVersion),
 		Tools:           SplitCSV(getenv(AITools)),
 		Fallbacks:       ParseFallbacks(getenv),
+		EnableTelemetry: IsTrue(getenv(EnableTelemetry)) || strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "",
+		TraceParent:     getenv(TraceParent),
 	}
 }
 

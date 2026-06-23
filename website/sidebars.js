@@ -33,6 +33,7 @@ const sidebars = {
         'guides/repository-monitors',
         'guides/github-label-triggers',
         'guides/ui',
+        'guides/observability',
       ],
     },
     {

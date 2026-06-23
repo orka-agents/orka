@@ -11,9 +11,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -169,13 +176,89 @@ func (r *Registry) List() []Tool {
 	return tools
 }
 
-// Execute executes a tool by name
+// Execute executes a tool by name. It is the DRY instrumentation point for
+// built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	tool, ok := r.Get(name)
 	if !ok {
 		return "", fmt.Errorf("tool %q not found", name)
 	}
-	return tool.Execute(ctx, args)
+
+	start := time.Now()
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, name),
+		attribute.String(genai.AttrToolType, toolType(ctx, tool)),
+	}
+	if tc := GetToolContext(ctx); tc != nil && tc.ToolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+	}
+	if description := tool.Description(); description != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
+	}
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	defer span.End()
+
+	result, err := tool.Execute(ctx, args)
+	duration := time.Since(start).Seconds()
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, name),
+		attribute.String(genai.AttrToolType, toolType(ctx, tool)),
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, fmt.Sprintf("%T", err)))
+	} else if failed, errType, message := failedToolResult(result); failed {
+		span.SetStatus(codes.Error, message)
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	}
+	recordToolDuration(ctx, duration, metricAttrs...)
+	return result, err
+}
+
+func failedToolResult(result string) (bool, string, string) {
+	var body map[string]any
+	if json.Unmarshal([]byte(result), &body) != nil {
+		return false, "", ""
+	}
+	success, ok := body["success"].(bool)
+	if !ok || success {
+		return false, "", ""
+	}
+
+	var tr ChatToolResult
+	_ = json.Unmarshal([]byte(result), &tr)
+	errType := tr.ErrorType
+	if errType == "" {
+		errType = "tool_error"
+	}
+	message := tr.Error
+	if message == "" {
+		message = errType
+	}
+	return true, errType, message
+}
+
+func toolType(ctx context.Context, _ Tool) string {
+	// Registry tools are in-process functions. External Tool CRD/MCP execution is
+	// handled by worker.ToolExecutor and can be modeled as extension later.
+	return genai.ToolTypeFunction
+}
+
+func recordToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
+	meter := tracing.GenAIMeter(genai.InstrumentationName)
+	histogram, err := meter.Float64Histogram(
+		genai.MetricExecuteToolDuration,
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	)
+	if err != nil {
+		return
+	}
+	histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
 }
 
 // ToLLMTools converts the registry to LLM tool definitions

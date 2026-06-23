@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TaskStatusBadge } from './task-status-badge'
-import type { Task } from '@/schemas/task'
+import type { Task, ExecutionEvent } from '@/schemas/task'
 
 const steps = ['Pending', 'Running', 'Completed'] as const
 
@@ -15,19 +15,28 @@ function stepIndex(phase?: string): number {
   return 2
 }
 
-function ElapsedTime({ startTime, completionTime }: { startTime?: string; completionTime?: string }) {
-  const [elapsed, setElapsed] = useState(() => startTime ? '' : '-')
+function ElapsedTime({
+  startTime,
+  completionTime,
+}: {
+  startTime?: string
+  completionTime?: string
+}) {
+  const [elapsed, setElapsed] = useState(() => (startTime ? '' : '-'))
 
   useEffect(() => {
     if (!startTime) return
     const start = new Date(startTime).getTime()
 
     function update() {
-      const end = completionTime ? new Date(completionTime).getTime() : Date.now()
+      const end = completionTime
+        ? new Date(completionTime).getTime()
+        : Date.now()
       const s = Math.floor((end - start) / 1000)
       if (s < 60) setElapsed(`${s}s`)
       else if (s < 3600) setElapsed(`${Math.floor(s / 60)}m ${s % 60}s`)
-      else setElapsed(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`)
+      else
+        setElapsed(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`)
     }
 
     update()
@@ -39,51 +48,102 @@ function ElapsedTime({ startTime, completionTime }: { startTime?: string; comple
   return <span data-testid="elapsed-time">{elapsed}</span>
 }
 
-function ChildTaskSummary({ childTasks }: { childTasks: NonNullable<Task['status']>['childTasks'] }) {
+function ChildTaskSummary({
+  childTasks,
+}: {
+  childTasks: NonNullable<Task['status']>['childTasks']
+}) {
   if (!childTasks?.length) return null
-  const running = childTasks.filter(c => c.phase === 'Running').length
-  const succeeded = childTasks.filter(c => c.phase === 'Succeeded').length
-  const failed = childTasks.filter(c => c.phase === 'Failed').length
-  const pending = childTasks.filter(c => c.phase === 'Pending').length
+  const running = childTasks.filter((c) => c.phase === 'Running').length
+  const succeeded = childTasks.filter((c) => c.phase === 'Succeeded').length
+  const failed = childTasks.filter((c) => c.phase === 'Failed').length
+  const pending = childTasks.filter((c) => c.phase === 'Pending').length
 
   return (
     <div data-testid="child-task-summary">
       <span className="text-muted-foreground text-sm">Child Tasks: </span>
       <span className="text-sm">
         {childTasks.length} total
-        {pending > 0 && <span className="text-yellow-600 dark:text-yellow-400"> · {pending} pending</span>}
-        {running > 0 && <span className="text-blue-600 dark:text-blue-400"> · {running} running</span>}
-        {succeeded > 0 && <span className="text-green-600 dark:text-green-400"> · {succeeded} succeeded</span>}
-        {failed > 0 && <span className="text-red-600 dark:text-red-400"> · {failed} failed</span>}
+        {pending > 0 && (
+          <span className="text-yellow-600 dark:text-yellow-400">
+            {' '}
+            · {pending} pending
+          </span>
+        )}
+        {running > 0 && (
+          <span className="text-blue-600 dark:text-blue-400">
+            {' '}
+            · {running} running
+          </span>
+        )}
+        {succeeded > 0 && (
+          <span className="text-green-600 dark:text-green-400">
+            {' '}
+            · {succeeded} succeeded
+          </span>
+        )}
+        {failed > 0 && (
+          <span className="text-red-600 dark:text-red-400">
+            {' '}
+            · {failed} failed
+          </span>
+        )}
       </span>
     </div>
   )
 }
 
-export function TaskExecutionPanel({ task }: { task: Task }) {
+export function TaskExecutionPanel({
+  task,
+  events = [],
+}: {
+  task: Task
+  events?: ExecutionEvent[]
+}) {
   const phase = task.status?.phase
+  const modelEvents = events.filter(
+    (event) => event.type === 'ModelRequestCompleted',
+  )
+  const totalIn = modelEvents.reduce(
+    (sum, event) => sum + (event.inputTokens ?? 0),
+    0,
+  )
+  const totalOut = modelEvents.reduce(
+    (sum, event) => sum + (event.outputTokens ?? 0),
+    0,
+  )
   const current = stepIndex(phase)
 
   return (
     <Card>
-      <CardHeader><CardTitle>Execution</CardTitle></CardHeader>
+      <CardHeader>
+        <CardTitle>Execution</CardTitle>
+      </CardHeader>
       <CardContent className="space-y-6">
         {/* Progress steps */}
         <div className="flex items-center gap-2" data-testid="progress-steps">
           {steps.map((step, i) => (
             <div key={step} className="flex items-center gap-2">
-              <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium ${
-                i < current
-                  ? 'bg-status-succeeded-bg text-status-succeeded'
-                  : i === current
-                  ? 'bg-status-running-bg text-status-running'
-                  : 'bg-muted text-muted-foreground'
-              }`}>
+              <div
+                className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium ${
+                  i < current
+                    ? 'bg-status-succeeded-bg text-status-succeeded'
+                    : i === current
+                      ? 'bg-status-running-bg text-status-running'
+                      : 'bg-muted text-muted-foreground'
+                }`}
+              >
                 {i < current ? '✓' : i + 1}
               </div>
-              <span className={`text-sm ${i <= current ? 'font-medium' : 'text-muted-foreground'}`}>{step}</span>
+              <span
+                className={`text-sm ${i <= current ? 'font-medium' : 'text-muted-foreground'}`}
+              >
+                {step}
+              </span>
               {i < steps.length - 1 && (
-                <div className={`h-0.5 w-8 ${i < current ? 'bg-status-succeeded' : 'bg-muted'}`} />
+                <div
+                  className={`h-0.5 w-8 ${i < current ? 'bg-status-succeeded' : 'bg-muted'}`}
+                />
               )}
             </div>
           ))}
@@ -97,7 +157,10 @@ export function TaskExecutionPanel({ task }: { task: Task }) {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Elapsed:</span>
-            <ElapsedTime startTime={task.status?.startTime} completionTime={task.status?.completionTime} />
+            <ElapsedTime
+              startTime={task.status?.startTime}
+              completionTime={task.status?.completionTime}
+            />
           </div>
           <div>
             <span className="text-muted-foreground">Attempts:</span>{' '}
@@ -110,6 +173,31 @@ export function TaskExecutionPanel({ task }: { task: Task }) {
             </div>
           )}
         </div>
+
+        {modelEvents.length > 0 && (
+          <div
+            className="rounded-md border p-3 text-sm"
+            aria-label="GenAI token rollup"
+          >
+            <div className="font-medium">GenAI tokens</div>
+            <div className="text-muted-foreground">
+              {totalIn + totalOut} total · {totalIn}{' '}
+              input · {totalOut} output
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              {modelEvents.map((event) => (
+                <span
+                  key={event.id || event.seq}
+                  className="rounded-full bg-muted px-2 py-0.5"
+                >
+                  {event.model ?? 'unknown model'}
+                  {event.provider ? ` · ${event.provider}` : ''}
+                  {event.stopReason ? ` · ${event.stopReason}` : ''}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
 
         <ChildTaskSummary childTasks={task.status?.childTasks} />
       </CardContent>

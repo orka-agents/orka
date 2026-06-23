@@ -20,17 +20,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/controller"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
-	"github.com/sozercan/orka/internal/tracing"
 )
 
 const taskCreatedMsg = "Task created"
@@ -141,17 +136,8 @@ type ToolResult struct {
 // Execute dispatches a tool call to the appropriate handler and returns
 // the JSON-serialized result.
 func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (string, error) {
-	tracer := tracing.Tracer("orka.tools")
-	ctx, span := tracer.Start(ctx, "tool.execute",
-		trace.WithAttributes(
-			attribute.String("tool.name", toolCall.Name),
-		),
-	)
-	defer span.End()
-
 	if e.allowedToolNames != nil {
 		if _, ok := e.allowedToolNames[toolCall.Name]; !ok {
-			span.SetStatus(codes.Error, "unauthorized tool")
 			result := toolError("unauthorized_tool", fmt.Sprintf("tool %q is not authorized for this request", toolCall.Name), "Use one of the available tools")
 			return marshalResult(result)
 		}
@@ -159,8 +145,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 
 	var args map[string]any
 	if err := json.Unmarshal(toolCall.Arguments, &args); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
 		result := toolError("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
 		return marshalResult(result)
 	}
@@ -233,8 +217,6 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Execute via registry
 	resultStr, err := e.registry.Execute(toolCtx, toolCall.Name, argsJSON)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
 		result := toolError("unknown_tool", fmt.Sprintf("unknown tool: %s", toolCall.Name), "Use one of the available tools")
 		return marshalResult(result)
 	}
@@ -243,16 +225,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	// Parse them back into ToolResult for consistent span attributes.
 	var tr ToolResult
 	if jsonErr := json.Unmarshal([]byte(resultStr), &tr); jsonErr == nil {
-		if tr.Success {
-			span.SetAttributes(attribute.Bool("tool.success", true))
-		} else {
-			span.SetStatus(codes.Error, tr.Error)
-		}
 		return resultStr, nil
 	}
 
 	// Fallback: wrap raw string as success
-	span.SetAttributes(attribute.Bool("tool.success", true))
 	result := ToolResult{Success: true, Data: resultStr}
 	return marshalResult(result)
 }

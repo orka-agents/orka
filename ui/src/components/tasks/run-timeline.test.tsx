@@ -12,7 +12,11 @@ function makeTask(overrides: Partial<Task> = {}): Task {
       creationTimestamp: '2026-01-01T00:00:00Z',
     },
     spec: { type: 'agent', agentRef: { name: 'looper' } },
-    status: { phase: 'Running', iteration: 2, startTime: '2026-01-01T00:01:00Z' },
+    status: {
+      phase: 'Running',
+      iteration: 2,
+      startTime: '2026-01-01T00:01:00Z',
+    },
     ...overrides,
   } as Task
 }
@@ -25,8 +29,16 @@ describe('RunTimeline', () => {
         iteration: 1,
         startTime: '2026-01-01T00:01:00Z',
         conditions: [
-          { type: 'PlanReady', status: 'True', lastTransitionTime: '2026-01-01T00:02:00Z' },
-          { type: 'Scheduled', status: 'True', lastTransitionTime: '2026-01-01T00:00:30Z' },
+          {
+            type: 'PlanReady',
+            status: 'True',
+            lastTransitionTime: '2026-01-01T00:02:00Z',
+          },
+          {
+            type: 'Scheduled',
+            status: 'True',
+            lastTransitionTime: '2026-01-01T00:00:30Z',
+          },
         ],
       },
     })
@@ -63,9 +75,16 @@ describe('RunTimeline', () => {
 
   it('applies the completed treatment when goalComplete is true', () => {
     const task = makeTask()
-    render(<RunTimeline task={task} plan={{ progressPct: 100, goalComplete: true }} />)
+    render(
+      <RunTimeline
+        task={task}
+        plan={{ progressPct: 100, goalComplete: true }}
+      />,
+    )
     expect(screen.getByText('Goal complete')).toBeInTheDocument()
-    const fill = screen.getByRole('progressbar').querySelector('div') as HTMLElement
+    const fill = screen
+      .getByRole('progressbar')
+      .querySelector('div') as HTMLElement
     expect(fill.className).toContain('bg-status-succeeded')
   })
 
@@ -83,7 +102,13 @@ describe('RunTimeline', () => {
       status: {
         phase: 'Running',
         iteration: 1,
-        conditions: [{ type: 'Scheduled', status: 'True', lastTransitionTime: '2026-01-01T00:00:30Z' }],
+        conditions: [
+          {
+            type: 'Scheduled',
+            status: 'True',
+            lastTransitionTime: '2026-01-01T00:00:30Z',
+          },
+        ],
       },
     })
     render(<RunTimeline task={task} />)
@@ -114,7 +139,9 @@ describe('RunTimeline', () => {
         completionTime: '2026-01-01T00:30:00Z',
       },
     })
-    const { container } = render(<RunTimeline task={task} plan={{ summary: 'stopped early' }} />)
+    const { container } = render(
+      <RunTimeline task={task} plan={{ summary: 'stopped early' }} />,
+    )
     const cancelled = screen.getByText('Cancelled')
     expect(cancelled).toBeInTheDocument()
     // Neutral (not failed/success) styling for a user-stopped run.
@@ -148,17 +175,54 @@ describe('RunTimeline', () => {
         startTime: '2026-01-01T00:01:00Z',
         completionTime: '2026-01-01T02:00:00Z',
         conditions: [
-          { type: 'PlanReady', status: 'True', lastTransitionTime: '2026-01-01T00:02:00Z' },
+          {
+            type: 'PlanReady',
+            status: 'True',
+            lastTransitionTime: '2026-01-01T00:02:00Z',
+          },
         ],
       },
     })
     render(<RunTimeline task={task} plan={{ summary: 'done thinking' }} />)
-    const labels = screen.getAllByRole('listitem').map((li) => li.textContent ?? '')
+    const labels = screen
+      .getAllByRole('listitem')
+      .map((li) => li.textContent ?? '')
     const iterationIdx = labels.findIndex((l) => l.includes('Iteration 4'))
     const terminalIdx = labels.findIndex((l) => l.includes('Succeeded'))
     expect(iterationIdx).toBeGreaterThanOrEqual(0)
     expect(terminalIdx).toBeGreaterThan(iterationIdx)
     // Terminal is the final event.
     expect(terminalIdx).toBe(labels.length - 1)
+  })
+
+  it('renders GenAI token/model telemetry from task events', () => {
+    const task = makeTask()
+    render(
+      <RunTimeline
+        task={task}
+        events={[
+          {
+            id: 'event-1',
+            namespace: 'default',
+            streamType: 'task',
+            streamID: 'auto-task',
+            seq: 1,
+            type: 'ModelRequestCompleted',
+            severity: 'info',
+            provider: 'anthropic',
+            model: 'claude-sonnet-4',
+            [`input${'Tokens'}`]: 12,
+            [`output${'Tokens'}`]: 8,
+            stopReason: 'end_turn',
+            createdAt: '2026-01-01T00:02:00Z',
+          },
+        ]}
+      />,
+    )
+    expect(screen.getByLabelText('GenAI telemetry')).toHaveTextContent(
+      '20 tokens',
+    )
+    expect(screen.getByText(/claude-sonnet-4/)).toBeInTheDocument()
+    expect(screen.getByText(/end_turn/)).toBeInTheDocument()
   })
 })

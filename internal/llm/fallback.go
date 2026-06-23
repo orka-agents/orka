@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -79,6 +80,9 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 
 		resp, err := c.provider.Complete(ctx, callReq)
 		if err == nil {
+			if resp != nil && strings.TrimSpace(resp.Provider) == "" {
+				resp.Provider = ProviderTelemetryName(c.provider)
+			}
 			if f.tracker != nil {
 				f.tracker.Reset(c.provider.Name())
 			}

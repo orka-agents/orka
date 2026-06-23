@@ -30,6 +30,17 @@ export const handlers = [
     return HttpResponse.json({ items: [], metadata: {} })
   }),
 
+  http.get(`${API}/tasks/:id/events`, ({ params }) => {
+    return HttpResponse.json({
+      namespace: 'default',
+      streamType: 'task',
+      streamID: params.id,
+      afterSeq: 0,
+      latestSeq: 0,
+      events: [],
+    })
+  }),
+
   // Sessions
   http.get(`${API}/sessions`, () => {
     return HttpResponse.json({ items: [], metadata: {} })

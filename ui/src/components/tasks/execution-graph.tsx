@@ -2,7 +2,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { phaseStyle, typeStyle } from '@/lib/task-status'
 import { StatusDot } from '@/components/ui/status-dot'
-import type { Task, TaskPhase, TaskType } from '@/schemas/task'
+import type { Task, TaskPhase, TaskType, ExecutionEvent } from '@/schemas/task'
 
 /** A node in the delegation graph. */
 interface GraphNode {
@@ -12,6 +12,7 @@ interface GraphNode {
   phase?: TaskPhase | string
   type?: TaskType | string
   children: GraphNode[]
+  telemetry?: string
 }
 
 /**
@@ -22,18 +23,26 @@ interface GraphNode {
  * so this can upgrade to a true multi-level DAG later without changing the
  * component API.
  */
-function buildGraph(task: Task): GraphNode {
+function buildGraph(task: Task, events: ExecutionEvent[] = []): GraphNode {
   const children = (task.status?.childTasks ?? []).map((c) => ({
     name: c.name,
     agent: c.agent,
     phase: c.phase,
     children: [] as GraphNode[],
   }))
+  const latestModelEvent = [...events]
+    .reverse()
+    .find((event) => event.type === 'ModelRequestCompleted')
   return {
     name: task.metadata.name,
     agent: task.spec.agentRef?.name,
     phase: task.status?.phase,
     type: task.spec.type,
+    telemetry: latestModelEvent
+      ? [latestModelEvent.model, latestModelEvent.provider]
+          .filter(Boolean)
+          .join(' · ')
+      : undefined,
     children,
   }
 }
@@ -57,7 +66,11 @@ function TreeNode({
   const hasChildren = node.children.length > 0
 
   return (
-    <li role="treeitem" aria-label={`${node.name} (${phaseLabel})`} className="relative">
+    <li
+      role="treeitem"
+      aria-label={`${node.name} (${phaseLabel})`}
+      className="relative"
+    >
       <button
         type="button"
         onClick={() => onNavigate(node.name)}
@@ -70,20 +83,42 @@ function TreeNode({
       >
         <StatusDot phase={node.phase} hideLabel />
         {TypeIcon && (
-          <TypeIcon className={cn('size-3.5 shrink-0', type?.textClass)} aria-hidden="true" />
+          <TypeIcon
+            className={cn('size-3.5 shrink-0', type?.textClass)}
+            aria-hidden="true"
+          />
         )}
-        <span className="truncate font-mono text-xs font-medium">{node.name}</span>
+        <span className="truncate font-mono text-xs font-medium">
+          {node.name}
+        </span>
         {node.agent && (
-          <span className="truncate text-xs text-muted-foreground">{node.agent}</span>
+          <span className="truncate text-xs text-muted-foreground">
+            {node.agent}
+          </span>
         )}
-        <span className={cn('ml-auto shrink-0 text-xs font-medium', phase.textClass)}>
+        {node.telemetry && (
+          <span className="truncate rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+            {node.telemetry}
+          </span>
+        )}
+        <span
+          className={cn(
+            'ml-auto shrink-0 text-xs font-medium',
+            phase.textClass,
+          )}
+        >
           {phaseLabel}
         </span>
       </button>
       {hasChildren && (
         <ul role="group" className="space-y-1">
           {node.children.map((child) => (
-            <TreeNode key={child.name} node={child} depth={depth + 1} onNavigate={onNavigate} />
+            <TreeNode
+              key={child.name}
+              node={child}
+              depth={depth + 1}
+              onNavigate={onNavigate}
+            />
           ))}
         </ul>
       )}
@@ -96,6 +131,7 @@ interface ExecutionGraphProps {
   /** Optional navigation override (defaults to TanStack router). */
   onSelect?: (taskName: string) => void
   className?: string
+  events?: ExecutionEvent[]
 }
 
 /**
@@ -109,9 +145,14 @@ interface ExecutionGraphProps {
  *
  * Degrades gracefully: a task with no children renders just the root node.
  */
-export function ExecutionGraph({ task, onSelect, className }: ExecutionGraphProps) {
+export function ExecutionGraph({
+  task,
+  onSelect,
+  className,
+  events = [],
+}: ExecutionGraphProps) {
   const navigate = useNavigate()
-  const root = buildGraph(task)
+  const root = buildGraph(task, events)
 
   const handleNavigate = (name: string) => {
     if (onSelect) onSelect(name)

@@ -345,3 +345,33 @@ func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
 		t.Fatalf("TransactionLogFields() contains a literal newline: %q", got)
 	}
 }
+
+func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
+	env := map[string]string{
+		AIProvider:      "openai",
+		AIModel:         "gpt-4o",
+		AIPrompt:        "hello",
+		EnableTelemetry: "true",
+		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+	}
+	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
+	if !got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = false, want true")
+	}
+	if got.TraceParent != env[TraceParent] {
+		t.Fatalf("TraceParent = %q, want %q", got.TraceParent, env[TraceParent])
+	}
+}
+
+func TestAIWorkerEnvTelemetryAutoEnablesFromOTLPEndpoint(t *testing.T) {
+	env := map[string]string{
+		AIProvider:                    "openai",
+		AIModel:                       "gpt-4o",
+		AIPrompt:                      "hello",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "otel-collector:4317",
+	}
+	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
+	if !got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = false, want true from OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+}

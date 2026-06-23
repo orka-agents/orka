@@ -98,6 +98,7 @@ type JobBuilder struct {
 	ContextTokenOutboundScope    string
 	ContextTokenChildTokenTTL    string
 	ContextTokenToolTokenTTL     string
+	EnableTelemetry              bool
 	directSecrets                directRuntimeSecretPolicy
 }
 
@@ -575,6 +576,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
+	envVars = b.addTelemetryEnvVars(envVars, task)
 
 	// Add task-level env vars
 	envVars = append(envVars, task.Spec.Env...)
@@ -718,6 +720,28 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 		ClaimTimeout:      request.ClaimTimeout,
 		CommandTimeout:    request.CommandTimeout,
 	}.EnvVars()...)
+}
+
+func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
+	if task != nil && task.Annotations != nil {
+		envVars = setControllerEnv(envVars, workerenv.TraceParent, task.Annotations[labels.AnnotationTraceParent])
+	}
+	if !b.EnableTelemetry || task == nil || (task.Spec.Type != corev1alpha1.TaskTypeAI && task.Spec.Type != corev1alpha1.TaskTypeAgent) {
+		return envVars
+	}
+	envVars = setControllerEnv(envVars, workerenv.EnableTelemetry, scheduledRunLabelValue)
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_INSECURE",
+		"OTEL_EXPORTER_OTLP_TIMEOUT",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	} {
+		envVars = setControllerEnv(envVars, name, os.Getenv(name))
+	}
+	return envVars
 }
 
 func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {

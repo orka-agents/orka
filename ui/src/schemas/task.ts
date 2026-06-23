@@ -145,3 +145,44 @@ export const taskWithPlanSchema = taskSchema.extend({
 
 export type PlanState = z.infer<typeof planStateSchema>
 export type TaskWithPlan = z.infer<typeof taskWithPlanSchema>
+
+const inputUsageKey = 'inputTokens' as const
+const outputUsageKey = 'outputTokens' as const
+const eventUsageFieldSchemas = {
+  [inputUsageKey]: z.number().optional(),
+  [outputUsageKey]: z.number().optional(),
+}
+
+export const executionEventSchema = z.object({
+  id: z.string(),
+  namespace: z.string(),
+  streamType: z.string(),
+  streamID: z.string(),
+  seq: z.number(),
+  type: z.string(),
+  severity: z.string(),
+  taskName: z.string().optional(),
+  sessionName: z.string().optional(),
+  agentName: z.string().optional(),
+  toolName: z.string().optional(),
+  toolCallID: z.string().optional(),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  stopReason: z.string().optional(),
+  summary: z.string().optional(),
+  content: z.unknown().optional(),
+  contentText: z.string().optional(),
+  createdAt: z.string(),
+}).extend(eventUsageFieldSchemas)
+
+export const taskEventsResponseSchema = z.object({
+  namespace: z.string(),
+  streamType: z.string(),
+  streamID: z.string(),
+  afterSeq: z.number(),
+  latestSeq: z.number(),
+  events: z.array(executionEventSchema),
+})
+
+export type ExecutionEvent = z.infer<typeof executionEventSchema>
+export type TaskEventsResponse = z.infer<typeof taskEventsResponseSchema>

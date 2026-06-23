@@ -2443,3 +2443,48 @@ func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
 		t.Fatalf("system-prompt = %q, want %q", got, "You are a careful reviewer.")
 	}
 }
+
+func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
+	builder := setupJobBuilder()
+	builder.EnableTelemetry = true
+	traceparent := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			Annotations: map[string]string{
+				labels.AnnotationTraceParent: traceparent,
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+	}
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
+		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
+	}
+	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); !ok || got.Value != "otel-collector:4317" {
+		t.Fatalf("OTEL_EXPORTER_OTLP_ENDPOINT = %#v, found=%v", got, ok)
+	}
+	if _, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_HEADERS"); ok {
+		t.Fatal("OTEL_EXPORTER_OTLP_HEADERS must not be copied into task workloads")
+	}
+	if got, ok := findEnvVar(envVars, workerenv.TraceParent); !ok || got.Value == "" {
+		t.Fatalf("%s = %#v, found=%v", workerenv.TraceParent, got, ok)
+	}
+
+	agentTask := task.DeepCopy()
+	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
+	envVars = builder.buildEnvVars(context.Background(), agentTask, nil, nil)
+	if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok {
+		t.Fatal("agent tasks should receive telemetry enablement because they use the AI worker")
+	}
+
+	containerTask := task.DeepCopy()
+	containerTask.Spec.Type = corev1alpha1.TaskTypeContainer
+	envVars = builder.buildEnvVars(context.Background(), containerTask, nil, nil)
+	if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); ok {
+		t.Fatal("generic container tasks must not receive telemetry enablement")
+	}
+}

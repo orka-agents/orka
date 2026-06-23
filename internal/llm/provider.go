@@ -59,6 +59,8 @@ type CompletionResponse struct {
 	InputTokens  int        `json:"input_tokens"`
 	OutputTokens int        `json:"output_tokens"`
 	Model        string     `json:"model"`
+	Provider     string     `json:"provider,omitempty"`
+	ID           string     `json:"id,omitempty"`
 }
 
 // Message represents a chat message
