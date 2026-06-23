@@ -92,6 +92,7 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
+	APIReader                          client.Reader
 	Scheme                             *runtime.Scheme
 	JobBuilder                         *JobBuilder
 	SessionManager                     *SessionManager
@@ -1652,6 +1653,25 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.isAutonomousTask(ctx, task) {
+				oldJob := task.Status.JobName
+				latest := &corev1alpha1.Task{}
+				reader := r.APIReader
+				if reader == nil {
+					reader = r.Client
+				}
+				if latestErr := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); latestErr != nil {
+					return ctrl.Result{}, latestErr
+				}
+				if latest.Status.JobName != oldJob || latest.Status.Phase != corev1alpha1.TaskPhaseRunning {
+					task.Status = latest.Status
+					log.Info("job not found for stale autonomous task state; requeueing with latest status",
+						"oldJob", oldJob,
+						"latestJob", latest.Status.JobName,
+						"latestPhase", latest.Status.Phase)
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+			}
 			if r.isWithinJobCreationVisibilityGracePeriod(task) {
 				log.Info("job not found shortly after creation, waiting for cache visibility",
 					"job", task.Status.JobName,
@@ -3033,6 +3053,9 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
 		return err
 	}

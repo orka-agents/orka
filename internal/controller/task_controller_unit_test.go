@@ -3260,6 +3260,51 @@ func TestHandleRunning_JobNotFound(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_AutonomousJobNotFoundUsesFreshTaskState(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-stale-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+	staleTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-stale-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-stale-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "old-job",
+		},
+	}
+	freshTask := staleTask.DeepCopy()
+	freshTask.Status = corev1alpha1.TaskStatus{
+		Phase:     corev1alpha1.TaskPhasePending,
+		JobName:   "",
+		Iteration: 1,
+		Message:   "autonomous iteration 1",
+	}
+	r := newUnitReconciler(scheme, staleTask, agent)
+	r.APIReader = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(freshTask).
+		Build()
+
+	result, err := r.handleRunning(context.Background(), staleTask)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected requeue for stale autonomous state, got %v", result.RequeueAfter)
+	}
+	if staleTask.Status.Phase != corev1alpha1.TaskPhasePending || staleTask.Status.JobName != "" || staleTask.Status.Iteration != 1 {
+		t.Fatalf("task status = %#v, want fresh pending autonomous status", staleTask.Status)
+	}
+}
+
 func TestHandleRunning_JobNotFoundWithRetryPolicy(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
