@@ -1,0 +1,30 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: fibey-monitor
+  namespace: orka-system
+spec:
+  type: ai
+  agentRef:
+    name: fibey-scout
+  prompt: "Run the monitoring sweep now."
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  suspend: true # Safe default: avoid repeatedly delegating the static demo alert.
+  # Do not set spec.timeout; approval parking should not consume a task timeout.
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: fibey-incident-smoke
+  namespace: orka-system
+spec:
+  type: ai
+  agentRef:
+    name: fibey-incident
+  prompt: |
+    Incident at Quincy North: alert ALT-20260524-001 [critical] Rack B-14 Port 3/1/12 —
+    optical_power_low, Rx -18.2 dBm (threshold -14), CRC error rate 2.3e-6. Investigate and
+    recommend the fix. If a transceiver swap is warranted, prepare the work order details.
+    If approvalRequiredTools is active, wait for approval before dispatching.
+  # Do not set spec.timeout; this task may park once the approval gate exists.
