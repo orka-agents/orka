@@ -2443,3 +2443,64 @@ func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
 		t.Fatalf("system-prompt = %q, want %q", got, "You are a careful reviewer.")
 	}
 }
+
+func TestJobBuilder_buildEnvVars_WithApprovalRequiredTools(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate incident"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+		Coordination: &corev1alpha1.CoordinationConfig{
+			Enabled:               true,
+			Autonomous:            true,
+			ApprovalRequiredTools: []string{"dispatch_work_order", "escalate_incident"},
+		},
+	}}
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
+	env, found := findEnvVar(envVars, workerenv.ApprovalRequiredTools)
+	if !found {
+		t.Fatalf("missing %s", workerenv.ApprovalRequiredTools)
+	}
+	if env.Value != "dispatch_work_order,escalate_incident" {
+		t.Fatalf("%s = %q", workerenv.ApprovalRequiredTools, env.Value)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_WithResolvedApprovalsOption(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate incident"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"}}}
+	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{ResolvedApprovalsJSON: `[{"id":"k","status":"approved"}]`})
+	env, found := findEnvVar(envVars, workerenv.ResolvedApprovals)
+	if !found {
+		t.Fatalf("missing %s", workerenv.ResolvedApprovals)
+	}
+	if env.Value != `[{"id":"k","status":"approved"}]` {
+		t.Fatalf("%s = %q", workerenv.ResolvedApprovals, env.Value)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_AutonomousCoordinationIncludesRequestApprovalTool(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Coordinate incident"},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude"},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
+	toolsEnv, found := findEnvVar(envVars, workerenv.AITools)
+	if !found {
+		t.Fatal("missing ORKA_AI_TOOLS")
+	}
+	if !strings.Contains(toolsEnv.Value, "request_approval") {
+		t.Fatalf("ORKA_AI_TOOLS = %s, want request_approval", toolsEnv.Value)
+	}
+}

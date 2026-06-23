@@ -76,6 +76,12 @@ spec:
                       - name
                       type: object
                     type: array
+                  approvalRequiredTools:
+                    description: ApprovalRequiredTools lists tool names that require
+                      a human approval before execution.
+                    items:
+                      type: string
+                    type: array
                   autonomous:
                     description: |-
                       Autonomous enables autonomous loop mode for coordinator agents using this config.

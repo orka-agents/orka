@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/llm"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,6 +26,7 @@ type ToolContext struct {
 	Namespace                 string
 	SessionID                 string
 	TaskID                    string
+	TaskUID                   string
 	ToolCallID                string
 	Tenant                    string
 	Provider                  string
@@ -51,6 +53,7 @@ type ToolContext struct {
 	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
 	RequireSecretReadAuthorization bool
 	IncrementTasks                 func()
+	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
 }
 
 type toolContextKey struct{}
@@ -206,6 +209,7 @@ func RegisterBuiltinTools() {
 	DefaultRegistry.Register(NewFileReadTool())
 	DefaultRegistry.Register(NewWebFetchTool())
 	DefaultRegistry.Register(NewFileWriteTool())
+	DefaultRegistry.Register(NewRequestApprovalTool())
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client

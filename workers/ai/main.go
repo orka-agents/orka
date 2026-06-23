@@ -214,8 +214,17 @@ func run() (err error) {
 
 		// Fetch existing plan state from controller
 		planContext := loadPlanContext()
-		if planContext != "" {
+		resolvedApprovals, err := parseResolvedApprovals(os.Getenv(workerenv.ResolvedApprovals))
+		if err != nil {
+			return err
+		}
+		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
+		if planContext != "" && resolvedContext != "" {
+			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n%s\n\n## Task\n\n%s", planContext, resolvedContext, prompt)
+		} else if planContext != "" {
 			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n## Task\n\n%s", planContext, prompt)
+		} else if resolvedContext != "" {
+			prompt = prependResolvedApprovalsContext(prompt, resolvedApprovals)
 		}
 
 		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
@@ -840,6 +849,14 @@ func executeAgentLoopWithEvents(
 		maxIterations = 100
 	}
 	allowedToolCalls := advertisedToolNames(llmTools)
+	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
+		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
+	}
+	baseToolCtx = prepareApprovalToolContext(baseToolCtx, eventRecorder)
+	approvalGate, err := newApprovalGateFromEnv(eventRecorder, baseToolCtx)
+	if err != nil {
+		return "", err
+	}
 
 	for iteration := range maxIterations {
 		req := &llm.CompletionRequest{
@@ -927,6 +944,20 @@ func executeAgentLoopWithEvents(
 			ToolCalls: resp.ToolCalls,
 		})
 
+		if decision, err := approvalGate.preScan(ctx, resp.ToolCalls); err != nil {
+			return "", err
+		} else if decision != nil {
+			if decision.result != "" {
+				return decision.result, nil
+			}
+			if len(decision.toolResults) > 0 {
+				messages = append(messages, decision.toolResults...)
+			}
+			if decision.continueLLM {
+				continue
+			}
+		}
+
 		// Execute tool calls
 		for _, tc := range resp.ToolCalls {
 			fmt.Printf("Executing tool: %s\n", tc.Name)
@@ -945,10 +976,23 @@ func executeAgentLoopWithEvents(
 				})),
 			)
 
+			var execArgs json.RawMessage
+			approvalKey := ""
+			alreadyFired := false
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
+			} else {
+				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
+					toolName,
+					tc.Arguments,
+				)
+			}
+			if execErr != nil {
+				// execErr is handled by the common error path below.
+			} else if alreadyFired {
+				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
 			} else if customTool, ok := customTools[toolName]; ok {
-				result, execErr = toolExecutor.Execute(ctx, customTool, tc.Arguments)
+				result, execErr = toolExecutor.Execute(ctx, customTool, execArgs)
 			} else {
 				// Fall back to built-in tools
 				execCtx := ctx
@@ -960,7 +1004,7 @@ func executeAgentLoopWithEvents(
 					}
 					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 				}
-				result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, tc.Arguments)
+				result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
 			}
 
 			if execErr != nil {
@@ -982,6 +1026,9 @@ func executeAgentLoopWithEvents(
 						"resultLength": len(result),
 					})),
 				)
+				if !alreadyFired {
+					approvalGate.markFired(approvalKey)
+				}
 			}
 
 			// Add tool result
@@ -995,6 +1042,14 @@ func executeAgentLoopWithEvents(
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {
+	if len(coordinationEnv.ApprovalRequiredTools) > 0 {
+		return true
+	}
+	_, requestApprovalAdvertised := allowedToolCalls["request_approval"]
+	return requestApprovalAdvertised
 }
 
 func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {

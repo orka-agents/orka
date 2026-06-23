@@ -359,3 +359,42 @@ func workerEventAuditSecrets() map[string]string {
 		"anthropic": strings.Join([]string{"sk", "ant", "api03", strings.Repeat("a", 32)}, "-"),
 	}
 }
+
+func TestRecordEventStrictReturnsServerFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer server.Close()
+
+	recorder := NewHTTPEventRecorder(HTTPEventRecorderConfig{
+		ControllerURL: server.URL,
+		Namespace:     "default",
+		TaskName:      "task-1",
+		BearerPath:    writeTestSAToken(t, "value"),
+		Timeout:       time.Second,
+	})
+	err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeApprovalRequested,
+		WithEventToolCallID("approval-1"),
+		WithEventSummary("approval requested"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("RecordEventStrict() error = %v, want HTTP 500", err)
+	}
+}
+
+func TestRecordEventStrictCapturesFakeEvent(t *testing.T) {
+	recorder := NewFakeEventRecorder()
+	err := RecordEventStrict(context.Background(), recorder, events.ExecutionEventTypeApprovalRequested,
+		WithEventToolCallID("approval-1"),
+	)
+	if err != nil {
+		t.Fatalf("RecordEventStrict() error = %v", err)
+	}
+	got := recorder.Events()
+	if len(got) != 1 ||
+		got[0].Type != events.ExecutionEventTypeApprovalRequested ||
+		got[0].ToolCallID != "approval-1" {
+		t.Fatalf("events = %#v", got)
+	}
+}

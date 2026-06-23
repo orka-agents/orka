@@ -319,6 +319,13 @@ func TestTaskApprovalDecisionAPIAppendsEvent(t *testing.T) {
 	if approved.Status != approvals.StatusApproved || approved.DecisionReason != "safe" {
 		t.Fatalf("approved=%#v", approved)
 	}
+	var patched corev1alpha1.Task
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "approval-task"}, &patched); err != nil {
+		t.Fatalf("get patched task: %v", err)
+	}
+	if patched.Annotations[labels.AnnotationApprovalDecidedAt] == "" || patched.Annotations[labels.AnnotationApprovalDecisionID] != "approval-1" || patched.Annotations[labels.AnnotationApprovalDecisionStatus] != approvals.StatusApproved {
+		t.Fatalf("approval decision annotations = %#v", patched.Annotations)
+	}
 }
 
 // Regression: a very large decision reason truncates the JSON content (dropping
@@ -485,6 +492,9 @@ func TestTaskApprovalDecisionAPIRejectsTerminalTaskAndRecordsActor(t *testing.T)
 		Content:    content2,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "approval-task"}, task); err != nil {
+		t.Fatalf("reload task: %v", err)
 	}
 	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	if err := h.client.Update(context.Background(), task); err != nil {
@@ -1025,5 +1035,40 @@ func appendToolEvent(t *testing.T, eventStore store.ExecutionEventStore, taskNam
 	t.Helper()
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: taskName, TaskName: taskName, Type: typ, Severity: events.ExecutionEventSeverityInfo, ToolName: "web_search", ToolCallID: callID}); err != nil {
 		t.Fatalf("AppendExecutionEvent: %v", err)
+	}
+}
+
+func TestTaskApprovalDecisionAPIIgnoresPassiveExpiryWithoutTerminalEvent(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{
+		"approvalID": "approval-expiring",
+		"action":     "dispatch",
+		"expiresAt":  time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "approval-expiring-task",
+		TaskName:   "approval-expiring-task",
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		Content:    content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-expiring-task"))
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/tasks/approval-expiring-task/approvals/approval-expiring/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want OK", resp.StatusCode)
 	}
 }

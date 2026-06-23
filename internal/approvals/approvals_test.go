@@ -56,3 +56,16 @@ func TestDeriveDuplicateRequestDoesNotResetTerminalApproval(t *testing.T) {
 		t.Fatalf("derived = %#v, want duplicate request to preserve approved state", derived)
 	}
 }
+
+func TestFilterEventsForTaskUIDScopesRequestAndDecisionEvents(t *testing.T) {
+	content := func(v map[string]string) json.RawMessage { data, _ := json.Marshal(v); return data }
+	filtered := FilterEventsForTaskUID([]store.ExecutionEvent{
+		{Seq: 1, Type: events.ExecutionEventTypeApprovalRequested, Content: content(map[string]string{"approvalID": "old", "taskUID": "old-uid"})},
+		{Seq: 2, Type: events.ExecutionEventTypeApprovalApproved, Content: content(map[string]string{"approvalID": "old", "taskUID": "old-uid"})},
+		{Seq: 3, Type: events.ExecutionEventTypeApprovalRequested, Content: content(map[string]string{"approvalID": "new", "taskUID": "new-uid"})},
+		{Seq: 4, Type: events.ExecutionEventTypeApprovalRequested, Content: content(map[string]string{"approvalID": "legacy"})},
+	}, "new-uid")
+	if len(filtered) != 2 || filtered[0].Seq != 3 || filtered[1].Seq != 4 {
+		t.Fatalf("filtered = %#v, want current task UID plus legacy untagged events", filtered)
+	}
+}

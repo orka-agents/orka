@@ -232,6 +232,10 @@ type CoordinationConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxIterations int32 `json:"maxIterations,omitempty"`
+
+	// ApprovalRequiredTools lists tool names that require a human approval before execution.
+	// +optional
+	ApprovalRequiredTools []string `json:"approvalRequiredTools,omitempty"`
 }
 
 // AllowedAgent defines an agent that can be delegated to

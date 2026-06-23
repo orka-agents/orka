@@ -276,6 +276,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 type JobBuildOptions struct {
 	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
 	ExecutionWorkspace    *ExecutionWorkspaceRequest
+	ResolvedApprovalsJSON string
 }
 
 // Build creates a Job for the given Task.
@@ -569,6 +570,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
+		TaskUID:        string(task.UID),
 		ResultEndpoint: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
 		ControllerURL:  b.ControllerURL,
 	}.EnvVars()
@@ -621,6 +623,9 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
+	}
+	if opts.ResolvedApprovalsJSON != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: workerenv.ResolvedApprovals, Value: opts.ResolvedApprovalsJSON})
 	}
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
@@ -836,6 +841,7 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		AutonomousMode:          agent.Spec.Coordination.Autonomous,
 		AutonomousIteration:     int(task.Status.Iteration),
 		AutonomousMaxIterations: int(agent.Spec.Coordination.MaxIterations),
+		ApprovalRequiredTools:   agent.Spec.Coordination.ApprovalRequiredTools,
 	}.EnvVars()...)
 }
 
@@ -889,6 +895,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			if !slices.Contains(cfg.tools, ct) {
 				cfg.tools = append(cfg.tools, ct)
 			}
+		}
+		if agent.Spec.Coordination.Autonomous && !slices.Contains(cfg.tools, "request_approval") {
+			cfg.tools = append(cfg.tools, "request_approval")
 		}
 	}
 

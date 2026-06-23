@@ -345,3 +345,24 @@ func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
 		t.Fatalf("TransactionLogFields() contains a literal newline: %q", got)
 	}
 }
+
+func TestCoordinationEnvRoundTripIncludesApprovalRequiredTools(t *testing.T) {
+	env := CoordinationEnv{
+		Enabled:               true,
+		MaxDepth:              3,
+		MaxChildren:           5,
+		AllowedAgents:         []string{"incident"},
+		Depth:                 "1",
+		AutonomousMode:        true,
+		AutonomousIteration:   2,
+		ApprovalRequiredTools: []string{"dispatch_work_order", "escalate_incident"},
+	}
+	values := map[string]string{}
+	for _, envVar := range env.EnvVars() {
+		values[envVar.Name] = envVar.Value
+	}
+	parsed := ParseCoordinationEnv(func(name string) string { return values[name] })
+	if strings.Join(parsed.ApprovalRequiredTools, ",") != "dispatch_work_order,escalate_incident" {
+		t.Fatalf("ApprovalRequiredTools = %#v", parsed.ApprovalRequiredTools)
+	}
+}
