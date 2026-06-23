@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package approvals
 
 import (
@@ -66,5 +72,28 @@ func TestApprovalTargetPayloadDoesNotPersistRawSensitiveArgs(t *testing.T) {
 	}
 	if target.TargetArgsDigest == "" || target.ApprovalID == "" {
 		t.Fatalf("target missing digest/id: %#v", target)
+	}
+}
+
+func TestApprovalTargetArgsPreviewIsBounded(t *testing.T) {
+	large := strings.Repeat("x", maxApprovalTargetArgsPreviewBytes+1024)
+	target, err := NewApprovalTarget(
+		"default",
+		"task-1",
+		"task-uid-1",
+		"dispatch_work_order",
+		json.RawMessage(`{"note":"`+large+`"}`),
+		"Dispatch work order",
+		"Needs human",
+		"warning",
+	)
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	if len(target.TargetArgsPreview) > maxApprovalTargetArgsPreviewBytes {
+		t.Fatalf("TargetArgsPreview length = %d, want <= %d", len(target.TargetArgsPreview), maxApprovalTargetArgsPreviewBytes)
+	}
+	if !strings.Contains(string(target.TargetArgsPreview), "truncated") {
+		t.Fatalf("TargetArgsPreview = %s, want truncation marker", target.TargetArgsPreview)
 	}
 }

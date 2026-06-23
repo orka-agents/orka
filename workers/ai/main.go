@@ -944,18 +944,27 @@ func executeAgentLoopWithEvents(
 			ToolCalls: resp.ToolCalls,
 		})
 
-		if decision, err := approvalGate.preScan(ctx, resp.ToolCalls); err != nil {
-			return "", err
-		} else if decision != nil {
-			if decision.result != "" {
-				return decision.result, nil
-			}
-			if len(decision.toolResults) > 0 {
-				messages = append(messages, decision.toolResults...)
-			}
-			if decision.continueLLM {
-				continue
-			}
+		var approvalResult string
+		var done bool
+		var continueLoop bool
+		var approvalErr error
+		messages, approvalResult, done, continueLoop, approvalErr = processApprovalBatch(
+			ctx,
+			messages,
+			resp.ToolCalls,
+			approvalGate,
+			allowedToolCalls,
+			eventRecorder,
+			baseToolCtx,
+		)
+		if approvalErr != nil {
+			return "", approvalErr
+		}
+		if done {
+			return approvalResult, nil
+		}
+		if continueLoop {
+			continue
 		}
 
 		// Execute tool calls
@@ -992,9 +1001,16 @@ func executeAgentLoopWithEvents(
 			} else if alreadyFired {
 				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
 			} else if customTool, ok := customTools[toolName]; ok {
-				result, execErr = toolExecutor.Execute(ctx, customTool, execArgs)
+				execCtx := ctx
+				if approvalKey != "" {
+					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
+				}
+				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
 			} else {
 				// Fall back to built-in tools
+				if approvalKey != "" {
+					execArgs, execErr = injectIdempotencyKey(execArgs, approvalKey)
+				}
 				execCtx := ctx
 				if baseToolCtx != nil {
 					toolCtxCopy := *baseToolCtx
@@ -1004,7 +1020,9 @@ func executeAgentLoopWithEvents(
 					}
 					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 				}
-				result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+				if execErr == nil {
+					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+				}
 			}
 
 			if execErr != nil {

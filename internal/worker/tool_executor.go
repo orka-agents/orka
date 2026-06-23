@@ -120,6 +120,25 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 	return respBody, nil
 }
 
+type toolIdempotencyKeyContextKey struct{}
+
+// WithToolIdempotencyKey attaches a trusted idempotency key for HTTP tool execution.
+func WithToolIdempotencyKey(ctx context.Context, key string) context.Context {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolIdempotencyKeyContextKey{}, key)
+}
+
+func toolIdempotencyKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	key, _ := ctx.Value(toolIdempotencyKeyContextKey{}).(string)
+	return strings.TrimSpace(key)
+}
+
 type preparedToolRequest struct {
 	httpConfig       corev1alpha1.HTTPExecution
 	request          *http.Request
@@ -197,6 +216,12 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
+	}
+	if idempotencyKey := toolIdempotencyKeyFromContext(ctx); idempotencyKey != "" {
+		if existing := strings.TrimSpace(req.Header.Get("Idempotency-Key")); existing != "" && existing != idempotencyKey {
+			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", "Idempotency-Key")
+		}
+		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)

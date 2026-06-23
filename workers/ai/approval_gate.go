@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package main
 
 import (
@@ -255,11 +261,7 @@ func (g *approvalGate) prepareApprovedCall(
 	if g.firedKeys[target.ApprovalID] {
 		return nil, target.ApprovalID, true, nil
 	}
-	withKey, err := injectIdempotencyKey(args, target.ApprovalID)
-	if err != nil {
-		return nil, "", false, err
-	}
-	return withKey, target.ApprovalID, false, nil
+	return args, target.ApprovalID, false, nil
 }
 
 func (g *approvalGate) markFired(key string) {
@@ -353,4 +355,119 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 		baseToolCtxCopy.TaskUID = os.Getenv(workerenv.TaskUID)
 	}
 	return &baseToolCtxCopy
+}
+
+func handleExplicitRequestApprovalBatch(
+	ctx context.Context,
+	calls []llm.ToolCall,
+	allowedToolCalls map[string]struct{},
+	eventRecorder common.EventRecorder,
+	baseToolCtx *tools.ToolContext,
+) (*approvalBatchDecision, error) {
+	for _, call := range calls {
+		if strings.TrimSpace(call.Name) != "request_approval" {
+			continue
+		}
+		if _, ok := allowedToolCalls["request_approval"]; !ok {
+			return nil, nil
+		}
+		result, err := executeRequestApprovalToolCall(ctx, call, eventRecorder, baseToolCtx)
+		if err != nil {
+			return nil, err
+		}
+		return &approvalBatchDecision{result: result}, nil
+	}
+	return nil, nil
+}
+
+func executeRequestApprovalToolCall(
+	ctx context.Context,
+	call llm.ToolCall,
+	eventRecorder common.EventRecorder,
+	baseToolCtx *tools.ToolContext,
+) (string, error) {
+	toolName := strings.TrimSpace(call.Name)
+	common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallStarted, modelLoopEventTimeout,
+		common.WithEventToolName(toolName),
+		common.WithEventToolCallID(call.ID),
+		common.WithEventSummary("tool call started"),
+		common.WithEventContent(eventContent(map[string]any{
+			"toolName":      toolName,
+			"toolCallID":    call.ID,
+			"argumentBytes": len(call.Arguments),
+		})),
+	)
+
+	execCtx := ctx
+	baseToolCtx = prepareApprovalToolContext(baseToolCtx, eventRecorder)
+	if baseToolCtx != nil {
+		toolCtxCopy := *baseToolCtx
+		toolCtxCopy.ToolCallID = call.ID
+		if toolCtxCopy.Tenant == "" {
+			toolCtxCopy.Tenant = toolCtxCopy.Namespace
+		}
+		execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
+	}
+	result, err := tools.DefaultRegistry.Execute(execCtx, toolName, call.Arguments)
+	if err != nil {
+		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
+			common.WithEventSeverity(events.ExecutionEventSeverityError),
+			common.WithEventToolName(toolName),
+			common.WithEventToolCallID(call.ID),
+			common.WithEventSummary(err.Error()),
+		)
+		return "", err
+	}
+	common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallCompleted, modelLoopEventTimeout,
+		common.WithEventToolName(toolName),
+		common.WithEventToolCallID(call.ID),
+		common.WithEventSummary("tool call completed"),
+		common.WithEventContent(eventContent(map[string]any{
+			"toolName":     toolName,
+			"toolCallID":   call.ID,
+			"resultLength": len(result),
+		})),
+	)
+	return result, nil
+}
+
+func processApprovalBatch(
+	ctx context.Context,
+	messages []llm.Message,
+	calls []llm.ToolCall,
+	gate *approvalGate,
+	allowedToolCalls map[string]struct{},
+	eventRecorder common.EventRecorder,
+	baseToolCtx *tools.ToolContext,
+) ([]llm.Message, string, bool, bool, error) {
+	if decision, err := gate.preScan(ctx, calls); err != nil {
+		return messages, "", false, false, err
+	} else if decision != nil {
+		return applyApprovalBatchDecision(messages, decision)
+	}
+	if decision, err := handleExplicitRequestApprovalBatch(
+		ctx,
+		calls,
+		allowedToolCalls,
+		eventRecorder,
+		baseToolCtx,
+	); err != nil {
+		return messages, "", false, false, err
+	} else if decision != nil {
+		return applyApprovalBatchDecision(messages, decision)
+	}
+	return messages, "", false, false, nil
+}
+
+func applyApprovalBatchDecision(
+	messages []llm.Message,
+	decision *approvalBatchDecision,
+) ([]llm.Message, string, bool, bool, error) {
+	if decision.result != "" {
+		return messages, decision.result, true, false, nil
+	}
+	if len(decision.toolResults) > 0 {
+		messages = append(messages, decision.toolResults...)
+	}
+	return messages, "", false, decision.continueLLM, nil
 }

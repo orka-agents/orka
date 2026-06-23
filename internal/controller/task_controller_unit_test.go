@@ -602,8 +602,28 @@ func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireAutonomous(t
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
-		!strings.Contains(err.Error(), "requires autonomous") {
+		!strings.Contains(err.Error(), "enabled autonomous") {
 		t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordinationEnabled(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want enabled autonomous approval rejection", err)
 	}
 }
 
@@ -6768,5 +6788,67 @@ func TestHandleAutonomousIteration_FastApprovalAtMaxIterationResumes(t *testing.
 	}
 	if updated.Annotations[labels.AnnotationApprovalDecidedAt] != "" {
 		t.Fatalf("approval decision nudge was not cleared: %#v", updated.Annotations)
+	}
+}
+
+func TestHandleAutonomousIteration_PendingApprovalParksBeforeGoalComplete(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-goal-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-goal")
+	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-approval-goal", &store.PlanState{
+		GoalComplete: true,
+		Summary:      "done",
+	})
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleAutonomousIteration() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want parked Running before goal-complete", task.Status.Phase)
+	}
+}
+
+func TestHandleAutonomousIteration_ResolvedApprovalResumesBeforeGoalComplete(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal-resume-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "approval-goal-resume-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal-resume", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-goal-resume-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-goal-resume-job", Message: "waiting for approval approval-goal for dispatch_work_order at iteration 1"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-goal")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-goal", events.ExecutionEventTypeApprovalApproved)
+	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-approval-goal-resume", &store.PlanState{
+		GoalComplete: true,
+		Summary:      "done",
+	})
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleAutonomousIteration() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed pending iteration 2", task.Status)
 	}
 }

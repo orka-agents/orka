@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package approvals
 
 import (
@@ -11,6 +17,8 @@ import (
 
 	"github.com/sozercan/orka/internal/events"
 )
+
+const maxApprovalTargetArgsPreviewBytes = 8 * 1024
 
 // ApprovalTarget is the stable, sanitized contract for a human approval request.
 // It deliberately stores only a digest of target arguments, not raw side-effect
@@ -90,6 +98,10 @@ func NewApprovalTarget(
 	if err != nil {
 		return ApprovalTarget{}, err
 	}
+	preview, err = boundApprovalTargetArgsPreview(preview)
+	if err != nil {
+		return ApprovalTarget{}, err
+	}
 	if strings.TrimSpace(action) == "" {
 		action = fmt.Sprintf("Execute %s", targetTool)
 	}
@@ -103,6 +115,20 @@ func NewApprovalTarget(
 		RiskSummary:       strings.TrimSpace(riskSummary),
 		Severity:          strings.TrimSpace(severity),
 	}, nil
+}
+
+func boundApprovalTargetArgsPreview(preview json.RawMessage) (json.RawMessage, error) {
+	if len(preview) <= maxApprovalTargetArgsPreviewBytes {
+		return preview, nil
+	}
+	bounded, err := json.Marshal(map[string]any{
+		"truncated": true,
+		"preview":   "[truncated sanitized approval target arguments]",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal truncated approval target args preview: %w", err)
+	}
+	return json.RawMessage(bounded), nil
 }
 
 func canonicalJSON(raw json.RawMessage) ([]byte, error) {

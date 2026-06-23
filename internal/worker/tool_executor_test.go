@@ -822,6 +822,34 @@ func TestToolExecutor_Execute_DefaultMethodPOST(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_IdempotencyKeyHeader(t *testing.T) {
+	var receivedHeader string
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&receivedBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+	ctx := WithToolIdempotencyKey(context.Background(), "approval-key-1")
+
+	_, err := executor.Execute(ctx, tool, json.RawMessage(`{"input":"test"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if receivedHeader != "approval-key-1" {
+		t.Fatalf("Idempotency-Key = %q, want approval-key-1", receivedHeader)
+	}
+	if _, ok := receivedBody["idempotencyKey"]; ok {
+		t.Fatalf("idempotency key was injected into body: %#v", receivedBody)
+	}
+}
+
 func TestToolExecutor_Execute_CustomMethod(t *testing.T) {
 	var receivedMethod string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

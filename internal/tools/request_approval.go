@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package tools
 
 import (
@@ -10,6 +16,7 @@ import (
 
 const requestApprovalToolName = "request_approval"
 
+// RequestApprovalTool records human approval requests for consequential worker actions.
 type RequestApprovalTool struct{}
 
 func NewRequestApprovalTool() *RequestApprovalTool { return &RequestApprovalTool{} }

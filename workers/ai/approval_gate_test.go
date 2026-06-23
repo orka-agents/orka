@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package main
 
 import (
@@ -354,5 +360,93 @@ func TestApprovalToolingRequiresAutonomousMode(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "autonomous coordination mode") {
 		t.Fatalf("error = %v, want autonomous-mode configuration error", err)
+	}
+}
+
+func TestRequestApprovalToolCallStopsWorkerAfterEmitting(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	t.Setenv(workerenv.AutonomousMode, "true")
+	recorder := common.NewFakeEventRecorder()
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{response: &llm.CompletionResponse{
+			Content: "requesting approval",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call-approval",
+				Name:      "request_approval",
+				Arguments: json.RawMessage(`{"action":"dispatch team"}`),
+			}},
+			StopReason: "tool_use",
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+		nil,
+		nil,
+		recorder,
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if !strings.Contains(result, "approval requested") {
+		t.Fatalf("result = %q, want approval requested", result)
+	}
+	assertRecordedEventTypesEventually(t, recorder, []string{events.ExecutionEventTypeApprovalRequested})
+}
+
+func TestApprovalGateDeclinedDecisionDoesNotExecuteAndContinues(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	var executions atomic.Int32
+	toolspkg.DefaultRegistry.Register(recordingTool{
+		name: gatedDispatchTool,
+		onExecute: func(json.RawMessage) {
+			executions.Add(1)
+		},
+	})
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	target := approvalTargetForTest(t, args)
+	declined := resolvedApprovalForTarget(target)
+	declined.Status = approvals.StatusDeclined
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{declined})
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-1",
+					Name:      gatedDispatchTool,
+					Arguments: args,
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: "decline handled", StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		toolspkg.DefaultRegistry.ToLLMTools([]string{gatedDispatchTool}),
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "decline handled" {
+		t.Fatalf("result = %q, want decline handled", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("declined approval executed gated tool")
 	}
 }

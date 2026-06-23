@@ -2809,8 +2809,8 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		}
 		if agent != nil && agent.Spec.Coordination != nil &&
 			len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 &&
-			!agent.Spec.Coordination.Autonomous {
-			return fmt.Errorf("agent %q approvalRequiredTools requires autonomous coordination mode", agent.Name)
+			(!agent.Spec.Coordination.Enabled || !agent.Spec.Coordination.Autonomous) {
+			return fmt.Errorf("agent %q approvalRequiredTools requires enabled autonomous coordination mode", agent.Name)
 		}
 	case corev1alpha1.TaskTypeContainer:
 		// Container tasks don't use agents, no validation needed
@@ -3423,16 +3423,6 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		log.Error(err, "failed to collect iteration result")
 	}
 
-	// Check plan state for termination signals
-	if r.PlanStore != nil {
-		plan, err := r.PlanStore.GetPlan(ctx, task.Namespace, task.Name)
-		if err == nil && plan.GoalComplete {
-			log.Info("autonomous task goal complete", "iteration", task.Status.Iteration, "summary", plan.Summary)
-			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
-				fmt.Sprintf("goal complete after %d iterations: %s", task.Status.Iteration+1, plan.Summary))
-		}
-	}
-
 	if pending, err := r.pendingApprovalsForTask(ctx, task); err != nil {
 		log.Error(err, "failed to derive pending approvals")
 		return ctrl.Result{}, err
@@ -3453,6 +3443,21 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Check plan state for termination signals
+	if r.PlanStore != nil {
+		plan, err := r.PlanStore.GetPlan(ctx, task.Namespace, task.Name)
+		if err == nil && plan.GoalComplete && !resumingAfterApproval {
+			log.Info("autonomous task goal complete", "iteration", task.Status.Iteration, "summary", plan.Summary)
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
+				fmt.Sprintf("goal complete after %d iterations: %s", task.Status.Iteration+1, plan.Summary))
+		}
+	}
+
 	// Check max iterations
 	if task.Spec.AgentRef == nil {
 		return r.failTask(ctx, task, "autonomous task requires agentRef")
@@ -3465,11 +3470,6 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
 		log.Error(err, "failed to get agent for autonomous check")
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "failed to resolve agent for autonomous iteration")
-	}
-
-	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
-	if err != nil {
-		return ctrl.Result{}, err
 	}
 
 	maxIter := agent.Spec.Coordination.MaxIterations
