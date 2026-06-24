@@ -177,4 +177,4 @@ curl https://orka.example.com/openai/v1/models \
 
 Orka transparently proxies requests to the backend LLM provider. The client manages its own tool execution loop — Orka simply forwards the messages and tool definitions to the LLM and returns the response.
 
-> **Note:** Both the OpenAI and Anthropic endpoints inject Orka's built-in tools (web_search, code_exec, etc.) and run server-side tool execution by default. Set `X-Orka-Tools: disabled` header to use as a transparent proxy instead.
+> **Note:** Both the OpenAI and Anthropic endpoints are transparent proxies by default. Set the `X-Orka-Tools: enabled` header to opt in to Orka-managed server-side tool execution.

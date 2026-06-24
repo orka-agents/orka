@@ -28,6 +28,10 @@ import (
 // and skips validation/review/PR.
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 
+func compatOrkaToolsEnabled(headerValue string) bool {
+	return strings.EqualFold(strings.TrimSpace(headerValue), "enabled")
+}
+
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
 // summary as the body of a premature-end response.

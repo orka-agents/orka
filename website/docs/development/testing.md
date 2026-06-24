@@ -114,7 +114,7 @@ The live copilot-proxy E2E path runs in a separate workflow and executes the foc
 
 - provider-backed `type: ai` tasks, including durable memory/tool execution coverage
 - chat SSE/JSON flows via `/api/v1/chat`
-- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows with the default Orka tool loop enabled
+- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows, including explicit `X-Orka-Tools: enabled` coverage for the Orka tool loop
 - external agent runtimes across `codex` + GPT, `claude` + Claude, and `copilot` + Gemini
 
 This is an **Orka** live integration suite, not a deep `copilot-proxy` feature suite. The proxy is test harness infrastructure that gives non-Copilot runtimes access to live GPT, Claude, and Gemini models in CI. The only proxy-specific assertions are smoke checks that the harness is alive and usable:

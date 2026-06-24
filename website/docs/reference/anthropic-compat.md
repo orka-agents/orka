@@ -15,7 +15,7 @@ Orka acts as a **proxy** to whichever LLM provider is configured in your cluster
 | `POST` | `/anthropic/v1/messages` | Create a message (streaming & non-streaming) |
 | `GET` | `/anthropic/v1/models` | List available models from configured providers |
 
-PR-blocking live CI exercises this API directly against a live Claude-family backend by checking `/anthropic/v1/models` and both non-streaming and streaming `/anthropic/v1/messages` requests. Those live checks keep the default Orka tool-loop behavior enabled unless a client explicitly sets `X-Orka-Tools: disabled`.
+PR-blocking live CI exercises this API directly against a live Claude-family backend by checking `/anthropic/v1/models` and both non-streaming and streaming `/anthropic/v1/messages` requests. Those live checks keep the transparent-proxy default; server-side Orka tool-loop behavior is exercised only when the client explicitly sets `X-Orka-Tools: enabled`.
 
 ## Authentication
 
@@ -145,19 +145,19 @@ curl https://orka.example.com/anthropic/v1/models \
 
 ## Server-Side Tool Execution
 
-By default, the Anthropic endpoint enables **server-side tool execution** — it injects Orka's built-in tools into the request and runs an autonomous tool loop. When the LLM returns `tool_use` content blocks, the proxy intercepts them, executes the tools, feeds results back to the LLM, and repeats until a final text response is produced. Clients never need to execute tools locally.
+By default, the Anthropic endpoint is a **transparent proxy**: requests are forwarded to the LLM and responses are returned without intercepting tool calls. The client manages its own tool execution loop.
 
-To disable this and use the endpoint as a **transparent proxy**, set the `X-Orka-Tools: disabled` header:
+To opt in to **server-side tool execution**, set the `X-Orka-Tools: enabled` header:
 
 ```
-X-Orka-Tools: disabled
+X-Orka-Tools: enabled
 ```
 
-When this header is set, requests are forwarded to the LLM and responses are returned without intercepting tool calls. The client manages its own tool execution loop.
+When this header is set, Orka injects its built-in tools into the request and runs an autonomous tool loop. When the LLM returns `tool_use` content blocks, the proxy intercepts them, executes the tools, feeds results back to the LLM, and repeats until a final text response is produced.
 
 ### Available Tools
 
-By default (without the `X-Orka-Tools: disabled` header), the proxy automatically injects these built-in tools into the request:
+When `X-Orka-Tools: enabled` is set, the proxy automatically injects these built-in tools into the request:
 
 | Tool | Description |
 |------|-------------|
@@ -233,7 +233,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   }'
 ```
 
-To use as a transparent proxy instead (client manages tools), add `X-Orka-Tools: disabled`.
+By default, the endpoint is a transparent proxy where the client manages tools. Add `X-Orka-Tools: enabled` only when you want Orka to manage server-side tools.
 
 ## Architecture
 
@@ -250,4 +250,4 @@ To use as a transparent proxy instead (client manages tools), add `X-Orka-Tools:
                     └──────────────────────────────┘
 ```
 
-Orka injects built-in tools and runs server-side tool execution by default. Set `X-Orka-Tools: disabled` to use as a transparent proxy where the client manages its own tool execution loop — see [Server-Side Tool Execution](#server-side-tool-execution) above.
+Orka uses transparent proxy mode by default. Set `X-Orka-Tools: enabled` to inject built-in tools and run server-side tool execution — see [Server-Side Tool Execution](#server-side-tool-execution) above.

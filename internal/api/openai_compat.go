@@ -269,11 +269,11 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	completionID := fmt.Sprintf("chatcmpl-%s", generateChatID())
 	now := time.Now().Unix()
 
-	// Inject Orka tools and run the server-side agentic loop by default.
-	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
+	// Use a transparent proxy by default. Server-side Orka tool execution is
+	// available only when explicitly requested with X-Orka-Tools: enabled.
+	orkaToolsEnabled := compatOrkaToolsEnabled(c.Get("X-Orka-Tools"))
 
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		// Replace client tools with Orka's tools (builtin + coordinator)
 		compReq.Tools = nil
 		injectOrkaTools(ctx, h.client, compReq, namespace)
@@ -291,7 +291,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Build ToolContext for coordinator tools
 	var proxyToolCtx *tools.ToolContext
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		tasksCreated := 0
 		proxyToolCtx = &tools.ToolContext{
 			Client:                    h.client,
@@ -357,13 +357,13 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	}
 
 	if req.Stream {
-		if !orkaToolsDisabled {
+		if orkaToolsEnabled {
 			return h.handleStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions, proxyToolCtx)
 		}
 		return h.handleStreamingCompletion(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
 	}
 
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, proxyToolCtx)
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)

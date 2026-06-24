@@ -413,3 +413,25 @@ func TestCoordinatorSystemPrompt_Demo10ContainerCacheAndReviewerTypeGuardrails(t
 		}
 	}
 }
+
+func TestCompatOrkaToolsEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		headerValue string
+		want        bool
+	}{
+		{name: "default transparent", want: false},
+		{name: "legacy disabled remains transparent", headerValue: "disabled", want: false},
+		{name: "explicit enabled", headerValue: "enabled", want: true},
+		{name: "enabled trims whitespace", headerValue: " enabled ", want: true},
+		{name: "enabled case insensitive", headerValue: "ENABLED", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := compatOrkaToolsEnabled(tt.headerValue); got != tt.want {
+				t.Fatalf("compatOrkaToolsEnabled(%q) = %v, want %v", tt.headerValue, got, tt.want)
+			}
+		})
+	}
+}
