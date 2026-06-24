@@ -121,29 +121,13 @@ func validationArtifactEvidenceRefFromJSON(data []byte) (store.FindingEvidenceRe
 	}
 }
 
-// ParseRepositoryURL extracts owner and repo name from GitHub URLs.
+// ParseRepositoryURL extracts owner and repo name from credential-free GitHub URLs.
 func ParseRepositoryURL(repoURL string) (owner string, repository string) {
-	if trimmed, ok := strings.CutPrefix(repoURL, "git@"); ok {
-		parts := strings.SplitN(trimmed, ":", 2)
-		if len(parts) == 2 {
-			repoPath := strings.TrimSuffix(parts[1], ".git")
-			segments := strings.Split(strings.Trim(repoPath, "/"), "/")
-			if len(segments) >= 2 {
-				return segments[0], segments[1]
-			}
-		}
-		return "", ""
-	}
-
-	u, err := url.Parse(repoURL)
+	owner, repository, err := ParseGitHubRepositoryURL(repoURL)
 	if err != nil {
 		return "", ""
 	}
-	segments := strings.Split(strings.Trim(path.Clean(u.Path), "/"), "/")
-	if len(segments) < 2 {
-		return "", ""
-	}
-	return segments[0], strings.TrimSuffix(segments[1], ".git")
+	return owner, repository
 }
 
 // ParseGitHubRepositoryURL validates a credential-free GitHub repository URL

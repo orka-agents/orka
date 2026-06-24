@@ -114,6 +114,19 @@ func titleCaseMode(mode string) string {
 	return strings.ToUpper(mode[:1]) + mode[1:]
 }
 
+func repositoryScanValidationError(scan *corev1alpha1.RepositoryScan) error {
+	if strings.TrimSpace(scan.Spec.RepoURL) == "" {
+		return fmt.Errorf("spec.repoURL is required")
+	}
+	if scan.Spec.Provider != "" && scan.Spec.Provider != "github" {
+		return fmt.Errorf("spec.provider must be github")
+	}
+	if _, _, err := security.ParseGitHubRepositoryURL(scan.Spec.RepoURL); err != nil {
+		return err
+	}
+	return nil
+}
+
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositoryscans,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositoryscans/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositoryscans/finalizers,verbs=update
@@ -146,6 +159,23 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	if validationErr := repositoryScanValidationError(scan); validationErr != nil {
+		if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
+			s.Status.Phase = repositoryScanPhaseError
+			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				Reason:             "InvalidRepositoryURL",
+				Message:            repositoryScanConditionMessage(validationErr.Error(), "invalid repository URL"),
+				LastTransitionTime: metav1.Now(),
+				ObservedGeneration: s.Generation,
+			})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	if err := r.ingestOwnedTasks(ctx, scan); err != nil {
