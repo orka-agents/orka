@@ -482,6 +482,10 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
+	if err := h.authorizeTaskCreate(ctx, c, task); err != nil {
+		return err
+	}
+
 	if err := h.client.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "task already exists")
@@ -490,6 +494,10 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(task)
+}
+
+func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *corev1alpha1.Task) error {
+	return authorizeKubernetesTaskCreate(ctx, h.clientset, GetUserInfo(c), task)
 }
 
 // ListTasks lists tasks

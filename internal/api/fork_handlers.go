@@ -153,6 +153,9 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenTaskCreate(c, createTaskRequestFromTask(forked), namespace); err != nil {
 		return err
 	}
+	if err := h.authorizeTaskCreate(c.Context(), c, forked); err != nil {
+		return err
+	}
 
 	sourceSessionName, forkedSessionName, err := h.resolveForkSessionNames(c.Context(), namespace, source, forked)
 	if err != nil {
