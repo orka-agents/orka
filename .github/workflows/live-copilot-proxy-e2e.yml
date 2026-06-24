@@ -3,10 +3,8 @@ name: Live Copilot Proxy E2E
 on:
   workflow_dispatch:
   push:
-    paths-ignore:
-      - ".codex/**"
-      - ".claude/**"
-  pull_request:
+    branches:
+      - main
     paths-ignore:
       - ".codex/**"
       - ".claude/**"
@@ -30,19 +28,10 @@ jobs:
     steps:
       - name: Decide whether live e2e can run
         id: gate
-        env:
-          IS_FORK: ${{ github.event.pull_request.head.repo.fork || false }}
-          ACTOR: ${{ github.actor }}
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${IS_FORK}" = "true" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Skipping live copilot-proxy e2e for fork pull requests because repository secrets are not exposed." >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "${ACTOR}" = "dependabot[bot]" ] && [ -z "${COPILOT_GITHUB_TOKEN}" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "reason=Skipping live copilot-proxy e2e for Dependabot pull requests because repository secrets are not exposed." >> "$GITHUB_OUTPUT"
+            echo "reason=Skipping live copilot-proxy e2e for pull requests because it requires repository secrets." >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
