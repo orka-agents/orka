@@ -2345,6 +2345,8 @@ func TestHandlePending_AgentTaskPrunesStaleWorkerRBAC(t *testing.T) {
 		task,
 		managedWorkerServiceAccount(AIWorkerServiceAccount),
 		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+		managedWorkerServiceAccount(VendorWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName, VendorWorkerServiceAccount),
 	}
 	r := newUnitReconciler(scheme, objects...)
 
@@ -2355,6 +2357,12 @@ func TestHandlePending_AgentTaskPrunesStaleWorkerRBAC(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected harness agent task to prune stale AI CRB, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: VendorWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected harness agent task to prune stale vendor SA, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-vendor-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected harness agent task to prune stale vendor CRB, got err %v", err)
 	}
 }
 
@@ -2462,7 +2470,7 @@ func TestEnsureWorkerRBAC_DoesNotPrunePendingAgentWorkerRBAC(t *testing.T) {
 	pendingAgent := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "pending-agent", Namespace: testNS},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: "pending-agent-job"},
 	}
 	objects := []client.Object{
 		pendingAgent,

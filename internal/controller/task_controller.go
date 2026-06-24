@@ -2944,6 +2944,9 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
+		if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
+			continue
+		}
 		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
 			serviceAccount := workerServiceAccountForTask(task)
 			keepServiceAccounts[serviceAccount] = struct{}{}
