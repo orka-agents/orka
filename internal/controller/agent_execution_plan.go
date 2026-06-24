@@ -55,10 +55,6 @@ func (r *TaskReconciler) planAgentExecution(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) agentExecutionPlan {
-	if reason := agentHarnessWrapperUnsupportedReason(task, agent); reason != "" {
-		return rejectAgentExecutionPlan(reason)
-	}
-
 	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
 	if err != nil {
 		return rejectAgentExecutionPlanWithWorkspaceStatus(
@@ -69,6 +65,10 @@ func (r *TaskReconciler) planAgentExecution(
 	if workspaceRequest != nil {
 		err := fmt.Errorf("execution workspace is not supported by harness runtime yet")
 		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
+	}
+
+	if reason := agentHarnessWrapperUnsupportedReason(task, agent); reason != "" {
+		return rejectAgentExecutionPlan(reason)
 	}
 
 	if task.Spec.PriorTaskRef != nil && r.EnforceNamespaceIsolation {

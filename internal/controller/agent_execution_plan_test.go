@@ -111,6 +111,23 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			wantWorkspaceStatusErr: "missing-template",
 		},
 		{
+			name: "execution workspace resolution failure is surfaced before placement rejection",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Execution = &corev1alpha1.ExecutionSpec{
+					RuntimeClassName: "kata",
+					Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+						Enabled:     true,
+						Provider:    corev1alpha1.WorkspaceProviderAgentSandbox,
+						TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "missing-template"},
+					},
+				}
+			},
+			agentSandboxEnabled:    true,
+			wantPath:               agentExecutionPathRejected,
+			wantReason:             "failed to resolve execution workspace",
+			wantWorkspaceStatusErr: "missing-template",
+		},
+		{
 			name: "cross namespace prior task is rejected only when namespace isolation is enforced",
 			mutateTask: func(task *corev1alpha1.Task) {
 				task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: "parent", Namespace: "other"}
