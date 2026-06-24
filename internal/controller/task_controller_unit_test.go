@@ -1908,6 +1908,39 @@ func TestDeleteSubstratePoolActorsForLeasesSkipsLeaseReassignedBeforeActorDelete
 // ensureWorkerRBAC
 // ---------------------------------------------------------------------------
 
+func managedWorkerServiceAccount(name string) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNS,
+			Labels: map[string]string{
+				orkaManagedByLabelKey: managedByLabelValue,
+			},
+		},
+	}
+}
+
+func managedWorkerClusterRoleBinding(name, clusterRole, serviceAccount string) *rbacv1.ClusterRoleBinding {
+	return &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				managedByLabelKey: managedByLabelValue,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     clusterRole,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      serviceAccount,
+			Namespace: testNS,
+		}},
+	}
+}
+
 func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -1919,6 +1952,7 @@ func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 		clusterRoleBinding string
 		clusterRole        string
 		absentAccounts     []string
+		absentBindings     []string
 	}{
 		{
 			name:               "container task",
@@ -1927,6 +1961,7 @@ func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 			clusterRoleBinding: "orka-container-worker-test-ns",
 			clusterRole:        DefaultContainerWorkerClusterRoleName,
 			absentAccounts:     []string{AIWorkerServiceAccount, VendorWorkerServiceAccount},
+			absentBindings:     []string{"orka-ai-worker-test-ns", "orka-vendor-worker-test-ns"},
 		},
 		{
 			name:               "agent task",
@@ -1935,6 +1970,7 @@ func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 			clusterRoleBinding: "orka-vendor-worker-test-ns",
 			clusterRole:        DefaultVendorWorkerClusterRoleName,
 			absentAccounts:     []string{AIWorkerServiceAccount, ContainerWorkerServiceAccount},
+			absentBindings:     []string{"orka-ai-worker-test-ns", "orka-container-worker-test-ns"},
 		},
 		{
 			name:               "ai task",
@@ -1943,6 +1979,7 @@ func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 			clusterRoleBinding: "orka-ai-worker-test-ns",
 			clusterRole:        DefaultAIWorkerClusterRoleName,
 			absentAccounts:     []string{VendorWorkerServiceAccount, ContainerWorkerServiceAccount},
+			absentBindings:     []string{"orka-vendor-worker-test-ns", "orka-container-worker-test-ns"},
 		},
 	}
 
@@ -1978,6 +2015,11 @@ func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 			for _, absent := range tt.absentAccounts {
 				if err := r.Get(ctx, types.NamespacedName{Name: absent, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
 					t.Fatalf("expected SA %s to remain absent, got err %v", absent, err)
+				}
+			}
+			for _, absent := range tt.absentBindings {
+				if err := r.Get(ctx, types.NamespacedName{Name: absent}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+					t.Fatalf("expected CRB %s to remain absent, got err %v", absent, err)
 				}
 			}
 		})
@@ -2041,14 +2083,12 @@ func TestWorkerClusterRoleBindingNameTruncatesLongNames(t *testing.T) {
 
 func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	scheme := newTestScheme()
-	// Pre-create all SAs and CRBs.
+	// Pre-create the selected SA and CRB.
 	expected := []struct {
 		serviceAccount     string
 		clusterRoleBinding string
 		clusterRole        string
 	}{
-		{AIWorkerServiceAccount, "orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
-		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
 		{ContainerWorkerServiceAccount, "orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
 	}
 
@@ -2077,6 +2117,85 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
 	if err := r.ensureWorkerRBAC(context.Background(), task); err != nil {
 		t.Fatalf("unexpected error on idempotent call: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PrunesStaleManagedResourcesForUnusedTiers(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	objects := []client.Object{
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+		managedWorkerServiceAccount(VendorWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName, VendorWorkerServiceAccount),
+		managedWorkerServiceAccount(ContainerWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName, ContainerWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, task); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, absent := range []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+	}{
+		{AIWorkerServiceAccount, "orka-ai-worker-test-ns"},
+		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns"},
+	} {
+		if err := r.Get(ctx, types.NamespacedName{Name: absent.serviceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected stale SA %s to be pruned, got err %v", absent.serviceAccount, err)
+		}
+		if err := r.Get(ctx, types.NamespacedName{Name: absent.clusterRoleBinding}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected stale CRB %s to be pruned, got err %v", absent.clusterRoleBinding, err)
+		}
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: ContainerWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected selected SA to remain: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-container-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected selected CRB to remain: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_DoesNotPruneResourcesForActiveOtherTierTask(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	activeAITask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	objects := []client.Object{
+		activeAITask,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+		managedWorkerServiceAccount(VendorWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName, VendorWorkerServiceAccount),
+		managedWorkerServiceAccount(ContainerWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName, ContainerWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected active AI SA to remain: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected active AI CRB to remain: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: VendorWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected inactive vendor SA to be pruned, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-vendor-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected inactive vendor CRB to be pruned, got err %v", err)
 	}
 }
 

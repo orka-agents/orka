@@ -2873,7 +2873,107 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, task *corev1alpha
 	if err := r.ensureWorkerClusterRoleBinding(ctx, task.Namespace, spec); err != nil {
 		return err
 	}
+	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, spec); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace string, selected workerRBACSpec) error {
+	inUse, err := r.workerServiceAccountsInUse(ctx, namespace)
+	if err != nil {
+		return err
+	}
+	inUse[selected.serviceAccountName] = struct{}{}
+
+	for _, spec := range r.workerRBACSpecs(namespace) {
+		if _, ok := inUse[spec.serviceAccountName]; ok {
+			continue
+		}
+		if err := r.deleteManagedWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+			return err
+		}
+		if err := r.deleteManagedWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *TaskReconciler) workerServiceAccountsInUse(ctx context.Context, namespace string) (map[string]struct{}, error) {
+	inUse := map[string]struct{}{}
+
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing tasks in namespace %s for worker RBAC pruning: %w", namespace, err)
+	}
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseScheduled || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
+			inUse[workerServiceAccountForTask(task)] = struct{}{}
+		}
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("listing pods in namespace %s for worker RBAC pruning: %w", namespace, err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Spec.ServiceAccountName == "" {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodUnknown {
+			inUse[pod.Spec.ServiceAccountName] = struct{}{}
+		}
+	}
+
+	return inUse, nil
+}
+
+func (r *TaskReconciler) deleteManagedWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+
+	crb := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, crb)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting stale worker ClusterRoleBinding %s for pruning: %w", spec.clusterRoleBindingName, err)
+	}
+	if crb.Labels[managedByLabelKey] != managedByLabelValue {
+		return nil
+	}
+
+	if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting stale worker ClusterRoleBinding %s for namespace %s: %w", spec.clusterRoleBindingName, namespace, err)
+	}
+	log.Info("Deleted stale worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName)
+	return nil
+}
+
+func (r *TaskReconciler) deleteManagedWorkerServiceAccount(ctx context.Context, namespace, name string) error {
+	log := logf.FromContext(ctx)
+
+	sa := &corev1.ServiceAccount{}
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, sa)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting stale worker ServiceAccount %s/%s for pruning: %w", namespace, name, err)
+	}
+	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+		return nil
+	}
+
+	if err := r.Delete(ctx, sa); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting stale worker ServiceAccount %s/%s: %w", namespace, name, err)
+	}
+	log.Info("Deleted stale worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	return nil
 }
 
