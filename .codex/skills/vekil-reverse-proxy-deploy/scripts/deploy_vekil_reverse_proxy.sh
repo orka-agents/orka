@@ -16,6 +16,7 @@ Options:
   --replicas N                      deployment replicas (default: 1)
   --port N                          listen and service port (default: 1337)
   --service-type TYPE               ClusterIP, NodePort, or LoadBalancer (default: ClusterIP)
+  --no-network-policy               do not render the default restrictive NetworkPolicy
   --providers-config PATH           JSON/YAML provider config to mount as a ConfigMap
   --providers-configmap NAME        ConfigMap name for providers config (default: <name>-providers)
   --env-secret ENV=SECRET:KEY       add env var from an existing Secret (repeatable)
@@ -97,6 +98,7 @@ timeout="180s"
 create_namespace="true"
 wait_rollout="true"
 print_only="false"
+network_policy="true"
 token_pvc=""
 copilot_token_secret=""
 copilot_token_key="token"
@@ -171,6 +173,10 @@ while [[ $# -gt 0 ]]; do
     --service-type)
       service_type="${2:?missing value for --service-type}"
       shift 2
+      ;;
+    --no-network-policy)
+      network_policy="false"
+      shift
       ;;
     --providers-config)
       providers_config="${2:?missing value for --providers-config}"
@@ -516,6 +522,36 @@ spec:
       port: $port
       targetPort: http
 EOF_SERVICE
+
+  if [[ "$network_policy" == "true" ]]; then
+    cat <<EOF_NETWORK_POLICY
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${name}-ingress
+  namespace: $namespace
+  labels:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/instance: $name
+    app.kubernetes.io/managed-by: vekil-reverse-proxy-deploy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+      app.kubernetes.io/instance: $name
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+      ports:
+        - protocol: TCP
+          port: $port
+EOF_NETWORK_POLICY
+  fi
 }
 
 if [[ "$print_only" == "true" ]]; then
@@ -558,6 +594,10 @@ cat <<EOF_DONE
 
 Vekil service URL inside the cluster:
   http://$name.$namespace.svc.cluster.local:$port
+
+Access control:
+  The default NetworkPolicy allows in-cluster traffic only from pods in namespace '$namespace'
+  labeled 'vekil.sozercan.io/access=true'. NetworkPolicy enforcement depends on the cluster CNI.
 
 Local verification:
   kubectl${context_name:+ --context $context_name} -n $namespace port-forward svc/$name $port:$port
