@@ -80,6 +80,80 @@ func TestExecutionEventTypeValidationRejectsEmptyAndUnknown(t *testing.T) {
 	}
 }
 
+func TestTerminalTaskEventTaxonomy(t *testing.T) {
+	want := []string{
+		ExecutionEventTypeTaskSucceeded,
+		ExecutionEventTypeTaskFailed,
+		ExecutionEventTypeTaskCancelled,
+	}
+	got := TerminalTaskEventTypes()
+	assertSameEventSet(t, got, want)
+	for _, typ := range got {
+		if !IsValidExecutionEventType(typ) {
+			t.Fatalf("terminal task event %q is not a valid execution event type", typ)
+		}
+		if !IsTerminalTaskEventType("  " + typ + " ") {
+			t.Fatalf("IsTerminalTaskEventType(%q) = false, want true", typ)
+		}
+	}
+	for _, typ := range []string{ExecutionEventTypeTaskStarted, ExecutionEventTypeApprovalApproved, ExecutionEventTypeAgentRuntimeCompleted, ""} {
+		if IsTerminalTaskEventType(typ) {
+			t.Fatalf("IsTerminalTaskEventType(%q) = true, want false", typ)
+		}
+	}
+	got[0] = ExecutionEventTypeTaskStarted
+	if TerminalTaskEventTypes()[0] != ExecutionEventTypeTaskSucceeded {
+		t.Fatalf("TerminalTaskEventTypes returned mutable package storage")
+	}
+}
+
+func TestTerminalApprovalEventTaxonomy(t *testing.T) {
+	want := []string{
+		ExecutionEventTypeApprovalApproved,
+		ExecutionEventTypeApprovalDeclined,
+		ExecutionEventTypeApprovalExpired,
+		ExecutionEventTypeApprovalCancelled,
+	}
+	got := TerminalApprovalEventTypes()
+	assertSameEventSet(t, got, want)
+	for _, typ := range got {
+		if !IsValidExecutionEventType(typ) {
+			t.Fatalf("terminal approval event %q is not a valid execution event type", typ)
+		}
+		if !IsTerminalApprovalEventType("  " + typ + " ") {
+			t.Fatalf("IsTerminalApprovalEventType(%q) = false, want true", typ)
+		}
+	}
+	for _, typ := range []string{ExecutionEventTypeApprovalRequested, ExecutionEventTypeTaskSucceeded, ExecutionEventTypeAgentRuntimeCompleted, ""} {
+		if IsTerminalApprovalEventType(typ) {
+			t.Fatalf("IsTerminalApprovalEventType(%q) = true, want false", typ)
+		}
+	}
+	got[0] = ExecutionEventTypeApprovalRequested
+	if TerminalApprovalEventTypes()[0] != ExecutionEventTypeApprovalApproved {
+		t.Fatalf("TerminalApprovalEventTypes returned mutable package storage")
+	}
+}
+
+func assertSameEventSet(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("event set length = %d, want %d (got=%v want=%v)", len(got), len(want), got, want)
+	}
+	seen := map[string]bool{}
+	for _, typ := range got {
+		if seen[typ] {
+			t.Fatalf("event set contains duplicate %q", typ)
+		}
+		seen[typ] = true
+	}
+	for _, typ := range want {
+		if !seen[typ] {
+			t.Fatalf("event set missing %q (got=%v)", typ, got)
+		}
+	}
+}
+
 func TestEventSeverityNormalization(t *testing.T) {
 	tests := map[string]string{
 		"":         ExecutionEventSeverityInfo,

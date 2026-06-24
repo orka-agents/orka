@@ -118,11 +118,12 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*Ca
 	if err := request.Validate(); err != nil {
 		return nil, safeClientError("cancel_turn", 0, err.Error())
 	}
-	if err := validateHarnessTurnPathID(request.TurnID); err != nil {
+	rel, err := CancelTurnPath(request.TurnID)
+	if err != nil {
 		return nil, safeClientError("cancel_turn", 0, err.Error())
 	}
 	var response CancelTurnResponse
-	if err := c.postJSON(ctx, turnPath(request.TurnID, "cancel"), request, &response); err != nil {
+	if err := c.postJSON(ctx, rel, request, &response); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(response.Version) != ProtocolVersion {
@@ -154,16 +155,13 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*Ca
 func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outputRef string) ([]byte, error) {
 	ctx, cancel := c.controlContext(ctx)
 	defer cancel()
-	if strings.TrimSpace(string(turnID)) == "" {
-		return nil, safeClientError("fetch_turn_output", 0, "turn id is required")
-	}
-	if err := validateHarnessTurnPathID(turnID); err != nil {
+	rel, err := OutputTurnPath(turnID)
+	if err != nil {
 		return nil, safeClientError("fetch_turn_output", 0, err.Error())
 	}
 	if strings.TrimSpace(outputRef) == "" {
 		return nil, safeClientError("fetch_turn_output", 0, "output ref is required")
 	}
-	rel := turnPath(turnID, "output")
 	u := c.resolve(rel)
 	q := u.Query()
 	q.Set("ref", outputRef)
@@ -193,16 +191,13 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 }
 
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
-	if strings.TrimSpace(string(turnID)) == "" {
-		return safeClientError("stream_frames", 0, "turn id is required")
-	}
-	if err := validateHarnessTurnPathID(turnID); err != nil {
+	rel, err := EventStreamPath(turnID)
+	if err != nil {
 		return safeClientError("stream_frames", 0, err.Error())
 	}
 	if emit == nil {
 		return safeClientError("stream_frames", 0, "emit callback is required")
 	}
-	rel := turnPath(turnID, "events")
 	u := c.resolve(rel)
 	q := u.Query()
 	if afterSeq > 0 {
@@ -310,22 +305,6 @@ func (c *Client) resolve(rel string) *url.URL {
 		copy.Path += "/"
 	}
 	return &copy
-}
-
-func turnPath(turnID HarnessTurnID, suffix string) string {
-	base := strings.TrimRight(TurnsPath, "/") + "/" + url.PathEscape(strings.TrimSpace(string(turnID)))
-	if strings.TrimSpace(suffix) == "" {
-		return base
-	}
-	return base + "/" + strings.Trim(strings.TrimSpace(suffix), "/")
-}
-
-func validateHarnessTurnPathID(turnID HarnessTurnID) error {
-	value := strings.TrimSpace(string(turnID))
-	if value == "." || value == ".." {
-		return fmt.Errorf("turn id must not be a dot path segment")
-	}
-	return nil
 }
 
 func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {

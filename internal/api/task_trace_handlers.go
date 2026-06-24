@@ -24,7 +24,7 @@ import (
 
 const maxTaskTraceEvents = 5000
 
-var errTaskTraceTooLarge = errors.New("task trace exceeds event limit")
+var errTaskTraceTooLarge = errTaskTimelineReadLimitExceeded
 
 // GetTaskTrace handles GET /api/v1/tasks/{id}/trace.
 func (h *Handlers) GetTaskTrace(c fiber.Ctx) error {
@@ -75,44 +75,5 @@ func listAllTaskEventsThrough(
 	throughSeq int64,
 	maxEvents int,
 ) ([]store.ExecutionEvent, error) {
-	if throughSeq == 0 {
-		return nil, nil
-	}
-	if maxEvents <= 0 {
-		return nil, errTaskTraceTooLarge
-	}
-	var out []store.ExecutionEvent
-	var after int64
-	for {
-		batch, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  namespace,
-			StreamType: events.ExecutionEventStreamTypeTask,
-			StreamID:   taskName,
-			AfterSeq:   after,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, event := range batch {
-			if event.Seq > throughSeq {
-				return out, nil
-			}
-			if len(out) >= maxEvents {
-				return nil, errTaskTraceTooLarge
-			}
-			out = append(out, event)
-			after = event.Seq
-			if after >= throughSeq {
-				return out, nil
-			}
-		}
-		if len(batch) < store.MaxExecutionEventLimit {
-			break
-		}
-	}
-	return out, nil
+	return newTaskTimelineReader(eventStore, namespace, taskName).listThrough(ctx, throughSeq, maxEvents)
 }
