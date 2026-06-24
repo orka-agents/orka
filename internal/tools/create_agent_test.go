@@ -466,7 +466,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T)
 	}
 }
 
-func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *testing.T) {
+func TestCreateAgentTool_Execute_RejectsOmittedRuntimeSecretRef(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
@@ -484,39 +484,16 @@ func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *tes
 		}
 	}`)
 
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error")
 	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
-	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != claudeAPIKeySecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeAPIKeySecretName)
+	if !strings.Contains(err.Error(), "runtime secretRef is required") {
+		t.Fatalf("error = %v, want it to mention required secretRef", err)
 	}
 }
 
-func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t *testing.T) {
+func TestCreateAgentTool_Execute_RejectsOmittedCodexRuntimeSecretRef(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
@@ -534,35 +511,12 @@ func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t
 		}
 	}`)
 
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error")
 	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
-	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("codex") {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "codex")
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != codexProxyTokenSecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, codexProxyTokenSecretName)
+	if !strings.Contains(err.Error(), "runtime secretRef is required") {
+		t.Fatalf("error = %v, want it to mention required secretRef", err)
 	}
 }
 

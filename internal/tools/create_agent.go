@@ -172,7 +172,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 					},
 					"secretRef": {
 						"type": "string",
-						"description": "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."
+						"description": "Required secret name containing runtime credentials for runtime agents. Secrets are never auto-discovered."
 					}
 				}
 			}
