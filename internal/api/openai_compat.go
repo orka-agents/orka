@@ -292,68 +292,20 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	// Build ToolContext for coordinator tools
 	var proxyToolCtx *tools.ToolContext
 	if !orkaToolsDisabled {
-		tasksCreated := 0
-		proxyToolCtx = &tools.ToolContext{
+		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
-			Tenant:                    namespace,
-			Provider:                  providerInfo.Name,
-			ProviderType:              providerInfo.Type,
+			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
-			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
-			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-					return authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
-				}
-				return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
-			},
-			AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-					return authorizeContextTokenTaskDeleteObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolDeleteTask", task)
-				}
-				return chatToolAuthorizationError(authorize, ctx, task, "Use a task authorized by the context token")
-			},
-			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-					return authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent)
-				}
-				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent configuration authorized by the context token")
-			},
-			AuthorizeAgentUpdate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-					return authorizeContextTokenToolAgentUpdate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolUpdateAgent", agent)
-				}
-				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent update authorized by the context token")
-			},
-			AuthorizeAgentDelete: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-					return authorizeContextTokenToolAgentDelete(contextToken, h.contextTokenAuthorization, "openAIToolDeleteAgent", agent)
-				}
-				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent authorized by the context token")
-			},
-			AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
-				if err := authorizeContextTokenSecretRead(contextToken, h.contextTokenAuthorization, "openAIToolReadSecret", namespace, secretName); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a context token authorized to read the git credential secret",
-					}
-				}
-				return nil
-			},
-			RequireSecretReadAuthorization: true,
-			CheckTaskLimit: func() *tools.ChatToolError {
-				if tasksCreated >= 20 {
-					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
-				}
-				return nil
-			},
-			IncrementTasks: func() { tasksCreated++ },
-		}
+			Profile:                   openAICompatProxyToolContextProfile,
+			AuthContext:               contextToken,
+			AuthorizationConfig:       h.contextTokenAuthorization,
+			UserInfo:                  userInfo,
+		})
 	}
 
 	if req.Stream {

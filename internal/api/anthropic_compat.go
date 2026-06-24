@@ -317,58 +317,20 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	// Build ToolContext for coordinator tools (create_agent_task, wait_for_task, etc.)
 	var proxyToolCtx *tools.ToolContext
 	if !orkaToolsDisabled {
-		tasksCreated := 0
-		proxyToolCtx = &tools.ToolContext{
+		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
-			Tenant:                    namespace,
-			Provider:                  providerInfo.Name,
-			ProviderType:              providerInfo.Type,
+			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
-			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "anthropic-proxy"} },
-			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				if err := authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateTask", userInfo, task); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a task configuration authorized by the context token",
-					}
-				}
-				return nil
-			},
-			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				if err := authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateAgent", agent); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use an agent configuration authorized by the context token",
-					}
-				}
-				return nil
-			},
-			AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
-				if err := authorizeContextTokenSecretRead(contextToken, h.contextTokenAuthorization, "anthropicToolReadSecret", namespace, secretName); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a context token authorized to read the git credential secret",
-					}
-				}
-				return nil
-			},
-			RequireSecretReadAuthorization: true,
-			CheckTaskLimit: func() *tools.ChatToolError {
-				if tasksCreated >= 20 {
-					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
-				}
-				return nil
-			},
-			IncrementTasks: func() { tasksCreated++ },
-		}
+			Profile:                   anthropicCompatProxyToolContextProfile,
+			AuthContext:               contextToken,
+			AuthorizationConfig:       h.contextTokenAuthorization,
+			UserInfo:                  userInfo,
+		})
 	}
 
 	if req.Stream {
