@@ -2,20 +2,48 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	authenticationv1 "k8s.io/api/authentication/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
+func allowResourceMutationRBAC(t *testing.T, handlers *Handlers, app *fiber.App) {
+	t.Helper()
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+	handlers.clientset = clientset
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice", UID: "uid-1"})
+		return c.Next()
+	})
+}
+
 func TestHandlers_ProviderCRUD(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Get("/providers", handlers.ListProviders)
 	app.Post("/providers", handlers.CreateProvider)
 	app.Get("/providers/:name", handlers.GetProvider)
@@ -75,6 +103,7 @@ func TestHandlers_ProviderUpdatePreservesExistingBaseURL(t *testing.T) {
 		},
 	}
 	handlers, app := setupTestHandlersWithObjects(provider)
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Put("/providers/:name", handlers.UpdateProvider)
 
 	resp := testJSONRequest(t, app, http.MethodPut, "/providers/proxy-provider", map[string]any{
@@ -102,6 +131,7 @@ func TestHandlers_ProviderUpdatePreservesExistingBaseURL(t *testing.T) {
 
 func TestHandlers_ToolWriteRejectsBuiltInAndCRUD(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Post("/tools", handlers.CreateTool)
 	app.Put("/tools/:name", handlers.UpdateTool)
 	app.Delete("/tools/:name", handlers.DeleteTool)
@@ -144,6 +174,7 @@ func TestHandlers_ToolWriteRejectsBuiltInAndCRUD(t *testing.T) {
 
 func TestHandlers_SubstrateActorPoolCRUD(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Get("/substrate-actor-pools", handlers.ListSubstrateActorPools)
 	app.Post("/substrate-actor-pools", handlers.CreateSubstrateActorPool)
 	app.Get("/substrate-actor-pools/:name", handlers.GetSubstrateActorPool)
@@ -177,6 +208,349 @@ func TestHandlers_SubstrateActorPoolCRUD(t *testing.T) {
 
 	resp = testJSONRequest(t, app, http.MethodDelete, "/substrate-actor-pools/pool-a", nil)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}
+
+func TestHandlers_SubstrateActorPoolUpdateRetriesConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "prod"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:   corev1alpha1.WorkspaceTemplateReference{Name: "template-a"},
+			TargetActors:  1,
+			TargetWorkers: 1,
+		},
+	}
+	patchAttempts := 0
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(pool).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchAttempts++
+				if patchAttempts == 1 {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "substrateactorpools"},
+						obj.GetName(),
+						fmt.Errorf("synthetic conflict"),
+					)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	handlers, app := setupTestHandlers()
+	handlers.client = fakeClient
+	handlers.clientset = clientset
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice"})
+		return c.Next()
+	})
+	app.Put("/substrate-actor-pools/:name", handlers.UpdateSubstrateActorPool)
+
+	resp := testJSONRequest(t, app, http.MethodPut, "/substrate-actor-pools/pool-a?namespace=prod", map[string]any{
+		"spec": map[string]any{
+			"templateRef":     map[string]any{"name": "template-a"},
+			"targetActors":    2,
+			"targetWorkers":   1,
+			"precreateActors": true,
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, 2, patchAttempts)
+
+	var updated corev1alpha1.SubstrateActorPool
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&updated))
+	require.Equal(t, int32(2), updated.Spec.TargetActors)
+	require.True(t, updated.Spec.PrecreateActors)
+}
+
+func TestHandlers_SubstrateActorPoolUpdateReturnsConflictWhenSpecChangesDuringRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "prod"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:   corev1alpha1.WorkspaceTemplateReference{Name: "template-a"},
+			TargetActors:  1,
+			TargetWorkers: 1,
+		},
+	}
+	patchAttempts := 0
+	fakeClient := crfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(pool).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchAttempts++
+				if patchAttempts == 1 {
+					latest := &corev1alpha1.SubstrateActorPool{}
+					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), latest))
+					latest.Spec.TargetActors = 9
+					require.NoError(t, c.Update(ctx, latest))
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "substrateactorpools"},
+						obj.GetName(),
+						fmt.Errorf("synthetic conflict"),
+					)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	handlers, app := setupTestHandlers()
+	handlers.client = fakeClient
+	handlers.clientset = clientset
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice"})
+		return c.Next()
+	})
+	app.Put("/substrate-actor-pools/:name", handlers.UpdateSubstrateActorPool)
+
+	resp := testJSONRequest(t, app, http.MethodPut, "/substrate-actor-pools/pool-a?namespace=prod", map[string]any{
+		"spec": map[string]any{
+			"templateRef":     map[string]any{"name": "template-a"},
+			"targetActors":    2,
+			"targetWorkers":   1,
+			"precreateActors": true,
+		},
+	})
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	require.Equal(t, 1, patchAttempts)
+}
+
+func TestHandlers_ResourceMutationRequiresKubernetesRBAC(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		require.Empty(t, review.Name)
+		require.Equal(t, "alice", review.Spec.User)
+		require.Equal(t, "uid-1", review.Spec.UID)
+		require.Equal(t, []string{"devs"}, review.Spec.Groups)
+		require.Equal(t, authorizationv1.ExtraValue{"tenant-a", "tenant-b"}, review.Spec.Extra["example.com/tenant"])
+		require.Equal(t, "prod", review.Spec.ResourceAttributes.Namespace)
+		require.Empty(t, review.Spec.ResourceAttributes.Name)
+		require.Equal(t, "create", review.Spec.ResourceAttributes.Verb)
+		require.Equal(t, "core.orka.ai", review.Spec.ResourceAttributes.Group)
+		require.Equal(t, "v1alpha1", review.Spec.ResourceAttributes.Version)
+		require.Equal(t, "providers", review.Spec.ResourceAttributes.Resource)
+		review.Status.Allowed = false
+		review.Status.Reason = "rbac denied"
+		return true, review, nil
+	})
+
+	handlers, app := setupTestHandlers()
+	handlers.clientset = clientset
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			AuthType: AuthTypeTokenReview,
+			Username: "alice",
+			UID:      "uid-1",
+			Groups:   []string{"devs"},
+			Extra: map[string]authenticationv1.ExtraValue{
+				"example.com/tenant": {"tenant-a", "tenant-b"},
+			},
+		})
+		return c.Next()
+	})
+	app.Post("/providers", handlers.CreateProvider)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
+		"metadata": map[string]any{"name": "openai", "namespace": "prod"},
+		"spec":     map[string]any{"type": "openai"},
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Len(t, clientset.Actions(), 1)
+}
+
+func TestHandlers_ResourceMutationRejectsMissingIdentity(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/providers", handlers.CreateProvider)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
+		"metadata": map[string]any{"name": "openai", "namespace": "prod"},
+		"spec":     map[string]any{"type": "openai"},
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestHandlers_ResourceMutationUsesStableOIDCSubjectForSAR(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		require.Equal(t, "https://issuer.example/#repo:sozercan/orka:ref:refs/heads/main", review.Spec.User)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	handlers, app := setupTestHandlers()
+	handlers.clientset = clientset
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			AuthType: AuthTypeOIDC,
+			Username: "mutable-display-name",
+			Issuer:   "https://issuer.example/",
+			Subject:  "repo:sozercan/orka:ref:refs/heads/main",
+		})
+		return c.Next()
+	})
+	app.Post("/providers", handlers.CreateProvider)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
+		"metadata": map[string]any{"name": "openai", "namespace": "prod"},
+		"spec":     map[string]any{"type": "openai"},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	require.Len(t, clientset.Actions(), 1)
+}
+
+func TestHandlers_NamedResourceMutationAuthorizesBeforeLookup(t *testing.T) {
+	cases := []struct {
+		name     string
+		method   string
+		path     string
+		object   string
+		resource string
+		verb     string
+		mount    func(*fiber.App, *Handlers)
+	}{
+		{
+			name:     "provider update",
+			method:   http.MethodPut,
+			path:     "/providers/missing-provider?namespace=prod",
+			object:   "missing-provider",
+			resource: "providers",
+			verb:     "update",
+			mount: func(app *fiber.App, handlers *Handlers) {
+				app.Put("/providers/:name", handlers.UpdateProvider)
+			},
+		},
+		{
+			name:     "provider delete",
+			method:   http.MethodDelete,
+			path:     "/providers/missing-provider?namespace=prod",
+			object:   "missing-provider",
+			resource: "providers",
+			verb:     "delete",
+			mount: func(app *fiber.App, handlers *Handlers) {
+				app.Delete("/providers/:name", handlers.DeleteProvider)
+			},
+		},
+		{
+			name:     "tool update",
+			method:   http.MethodPut,
+			path:     "/tools/custom-tool?namespace=prod",
+			object:   "custom-tool",
+			resource: "tools",
+			verb:     "update",
+			mount: func(app *fiber.App, handlers *Handlers) {
+				app.Put("/tools/:name", handlers.UpdateTool)
+			},
+		},
+		{
+			name:     "tool delete",
+			method:   http.MethodDelete,
+			path:     "/tools/custom-tool?namespace=prod",
+			object:   "custom-tool",
+			resource: "tools",
+			verb:     "delete",
+			mount: func(app *fiber.App, handlers *Handlers) {
+				app.Delete("/tools/:name", handlers.DeleteTool)
+			},
+		},
+		{
+			name:     "substrate actor pool update",
+			method:   http.MethodPut,
+			path:     "/substrate-actor-pools/missing-pool?namespace=prod",
+			object:   "missing-pool",
+			resource: "substrateactorpools",
+			verb:     "update",
+			mount: func(app *fiber.App, handlers *Handlers) {
+				app.Put("/substrate-actor-pools/:name", handlers.UpdateSubstrateActorPool)
+			},
+		},
+		{
+			name:     "substrate actor pool delete",
+			method:   http.MethodDelete,
+			path:     "/substrate-actor-pools/missing-pool?namespace=prod",
+			object:   "missing-pool",
+			resource: "substrateactorpools",
+			verb:     "delete",
+			mount: func(app *fiber.App, handlers *Handlers) {
+				app.Delete("/substrate-actor-pools/:name", handlers.DeleteSubstrateActorPool)
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := kubefake.NewSimpleClientset()
+			clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+				require.Equal(t, "prod", review.Spec.ResourceAttributes.Namespace)
+				require.Equal(t, tt.object, review.Spec.ResourceAttributes.Name)
+				require.Equal(t, tt.resource, review.Spec.ResourceAttributes.Resource)
+				require.Equal(t, tt.verb, review.Spec.ResourceAttributes.Verb)
+				review.Status.Allowed = false
+				review.Status.Reason = "rbac denied before lookup"
+				return true, review, nil
+			})
+
+			handlers, app := setupTestHandlers()
+			handlers.clientset = clientset
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice"})
+				return c.Next()
+			})
+			tt.mount(app, handlers)
+
+			resp := testJSONRequest(t, app, tt.method, tt.path, nil)
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+			require.Len(t, clientset.Actions(), 1)
+		})
+	}
+}
+
+func TestHandlers_ResourceMutationAllowsKubernetesRBAC(t *testing.T) {
+	clientset := kubefake.NewSimpleClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	handlers, app := setupTestHandlers()
+	handlers.clientset = clientset
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice"})
+		return c.Next()
+	})
+	app.Post("/providers", handlers.CreateProvider)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
+		"metadata": map[string]any{"name": "openai", "namespace": "prod"},
+		"spec":     map[string]any{"type": "openai"},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	require.Len(t, clientset.Actions(), 1)
 }
 
 func TestServer_HandleAuthWhoAmI_Sanitized(t *testing.T) {
@@ -330,6 +704,7 @@ func TestHandlers_ProviderMutationRejectsContextTokenIdentity(t *testing.T) {
 
 func TestHandlers_ToolRESTMutationRejectsCredentialHeaders(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Post("/tools", handlers.CreateTool)
 	resp := testJSONRequest(t, app, http.MethodPost, "/tools", map[string]any{
 		"name": "header-tool",
@@ -413,6 +788,7 @@ func TestHandlers_CreateRepositoryScan_KubernetesStyleMetadata(t *testing.T) {
 
 func TestHandlers_ProviderRESTMutationRejectsBaseURL(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Post("/providers", handlers.CreateProvider)
 	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
 		"name": "proxy-provider",
@@ -427,6 +803,7 @@ func TestHandlers_ProviderRESTMutationRejectsBaseURL(t *testing.T) {
 
 func TestHandlers_ToolRESTMutationRejectsMalformedURL(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Post("/tools", handlers.CreateTool)
 
 	resp := testJSONRequest(t, app, http.MethodPost, "/tools", map[string]any{
@@ -443,6 +820,7 @@ func TestHandlers_ToolRESTMutationRejectsMalformedURL(t *testing.T) {
 
 func TestHandlers_ToolRESTMutationRejectsAuthSecretRef(t *testing.T) {
 	handlers, app := setupTestHandlers()
+	allowResourceMutationRBAC(t, handlers, app)
 	app.Post("/tools", handlers.CreateTool)
 	resp := testJSONRequest(t, app, http.MethodPost, "/tools", map[string]any{
 		"name": "secret-tool",

@@ -108,6 +108,10 @@ type proxyModelCatalog struct {
 
 var (
 	liveCopilotProxyGPTModelPreferences = []string{
+		// Prefer gpt-5.4 for the Codex runtime path. The Copilot-backed
+		// gpt-5.5 Responses endpoint currently rejects the Codex CLI's
+		// internal_chat_message_metadata_passthrough request field.
+		"gpt-5.4",
 		"gpt-5.2",
 		"gpt-5.5",
 	}

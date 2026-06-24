@@ -125,6 +125,9 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		if gptModel == "" {
 			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
 		}
+		if strings.EqualFold(gptModel, "gpt-5.5") {
+			Skip("Skipping Codex runtime live proxy check: Copilot-backed gpt-5.5 currently rejects Codex CLI metadata passthrough payloads")
+		}
 
 		DeferCleanup(func() {
 			for _, resource := range []struct {

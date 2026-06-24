@@ -1,13 +1,18 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	neturl "net/url"
+	"reflect"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -46,15 +51,108 @@ type UpdateSubstrateActorPoolRequest struct {
 	Spec corev1alpha1.SubstrateActorPoolSpec `json:"spec"`
 }
 
-func rejectContextTokenResourceMutation(c fiber.Ctx, resource string) error {
+func (h *Handlers) authorizeResourceMutation(c fiber.Ctx, resourceLabel, resource, verb, namespace, name string) error {
 	ui := GetUserInfo(c)
-	if ui == nil || ui.AuthType != AuthTypeContextToken {
+	if ui == nil {
+		return fiber.NewError(
+			fiber.StatusForbidden,
+			fmt.Sprintf("%s mutations require an authenticated identity", resourceLabel),
+		)
+	}
+	if ui.AuthType == AuthTypeContextToken {
+		return fiber.NewError(
+			fiber.StatusForbidden,
+			fmt.Sprintf("%s mutations are not allowed with transaction tokens", resourceLabel),
+		)
+	}
+	reviewUser, err := resourceMutationReviewUser(ui, resourceLabel)
+	if err != nil {
+		return err
+	}
+	if h.clientset == nil {
+		return fiber.NewError(
+			fiber.StatusForbidden,
+			fmt.Sprintf("%s mutations require Kubernetes RBAC authorization", resourceLabel),
+		)
+	}
+
+	review := &authorizationv1.SubjectAccessReview{
+		Spec: authorizationv1.SubjectAccessReviewSpec{
+			User:   reviewUser,
+			UID:    ui.UID,
+			Groups: append([]string(nil), ui.Groups...),
+			Extra:  authorizationExtra(ui),
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Namespace: namespace,
+				Name:      name,
+				Verb:      verb,
+				Group:     corev1alpha1.GroupVersion.Group,
+				Version:   corev1alpha1.GroupVersion.Version,
+				Resource:  resource,
+			},
+		},
+	}
+	createdReview, err := h.clientset.AuthorizationV1().SubjectAccessReviews().Create(c.Context(), review, metav1.CreateOptions{})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to authorize %s mutation: %v", resourceLabel, err))
+	}
+	review = createdReview
+	if !review.Status.Allowed {
+		message := review.Status.Reason
+		if message == "" {
+			message = fmt.Sprintf("%s mutation is not allowed by Kubernetes RBAC", resourceLabel)
+		}
+		return fiber.NewError(fiber.StatusForbidden, message)
+	}
+	return nil
+}
+
+func resourceMutationReviewUser(ui *UserInfo, resourceLabel string) (string, error) {
+	switch ui.AuthType {
+	case AuthTypeTokenReview:
+		if strings.TrimSpace(ui.Username) == "" {
+			return "", fiber.NewError(
+				fiber.StatusForbidden,
+				fmt.Sprintf("%s mutations require an authenticated Kubernetes user", resourceLabel),
+			)
+		}
+		return ui.Username, nil
+	case AuthTypeOIDC:
+		if strings.TrimSpace(ui.Issuer) == "" || strings.TrimSpace(ui.Subject) == "" {
+			return "", fiber.NewError(
+				fiber.StatusForbidden,
+				fmt.Sprintf("%s mutations require a stable OIDC issuer and subject", resourceLabel),
+			)
+		}
+		return ui.Issuer + "#" + ui.Subject, nil
+	default:
+		return "", fiber.NewError(
+			fiber.StatusForbidden,
+			fmt.Sprintf("%s mutations require Kubernetes RBAC authorization", resourceLabel),
+		)
+	}
+}
+
+func authorizationExtra(ui *UserInfo) map[string]authorizationv1.ExtraValue {
+	if len(ui.Extra) == 0 {
 		return nil
 	}
-	return fiber.NewError(
-		fiber.StatusForbidden,
-		fmt.Sprintf("%s mutations are not allowed with transaction tokens", resource),
-	)
+	extra := make(map[string]authorizationv1.ExtraValue, len(ui.Extra))
+	for key, values := range ui.Extra {
+		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
+	}
+	return extra
+}
+
+func resourceMutationUpdateError(resourceLabel string, err error) error {
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		return err
+	}
+	if apierrors.IsConflict(err) {
+		return fiber.NewError(fiber.StatusConflict, fmt.Sprintf("%s was modified concurrently", resourceLabel))
+	}
+	return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update %s: %v", resourceLabel, err))
 }
 
 func validateProviderRESTCreate(spec corev1alpha1.ProviderSpec) error {
@@ -284,7 +382,7 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
+	if err := h.authorizeResourceMutation(c, "provider", "providers", "create", namespace, ""); err != nil {
 		return err
 	}
 	if err := validateProviderRESTCreate(req.Spec); err != nil {
@@ -305,36 +403,62 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 
 // UpdateProvider updates a provider spec.
 func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
-	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
-	if err != nil {
+	if err := h.authorizeResourceMutation(c, "provider", "providers", "update", namespace, name); err != nil {
 		return err
 	}
 	var req UpdateProviderRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	if err := validateProviderRESTUpdate(req.Spec, provider.Spec); err != nil {
-		return err
-	}
-	// REST updates cannot set protected routing fields, but they also must not
-	// clear values that were created through the Kubernetes API/RBAC path.
-	req.Spec.BaseURL = provider.Spec.BaseURL
-	provider.Spec = req.Spec
-	if err := h.client.Update(c.Context(), provider); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
+	var provider *corev1alpha1.Provider
+	var originalSpec *corev1alpha1.ProviderSpec
+	retryErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current, err := h.fetchProviderInNamespace(c, namespace, name)
+		if err != nil {
+			return err
+		}
+		if originalSpec == nil {
+			originalSpec = current.Spec.DeepCopy()
+		} else if !reflect.DeepEqual(current.Spec, *originalSpec) {
+			return fiber.NewError(fiber.StatusConflict, "provider was modified concurrently")
+		}
+		if err := validateProviderRESTUpdate(req.Spec, current.Spec); err != nil {
+			return err
+		}
+		patchBase := current.DeepCopy()
+		// REST updates cannot set protected routing fields, but they also must not
+		// clear values that were created through the Kubernetes API/RBAC path.
+		nextSpec := req.Spec
+		nextSpec.BaseURL = current.Spec.BaseURL
+		current.Spec = nextSpec
+		if err := h.client.Patch(c.Context(), current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		provider = current
+		return nil
+	})
+	if retryErr != nil {
+		return resourceMutationUpdateError("provider", retryErr)
 	}
 	return c.JSON(provider)
 }
 
 // DeleteProvider deletes a provider.
 func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
-	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
 		return err
 	}
-	provider, err := h.fetchProvider(c, c.Params("name"))
+	if err := h.authorizeResourceMutation(c, "provider", "providers", "delete", namespace, name); err != nil {
+		return err
+	}
+	provider, err := h.fetchProviderInNamespace(c, namespace, name)
 	if err != nil {
 		return err
 	}
@@ -349,6 +473,10 @@ func (h *Handlers) fetchProvider(c fiber.Ctx, name string) (*corev1alpha1.Provid
 	if err != nil {
 		return nil, err
 	}
+	return h.fetchProviderInNamespace(c, namespace, name)
+}
+
+func (h *Handlers) fetchProviderInNamespace(c fiber.Ctx, namespace, name string) (*corev1alpha1.Provider, error) {
 	provider := &corev1alpha1.Provider{}
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, provider); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -383,7 +511,7 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
+	if err := h.authorizeResourceMutation(c, "tool", "tools", "create", namespace, ""); err != nil {
 		return err
 	}
 	if err := validateToolRESTMutation(req.Spec); err != nil {
@@ -404,22 +532,16 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 
 // UpdateTool updates a Tool CRD.
 func (h *Handlers) UpdateTool(c fiber.Ctx) error {
-	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
-		return err
-	}
 	name := c.Params("name")
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be updated")
 	}
-	tool, err := h.fetchToolCRD(c, name)
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return err
 	}
-	if toolSpecHasProtectedAuth(tool.Spec) {
-		return fiber.NewError(
-			fiber.StatusBadRequest,
-			"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
-		)
+	if err := h.authorizeResourceMutation(c, "tool", "tools", "update", namespace, name); err != nil {
+		return err
 	}
 	var req UpdateToolRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -428,23 +550,52 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := validateToolRESTMutation(req.Spec); err != nil {
 		return err
 	}
-	tool.Spec = req.Spec
-	if err := h.client.Update(c.Context(), tool); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
+	var tool *corev1alpha1.Tool
+	var originalSpec *corev1alpha1.ToolSpec
+	retryErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current, err := h.fetchToolCRDInNamespace(c, namespace, name)
+		if err != nil {
+			return err
+		}
+		if originalSpec == nil {
+			originalSpec = current.Spec.DeepCopy()
+		} else if !reflect.DeepEqual(current.Spec, *originalSpec) {
+			return fiber.NewError(fiber.StatusConflict, "tool was modified concurrently")
+		}
+		if toolSpecHasProtectedAuth(current.Spec) {
+			return fiber.NewError(
+				fiber.StatusBadRequest,
+				"tools with protected HTTP auth configuration must be updated with Kubernetes RBAC",
+			)
+		}
+		patchBase := current.DeepCopy()
+		current.Spec = req.Spec
+		if err := h.client.Patch(c.Context(), current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		tool = current
+		return nil
+	})
+	if retryErr != nil {
+		return resourceMutationUpdateError("tool", retryErr)
 	}
 	return c.JSON(tool)
 }
 
 // DeleteTool deletes a Tool CRD.
 func (h *Handlers) DeleteTool(c fiber.Ctx) error {
-	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
-		return err
-	}
 	name := c.Params("name")
 	if _, builtin := builtinToolsMap[name]; builtin {
 		return fiber.NewError(fiber.StatusConflict, "built-in tools cannot be deleted")
 	}
-	tool, err := h.fetchToolCRD(c, name)
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeResourceMutation(c, "tool", "tools", "delete", namespace, name); err != nil {
+		return err
+	}
+	tool, err := h.fetchToolCRDInNamespace(c, namespace, name)
 	if err != nil {
 		return err
 	}
@@ -454,11 +605,7 @@ func (h *Handlers) DeleteTool(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-func (h *Handlers) fetchToolCRD(c fiber.Ctx, name string) (*corev1alpha1.Tool, error) {
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
-	if err != nil {
-		return nil, err
-	}
+func (h *Handlers) fetchToolCRDInNamespace(c fiber.Ctx, namespace, name string) (*corev1alpha1.Tool, error) {
 	tool := &corev1alpha1.Tool{}
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, tool); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -540,7 +687,7 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
+	if err := h.authorizeResourceMutation(c, "substrate actor pool", "substrateactorpools", "create", namespace, ""); err != nil {
 		return err
 	}
 	pool := &corev1alpha1.SubstrateActorPool{
@@ -558,30 +705,55 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 
 // UpdateSubstrateActorPool updates an Orka Substrate actor pool.
 func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
-	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
 		return err
 	}
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
-	if err != nil {
+	if err := h.authorizeResourceMutation(c, "substrate actor pool", "substrateactorpools", "update", namespace, name); err != nil {
 		return err
 	}
 	var req UpdateSubstrateActorPoolRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	pool.Spec = req.Spec
-	if err := h.client.Update(c.Context(), pool); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update substrate actor pool: %v", err))
+	var pool *corev1alpha1.SubstrateActorPool
+	var originalSpec *corev1alpha1.SubstrateActorPoolSpec
+	retryErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current, err := h.fetchSubstrateActorPoolInNamespace(c, namespace, name)
+		if err != nil {
+			return err
+		}
+		if originalSpec == nil {
+			originalSpec = current.Spec.DeepCopy()
+		} else if !reflect.DeepEqual(current.Spec, *originalSpec) {
+			return fiber.NewError(fiber.StatusConflict, "substrate actor pool was modified concurrently")
+		}
+		patchBase := current.DeepCopy()
+		current.Spec = req.Spec
+		if err := h.client.Patch(c.Context(), current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		pool = current
+		return nil
+	})
+	if retryErr != nil {
+		return resourceMutationUpdateError("substrate actor pool", retryErr)
 	}
 	return c.JSON(pool)
 }
 
 // DeleteSubstrateActorPool deletes an Orka Substrate actor pool.
 func (h *Handlers) DeleteSubstrateActorPool(c fiber.Ctx) error {
-	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
+	name := c.Params("name")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
 		return err
 	}
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+	if err := h.authorizeResourceMutation(c, "substrate actor pool", "substrateactorpools", "delete", namespace, name); err != nil {
+		return err
+	}
+	pool, err := h.fetchSubstrateActorPoolInNamespace(c, namespace, name)
 	if err != nil {
 		return err
 	}
@@ -596,6 +768,10 @@ func (h *Handlers) fetchSubstrateActorPool(c fiber.Ctx, name string) (*corev1alp
 	if err != nil {
 		return nil, err
 	}
+	return h.fetchSubstrateActorPoolInNamespace(c, namespace, name)
+}
+
+func (h *Handlers) fetchSubstrateActorPoolInNamespace(c fiber.Ctx, namespace, name string) (*corev1alpha1.SubstrateActorPool, error) {
 	pool := &corev1alpha1.SubstrateActorPool{}
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, pool); err != nil {
 		if apierrors.IsNotFound(err) {
