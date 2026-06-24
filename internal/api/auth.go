@@ -199,20 +199,8 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		if oidcErr == nil {
 			return userInfo, nil
 		}
-		if errors.Is(oidcErr, errOIDCAuthorization) {
-			return nil, oidcErr
-		}
 
-		if c == nil {
-			return nil, oidcErr
-		}
-
-		userInfo, tokenReviewErr := validateToken(ctx, c, token)
-		if tokenReviewErr == nil {
-			return userInfo, nil
-		}
-
-		return nil, fmt.Errorf("OIDC validation failed: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+		return nil, oidcErr
 	}
 
 	if c == nil {
