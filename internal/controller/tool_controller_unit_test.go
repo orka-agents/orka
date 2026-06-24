@@ -1971,6 +1971,38 @@ func TestToolReconcilerFinalizesMCPActorWhenToolBecomesHTTP(t *testing.T) {
 	}
 }
 
+func TestToolReconcilerMCPSubstrateActorRejectsCrossNamespaceTemplateWhenIsolationEnforced(t *testing.T) {
+	scheme := newToolScheme()
+	template := approvedMCPActorTemplateForTest()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp-tool", Namespace: "default"},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: "/mcp",
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					PoolRef:     &corev1alpha1.SubstrateActorPoolReference{Name: testMCPPoolName},
+				},
+			},
+		},
+	}
+	r := &ToolReconciler{
+		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool, template).Build(),
+		Scheme:                    scheme,
+		SubstrateEnabled:          true,
+		EnforceNamespaceIsolation: true,
+	}
+
+	err := r.validateTool(context.Background(), tool)
+	if err == nil {
+		t.Fatal("validateTool() error = nil, want cross-namespace templateRef rejection")
+	}
+	if !contains(err.Error(), "cross-namespace MCP substrate actor templateRef not allowed") {
+		t.Fatalf("validateTool() error = %q, want cross-namespace templateRef rejection", err.Error())
+	}
+}
+
 func TestToolReconcilerMCPSubstrateActorRejectsUnapprovedTemplate(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()

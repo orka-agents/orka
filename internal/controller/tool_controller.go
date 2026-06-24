@@ -230,6 +230,14 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 		return fmt.Errorf("mcp.substrateActor.poolRef.name is required")
 	}
 	templateRequest := r.substrateMCPTemplateRequest(tool)
+	if r.EnforceNamespaceIsolation && templateRequest.TemplateNamespace != tool.Namespace {
+		return fmt.Errorf(
+			"cross-namespace MCP substrate actor templateRef not allowed when namespace isolation is enforced: template %q in namespace %q, tool in %q",
+			templateRequest.TemplateName,
+			templateRequest.TemplateNamespace,
+			tool.Namespace,
+		)
+	}
 	if err := validateSubstrateMCPActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
 		return err
 	}
