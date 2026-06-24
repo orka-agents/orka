@@ -92,16 +92,18 @@ func newTestOIDCProvider(t *testing.T) *testOIDCProvider {
 
 func (p *testOIDCProvider) config() OIDCConfig {
 	return OIDCConfig{
-		Issuer:   p.server.URL,
-		Audience: p.aud,
-		JWKSURL:  p.server.URL + "/jwks",
+		Issuer:          p.server.URL,
+		Audience:        p.aud,
+		JWKSURL:         p.server.URL + "/jwks",
+		AllowedSubjects: []string{"*"},
 	}
 }
 
 func (p *testOIDCProvider) configWithoutJWKSURL() OIDCConfig {
 	return OIDCConfig{
-		Issuer:   p.server.URL,
-		Audience: p.aud,
+		Issuer:          p.server.URL,
+		Audience:        p.aud,
+		AllowedSubjects: []string{"*"},
 	}
 }
 
@@ -264,6 +266,45 @@ func TestValidateOIDCToken_Valid(t *testing.T) {
 	}
 	if userInfo.Namespace != "team-a" {
 		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, "team-a")
+	}
+}
+
+func TestValidateOIDCToken_RequiresAllowedSubject(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = nil
+	token := provider.issueToken(t, testOIDCTokenOptions{})
+
+	_, err := validateOIDCToken(context.Background(), token, cfg)
+	if err == nil || !strings.Contains(err.Error(), "subject authorization") {
+		t.Fatalf("validateOIDCToken error = %v, want subject authorization error", err)
+	}
+}
+
+func TestValidateOIDCToken_RejectsUnauthorizedSubject(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = []string{"repo:trusted-org/trusted-repo:*"}
+	token := provider.issueToken(t, testOIDCTokenOptions{Subject: "repo:untrusted-org/untrusted-repo:ref:refs/heads/main"})
+
+	_, err := validateOIDCToken(context.Background(), token, cfg)
+	if err == nil || !strings.Contains(err.Error(), "not authorized") {
+		t.Fatalf("validateOIDCToken error = %v, want not authorized error", err)
+	}
+}
+
+func TestValidateOIDCToken_AssignsConfiguredNamespace(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.Namespace = "ci-tenant"
+	token := provider.issueToken(t, testOIDCTokenOptions{})
+
+	userInfo, err := validateOIDCToken(context.Background(), token, cfg)
+	if err != nil {
+		t.Fatalf("validateOIDCToken returned error: %v", err)
+	}
+	if userInfo.Namespace != "ci-tenant" {
+		t.Fatalf("Namespace = %q, want ci-tenant", userInfo.Namespace)
 	}
 }
 

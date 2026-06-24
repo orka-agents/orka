@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -89,8 +90,11 @@ func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCCon
 	if err := json.Unmarshal(verified.RawClaims, &claims); err != nil {
 		return nil, fmt.Errorf("parse JWT claims: %w", err)
 	}
+	if err := authorizeOIDCClaims(claims, cfg); err != nil {
+		return nil, err
+	}
 
-	return userInfoFromOIDCClaims(claims), nil
+	return userInfoFromOIDCClaims(claims, cfg), nil
 }
 
 func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
@@ -119,7 +123,36 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 	return parsed, nil
 }
 
-func userInfoFromOIDCClaims(claims oidcClaims) *UserInfo {
+func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
+	if len(cfg.AllowedSubjects) == 0 {
+		return errors.New("OIDC subject authorization is not configured")
+	}
+
+	for _, allowed := range cfg.AllowedSubjects {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		matched, err := wildcardMatch(allowed, claims.Subject)
+		if err != nil {
+			return fmt.Errorf("invalid OIDC allowed subject pattern %q: %w", allowed, err)
+		}
+		if matched {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("OIDC subject %q is not authorized", claims.Subject)
+}
+
+func wildcardMatch(pattern, value string) (bool, error) {
+	quoted := regexp.QuoteMeta(pattern)
+	quoted = strings.ReplaceAll(quoted, `\*`, ".*")
+	quoted = strings.ReplaceAll(quoted, `\?`, ".")
+	return regexp.MatchString("^"+quoted+"$", value)
+}
+
+func userInfoFromOIDCClaims(claims oidcClaims, cfg OIDCConfig) *UserInfo {
 	username := claims.Username
 	if username == "" {
 		username = claims.Email
@@ -134,15 +167,27 @@ func userInfoFromOIDCClaims(claims oidcClaims) *UserInfo {
 	roles := append([]string{}, claims.Roles...)
 	roles = append(roles, claims.RealmAccess.Roles...)
 
+	namespace := cfg.Namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+
+	if namespace == "" {
+		namespace = claims.Namespace
+	}
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+
 	return &UserInfo{
 		Username:  username,
 		Groups:    append([]string{}, claims.Groups...),
+		Namespace: namespace,
 		AuthType:  AuthTypeOIDC,
 		Subject:   claims.Subject,
 		Email:     claims.Email,
 		Issuer:    claims.Issuer,
 		Roles:     roles,
-		Namespace: claims.Namespace,
 	}
 }
 

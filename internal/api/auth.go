@@ -94,9 +94,11 @@ type UserInfo struct {
 
 // OIDCConfig holds OpenID Connect JWT validation settings.
 type OIDCConfig struct {
-	Issuer   string
-	Audience string
-	JWKSURL  string
+	Issuer          string
+	Audience        string
+	JWKSURL         string
+	AllowedSubjects []string
+	Namespace       string
 }
 
 // Enabled reports whether OIDC authentication is configured.
