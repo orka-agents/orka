@@ -2290,6 +2290,39 @@ func TestEnsureWorkerRBAC_PreservesExternallyManagedUnusedServiceAccount(t *test
 	}
 }
 
+func TestEnsureWorkerRBAC_PreservesCustomizedUnusedServiceAccountWithoutAppOwner(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	externalSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:         AIWorkerServiceAccount,
+			Namespace:    testNS,
+			Labels:       map[string]string{orkaManagedByLabelKey: managedByLabelValue},
+			Annotations:  map[string]string{"example.com/owner": "platform"},
+			Finalizers:   []string{"example.com/finalizer"},
+			GenerateName: "ignored-",
+		},
+		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "pull-secret"}},
+	}
+	objects := []client.Object{
+		externalSA,
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected customized externally managed SA to remain: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale managed CRB to be pruned, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_PrunesLegacyOrkaManagedServiceAccountWithoutExternalOwner(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2412,10 +2445,7 @@ func TestEnsureWorkerRBAC_RepairsActiveOtherTierClusterRoleBinding(t *testing.T)
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
-	objects := []client.Object{
-		activeAI,
-		managedWorkerServiceAccount(AIWorkerServiceAccount),
-	}
+	objects := []client.Object{activeAI}
 	r := newUnitReconciler(scheme, objects...)
 	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
 
@@ -2429,6 +2459,9 @@ func TestEnsureWorkerRBAC_RepairsActiveOtherTierClusterRoleBinding(t *testing.T)
 	}
 	if crb.RoleRef.Name != DefaultAIWorkerClusterRoleName {
 		t.Fatalf("expected active AI ClusterRoleBinding role %s, got %s", DefaultAIWorkerClusterRoleName, crb.RoleRef.Name)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected active AI ServiceAccount to be repaired: %v", err)
 	}
 }
 

@@ -2905,6 +2905,9 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if _, ok := repairBindings[spec.serviceAccountName]; ok {
+			if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
+				return err
+			}
 			if r.EnforceNamespaceIsolation {
 				if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
 					return err
@@ -3047,7 +3050,13 @@ func workerServiceAccountOwnedByOrka(sa *corev1.ServiceAccount) bool {
 	if sa.Labels[workerRBACOwnedLabelKey] == scheduledRunLabelValue {
 		return true
 	}
-	return sa.Labels[managedByLabelKey] == ""
+	return len(sa.Labels) == 1 &&
+		len(sa.Annotations) == 0 &&
+		len(sa.OwnerReferences) == 0 &&
+		len(sa.Finalizers) == 0 &&
+		len(sa.Secrets) == 0 &&
+		len(sa.ImagePullSecrets) == 0 &&
+		sa.AutomountServiceAccountToken == nil
 }
 
 func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespace, name string) error {
