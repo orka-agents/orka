@@ -358,6 +358,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		blockIndex := 0
 		inTextBlock := false
 		hasToolCalls := false
+		streamedTextBytes := 0
 
 		for chunk := range streamCh {
 			if chunk.Error != nil {
@@ -366,6 +367,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 			}
 
 			if chunk.Content != "" {
+				streamedTextBytes += len(chunk.Content)
 				if !inTextBlock {
 					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
 						Type: "text", Text: "",
@@ -419,14 +421,25 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		if hasToolCalls {
 			stopReason = oaiStopReasonToolUse
 		}
-		_ = writeMessageDelta(w, stopReason, 0)
+		_ = writeMessageDelta(w, stopReason, estimateTokensFromBytes(streamedTextBytes))
 		_ = writeMessageStop(w)
 	})
 }
 
 // estimateTokens provides a rough token count estimate from text length.
 func estimateTokens(text string) int {
-	return len(text) / 4
+	return estimateTokensFromBytes(len(text))
+}
+
+func estimateTokensFromBytes(byteCount int) int {
+	if byteCount == 0 {
+		return 0
+	}
+	estimate := byteCount / 4
+	if estimate == 0 {
+		return 1
+	}
+	return estimate
 }
 
 // handleStreamingFallback uses provider.Complete() and emits the result as a complete SSE sequence.
