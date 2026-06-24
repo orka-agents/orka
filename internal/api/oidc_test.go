@@ -43,6 +43,7 @@ type testOIDCTokenOptions struct {
 	ExpiresAt  time.Time
 	NotBefore  *time.Time
 	Kid        string
+	Algorithm  string
 	Username   string
 	Email      string
 	Name       string
@@ -131,8 +132,13 @@ func (p *testOIDCProvider) issueToken(t *testing.T, opts testOIDCTokenOptions) s
 		kid = p.kid
 	}
 
+	algorithm := opts.Algorithm
+	if algorithm == "" {
+		algorithm = "RS256"
+	}
+
 	header := map[string]any{
-		"alg": "RS256",
+		"alg": algorithm,
 		"typ": "JWT",
 		"kid": kid,
 	}

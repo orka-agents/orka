@@ -632,6 +632,43 @@ func TestNewAuthMiddleware_OIDCValidationFailureSkipsTokenReviewFallback(t *test
 	}
 }
 
+func TestNewAuthMiddleware_OIDCUnsupportedAlgorithmSkipsTokenReviewFallback(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	token := provider.issueToken(t, testOIDCTokenOptions{Algorithm: "ES256"})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					createCalls++
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{Username: "github:unsupported-alg"}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	_, err := authenticateToken(context.Background(), fakeClient, token, AuthConfig{OIDC: cfg})
+	if err == nil || !strings.Contains(err.Error(), "unsupported JWT signing algorithm") {
+		t.Fatalf("authenticateToken error = %v, want unsupported algorithm error", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("TokenReview Create calls = %d, want 0 for configured-issuer unsupported OIDC algorithm", createCalls)
+	}
+}
+
 func TestNewAuthMiddleware_MalformedConfiguredNonAuthorizationContextTokenHeaderPreservesBearerFallback(t *testing.T) {
 	tokenCache.Range(func(key, _ any) bool {
 		tokenCache.Delete(key)

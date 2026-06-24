@@ -105,10 +105,6 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 		return nil, err
 	}
 
-	if !jwtSigningAlgorithmAllowed(parsed.Header.Algorithm, nil) {
-		return nil, fmt.Errorf("unsupported JWT signing algorithm %q", parsed.Header.Algorithm.String())
-	}
-
 	var claims struct {
 		Issuer string `json:"iss"`
 	}
