@@ -3175,6 +3175,32 @@ func TestResolveNamespace_IsolationEnforced(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
+func TestResolveNamespace_IsolationRejectsNamespaceLessAuthenticatedUser(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
+
+	app := fiber.New()
+	app.Get("/test", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "oidc-user", AuthType: AuthTypeOIDC})
+		ns, err := handlers.resolveNamespace(c, "team-a")
+		if err != nil {
+			return err
+		}
+		return c.SendString(ns)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 func TestResolveNamespace_IsolationAllowsSameNamespace(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)

@@ -187,6 +187,39 @@ func TestContextToken_KontxtValidViaTxnTokenHeader(t *testing.T) {
 	}
 }
 
+func TestContextToken_UserInfoNamespaceFromTransactionContext(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := testContextTokenConfig(t, provider, "")
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"tctx": map[string]any{
+			"namespace": "team-a",
+		},
+	})
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(nil, AuthConfig{ContextTokens: cfg}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		userInfo := GetUserInfo(ctx)
+		if userInfo == nil || userInfo.AuthType != AuthTypeContextToken {
+			return fiber.NewError(fiber.StatusInternalServerError, "missing context token user info")
+		}
+		if userInfo.Namespace != "team-a" {
+			return fiber.NewError(fiber.StatusInternalServerError, "context token namespace was not mapped")
+		}
+		return ctx.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set(KontxtHeaderName, token)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestContextToken_KontxtValidViaAuthorizationBearerWhenConfigured(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg := testContextTokenConfig(t, provider, "Txn-Token,Authorization:Bearer")

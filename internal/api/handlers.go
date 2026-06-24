@@ -177,10 +177,20 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 		ns = GetEffectiveNamespace(c, "")
 	}
 
-	// Enforce namespace isolation: user can only access their SA namespace
+	// Enforce namespace isolation: authenticated callers must carry a namespace
+	// and can only access that namespace.
 	if h.enforceNamespaceIsolation {
 		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && ns != ui.Namespace {
+		if ui != nil && ui.Namespace == "" {
+			log.Info("namespace access denied: namespace-less identity",
+				"username", ui.Username,
+				"authType", ui.AuthType,
+				"requestedNamespace", ns,
+				"ip", c.IP(),
+			)
+			return "", fiber.NewError(fiber.StatusForbidden, "namespace-bound identity required")
+		}
+		if ui != nil && ns != ui.Namespace {
 			log.Info("namespace access denied: isolation violation",
 				"username", ui.Username,
 				"userNamespace", ui.Namespace,

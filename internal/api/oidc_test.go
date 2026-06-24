@@ -46,6 +46,7 @@ type testOIDCTokenOptions struct {
 	Username   string
 	Email      string
 	Name       string
+	Namespace  string
 	Groups     []string
 	Roles      []string
 	RealmRoles []string
@@ -151,6 +152,9 @@ func (p *testOIDCProvider) issueToken(t *testing.T, opts testOIDCTokenOptions) s
 	if opts.Name != "" {
 		claims["name"] = opts.Name
 	}
+	if opts.Namespace != "" {
+		claims["namespace"] = opts.Namespace
+	}
 	if opts.Groups != nil {
 		claims["groups"] = opts.Groups
 	}
@@ -229,6 +233,7 @@ func TestValidateOIDCToken_Valid(t *testing.T) {
 		Groups:     []string{"devs", "admins"},
 		Roles:      []string{"submitter"},
 		RealmRoles: []string{"reviewer"},
+		Namespace:  "team-a",
 	})
 
 	userInfo, err := validateOIDCToken(context.Background(), token, cfg)
@@ -256,6 +261,9 @@ func TestValidateOIDCToken_Valid(t *testing.T) {
 	}
 	if strings.Join(userInfo.Roles, ",") != "submitter,reviewer" {
 		t.Fatalf("Roles = %#v, want [submitter reviewer]", userInfo.Roles)
+	}
+	if userInfo.Namespace != "team-a" {
+		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, "team-a")
 	}
 }
 
