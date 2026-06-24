@@ -46,6 +46,9 @@ func (t *CheckTaskProgressTool) Execute(ctx context.Context, args json.RawMessag
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the task name")
 	}
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
+	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
+		return r, nil
+	}
 
 	task := &corev1alpha1.Task{}
 	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, task); err != nil {

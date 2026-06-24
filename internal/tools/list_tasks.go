@@ -43,6 +43,9 @@ func (t *ListTasksTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	}
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
+	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
+		return r, nil
+	}
 	statusFilter := chatGetStringArg(a, statusField)
 	limit := chatGetIntArg(a, limitField, 20)
 

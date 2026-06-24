@@ -41,6 +41,9 @@ func (t *ListAgentsTool) Execute(ctx context.Context, args json.RawMessage) (str
 	}
 
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
+	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
+		return r, nil
+	}
 
 	agentList := &corev1alpha1.AgentList{}
 	if err := tc.Client.List(ctx, agentList, client.InNamespace(namespace)); err != nil {
