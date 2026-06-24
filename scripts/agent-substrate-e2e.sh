@@ -741,22 +741,6 @@ create_substrate_actor_pools() {
 apiVersion: core.orka.ai/v1alpha1
 kind: SubstrateActorPool
 metadata:
-  name: codex-substrate-pool-ci
-  namespace: default
-spec:
-  templateRef:
-    name: orka-codex-ci
-    namespace: ate-demo
-  workerPoolRef:
-    name: orka-workers
-    namespace: ate-demo
-  targetActors: 2
-  targetWorkers: 1
-  precreateActors: true
----
-apiVersion: core.orka.ai/v1alpha1
-kind: SubstrateActorPool
-metadata:
   name: mcp-substrate-pool-ci
   namespace: default
 spec:
@@ -771,7 +755,7 @@ spec:
   precreateActors: true
 YAML
 
-  for pool in codex-substrate-pool-ci mcp-substrate-pool-ci; do
+  for pool in mcp-substrate-pool-ci; do
     wait_jsonpath_equals \
       "substrateactorpool/${pool} readiness" \
       "kubectl -n default get substrateactorpool ${pool} -o jsonpath='{.status.phase}'" \

@@ -26,11 +26,31 @@ import (
 
 const (
 	testSandboxTemplatesNamespace          = "sandbox-templates"
+	testSubstrateSessionReuseKey           = "session-a"
 	testSubstrateBootstrapSecretName       = "orka-substrate-bootstrap"
 	testSubstrateBootstrapSecretKey        = "bootstrap-token"
 	testSubstrateSessionIdentitySecretName = "orka-substrate-session-identity"
 	testSubstrateSessionIdentitySecretKey  = "session-token"
 )
+
+func substrateBootstrapSecretEnvForTest() map[string]any {
+	return map[string]any{
+		"name": workerenv.WorkspaceBootstrapToken,
+		"valueFrom": map[string]any{
+			"secretKeyRef": map[string]any{
+				"name": testSubstrateBootstrapSecretName,
+				"key":  testSubstrateBootstrapSecretKey,
+			},
+		},
+	}
+}
+
+func substrateBootstrapLiteralEnvForTest() map[string]any {
+	return map[string]any{
+		"name":  workerenv.WorkspaceBootstrapToken,
+		"value": "bootstrap-token",
+	}
+}
 
 func TestDefaultAgentSandboxConfig(t *testing.T) {
 	cfg := DefaultAgentSandboxConfig()
@@ -333,15 +353,7 @@ func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenEnv(t *testing.
 
 func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenSecretRef(t *testing.T) {
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name": workerenv.WorkspaceBootstrapToken,
-			"valueFrom": map[string]any{
-				"secretKeyRef": map[string]any{
-					"name": testSubstrateBootstrapSecretName,
-					"key":  testSubstrateBootstrapSecretKey,
-				},
-			},
-		},
+		substrateBootstrapSecretEnvForTest(),
 	})
 	r := substrateTemplateValidatorForTest(t, template)
 
@@ -350,17 +362,103 @@ func TestValidateSubstrateWorkspaceTemplateAcceptsBootstrapTokenSecretRef(t *tes
 	}
 }
 
-func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnv(t *testing.T) {
+func TestValidateSubstrateWorkspaceTemplateAcceptsLiteralBootstrapTokenEnvForDeleteAfterUse(t *testing.T) {
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapLiteralEnvForTest(),
 	})
 	r := substrateTemplateValidatorForTest(t, template)
 
 	if err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, substrateTemplateRequestForTest()); err != nil {
 		t.Fatalf("validateSubstrateWorkspaceTemplate() error = %v", err)
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRejectsLiteralBootstrapTokenEnvOnSidecarForDurableActors(t *testing.T) {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
+				substrateBootstrapSecretEnvForTest(),
+			},
+		},
+		map[string]any{
+			"name": "sidecar",
+			"env": []any{
+				substrateBootstrapLiteralEnvForTest(),
+			},
+		},
+	})
+	r := substrateTemplateValidatorForTest(t, template)
+	request := substrateTemplateRequestForTest()
+	request.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
+
+	err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, request)
+	if err == nil {
+		t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want durable sidecar literal bootstrap rejection")
+	}
+	if !strings.Contains(err.Error(), "cleanupPolicy=retain") {
+		t.Fatalf("error = %q, want retain literal bootstrap rejection", err.Error())
+	}
+}
+
+func TestValidateSubstrateWorkspaceTemplateRejectsLiteralBootstrapTokenEnvForDurableActors(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*ExecutionWorkspaceRequest)
+		wantErr string
+	}{
+		{
+			name: "retain cleanup",
+			mutate: func(request *ExecutionWorkspaceRequest) {
+				request.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
+			},
+			wantErr: "cleanupPolicy=retain",
+		},
+		{
+			name: "session reuse",
+			mutate: func(request *ExecutionWorkspaceRequest) {
+				request.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
+				request.ReuseKey = testSubstrateSessionReuseKey
+			},
+			wantErr: "session reuse",
+		},
+		{
+			name: "resident workspace",
+			mutate: func(request *ExecutionWorkspaceRequest) {
+				request.ProcessMode = corev1alpha1.ExecutionWorkspaceProcessModeResident
+				request.ResidentKey = "resident-a"
+			},
+			wantErr: "resident workspaces",
+		},
+		{
+			name: "pooled actor",
+			mutate: func(request *ExecutionWorkspaceRequest) {
+				request.PoolName = "codex-pool"
+				request.PoolNamespace = defaultNS
+			},
+			wantErr: "actor pools",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			template := readySubstrateActorTemplateForTest([]any{
+				substrateBootstrapLiteralEnvForTest(),
+			})
+			r := substrateTemplateValidatorForTest(t, template)
+			request := substrateTemplateRequestForTest()
+			tt.mutate(request)
+
+			err := r.validateSubstrateWorkspaceTemplate(context.Background(), &corev1alpha1.Task{}, request)
+			if err == nil {
+				t.Fatal("validateSubstrateWorkspaceTemplate() error = nil, want durable literal bootstrap rejection")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -370,10 +468,7 @@ func TestValidateSubstrateWorkspaceTemplateRejectsDaemonPortMismatch(t *testing.
 			"name":    "workspace",
 			"command": []any{"/orka-workspace-agent"},
 			"env": []any{
-				map[string]any{
-					"name":  workerenv.WorkspaceBootstrapToken,
-					"value": "bootstrap-token",
-				},
+				substrateBootstrapLiteralEnvForTest(),
 			},
 		},
 	})
@@ -397,10 +492,7 @@ func TestValidateSubstrateWorkspaceTemplateRequiresBootstrapTokenOnDaemonContain
 		map[string]any{
 			"name": "sidecar",
 			"env": []any{
-				map[string]any{
-					"name":  workerenv.WorkspaceBootstrapToken,
-					"value": "bootstrap-token",
-				},
+				substrateBootstrapLiteralEnvForTest(),
 			},
 		},
 		map[string]any{
@@ -457,10 +549,7 @@ func TestValidateSubstrateWorkspaceTemplateRequiresDaemonContainerForMultiContai
 		map[string]any{
 			"name": "sidecar",
 			"env": []any{
-				map[string]any{
-					"name":  workerenv.WorkspaceBootstrapToken,
-					"value": "bootstrap-token",
-				},
+				substrateBootstrapLiteralEnvForTest(),
 			},
 		},
 		map[string]any{
@@ -750,10 +839,7 @@ func TestResolveSubstrateWorkspaceRequestResolvesPoolRef(t *testing.T) {
 		Kind:    "ActorTemplate",
 	}, &unstructured.Unstructured{})
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapSecretEnvForTest(),
 	})
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: defaultNS},
@@ -825,10 +911,7 @@ func TestResolveSubstrateWorkspaceRequestRejectsCrossNamespacePoolRefWhenIsolate
 		Kind:    "ActorTemplate",
 	}, &unstructured.Unstructured{})
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapLiteralEnvForTest(),
 	})
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: "shared"},
@@ -894,10 +977,7 @@ func TestResolveSubstrateWorkspaceRequestRejectsOversizedPoolRefBeforeFinalizer(
 		Kind:    "ActorTemplate",
 	}, &unstructured.Unstructured{})
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapLiteralEnvForTest(),
 	})
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: defaultNS},
@@ -962,10 +1042,7 @@ func TestResolveSubstrateWorkspaceRequestRejectsInvalidPoolRef(t *testing.T) {
 		Kind:    "ActorTemplate",
 	}, &unstructured.Unstructured{})
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapLiteralEnvForTest(),
 	})
 	pool := &corev1alpha1.SubstrateActorPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: defaultNS},
@@ -1023,10 +1100,7 @@ func TestResolveSubstrateWorkspaceRequestRejectsDeletingPoolRef(t *testing.T) {
 		Kind:    "ActorTemplate",
 	}, &unstructured.Unstructured{})
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  workerenv.WorkspaceBootstrapToken,
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapLiteralEnvForTest(),
 	})
 	deletingAt := metav1.Now()
 	pool := &corev1alpha1.SubstrateActorPool{

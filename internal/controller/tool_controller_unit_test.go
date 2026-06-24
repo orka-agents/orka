@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2040,6 +2041,289 @@ func TestToolReconcilerMCPSubstrateActorAllowsMCPOnlyTemplate(t *testing.T) {
 	}
 }
 
+func TestToolReconcilerMCPSubstrateActorLiteralBootstrapCleanupPrecedesAuthValidation(t *testing.T) {
+	scheme := newToolScheme()
+	template := literalBootstrapMCPActorTemplateForTest()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:        "https://example.invalid",
+				AuthInject: "body",
+			},
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Actor: &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: oldMCPActorID},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !slices.Contains(executor.deletedActorIDs, oldMCPActorID) {
+		t.Fatalf("deleted actors = %#v, want cleanup before auth validation masks unsafe template", executor.deletedActorIDs)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorLiteralBootstrapCleanupPrecedesRouteValidation(t *testing.T) {
+	scheme := newToolScheme()
+	template := literalBootstrapMCPActorTemplateForTest()
+	annotations := template.GetAnnotations()
+	annotations["orka.ai/workspace-daemon-port"] = "80"
+	template.SetAnnotations(annotations)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Actor: &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: oldMCPActorID},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !slices.Contains(executor.deletedActorIDs, oldMCPActorID) {
+		t.Fatalf("deleted actors = %#v, want cleanup before route validation masks unsafe template", executor.deletedActorIDs)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorLiteralBootstrapValidationCleansExistingNonPooledActor(t *testing.T) {
+	scheme := newToolScheme()
+	template := literalBootstrapMCPActorTemplateForTest()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Actor: &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: oldMCPActorID},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	foundExistingActor := slices.Contains(executor.deletedActorIDs, oldMCPActorID)
+	if !foundExistingActor {
+		t.Fatalf("deleted actors = %#v, want existing actor %q", executor.deletedActorIDs, oldMCPActorID)
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(&got, substrateMCPToolActorFinalizer) {
+		t.Fatal("MCP actor finalizer still present after unsafe cleanup")
+	}
+	if got.Status.Actor != nil {
+		t.Fatalf("status actor = %#v, want cleared after unsafe cleanup", got.Status.Actor)
+	}
+	if got.Status.Available {
+		t.Fatal("tool available = true, want unavailable after validation failure")
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorLiteralBootstrapValidationPreservesActorForCleanupRetry(t *testing.T) {
+	scheme := newToolScheme()
+	template := literalBootstrapMCPActorTemplateForTest()
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Available: true,
+			Actor:     &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: oldMCPActorID},
+		},
+	}
+	executor := &recordingToolWorkspaceExecutor{deleteErrs: []error{errors.New("delete failed")}}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
+		t.Fatal("Reconcile() error = nil, want cleanup retry error")
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	if got.Status.Available {
+		t.Fatal("tool remains available after unsafe validation failure and cleanup error")
+	}
+	if got.Status.Actor == nil || got.Status.Actor.ActorID != oldMCPActorID {
+		t.Fatalf("status actor = %#v, want preserved for cleanup retry", got.Status.Actor)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorLiteralBootstrapValidationCleansPooledLease(t *testing.T) {
+	scheme := newToolScheme()
+	template := literalBootstrapMCPActorTemplateForTest()
+	actorID := testPooledMCPActorID
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mcp-tool",
+			Namespace:  defaultNS,
+			UID:        "mcp-tool-uid",
+			Finalizers: []string{substrateMCPToolActorFinalizer},
+			Annotations: map[string]string{
+				substrateMCPToolActorIDAnno:            actorID,
+				substrateMCPToolActorPoolNameAnno:      testMCPPoolName,
+				substrateMCPToolActorPoolNamespaceAnno: defaultNS,
+			},
+		},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "MCP tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				Path: testMCPPath,
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					PoolRef:     &corev1alpha1.SubstrateActorPoolReference{Name: testMCPPoolName},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Actor: &corev1alpha1.ToolActorStatus{
+				Provider: corev1alpha1.WorkspaceProviderSubstrate,
+				ActorID:  actorID,
+				PoolRef:  &corev1alpha1.SubstrateActorPoolReference{Name: testMCPPoolName, Namespace: defaultNS},
+			},
+		},
+	}
+	lease := newSubstrateMCPPoolActorLease(tool, defaultNS, actorID, actorID)
+	executor := &recordingToolWorkspaceExecutor{}
+	r := &ToolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(tool, template, lease).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(executor.deletedActorIDs) != 1 || executor.deletedActorIDs[0] != actorID {
+		t.Fatalf("deleted actors = %#v, want %q", executor.deletedActorIDs, actorID)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: actorID, Namespace: defaultNS}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pool actor lease error = %v, want not found", err)
+	}
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	if got.Status.Actor != nil {
+		t.Fatalf("status actor = %#v, want cleared after unsafe cleanup", got.Status.Actor)
+	}
+}
+
+func TestToolReconcilerMCPSubstrateActorRejectsLiteralBootstrapTokenEnv(t *testing.T) {
+	scheme := newToolScheme()
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
+			"env": []any{
+				substrateBootstrapLiteralEnvForTest(),
+			},
+		},
+	})
+	template.SetName("mcp-template")
+	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(template).Build()
+	request := &ExecutionWorkspaceRequest{
+		TemplateName:      "mcp-template",
+		TemplateNamespace: "ate-demo",
+	}
+
+	err := validateSubstrateMCPActorTemplateResource(context.Background(), k8sClient, request)
+	if err == nil {
+		t.Fatal("validateSubstrateMCPActorTemplateResource() error = nil, want literal bootstrap rejection")
+	}
+	if !contains(err.Error(), "literal value is not allowed for durable substrate actors") {
+		t.Fatalf("error = %q, want durable literal bootstrap rejection", err.Error())
+	}
+}
+
 func TestToolReconcilerMCPSubstrateActorRejectsRoutePortMismatch(t *testing.T) {
 	scheme := newToolScheme()
 	template := approvedMCPActorTemplateForTest()
@@ -2243,6 +2527,24 @@ func TestToolReconcilerMCPSubstrateActorRejectsInvalidAuthConfig(t *testing.T) {
 	if !contains(got.Status.Error, "authBodyKey is required") {
 		t.Fatalf("status error = %q, want authBodyKey validation error", got.Status.Error)
 	}
+}
+
+func literalBootstrapMCPActorTemplateForTest() *unstructured.Unstructured {
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "mcp",
+			"command": []any{"/mcp-server"},
+			"env": []any{
+				substrateBootstrapLiteralEnvForTest(),
+			},
+		},
+	})
+	template.SetName("mcp-template")
+	template.SetNamespace("ate-demo")
+	annotations := template.GetAnnotations()
+	delete(annotations, "orka.ai/workspace-staging-root")
+	template.SetAnnotations(annotations)
+	return template
 }
 
 func approvedMCPActorTemplateForTest() *unstructured.Unstructured {

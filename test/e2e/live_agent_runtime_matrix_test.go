@@ -204,7 +204,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("waiting for the Codex task to return the exact marker from the prior diff")
-		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		phase := waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)
+		if phase == "Failed" && liveCopilotProxyTaskFailedWithUnsupportedCodexResponsesParameter(codexTaskReadName) {
+			Skip("Skipping: live Copilot proxy Responses API rejected the Codex CLI metadata parameter for model " + gptModel)
+		}
+		Expect(phase).To(Equal("Succeeded"))
 		verifyResultAvailable(codexTaskReadName)
 		// Harness-wrapper-backed agent tasks do not create a worker Job. The result
 		// assertion below verifies the priorTaskRef workspace diff was consumed.

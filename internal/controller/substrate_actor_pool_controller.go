@@ -83,12 +83,26 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
 	cfg := r.SubstrateConfig.WithDefaults()
-	if err := validateSubstrateRoutableActorTemplateResource(ctx, r.Client, &ExecutionWorkspaceRequest{
+	templateRequest := &ExecutionWorkspaceRequest{
 		TemplateName:                 template.Name,
 		TemplateNamespace:            template.Namespace,
+		PoolName:                     pool.Name,
+		PoolNamespace:                pool.Namespace,
 		SubstrateBootstrapSecretName: cfg.BootstrapSecretName,
 		SubstrateBootstrapSecretKey:  cfg.BootstrapSecretKey,
-	}); err != nil {
+	}
+	unsafeLiteralBootstrapErr := substrateActorTemplateUnsafeLiteralBootstrapEnv(ctx, r.Client, templateRequest)
+	if unsafeLiteralBootstrapErr != nil {
+		return r.failUnsafeSubstrateActorPool(ctx, pool, prefix, unsafeLiteralBootstrapErr.Error())
+	}
+	if pool.Spec.PrecreateActors {
+		if err := validateSubstratePrecreatedPoolActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
+			if isSubstrateUnsafeLiteralBootstrapError(err) {
+				return r.failUnsafeSubstrateActorPool(ctx, pool, prefix, err.Error())
+			}
+			return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+		}
+	} else if err := validateSubstrateRoutableActorTemplateResource(ctx, r.Client, templateRequest); err != nil {
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
 	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
@@ -142,6 +156,44 @@ func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
 	}
 	return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseReady, density, "pool reconciled")
+}
+
+func (r *SubstrateActorPoolReconciler) failUnsafeSubstrateActorPool(
+	ctx context.Context,
+	pool *corev1alpha1.SubstrateActorPool,
+	prefix string,
+	message string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(pool, substrateActorPoolFinalizer) {
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, message)
+	}
+	blocked, err := r.activeSubstratePoolActorLeaseCount(ctx, pool.Namespace, prefix, 0)
+	if err != nil {
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+	}
+	if blocked > 0 {
+		if _, err := r.updateSubstrateActorPoolStatus(
+			ctx,
+			pool,
+			corev1alpha1.SubstrateActorPoolPhasePending,
+			workspace.Density{},
+			fmt.Sprintf("unsafe substrate actor pool template: waiting for %d active actor lease(s) before deleting actors", blocked),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
+	}
+	executor, err := r.substratePoolExecutor()
+	if err != nil {
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+	}
+	defer closeSubstratePoolExecutor(ctx, executor)
+	if _, _, err := executor.ConvergeSubstrateActors(ctx, prefix, 0, workspace.TemplateRef{}); err != nil {
+		logger.Error(err, "failed to delete unsafe substrate pool actors", "pool", pool.Name)
+		return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, err.Error())
+	}
+	return r.updateSubstrateActorPoolStatus(ctx, pool, corev1alpha1.SubstrateActorPoolPhaseFailed, workspace.Density{}, message)
 }
 
 func (r *SubstrateActorPoolReconciler) finalizeSubstrateActorPool(
