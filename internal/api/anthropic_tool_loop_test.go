@@ -452,7 +452,7 @@ func TestCompleteWithStreamingFallback(t *testing.T) {
 		},
 	}
 
-	resp, err := completeWithStreamingFallback(context.Background(), provider, &llm.CompletionRequest{Model: "test-model"})
+	resp, err := completeWithStreamingFallback(context.Background(), anthropicLog, provider, &llm.CompletionRequest{Model: "test-model"})
 	if err != nil {
 		t.Fatalf("completeWithStreamingFallback returned error: %v", err)
 	}

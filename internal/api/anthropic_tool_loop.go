@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/tools"
@@ -34,14 +36,14 @@ func compatOrkaToolsEnabled(headerValue string) bool {
 	return strings.EqualFold(strings.TrimSpace(headerValue), "enabled")
 }
 
-func completeWithStreamingFallback(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+func completeWithStreamingFallback(ctx context.Context, logger logr.Logger, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	resp, err := provider.Complete(ctx, req)
 	if err != nil && isStreamingRequiredErr(err) {
 		// Upstream (Copilot/Anthropic) refuses non-streaming for requests
 		// that may exceed its timeout. Re-issue via Stream and aggregate
 		// chunks into a synthesized CompletionResponse so callers keep
 		// non-streaming semantics even when the upstream requires streaming.
-		anthropicLog.Info("upstream refused non-streaming, retrying via Stream and aggregating")
+		logger.Info("upstream refused non-streaming, retrying via Stream and aggregating")
 		resp, err = completeViaStream(ctx, provider, req)
 	}
 	return resp, err
@@ -687,7 +689,7 @@ func runToolLoopWithObserver(
 			Temperature:  req.Temperature,
 		}
 
-		resp, err := completeWithStreamingFallback(ctx, provider, compReq)
+		resp, err := completeWithStreamingFallback(ctx, anthropicLog, provider, compReq)
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
 			for _, m := range messages {
@@ -695,7 +697,7 @@ func runToolLoopWithObserver(
 			}
 			messages = llm.TruncateMessages(messages, tokenEstimate/2)
 			compReq.Messages = messages
-			resp, err = completeWithStreamingFallback(ctx, provider, compReq)
+			resp, err = completeWithStreamingFallback(ctx, anthropicLog, provider, compReq)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
