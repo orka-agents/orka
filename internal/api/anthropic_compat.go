@@ -388,8 +388,9 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		}
 		resp = stripGoalStateSentinelFromResponse(resp)
 	} else {
-		// Transparent proxy: single LLM call, return response directly
-		resp, err = provider.Complete(ctx, compReq)
+		// Transparent proxy: single LLM call, preserving the streaming fallback
+		// used by tool-loop requests for upstreams that require streaming.
+		resp, err = completeWithStreamingFallback(ctx, provider, compReq)
 		if err != nil {
 			anthropicLog.Error(err, "completion failed")
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())

@@ -438,7 +438,7 @@ func (h *OpenAICompatHandler) handleNonStreamingCompletion(
 	completionID, model string,
 	created int64,
 ) error {
-	resp, err := provider.Complete(ctx, req)
+	resp, err := completeWithStreamingFallback(ctx, provider, req)
 	if err != nil {
 		oaiLog.Error(err, "completion failed")
 		return c.Status(500).JSON(OAIError{Error: OAIErrorDetail{

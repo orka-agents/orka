@@ -606,6 +606,46 @@ func TestHandleNonStreamingCompletion_WithToolCalls(t *testing.T) {
 	}
 }
 
+func TestHandleNonStreamingCompletion_StreamingRequiredFallback(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 3)
+	ch <- llm.StreamChunk{Content: "Hello"}
+	ch <- llm.StreamChunk{Content: " from stream"}
+	ch <- llm.StreamChunk{Done: true, StopReason: "end_turn"}
+	close(ch)
+
+	mock := &oaiMockProvider{
+		err:      fmt.Errorf("streaming is required for operations that may take longer than 10 minutes"),
+		streamCh: ch,
+	}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleNonStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-fallback", "gpt-4", 1234567890,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var oaiResp OAIResponse
+	json.NewDecoder(resp.Body).Decode(&oaiResp) //nolint:errcheck
+	if got := extractContent(oaiResp.Choices[0].Message.Content); got != "Hello from stream" {
+		t.Fatalf("content = %q, want streaming fallback content", got)
+	}
+	if len(mock.requests) != 1 {
+		t.Fatalf("Complete calls = %d, want 1", len(mock.requests))
+	}
+}
+
 func TestHandleNonStreamingCompletion_Error(t *testing.T) {
 	mock := &oaiMockProvider{
 		err: fmt.Errorf("API rate limited"),

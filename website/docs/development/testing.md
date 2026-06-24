@@ -78,7 +78,7 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/provider_advanced_test.go` | Provider rate-limit config coverage |
 | `test/e2e/live_copilot_proxy_test.go` | Live Orka Provider + `type: ai` path using copilot-proxy as the backend harness, including durable memory recall, proposal governance, and transcript search tool execution |
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
-| `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
+| `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage for transparent default JSON/SSE flows plus an explicit `X-Orka-Tools: enabled` non-streaming tool-loop smoke |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
 | `.github/workflows/live-github-label-trigger-e2e.yml` / `scripts/live-github-label-trigger-e2e.sh` | Manual model-free GitHub label trigger validation for HMAC rejection, signed webhook Task creation, scoped workspace settings, and duplicate delivery idempotency |
@@ -114,7 +114,7 @@ The live copilot-proxy E2E path runs in a separate workflow and executes the foc
 
 - provider-backed `type: ai` tasks, including durable memory/tool execution coverage
 - chat SSE/JSON flows via `/api/v1/chat`
-- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows, including explicit `X-Orka-Tools: enabled` coverage for the Orka tool loop
+- Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` flows, including transparent default JSON/SSE coverage and explicit `X-Orka-Tools: enabled` non-streaming coverage for the Orka tool loop
 - external agent runtimes across `codex` + GPT, `claude` + Claude, and `copilot` + Gemini
 
 This is an **Orka** live integration suite, not a deep `copilot-proxy` feature suite. The proxy is test harness infrastructure that gives non-Copilot runtimes access to live GPT, Claude, and Gemini models in CI. The only proxy-specific assertions are smoke checks that the harness is alive and usable:
