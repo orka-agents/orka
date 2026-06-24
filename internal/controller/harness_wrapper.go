@@ -25,7 +25,6 @@ import (
 	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -154,7 +153,8 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		// re-issue StartTurn (which would duplicate external side effects after a
 		// wrapper pod restart wiped its in-memory turn map); recover by treating the
 		// turn as accepted and proceeding to the Running transition.
-		hasFrames, framesErr := r.harnessWrapperTurnHasPersistedFrames(ctx, task, request.TurnID)
+		journal := r.harnessWrapperTurnJournal(ctx, task)
+		hasFrames, framesErr := journal.HasPersistedFrames(ctx, request.TurnID)
 		if framesErr != nil {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
@@ -225,6 +225,27 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 }
 
+func (r *TaskReconciler) harnessWrapperTurnJournal(ctx context.Context, task *corev1alpha1.Task) harness.TurnJournal {
+	journal := harness.TurnJournal{EventStore: r.ExecutionEventStore}
+	if task == nil {
+		return journal
+	}
+	journal.MapContext = harness.EventMapContext{
+		Namespace: task.Namespace,
+		TaskName:  task.Name,
+		// Use the real-session-only helper here (not harnessWrapperSessionName,
+		// which falls back to task.Name): this SessionName is PERSISTED as the
+		// execution event's session key, so a task-name fallback would collide a
+		// SessionRef-less task's events into any real Session of the same name.
+		// The StartTurn/CancelTurn request sites intentionally keep
+		// harnessWrapperSessionName because the protocol requires a non-empty
+		// identifier there (it is not a stored timeline key).
+		SessionName: r.executionEventSessionName(ctx, task),
+		AgentName:   harnessWrapperTaskAgentName(task),
+	}
+	return journal
+}
+
 //nolint:gocyclo // Handles stream polling, event mapping, and terminal task classification in one reconcile step.
 func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -249,22 +270,10 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
 	}
 	result := harness.TurnRunResult{}
-	mapCtx := harness.EventMapContext{
-		Namespace: task.Namespace,
-		TaskName:  task.Name,
-		// Use the real-session-only helper here (not harnessWrapperSessionName,
-		// which falls back to task.Name): this SessionName is PERSISTED as the
-		// execution event's session key, so a task-name fallback would collide a
-		// SessionRef-less task's events into any real Session of the same name.
-		// The StartTurn/CancelTurn request sites below intentionally keep
-		// harnessWrapperSessionName because the protocol requires a non-empty
-		// identifier there (it is not a stored timeline key).
-		SessionName: r.executionEventSessionName(ctx, task),
-		AgentName:   harnessWrapperTaskAgentName(task),
-	}
+	journal := r.harnessWrapperTurnJournal(ctx, task)
 	afterSeq := harnessWrapperLastFrameSeq(task)
 	lastFrameSeq := afterSeq
-	existingFrameKeys, err := r.existingHarnessFrameKeys(ctx, task)
+	journalState, err := journal.Open(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -275,19 +284,12 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			return fmt.Errorf("harness frame identity does not match running turn")
 		}
 		result.Frames = append(result.Frames, frame)
-		key := harness.MappedFrameKey(frame)
-		_, alreadyAppended := existingFrameKeys[key]
-		if !alreadyAppended {
-			mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
-			if err != nil {
-				return err
-			}
-			appended, err := r.ExecutionEventStore.AppendExecutionEvent(streamCtx, mapped)
-			if err != nil {
-				return fmt.Errorf("append mapped harness event: %w", err)
-			}
+		appended, appendedNew, err := journalState.AppendFrameIfNew(streamCtx, frame)
+		if err != nil {
+			return err
+		}
+		if appendedNew {
 			result.Events = append(result.Events, *appended)
-			existingFrameKeys[key] = struct{}{}
 		}
 		if frame.Seq > lastFrameSeq {
 			lastFrameSeq = frame.Seq
@@ -387,91 +389,6 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn ended without result")
 	}
 	return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "harness wrapper task completed successfully")
-}
-
-func (r *TaskReconciler) existingHarnessFrameKeys(ctx context.Context, task *corev1alpha1.Task) (map[string]struct{}, error) {
-	keys := map[string]struct{}{}
-	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return keys, nil
-	}
-	var afterSeq int64
-	for {
-		eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  task.Namespace,
-			StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID:   task.Name,
-			AfterSeq:   afterSeq,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list mapped harness events: %w", err)
-		}
-		if len(eventsList) == 0 {
-			break
-		}
-		for _, event := range eventsList {
-			if event.Seq > afterSeq {
-				afterSeq = event.Seq
-			}
-			identity, ok := harness.MappedFrameIdentityFromEvent(event)
-			if !ok {
-				continue
-			}
-			keys[identity.Key()] = struct{}{}
-		}
-		if len(eventsList) < store.MaxExecutionEventLimit {
-			break
-		}
-	}
-	return keys, nil
-}
-
-// harnessWrapperTurnHasPersistedFrames reports whether the event store already
-// holds at least one mapped frame for the given turn ID on this task's stream.
-// Because the event store is the controller's durable database (not wrapper
-// memory), a positive result means the turn was already accepted and ran — even
-// across a wrapper pod restart that wiped its in-memory turn map. The controller
-// uses this to recover instead of re-issuing StartTurn (which would duplicate
-// external side effects) when the "started" marker was never persisted.
-func (r *TaskReconciler) harnessWrapperTurnHasPersistedFrames(ctx context.Context, task *corev1alpha1.Task, turnID harness.HarnessTurnID) (bool, error) {
-	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return false, nil
-	}
-	wantTurnID := strings.TrimSpace(string(turnID))
-	if wantTurnID == "" {
-		return false, nil
-	}
-	var afterSeq int64
-	for {
-		eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  task.Namespace,
-			StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID:   task.Name,
-			AfterSeq:   afterSeq,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return false, fmt.Errorf("list mapped harness events: %w", err)
-		}
-		if len(eventsList) == 0 {
-			return false, nil
-		}
-		for _, event := range eventsList {
-			if event.Seq > afterSeq {
-				afterSeq = event.Seq
-			}
-			identity, ok := harness.MappedFrameIdentityFromEvent(event)
-			if !ok {
-				continue
-			}
-			if identity.HasTurnID(turnID) {
-				return true, nil
-			}
-		}
-		if len(eventsList) < store.MaxExecutionEventLimit {
-			return false, nil
-		}
-	}
 }
 
 func harnessWrapperOutputFetchRetries(task *corev1alpha1.Task) int {

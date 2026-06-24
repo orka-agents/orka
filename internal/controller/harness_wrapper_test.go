@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -125,6 +127,174 @@ func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
 	}
+}
+
+func TestHarnessWrapperStartSkipsStartTurnWhenJournalHasPersistedFrames(t *testing.T) {
+	startCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version:                 harness.ProtocolVersion,
+				ProtocolVersion:         harness.ProtocolVersion,
+				Transport:               harness.HTTPTransport,
+				RuntimeName:             string(corev1alpha1.AgentRuntimeCodex),
+				ProviderKind:            harness.ProviderKindKubernetesService,
+				ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+				SupportsCancel:          true,
+				SupportsRuntimeSessions: true,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == harness.TurnsPath:
+			startCalls++
+			harness.WriteError(w, http.StatusInternalServerError, "StartTurn should not be called")
+		default:
+			harness.WriteError(w, http.StatusNotFound, "not found")
+		}
+	}))
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, string(agent.Spec.Runtime.Type))),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	if err := appendMappedHarnessFrame(context.Background(), r.ExecutionEventStore, task, harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameTurnStarted,
+		RuntimeSessionID: harness.RuntimeSessionID(task.Annotations[harnessWrapperRuntimeAnnotation]),
+		TurnID:           harness.HarnessTurnID(task.Annotations[harnessWrapperTurnIDAnnotation]),
+		CorrelationID:    task.Annotations[harnessWrapperCorrelationIDAnno],
+		Seq:              1,
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append persisted frame: %v", err)
+	}
+
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	if startCalls != 0 {
+		t.Fatalf("StartTurn calls = %d, want 0", startCalls)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want Running", updated.Status.Phase)
+	}
+	if !taskHasHarnessWrapperTurn(&updated) {
+		t.Fatalf("started harness annotations missing: %#v", updated.Annotations)
+	}
+}
+
+func TestFinishHarnessWrapperTaskUsesJournalDedupeOnReplay(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	turnID := harnessWrapperTurnID(task, 1)
+	runtimeID := harnessWrapperRuntimeSessionID(task, string(agent.Spec.Runtime.Type))
+	correlationID := string(task.UID)
+	task.Status.Phase = corev1alpha1.TaskPhaseRunning
+	task.Status.Attempts = 1
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(turnID),
+		harnessWrapperRuntimeAnnotation: string(runtimeID),
+		harnessWrapperCorrelationIDAnno: correlationID,
+		harnessWrapperStartedAnno:       scheduledRunLabelValue,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		eventsPath, _ := harness.EventStreamPath(turnID)
+		if r.Method != http.MethodGet || r.URL.Path != eventsPath {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+			Version:          harness.ProtocolVersion,
+			Type:             harness.FrameTurnStarted,
+			RuntimeSessionID: runtimeID,
+			TurnID:           turnID,
+			CorrelationID:    correlationID,
+			Seq:              1,
+			CreatedAt:        time.Now().UTC(),
+		})
+		_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+			Version:          harness.ProtocolVersion,
+			Type:             harness.FrameTurnCompleted,
+			RuntimeSessionID: runtimeID,
+			TurnID:           turnID,
+			CorrelationID:    correlationID,
+			Seq:              2,
+			CreatedAt:        time.Now().UTC(),
+			Completed:        &harness.TurnCompleted{Result: "ok"},
+		})
+		_ = harness.WriteSSEDone(w)
+	}))
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	if err := appendMappedHarnessFrame(context.Background(), r.ExecutionEventStore, task, harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameTurnStarted,
+		RuntimeSessionID: runtimeID,
+		TurnID:           turnID,
+		CorrelationID:    correlationID,
+		Seq:              1,
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append preexisting frame: %v", err)
+	}
+
+	if _, err := r.handleRunning(context.Background(), task); err != nil {
+		t.Fatalf("handleRunning: %v", err)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+
+	listed, err := r.ExecutionEventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	counts := map[string]int{}
+	for _, event := range listed {
+		identity, ok := harness.MappedFrameIdentityFromEvent(event)
+		if ok {
+			counts[identity.Key()]++
+		}
+	}
+	seq1Key := strings.Join([]string{string(runtimeID), string(turnID), correlationID, "1"}, "\x00")
+	seq2Key := strings.Join([]string{string(runtimeID), string(turnID), correlationID, "2"}, "\x00")
+	if counts[seq1Key] != 1 {
+		t.Fatalf("seq1 mapped frame count = %d, want 1 (counts=%#v)", counts[seq1Key], counts)
+	}
+	if counts[seq2Key] != 1 {
+		t.Fatalf("seq2 mapped frame count = %d, want 1 (counts=%#v)", counts[seq2Key], counts)
+	}
+}
+
+func appendMappedHarnessFrame(ctx context.Context, eventStore store.ExecutionEventStore, task *corev1alpha1.Task, frame harness.HarnessEventFrame) error {
+	mapped, err := harness.MapFrameToExecutionEvent(frame, harness.EventMapContext{
+		Namespace: task.Namespace,
+		TaskName:  task.Name,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = eventStore.AppendExecutionEvent(ctx, mapped)
+	return err
 }
 
 func TestHarnessRuntimeMissingEndpointFailsAgentTask(t *testing.T) {
@@ -513,73 +683,6 @@ func TestHarnessWrapperPlannedTurnMustMatchTaskIdentity(t *testing.T) {
 	}
 }
 
-func TestExistingHarnessFrameKeysIndexesStoredHarnessIdentity(t *testing.T) {
-	task, _ := harnessWrapperTaskAndAgent()
-	eventStore := store.NewFakeExecutionEventStore()
-	_, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace:  task.Namespace,
-		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   task.Name,
-		Type:       events.ExecutionEventTypeAgentRuntimeStarted,
-		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-1","turnID":"turn-1","correlationID":"corr-1","seq":7}}`),
-	})
-	if err != nil {
-		t.Fatalf("AppendExecutionEvent: %v", err)
-	}
-	r := &TaskReconciler{ExecutionEventStore: eventStore}
-	keys, err := r.existingHarnessFrameKeys(context.Background(), task)
-	if err != nil {
-		t.Fatalf("existingHarnessFrameKeys: %v", err)
-	}
-	key := strings.Join([]string{"runtime-1", "turn-1", "corr-1", "7"}, "\x00")
-	if _, ok := keys[key]; !ok {
-		t.Fatalf("existing frame key missing from %#v", keys)
-	}
-}
-
-// The controller-side cross-restart idempotency backstop: if frames for a turn ID
-// are already persisted, the turn already ran and must be recovered rather than
-// re-issued (which would duplicate side effects after a wrapper restart).
-func TestHarnessWrapperTurnHasPersistedFrames(t *testing.T) {
-	task, _ := harnessWrapperTaskAndAgent()
-	eventStore := store.NewFakeExecutionEventStore()
-	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace:  task.Namespace,
-		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   task.Name,
-		Type:       events.ExecutionEventTypeAgentRuntimeStarted,
-		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-1","turnID":"turn-abc","correlationID":"corr-1","seq":1}}`),
-	}); err != nil {
-		t.Fatalf("AppendExecutionEvent: %v", err)
-	}
-	r := &TaskReconciler{ExecutionEventStore: eventStore}
-
-	has, err := r.harnessWrapperTurnHasPersistedFrames(context.Background(), task, "turn-abc")
-	if err != nil {
-		t.Fatalf("harnessWrapperTurnHasPersistedFrames: %v", err)
-	}
-	if !has {
-		t.Fatal("expected persisted frames for turn-abc to be detected")
-	}
-
-	has, err = r.harnessWrapperTurnHasPersistedFrames(context.Background(), task, "turn-other")
-	if err != nil {
-		t.Fatalf("harnessWrapperTurnHasPersistedFrames(other): %v", err)
-	}
-	if has {
-		t.Fatal("unexpected match for a different turn ID")
-	}
-
-	emptyStore := store.NewFakeExecutionEventStore()
-	has, err = (&TaskReconciler{ExecutionEventStore: emptyStore}).harnessWrapperTurnHasPersistedFrames(context.Background(), task, "turn-abc")
-	if err != nil {
-		t.Fatalf("harnessWrapperTurnHasPersistedFrames(empty): %v", err)
-	}
-	if has {
-		t.Fatal("unexpected match against an empty store")
-	}
-}
-
 // The persisted execution-event SessionName for a harness task must be EMPTY
 // when the task has no real SessionRef, so a SessionRef-less task named "foo"
 // cannot collide its events into a real Session "foo". The protocol-level
@@ -597,44 +700,6 @@ func TestHarnessEventSessionNameEmptyWithoutRealSessionRef(t *testing.T) {
 	// The protocol identifier helper still returns a non-empty value (the task name).
 	if got := harnessWrapperSessionName(task); got != task.Name {
 		t.Fatalf("harnessWrapperSessionName = %q, want task name %q for the protocol request", got, task.Name)
-	}
-}
-
-func TestExistingHarnessFrameKeysPagesPastNonHarnessEvents(t *testing.T) {
-	task, _ := harnessWrapperTaskAndAgent()
-	eventStore := store.NewFakeExecutionEventStore()
-	for i := range store.MaxExecutionEventLimit {
-		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-			Namespace:  task.Namespace,
-			StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID:   task.Name,
-			TaskName:   task.Name,
-			Type:       events.ExecutionEventTypeModelMessage,
-			Summary:    fmt.Sprintf("non-harness event %d", i),
-		}); err != nil {
-			t.Fatalf("AppendExecutionEvent(non-harness %d): %v", i, err)
-		}
-	}
-	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace:  task.Namespace,
-		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   task.Name,
-		TaskName:   task.Name,
-		Type:       events.ExecutionEventTypeAgentRuntimeCompleted,
-		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-page","turnID":"turn-page","correlationID":"corr-page","seq":1001}}`),
-	}); err != nil {
-		t.Fatalf("AppendExecutionEvent(harness): %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	keys, err := (&TaskReconciler{ExecutionEventStore: eventStore}).existingHarnessFrameKeys(ctx, task)
-	if err != nil {
-		t.Fatalf("existingHarnessFrameKeys: %v", err)
-	}
-	key := strings.Join([]string{"runtime-page", "turn-page", "corr-page", "1001"}, "\x00")
-	if _, ok := keys[key]; !ok {
-		t.Fatalf("paged harness frame key missing from %#v", keys)
 	}
 }
 
