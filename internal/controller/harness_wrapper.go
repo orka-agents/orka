@@ -83,30 +83,8 @@ func harnessWrapperAuthValue() string {
 
 //nolint:gocyclo // Coordinates idempotent turn planning, wrapper start, and Running transition.
 func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
-	if err != nil {
-		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
-	}
-	if workspaceRequest != nil {
-		err := fmt.Errorf("execution workspace is not supported by harness runtime yet")
-		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return r.failTask(ctx, task, err.Error())
-	}
-	if execution := resolveExecution(task, agent); execution != nil {
-		return r.failTask(ctx, task, "agent execution placement is not supported by harness runtime yet")
-	}
-	if task.Spec.PriorTaskRef != nil && r.EnforceNamespaceIsolation {
-		priorNS := strings.TrimSpace(task.Spec.PriorTaskRef.Namespace)
-		if priorNS != "" && priorNS != task.Namespace {
-			return r.failTask(ctx, task, "cross-namespace priorTaskRef is not supported by harness runtime when namespace isolation is enforced")
-		}
-	}
-
+	// Agent execution planning owns path compatibility and rejection decisions.
+	// This method starts or resumes an already-approved harness-wrapper turn.
 	now := metav1.Now()
 	attempts := task.Status.Attempts + 1
 	if taskHasPlannedHarnessWrapperTurn(task) && !harnessWrapperPlannedTurnMatchesTask(task, agent, attempts) {
@@ -124,10 +102,10 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		return r.failTask(ctx, task, "execution event store is required for harness wrapper mode")
 	}
 	var request harness.StartTurnRequest
+	var err error
 	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if !taskHasHarnessWrapperTurn(task) {
-			var err error
 			request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 			if err != nil {
 				return r.failTask(ctx, task, err.Error())
@@ -143,7 +121,6 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
 		request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
 	} else {
-		var err error
 		request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 		if err != nil {
 			return r.failTask(ctx, task, err.Error())

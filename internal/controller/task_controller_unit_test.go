@@ -4886,6 +4886,140 @@ func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing
 	assertNoJobsForTask(t, r, task)
 }
 
+func TestHandlePending_AgentRuntimeUnsupportedPlannerFeaturesFailBeforeJobBackend(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutateTask func(*corev1alpha1.Task)
+		want       string
+	}{
+		{
+			name: "transaction",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1"}
+			},
+			want: "transaction token delegation",
+		},
+		{
+			name: "execution placement",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Execution = &corev1alpha1.ExecutionSpec{RuntimeClassName: "kata"}
+			},
+			want: "execution placement",
+		},
+		{
+			name: "cross namespace prior task",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: "prior", Namespace: "other"}
+			},
+			want: "cross-namespace priorTaskRef",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+				},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-" + strings.ReplaceAll(tt.name, " ", "-"), Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeAgent,
+					AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+					Prompt:   "do work",
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+			}
+			tt.mutateTask(task)
+			r := newUnitReconciler(scheme, task, agent)
+			r.EnforceNamespaceIsolation = true
+
+			result, err := r.handlePending(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handlePending() error = %v", err)
+			}
+			if result.RequeueAfter != time.Second {
+				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+			}
+
+			updated := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+				t.Fatalf("Get updated task: %v", err)
+			}
+			if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+				t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+			}
+			if !strings.Contains(updated.Status.Message, tt.want) {
+				t.Fatalf("message = %q, want %q", updated.Status.Message, tt.want)
+			}
+			assertNoJobsForTask(t, r, task)
+		})
+	}
+}
+
+func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	template := &sandboxextv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-template", Namespace: defaultNS},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-valid-but-unsupported", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name: template.Name,
+					},
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent, template)
+	r.AgentSandboxEnabled = true
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "execution workspace is not supported by harness runtime yet") {
+		t.Fatalf("message = %q, want workspace unsupported failure", updated.Status.Message)
+	}
+	assertExecutionWorkspaceValidationFailedStatus(
+		t,
+		updated.Status.ExecutionWorkspace,
+		corev1alpha1.WorkspaceProviderAgentSandbox,
+		template.Name,
+		"execution workspace is not supported by harness runtime yet",
+	)
+	assertNoJobsForTask(t, r, task)
+}
+
 func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
