@@ -666,6 +666,7 @@ Key configuration values for the Helm chart:
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
 | `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
+| `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `controller.apiPort` | `8080` | REST API port |
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
@@ -686,6 +687,7 @@ Key configuration values for the Helm chart:
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
+| `client.namespace` | `""` | Client ServiceAccount namespace override. Empty defaults to `controller.watchNamespace` when namespace isolation is enforced and `watchNamespace` is set, otherwise the release namespace. |
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:

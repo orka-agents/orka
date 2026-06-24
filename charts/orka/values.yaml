@@ -39,7 +39,7 @@ controller:
   logLevel: info
 
   # Enforce namespace isolation (restrict users to their SA namespace)
-  enforceNamespaceIsolation: false
+  enforceNamespaceIsolation: true
 
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
@@ -266,3 +266,6 @@ client:
   create: true
   # Name of the client service account
   name: orka-client
+  # Namespace for the client service account. Empty defaults to controller.watchNamespace
+  # when namespace isolation is enforced and watchNamespace is set, otherwise the release namespace.
+  namespace: ""

@@ -44,6 +44,7 @@ type oidcClaims struct {
 	Email       string          `json:"email,omitempty"`
 	Username    string          `json:"preferred_username,omitempty"`
 	Name        string          `json:"name,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
 	Groups      stringList      `json:"groups,omitempty"`
 	Roles       stringList      `json:"roles,omitempty"`
 	RealmAccess oidcRealmAccess `json:"realm_access,omitempty"`
@@ -134,13 +135,14 @@ func userInfoFromOIDCClaims(claims oidcClaims) *UserInfo {
 	roles = append(roles, claims.RealmAccess.Roles...)
 
 	return &UserInfo{
-		Username: username,
-		Groups:   append([]string{}, claims.Groups...),
-		AuthType: AuthTypeOIDC,
-		Subject:  claims.Subject,
-		Email:    claims.Email,
-		Issuer:   claims.Issuer,
-		Roles:    roles,
+		Username:  username,
+		Groups:    append([]string{}, claims.Groups...),
+		AuthType:  AuthTypeOIDC,
+		Subject:   claims.Subject,
+		Email:     claims.Email,
+		Issuer:    claims.Issuer,
+		Roles:     roles,
+		Namespace: claims.Namespace,
 	}
 }
 

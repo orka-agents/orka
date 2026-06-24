@@ -44,7 +44,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update"]
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
@@ -109,12 +109,25 @@ rules:
     resources: ["clusterroles", "roles", "rolebindings"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "update", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames:
+      - {{ include "orka.aiWorkerClusterRoleName" . }}
+      - {{ include "orka.vendorWorkerClusterRoleName" . }}
+      - {{ include "orka.containerWorkerClusterRoleName" . }}
+    verbs: ["bind"]
 
-  # TokenReview for authentication
+  # TokenReview authenticates caller tokens; SubjectAccessReview authorizes Kubernetes callers
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
     verbs: ["create"]
 
   # Leader election
@@ -184,11 +197,20 @@ rules:
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.controller.enforceNamespaceIsolation }}
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-client
+  namespace: {{ include "orka.clientNamespace" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+{{- else }}
 kind: ClusterRoleBinding
 metadata:
   name: {{ include "orka.fullname" . }}-client
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+{{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -196,7 +218,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.client.name }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "orka.clientNamespace" . }}
 {{- end }}
 ---
 # AI Worker Role (trusted worker with Kubernetes tool and code_exec permissions)
@@ -282,11 +304,20 @@ rules:
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.controller.enforceNamespaceIsolation }}
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.aiWorkerClusterRoleBindingName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+{{- else }}
 kind: ClusterRoleBinding
 metadata:
   name: {{ include "orka.aiWorkerClusterRoleBindingName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+{{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -367,11 +398,20 @@ rules:
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.controller.enforceNamespaceIsolation }}
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.vendorWorkerClusterRoleBindingName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+{{- else }}
 kind: ClusterRoleBinding
 metadata:
   name: {{ include "orka.vendorWorkerClusterRoleBindingName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+{{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -398,11 +438,20 @@ rules:
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.controller.enforceNamespaceIsolation }}
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.containerWorkerClusterRoleBindingName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+{{- else }}
 kind: ClusterRoleBinding
 metadata:
   name: {{ include "orka.containerWorkerClusterRoleBindingName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
+{{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

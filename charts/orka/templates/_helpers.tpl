@@ -62,6 +62,22 @@ Create the name of the service account to use
 {{- end }}
 {{- end }}
 
+
+{{/*
+Create the namespace for the chart-managed client ServiceAccount.
+When namespace isolation is enforced and the controller watches one namespace,
+place the default client in that namespace so its token remains usable.
+*/}}
+{{- define "orka.clientNamespace" -}}
+{{- if .Values.client.namespace }}
+{{- .Values.client.namespace }}
+{{- else if and .Values.controller.enforceNamespaceIsolation .Values.controller.watchNamespace }}
+{{- .Values.controller.watchNamespace }}
+{{- else }}
+{{- .Release.Namespace }}
+{{- end }}
+{{- end }}
+
 {{/*
 Create release-scoped worker ClusterRole names.
 */}}
