@@ -2484,6 +2484,34 @@ func TestEnsureWorkerRBAC_DoesNotPrunePendingAgentWorkerRBAC(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkerRBAC_DoesNotGrantRBACForPodOnlyWorkerServiceAccount(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	livePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "foreign-pod", Namespace: testNS},
+		Spec:       corev1.PodSpec{ServiceAccountName: AIWorkerServiceAccount, Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	objects := []client.Object{
+		livePod,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected live pod ServiceAccount to be preserved: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected pod-only evidence not to preserve or recreate AI ClusterRoleBinding, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()

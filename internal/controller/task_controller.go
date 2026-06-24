@@ -2894,16 +2894,17 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, task *corev1alpha
 }
 
 func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, selectedServiceAccount string) error {
-	inUse, err := r.workerServiceAccountsInUse(ctx, namespace)
+	keepServiceAccounts, repairBindings, err := r.workerServiceAccountUsage(ctx, namespace)
 	if err != nil {
 		return err
 	}
 	if selectedServiceAccount != "" {
-		inUse[selectedServiceAccount] = struct{}{}
+		keepServiceAccounts[selectedServiceAccount] = struct{}{}
+		repairBindings[selectedServiceAccount] = struct{}{}
 	}
 
 	for _, spec := range r.workerRBACSpecs(namespace) {
-		if _, ok := inUse[spec.serviceAccountName]; ok {
+		if _, ok := repairBindings[spec.serviceAccountName]; ok {
 			if r.EnforceNamespaceIsolation {
 				if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
 					return err
@@ -2922,6 +2923,9 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 		if err := r.deleteManagedWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 			return err
 		}
+		if _, ok := keepServiceAccounts[spec.serviceAccountName]; ok {
+			continue
+		}
 		if err := r.deleteManagedWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
 		}
@@ -2930,23 +2934,26 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 	return nil
 }
 
-func (r *TaskReconciler) workerServiceAccountsInUse(ctx context.Context, namespace string) (map[string]struct{}, error) {
-	inUse := map[string]struct{}{}
+func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespace string) (map[string]struct{}, map[string]struct{}, error) {
+	keepServiceAccounts := map[string]struct{}{}
+	repairBindings := map[string]struct{}{}
 
 	var tasks corev1alpha1.TaskList
 	if err := r.List(ctx, &tasks, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("listing tasks in namespace %s for worker RBAC pruning: %w", namespace, err)
+		return nil, nil, fmt.Errorf("listing tasks in namespace %s for worker RBAC pruning: %w", namespace, err)
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
-			inUse[workerServiceAccountForTask(task)] = struct{}{}
+			serviceAccount := workerServiceAccountForTask(task)
+			keepServiceAccounts[serviceAccount] = struct{}{}
+			repairBindings[serviceAccount] = struct{}{}
 		}
 	}
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("listing pods in namespace %s for worker RBAC pruning: %w", namespace, err)
+		return nil, nil, fmt.Errorf("listing pods in namespace %s for worker RBAC pruning: %w", namespace, err)
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -2954,11 +2961,11 @@ func (r *TaskReconciler) workerServiceAccountsInUse(ctx context.Context, namespa
 			continue
 		}
 		if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodUnknown {
-			inUse[pod.Spec.ServiceAccountName] = struct{}{}
+			keepServiceAccounts[pod.Spec.ServiceAccountName] = struct{}{}
 		}
 	}
 
-	return inUse, nil
+	return keepServiceAccounts, repairBindings, nil
 }
 
 func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
