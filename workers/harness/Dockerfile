@@ -31,7 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code \
+# Pin Codex CLI so live proxy E2E is not broken by upstream request-shape changes.
+ARG CODEX_CLI_VERSION=0.142.1
+RUN npm install -g @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code \
     && npm cache clean --force
 
 COPY --from=target-go /usr/local/go /usr/local/go

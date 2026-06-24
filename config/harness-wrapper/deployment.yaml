@@ -51,8 +51,6 @@ spec:
           value: "1000"
         - name: ORKA_HARNESS_WRAPPER_CHILD_GID
           value: "1000"
-        - name: ORKA_CODEX_SANDBOX_MODE
-          value: danger-full-access
         - name: ORKA_SA_TOKEN_PATH
           value: /var/run/orka/upload-token/token
         volumeMounts:
