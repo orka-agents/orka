@@ -167,9 +167,6 @@ func userInfoFromOIDCClaims(claims oidcClaims, cfg OIDCConfig) *UserInfo {
 
 	namespace := cfg.Namespace
 	if namespace == "" {
-		namespace = claims.Namespace
-	}
-	if namespace == "" {
 		namespace = defaultNamespace
 	}
 

@@ -270,8 +270,8 @@ func TestValidateOIDCToken_Valid(t *testing.T) {
 	if strings.Join(userInfo.Roles, ",") != "submitter,reviewer" {
 		t.Fatalf("Roles = %#v, want [submitter reviewer]", userInfo.Roles)
 	}
-	if userInfo.Namespace != "team-a" {
-		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, "team-a")
+	if userInfo.Namespace != defaultNamespace {
+		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, defaultNamespace)
 	}
 }
 
