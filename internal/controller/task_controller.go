@@ -2904,6 +2904,14 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if _, ok := inUse[spec.serviceAccountName]; ok {
+			if r.EnforceNamespaceIsolation {
+				if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
+					return err
+				}
+				if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if err := r.deleteManagedWorkerRoleBinding(ctx, namespace, spec); err != nil {
@@ -2929,9 +2937,6 @@ func (r *TaskReconciler) workerServiceAccountsInUse(ctx context.Context, namespa
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-			continue
-		}
 		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
 			inUse[workerServiceAccountForTask(task)] = struct{}{}
 		}
