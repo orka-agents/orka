@@ -909,8 +909,8 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure worker ServiceAccount and RBAC exist in the task namespace
-	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
+	// Ensure only the worker ServiceAccount and RBAC required for this task exist in the task namespace
+	if err := r.ensureWorkerRBAC(ctx, task); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
 		if r.Recorder != nil {
 			r.Recorder.Eventf(task, corev1.EventTypeWarning, workerRBACReconcileFailedReason,
@@ -2839,16 +2839,39 @@ func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 	return fmt.Sprintf("%s-%s", name[:prefixLength], suffix)
 }
 
-// ensureWorkerRBAC ensures each worker ServiceAccount and ClusterRoleBinding
-// exists in the given namespace so that task jobs have trust-tiered permissions.
-func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
+// workerRBACSpecForTask returns the single worker identity required by the task's trust tier.
+func (r *TaskReconciler) workerRBACSpecForTask(task *corev1alpha1.Task) workerRBACSpec {
+	namespace := ""
+	if task != nil {
+		namespace = task.Namespace
+	}
+
 	for _, spec := range r.workerRBACSpecs(namespace) {
-		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
-			return err
+		if spec.serviceAccountName == workerServiceAccountForTask(task) {
+			return spec
 		}
-		if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
-			return err
-		}
+	}
+
+	return workerRBACSpec{
+		serviceAccountName:     ContainerWorkerServiceAccount,
+		clusterRoleName:        workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
+		clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "container", namespace),
+	}
+}
+
+// ensureWorkerRBAC ensures the ServiceAccount and ClusterRoleBinding required
+// by this task's trust tier exist in the task namespace.
+func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, task *corev1alpha1.Task) error {
+	if task == nil {
+		return fmt.Errorf("task is required to ensure worker RBAC")
+	}
+
+	spec := r.workerRBACSpecForTask(task)
+	if err := r.ensureWorkerServiceAccount(ctx, task.Namespace, spec.serviceAccountName); err != nil {
+		return err
+	}
+	if err := r.ensureWorkerClusterRoleBinding(ctx, task.Namespace, spec); err != nil {
+		return err
 	}
 
 	return nil
