@@ -9,17 +9,18 @@ package harness
 import "testing"
 
 const (
-	runtimeIdentityNamespace = "identity-ns"
-	runtimeIdentityTask      = "identity-task"
-	runtimeIdentityAgent     = "identity-agent"
+	runtimeIdentityDefaultNamespace = "default"
+	runtimeIdentityNamespace        = "identity-ns"
+	runtimeIdentityTask             = "identity-task"
+	runtimeIdentityAgent            = "identity-agent"
 )
 
 func TestResolveRuntimeSessionIdentityDefaultsNilLikeInput(t *testing.T) {
 	identity := ResolveRuntimeSessionIdentity(RuntimeSessionIdentityInput{RuntimeName: " codex "})
-	if identity.ID != "default:default:codex" {
-		t.Fatalf("ID = %q, want default:default:codex", identity.ID)
+	if identity.ID != RuntimeSessionID(runtimeIdentityDefaultNamespace+":default:codex") {
+		t.Fatalf("ID = %q, want default runtime identity", identity.ID)
 	}
-	if identity.Owner.Namespace != "default" || identity.Owner.SessionName != "default" || identity.Owner.ActiveTask != "" {
+	if identity.Owner.Namespace != runtimeIdentityDefaultNamespace || identity.Owner.SessionName != runtimeIdentityDefaultNamespace || identity.Owner.ActiveTask != "" {
 		t.Fatalf("Owner = %#v, want default owner without active task", identity.Owner)
 	}
 }

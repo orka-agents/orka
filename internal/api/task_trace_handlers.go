@@ -13,10 +13,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tasktrace"
@@ -33,21 +30,15 @@ func (h *Handlers) GetTaskTrace(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "getTaskTrace", namespace, taskName); err != nil {
+	access := h.taskAccess()
+	if err := access.authorizeReadable(c, "getTaskTrace", namespace, taskName); err != nil {
 		return err
 	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
 	}
-
-	task := &corev1alpha1.Task{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "getTaskTrace", task); err != nil {
+	task, err := access.loadAuthorized(c, "getTaskTrace", namespace, taskName)
+	if err != nil {
 		return err
 	}
 
