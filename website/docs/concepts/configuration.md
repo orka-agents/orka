@@ -736,11 +736,6 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--api-port` | `8080` | REST API server port |
 | `--watch-namespace` | `""` | Namespace to watch (empty = all) |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
-| `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer tokens |
-| `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience |
-| `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or discovered | Optional OIDC JWKS URL |
-| `--oidc-allowed-subjects` | `ORKA_OIDC_ALLOWED_SUBJECTS` env or `""` | Required comma-separated OIDC subject allowlist patterns when OIDC is enabled |
-| `--oidc-namespace` | `ORKA_OIDC_NAMESPACE` env or `default` | Namespace assigned to authorized OIDC callers for namespace isolation |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |

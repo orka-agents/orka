@@ -59,6 +59,8 @@ type oidcDiscoveryDocument struct {
 	JWKSURI string `json:"jwks_uri"`
 }
 
+var errOIDCAuthorization = errors.New("OIDC authorization failed")
+
 func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*UserInfo, error) {
 	parsed, err := parseOIDCTokenCandidate(token, cfg)
 	if err != nil {
@@ -125,7 +127,7 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 
 func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
 	if len(cfg.AllowedSubjects) == 0 {
-		return errors.New("OIDC subject authorization is not configured")
+		return fmt.Errorf("%w: OIDC subject authorization is not configured", errOIDCAuthorization)
 	}
 
 	for _, allowed := range cfg.AllowedSubjects {
@@ -135,14 +137,14 @@ func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
 		}
 		matched, err := wildcardMatch(allowed, claims.Subject)
 		if err != nil {
-			return fmt.Errorf("invalid OIDC allowed subject pattern %q: %w", allowed, err)
+			return fmt.Errorf("%w: invalid allowed subject pattern %q: %v", errOIDCAuthorization, allowed, err)
 		}
 		if matched {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("OIDC subject %q is not authorized", claims.Subject)
+	return fmt.Errorf("%w: subject %q is not authorized", errOIDCAuthorization, claims.Subject)
 }
 
 func wildcardMatch(pattern, value string) (bool, error) {

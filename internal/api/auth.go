@@ -199,6 +199,9 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		if oidcErr == nil {
 			return userInfo, nil
 		}
+		if errors.Is(oidcErr, errOIDCAuthorization) {
+			return nil, oidcErr
+		}
 
 		if c == nil {
 			return nil, oidcErr

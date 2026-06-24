@@ -91,6 +91,10 @@ controller:
     audience: ""
     # Optional JWKS URL. When empty, Orka discovers it from issuer.
     jwksUrl: ""
+    # Required comma-separated subject allowlist patterns when OIDC is enabled.
+    allowedSubjects: ""
+    # Namespace assigned to authorized OIDC callers for namespace isolation. Empty uses controller default.
+    namespace: ""
 
   # Context-token authentication, scoped authorization, and optional kontxt TTS exchange.
   # Empty values keep the controller defaults / corresponding environment variables.
