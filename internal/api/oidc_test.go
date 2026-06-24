@@ -299,6 +299,20 @@ func TestValidateOIDCToken_RejectsUnauthorizedSubject(t *testing.T) {
 	}
 }
 
+func TestValidateOIDCToken_DefaultsNamespaceWhenUnspecified(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	token := provider.issueToken(t, testOIDCTokenOptions{})
+
+	userInfo, err := validateOIDCToken(context.Background(), token, cfg)
+	if err != nil {
+		t.Fatalf("validateOIDCToken returned error: %v", err)
+	}
+	if userInfo.Namespace != defaultNamespace {
+		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, defaultNamespace)
+	}
+}
+
 func TestValidateOIDCToken_AssignsConfiguredNamespace(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	cfg := provider.config()
