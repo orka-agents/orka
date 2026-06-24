@@ -271,27 +271,19 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
-
-	if !orkaToolsDisabled {
-		// Replace client tools with Orka's tools (builtin + coordinator)
-		compReq.Tools = nil
-		injectOrkaTools(ctx, h.client, compReq, namespace)
-		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
-		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "openAITools", completionToolNames(compReq.Tools)); err != nil {
-			return openAIContextTokenAuthorizationError(c, err)
-		}
-
-		// Inject coordinator system prompt
-		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
-
-		// Strip client tool messages from history
-		compReq.Messages = stripClientToolMessages(compReq.Messages)
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
+		Client:              h.client,
+		Namespace:           namespace,
+		ToolUseAction:       "openAITools",
+		AuthorizationConfig: h.contextTokenAuthorization,
+	})
+	if err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
 	// Build ToolContext for coordinator tools
 	var proxyToolCtx *tools.ToolContext
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
 			KubeClient:                h.kubeClient,
@@ -309,13 +301,13 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	}
 
 	if req.Stream {
-		if !orkaToolsDisabled {
+		if orkaToolsEnabled {
 			return h.handleStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions, proxyToolCtx)
 		}
 		return h.handleStreamingCompletion(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
 	}
 
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, proxyToolCtx)
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
