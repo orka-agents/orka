@@ -516,7 +516,7 @@ func TestAuthorizeAndStampToolTaskCreateStampsContextTokenProvenance(t *testing.
 		},
 	}
 
-	err := authorizeAndStampToolTaskCreate(context.Background(), nil, token, cfg, "chatToolCreateTask", ui, task)
+	err := authorizeAndStampToolTaskCreate(context.Background(), nil, nil, token, cfg, "chatToolCreateTask", ui, task)
 	require.NoError(t, err)
 	require.NotNil(t, task.Spec.RequestedBy)
 	require.Equal(t, testContextTokenSubject, task.Spec.RequestedBy.Subject)

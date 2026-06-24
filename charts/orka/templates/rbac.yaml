@@ -112,9 +112,12 @@ rules:
     resources: ["clusterrolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
 
-  # TokenReview for authentication
+  # TokenReview authenticates caller tokens; SubjectAccessReview authorizes Kubernetes callers
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
     verbs: ["create"]
 
   # Leader election
