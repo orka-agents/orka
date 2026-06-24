@@ -17,19 +17,25 @@ import (
 	"github.com/sozercan/orka/internal/store"
 )
 
+const (
+	turnJournalNamespace = "journal-ns"
+	turnJournalTask      = "journal-task"
+	turnJournalAgent     = "journal-agent"
+)
+
 func TestTurnJournalOpenIndexesStoredHarnessIdentity(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	_, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace:  "default",
+		Namespace:  turnJournalNamespace,
 		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   "task-a",
+		StreamID:   turnJournalTask,
 		Type:       events.ExecutionEventTypeAgentRuntimeStarted,
 		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-1","turnID":"turn-1","correlationID":"corr-1","seq":7}}`),
 	})
 	if err != nil {
 		t.Fatalf("AppendExecutionEvent: %v", err)
 	}
-	state, err := TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: "default", TaskName: "task-a"}}.Open(context.Background())
+	state, err := TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: turnJournalNamespace, TaskName: turnJournalTask}}.Open(context.Background())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -43,15 +49,15 @@ func TestTurnJournalOpenIndexesStoredHarnessIdentity(t *testing.T) {
 func TestTurnJournalHasPersistedFrames(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace:  "default",
+		Namespace:  turnJournalNamespace,
 		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   "task-a",
+		StreamID:   turnJournalTask,
 		Type:       events.ExecutionEventTypeAgentRuntimeStarted,
 		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-1","turnID":"turn-abc","correlationID":"corr-1","seq":1}}`),
 	}); err != nil {
 		t.Fatalf("AppendExecutionEvent: %v", err)
 	}
-	journal := TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: "default", TaskName: "task-a"}}
+	journal := TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: turnJournalNamespace, TaskName: turnJournalTask}}
 
 	has, err := journal.HasPersistedFrames(context.Background(), "turn-abc")
 	if err != nil {
@@ -69,7 +75,7 @@ func TestTurnJournalHasPersistedFrames(t *testing.T) {
 		t.Fatal("unexpected match for a different turn ID")
 	}
 
-	emptyJournal := TurnJournal{EventStore: store.NewFakeExecutionEventStore(), MapContext: EventMapContext{Namespace: "default", TaskName: "task-a"}}
+	emptyJournal := TurnJournal{EventStore: store.NewFakeExecutionEventStore(), MapContext: EventMapContext{Namespace: turnJournalNamespace, TaskName: turnJournalTask}}
 	has, err = emptyJournal.HasPersistedFrames(context.Background(), "turn-abc")
 	if err != nil {
 		t.Fatalf("HasPersistedFrames(empty): %v", err)
@@ -83,10 +89,10 @@ func TestTurnJournalPagesPastNonHarnessEvents(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	for i := range store.MaxExecutionEventLimit {
 		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-			Namespace:  "default",
+			Namespace:  turnJournalNamespace,
 			StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID:   "task-a",
-			TaskName:   "task-a",
+			StreamID:   turnJournalTask,
+			TaskName:   turnJournalTask,
 			Type:       events.ExecutionEventTypeModelMessage,
 			Summary:    fmt.Sprintf("non-harness event %d", i),
 		}); err != nil {
@@ -94,10 +100,10 @@ func TestTurnJournalPagesPastNonHarnessEvents(t *testing.T) {
 		}
 	}
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
-		Namespace:  "default",
+		Namespace:  turnJournalNamespace,
 		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   "task-a",
-		TaskName:   "task-a",
+		StreamID:   turnJournalTask,
+		TaskName:   turnJournalTask,
 		Type:       events.ExecutionEventTypeAgentRuntimeCompleted,
 		Content:    []byte(`{"harness":{"runtimeSessionID":"runtime-page","turnID":"turn-page","correlationID":"corr-page","seq":1001}}`),
 	}); err != nil {
@@ -106,7 +112,7 @@ func TestTurnJournalPagesPastNonHarnessEvents(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	keys, err := (TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: "default", TaskName: "task-a"}}).ExistingFrameKeys(ctx)
+	keys, err := (TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: turnJournalNamespace, TaskName: turnJournalTask}}).ExistingFrameKeys(ctx)
 	if err != nil {
 		t.Fatalf("ExistingFrameKeys: %v", err)
 	}
@@ -118,7 +124,7 @@ func TestTurnJournalPagesPastNonHarnessEvents(t *testing.T) {
 
 func TestTurnJournalAppendFrameIfNewDeduplicatesMappedFrame(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
-	journal := TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: "default", TaskName: "task-a", AgentName: "agent-a"}}
+	journal := TurnJournal{EventStore: eventStore, MapContext: EventMapContext{Namespace: turnJournalNamespace, TaskName: turnJournalTask, AgentName: turnJournalAgent}}
 	state, err := journal.Open(context.Background())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -150,9 +156,9 @@ func TestTurnJournalAppendFrameIfNewDeduplicatesMappedFrame(t *testing.T) {
 	}
 
 	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
-		Namespace:  "default",
+		Namespace:  turnJournalNamespace,
 		StreamType: store.ExecutionEventStreamTypeTask,
-		StreamID:   "task-a",
+		StreamID:   turnJournalTask,
 	})
 	if err != nil {
 		t.Fatalf("ListExecutionEvents: %v", err)
@@ -165,7 +171,7 @@ func TestTurnJournalAppendFrameIfNewDeduplicatesMappedFrame(t *testing.T) {
 func TestTurnJournalAppendFrameIfNewPropagatesAppendFailure(t *testing.T) {
 	journal := TurnJournal{
 		EventStore: failingAppendExecutionEventStore{err: fmt.Errorf("store unavailable")},
-		MapContext: EventMapContext{Namespace: "default", TaskName: "task-a"},
+		MapContext: EventMapContext{Namespace: turnJournalNamespace, TaskName: turnJournalTask},
 	}
 	state := &TurnJournalState{journal: journal, keys: map[string]struct{}{}}
 	_, _, err := state.AppendFrameIfNew(context.Background(), HarnessEventFrame{

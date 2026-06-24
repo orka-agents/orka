@@ -898,16 +898,27 @@ func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
 	}
 }
 
-func TestHarnessWrapperRuntimeSessionIDUsesUIDWithoutExplicitSession(t *testing.T) {
-	task, _ := harnessWrapperTaskAndAgent()
-	got := string(harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)))
+func TestHarnessWrapperRuntimeSessionIdentityUsesUIDWithoutExplicitSession(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	identity := harnessWrapperRuntimeSessionIdentity(task, agent, string(corev1alpha1.AgentRuntimeClaude))
+	got := string(identity.ID)
 	if !strings.Contains(got, string(task.UID)) {
 		t.Fatalf("runtime session id = %q, want task UID", got)
 	}
+	if identity.Owner.Namespace != task.Namespace || identity.Owner.SessionName != task.Name+":"+string(task.UID) || identity.Owner.ActiveTask != task.Name || identity.Owner.AgentName != agent.Name || identity.Owner.Provider != harness.ProviderKindKubernetesService {
+		t.Fatalf("runtime session owner = %#v, want task-scoped owner metadata", identity.Owner)
+	}
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "shared-session"}
-	got = string(harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)))
+	identity = harnessWrapperRuntimeSessionIdentity(task, agent, string(corev1alpha1.AgentRuntimeClaude))
+	got = string(identity.ID)
 	if strings.Contains(got, string(task.UID)) || !strings.Contains(got, "shared-session") {
 		t.Fatalf("runtime session id = %q, want explicit shared session without UID", got)
+	}
+	if identity.Owner.SessionName != "shared-session" || identity.Owner.ActiveTask != task.Name {
+		t.Fatalf("runtime session owner = %#v, want shared session owner with active task", identity.Owner)
+	}
+	if got := harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)); got != identity.ID {
+		t.Fatalf("compat runtime session id = %q, want identity id %q", got, identity.ID)
 	}
 }
 

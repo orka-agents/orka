@@ -702,12 +702,13 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
+	runtimeIdentity := harnessWrapperRuntimeSessionIdentity(task, agent, runtimeName)
 	return harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
 		Namespace:        task.Namespace,
 		TaskName:         task.Name,
 		SessionName:      harnessWrapperSessionName(task),
-		RuntimeSessionID: harnessWrapperRuntimeSessionID(task, runtimeName),
+		RuntimeSessionID: runtimeIdentity.ID,
 		TurnID:           turnID,
 		CorrelationID:    correlationID,
 		Deadline:         deadline.UTC(),
@@ -1418,21 +1419,31 @@ func harnessWrapperTurnIDPrefix(value string) string {
 	return prefix
 }
 
-func harnessWrapperRuntimeSessionID(task *corev1alpha1.Task, runtimeName string) harness.RuntimeSessionID {
-	parts := []string{"default", "default", strings.TrimSpace(runtimeName)}
+func harnessWrapperRuntimeSessionIdentity(task *corev1alpha1.Task, agent *corev1alpha1.Agent, runtimeName string) harness.RuntimeSessionIdentity {
+	input := harness.RuntimeSessionIdentityInput{
+		Namespace:   "default",
+		SessionName: "default",
+		RuntimeName: runtimeName,
+		Provider:    harness.ProviderKindKubernetesService,
+	}
 	if task != nil {
-		parts[0] = task.Namespace
-		if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" {
-			parts[1] = strings.TrimSpace(task.Spec.SessionRef.Name)
-		} else {
-			identity := strings.TrimSpace(string(task.UID))
-			if identity == "" {
-				identity = task.Name
-			}
-			parts[1] = task.Name + ":" + identity
+		input.Namespace = task.Namespace
+		input.TaskName = task.Name
+		input.TaskUID = string(task.UID)
+		input.ActiveTask = task.Name
+		input.SessionName = ""
+		if task.Spec.SessionRef != nil {
+			input.SessionName = task.Spec.SessionRef.Name
 		}
 	}
-	return harness.RuntimeSessionID(strings.Join(parts, ":"))
+	if agent != nil {
+		input.AgentName = agent.Name
+	}
+	return harness.ResolveRuntimeSessionIdentity(input)
+}
+
+func harnessWrapperRuntimeSessionID(task *corev1alpha1.Task, runtimeName string) harness.RuntimeSessionID {
+	return harnessWrapperRuntimeSessionIdentity(task, nil, runtimeName).ID
 }
 
 func harnessWrapperSessionName(task *corev1alpha1.Task) string {
