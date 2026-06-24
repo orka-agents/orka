@@ -2396,6 +2396,34 @@ func TestEnsureWorkerRBAC_DoesNotPruneResourcesForActiveOtherTierTask(t *testing
 	}
 }
 
+func TestEnsureWorkerRBAC_RepairsActiveOtherTierClusterRoleBinding(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	activeAI := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	objects := []client.Object{
+		activeAI,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, crb); err != nil {
+		t.Fatalf("expected active AI ClusterRoleBinding to be repaired: %v", err)
+	}
+	if crb.RoleRef.Name != DefaultAIWorkerClusterRoleName {
+		t.Fatalf("expected active AI ClusterRoleBinding role %s, got %s", DefaultAIWorkerClusterRoleName, crb.RoleRef.Name)
+	}
+}
+
 func TestEnsureWorkerRBAC_IsolationMigratesActiveOtherTierRBAC(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()

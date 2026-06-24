@@ -2911,6 +2911,8 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 				if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 					return err
 				}
+			} else if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+				return err
 			}
 			continue
 		}
