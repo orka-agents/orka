@@ -645,6 +645,59 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	})
 
+	t.Run("empty template namespace is accepted when namespace isolation is enforced", func(t *testing.T) {
+		template := &sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
+		}
+		r := newUnitReconciler(scheme, template)
+		r.AgentSandboxEnabled = true
+		r.EnforceNamespaceIsolation = true
+
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-empty-ns", executionWorkspace("task-template", "")))
+		if err != nil {
+			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
+		}
+		if request == nil || request.TemplateNamespace != defaultNS || request.ClaimNamespace != defaultNS {
+			t.Fatalf("request = %#v, want template and claim namespace %q", request, defaultNS)
+		}
+	})
+
+	t.Run("matching template namespace is accepted when namespace isolation is enforced", func(t *testing.T) {
+		template := &sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
+		}
+		r := newUnitReconciler(scheme, template)
+		r.AgentSandboxEnabled = true
+		r.EnforceNamespaceIsolation = true
+
+		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-same-ns", executionWorkspace("task-template", defaultNS)))
+		if err != nil {
+			t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
+		}
+		if request == nil || request.TemplateNamespace != defaultNS || request.ClaimNamespace != defaultNS {
+			t.Fatalf("request = %#v, want template and claim namespace %q", request, defaultNS)
+		}
+	})
+
+	t.Run("controller strategy namespace is rejected when namespace isolation is enforced", func(t *testing.T) {
+		r := newUnitReconciler(scheme)
+		r.AgentSandboxEnabled = true
+		r.EnforceNamespaceIsolation = true
+		r.AgentSandboxConfig = AgentSandboxConfig{
+			NamespaceStrategy:   AgentSandboxNamespaceStrategyController,
+			ControllerNamespace: "orka-system",
+		}
+
+		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-controller-ns", executionWorkspace("task-template", "")))
+		if err == nil {
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want namespace isolation error")
+		}
+		want := `execution workspace resolved template namespace "orka-system" from agent sandbox controller namespace must match task namespace "default"`
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
+		}
+	})
+
 	t.Run("missing template fails before job creation", func(t *testing.T) {
 		r := newUnitReconciler(scheme)
 		r.AgentSandboxEnabled = true
@@ -659,7 +712,7 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	})
 
-	t.Run("explicit template namespace is accepted as claim namespace", func(t *testing.T) {
+	t.Run("explicit template namespace is accepted as claim namespace when namespace isolation is disabled", func(t *testing.T) {
 		template := &sandboxextv1alpha1.SandboxTemplate{
 			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
 		}
@@ -672,6 +725,24 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 		if request.ClaimNamespace != "sandbox-templates" {
 			t.Fatalf("ClaimNamespace = %q, want sandbox-templates", request.ClaimNamespace)
+		}
+	})
+
+	t.Run("explicit template namespace is rejected when namespace isolation is enforced", func(t *testing.T) {
+		template := &sandboxextv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
+		}
+		r := newUnitReconciler(scheme, template)
+		r.AgentSandboxEnabled = true
+		r.EnforceNamespaceIsolation = true
+
+		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", executionWorkspace("shared-template", "sandbox-templates")))
+		if err == nil {
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want namespace isolation error")
+		}
+		want := `execution workspace resolved template namespace "sandbox-templates" from templateRef.namespace must match task namespace "default"`
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}
 	})
 }
@@ -695,6 +766,7 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 		task                *corev1alpha1.Task
 		agentSandboxConfig  AgentSandboxConfig
 		substrateConfig     SubstrateConfig
+		enforceIsolation    bool
 		wantErr             string
 	}{
 		{
@@ -915,6 +987,60 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 			wantErr: "requires spec.sessionRef.name",
 		},
 		{
+			name:                "agent sandbox empty template namespace accepted when isolation enforced",
+			agentSandboxEnabled: true,
+			enforceIsolation:    true,
+			task: &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS}, Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(),
+				},
+			}},
+		},
+		{
+			name:                "agent sandbox matching template namespace accepted when isolation enforced",
+			agentSandboxEnabled: true,
+			enforceIsolation:    true,
+			task: &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS}, Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.TemplateRef.Namespace = defaultNS
+					}),
+				},
+			}},
+		},
+		{
+			name:                "agent sandbox controller template namespace rejects cross-namespace when isolation enforced",
+			agentSandboxEnabled: true,
+			enforceIsolation:    true,
+			agentSandboxConfig: AgentSandboxConfig{
+				NamespaceStrategy:   AgentSandboxNamespaceStrategyController,
+				ControllerNamespace: "orka-system",
+			},
+			task: &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS}, Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(),
+				},
+			}},
+			wantErr: `resolved template namespace "orka-system" from agent sandbox controller namespace must match task namespace "default"`,
+		},
+		{
+			name:                "agent sandbox template namespace rejects cross-namespace when isolation enforced",
+			agentSandboxEnabled: true,
+			enforceIsolation:    true,
+			task: &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS}, Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{
+					Workspace: executionWorkspace(func(ws *corev1alpha1.ExecutionWorkspaceSpec) {
+						ws.TemplateRef.Namespace = "sandbox-templates"
+					}),
+				},
+			}},
+			wantErr: `resolved template namespace "sandbox-templates" from templateRef.namespace must match task namespace "default"`,
+		},
+		{
 			name:                "valid defaults",
 			agentSandboxEnabled: true,
 			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
@@ -943,10 +1069,11 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &TaskReconciler{
-				AgentSandboxEnabled: tt.agentSandboxEnabled,
-				SubstrateEnabled:    tt.substrateEnabled,
-				AgentSandboxConfig:  tt.agentSandboxConfig,
-				SubstrateConfig:     tt.substrateConfig,
+				AgentSandboxEnabled:       tt.agentSandboxEnabled,
+				SubstrateEnabled:          tt.substrateEnabled,
+				AgentSandboxConfig:        tt.agentSandboxConfig,
+				SubstrateConfig:           tt.substrateConfig,
+				EnforceNamespaceIsolation: tt.enforceIsolation,
 			}
 
 			err := r.validateExecutionWorkspace(tt.task)

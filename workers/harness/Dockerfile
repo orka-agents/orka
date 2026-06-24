@@ -31,7 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code \
+# Pin Codex until the live Copilot-compatible proxy accepts the newer
+# internal_chat_message_metadata_passthrough field emitted by 0.142.x.
+RUN npm install -g @openai/codex@0.141.0 @anthropic-ai/claude-code \
     && npm cache clean --force
 
 COPY --from=target-go /usr/local/go /usr/local/go
