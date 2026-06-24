@@ -18,7 +18,7 @@ func TestCodexAdapterBuildsLegacyCompatibleArgs(t *testing.T) {
 	t.Setenv(workerenv.SystemPrompt, "system guidance")
 	t.Setenv(workerenv.MaxTurns, "12")
 	t.Setenv(workerenv.OpenAIBaseURL, "https://example.invalid/v1")
-	t.Setenv(workerenv.AllowedTools, "web_search")
+	t.Setenv(workerenv.AllowedTools, "Bash,web_search")
 
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
 	spec, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
@@ -57,6 +57,26 @@ func TestCodexAdapterRequiresAllowBash(t *testing.T) {
 	_, err := adapter.BuildCommand(context.Background(), TurnContext{})
 	if err == nil || !strings.Contains(err.Error(), workerenv.AllowBash) {
 		t.Fatalf("BuildCommand error = %v, want allow bash requirement", err)
+	}
+}
+
+func TestCodexAdapterRejectsAllowlistWithoutBash(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.AllowedTools, "Read,WebSearch")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+	if err == nil || !strings.Contains(err.Error(), workerenv.AllowedTools) || !strings.Contains(err.Error(), "without Bash") {
+		t.Fatalf("BuildCommand error = %v, want unsupported Codex allowlist error", err)
+	}
+}
+
+func TestCodexAdapterRejectsDisallowedBash(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.DisallowedTools, "Bash")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+	if err == nil || !strings.Contains(err.Error(), workerenv.DisallowedTools) || !strings.Contains(err.Error(), "cannot disable shell execution") {
+		t.Fatalf("BuildCommand error = %v, want unsupported Codex disallowlist error", err)
 	}
 }
 

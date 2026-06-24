@@ -27,11 +27,8 @@ func (a *CodexAdapter) Name() string { return RuntimeCodex }
 
 func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
-	if !agentCfg.AllowBash {
-		return nil, fmt.Errorf(
-			"codex runtime requires %s=true because the Codex CLI cannot disable shell execution",
-			workerenv.AllowBash,
-		)
+	if err := validateCodexToolPolicy(agentCfg); err != nil {
+		return nil, err
 	}
 
 	outputFile, err := os.CreateTemp("", "codex-last-message-*")
@@ -102,6 +99,52 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 		}
 	}
 	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+}
+
+func validateCodexToolPolicy(cfg *agentEnvConfig) error {
+	if cfg == nil {
+		cfg = &agentEnvConfig{}
+	}
+	if !cfg.AllowBash {
+		return fmt.Errorf(
+			"codex runtime requires %s=true because the Codex CLI cannot disable shell execution",
+			workerenv.AllowBash,
+		)
+	}
+	for _, tool := range cfg.DisallowedTools {
+		if isCodexBashTool(tool) {
+			return fmt.Errorf(
+				"codex runtime cannot enforce %s=%q because the Codex CLI cannot disable shell execution",
+				workerenv.DisallowedTools,
+				strings.TrimSpace(tool),
+			)
+		}
+	}
+	if cfg.AllowedToolsSet && !codexToolListAllowsBash(cfg.AllowedTools) {
+		return fmt.Errorf(
+			"codex runtime cannot enforce %s without Bash because the Codex CLI cannot disable shell execution",
+			workerenv.AllowedTools,
+		)
+	}
+	return nil
+}
+
+func codexToolListAllowsBash(tools []string) bool {
+	for _, tool := range tools {
+		if isCodexBashTool(tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexBashTool(tool string) bool {
+	switch normalizeToolName(tool) {
+	case "bash", "shell", "codeexec", "terminal":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildCodexArgs(
