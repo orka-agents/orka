@@ -592,6 +592,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
+			log.Error(err, "failed to prune unused worker RBAC")
+		}
 		if reason := agentTaskJobBackendUnsupportedReason(task, agent); reason != "" {
 			return r.failTask(ctx, task, reason)
 		}
@@ -2781,9 +2784,10 @@ const (
 	maxWorkerClusterRoleBindingNameLength = 253
 	workerClusterRoleBindingHashLength    = 10
 
-	managedByLabelKey     = "app.kubernetes.io/managed-by"
-	managedByLabelValue   = "orka"
-	orkaManagedByLabelKey = "orka.ai/managed-by"
+	managedByLabelKey       = "app.kubernetes.io/managed-by"
+	managedByLabelValue     = "orka"
+	orkaManagedByLabelKey   = "orka.ai/managed-by"
+	workerRBACOwnedLabelKey = "orka.ai/worker-rbac-owned"
 )
 
 type workerRBACSpec struct {
@@ -2873,19 +2877,21 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, task *corev1alpha
 	if err := r.ensureWorkerClusterRoleBinding(ctx, task.Namespace, spec); err != nil {
 		return err
 	}
-	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, spec); err != nil {
+	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, spec.serviceAccountName); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace string, selected workerRBACSpec) error {
+func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, selectedServiceAccount string) error {
 	inUse, err := r.workerServiceAccountsInUse(ctx, namespace)
 	if err != nil {
 		return err
 	}
-	inUse[selected.serviceAccountName] = struct{}{}
+	if selectedServiceAccount != "" {
+		inUse[selectedServiceAccount] = struct{}{}
+	}
 
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if _, ok := inUse[spec.serviceAccountName]; ok {
@@ -2911,7 +2917,10 @@ func (r *TaskReconciler) workerServiceAccountsInUse(ctx context.Context, namespa
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseScheduled || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
+		if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+			continue
+		}
+		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
 			inUse[workerServiceAccountForTask(task)] = struct{}{}
 		}
 	}
@@ -2969,12 +2978,25 @@ func (r *TaskReconciler) deleteManagedWorkerServiceAccount(ctx context.Context, 
 	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		return nil
 	}
+	if !workerServiceAccountOwnedByOrka(sa) {
+		return nil
+	}
 
 	if err := r.Delete(ctx, sa); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("deleting stale worker ServiceAccount %s/%s: %w", namespace, name, err)
 	}
 	log.Info("Deleted stale worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	return nil
+}
+
+func workerServiceAccountOwnedByOrka(sa *corev1.ServiceAccount) bool {
+	if sa == nil || sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+		return false
+	}
+	if sa.Labels[workerRBACOwnedLabelKey] == scheduledRunLabelValue {
+		return true
+	}
+	return sa.Labels[managedByLabelKey] == ""
 }
 
 func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespace, name string) error {
@@ -2988,7 +3010,8 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 				Name:      name,
 				Namespace: namespace,
 				Labels: map[string]string{
-					orkaManagedByLabelKey: managedByLabelValue,
+					orkaManagedByLabelKey:   managedByLabelValue,
+					workerRBACOwnedLabelKey: scheduledRunLabelValue,
 				},
 			},
 		}

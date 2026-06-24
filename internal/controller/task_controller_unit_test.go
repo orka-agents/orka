@@ -1914,7 +1914,8 @@ func managedWorkerServiceAccount(name string) *corev1.ServiceAccount {
 			Name:      name,
 			Namespace: testNS,
 			Labels: map[string]string{
-				orkaManagedByLabelKey: managedByLabelValue,
+				orkaManagedByLabelKey:   managedByLabelValue,
+				workerRBACOwnedLabelKey: scheduledRunLabelValue,
 			},
 		},
 	}
@@ -2161,6 +2162,138 @@ func TestEnsureWorkerRBAC_PrunesStaleManagedResourcesForUnusedTiers(t *testing.T
 	}
 }
 
+func TestEnsureWorkerRBAC_DoesNotTreatScheduledParentAsUsingWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	dormantScheduledAI := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "scheduled-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Schedule: "*/15 * * * *"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
+	}
+	objects := []client.Object{
+		dormantScheduledAI,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected dormant scheduled AI SA to be pruned, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected dormant scheduled AI CRB to be pruned, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PreservesExternallyManagedUnusedServiceAccount(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	externalSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AIWorkerServiceAccount,
+			Namespace: testNS,
+			Labels: map[string]string{
+				managedByLabelKey:     "Helm",
+				orkaManagedByLabelKey: managedByLabelValue,
+			},
+		},
+	}
+	objects := []client.Object{
+		externalSA,
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &corev1.ServiceAccount{}
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, got); err != nil {
+		t.Fatalf("expected externally managed SA to remain: %v", err)
+	}
+	if got.Labels[managedByLabelKey] != "Helm" {
+		t.Fatalf("expected external managed-by label to remain, got labels %#v", got.Labels)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale managed CRB to be pruned, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PrunesLegacyOrkaManagedServiceAccountWithoutExternalOwner(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	legacySA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      AIWorkerServiceAccount,
+			Namespace: testNS,
+			Labels: map[string]string{
+				orkaManagedByLabelKey: managedByLabelValue,
+			},
+		},
+	}
+	objects := []client.Object{
+		legacySA,
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected legacy Orka-managed SA to be pruned, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale managed CRB to be pruned, got err %v", err)
+	}
+}
+
+func TestHandlePending_AgentTaskPrunesStaleWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	t.Setenv(harnessWrapperEndpointEnv, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: testNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-task", Namespace: testNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	objects := []client.Object{
+		agent,
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+
+	_, _ = r.handlePending(ctx, task)
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected harness agent task to prune stale AI SA, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected harness agent task to prune stale AI CRB, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_DoesNotPruneResourcesForActiveOtherTierTask(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2229,6 +2362,9 @@ func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	}
 	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
+	}
+	if got.Labels[workerRBACOwnedLabelKey] == scheduledRunLabelValue {
+		t.Fatalf("expected existing externally managed ServiceAccount not to get ownership marker, got labels %#v", got.Labels)
 	}
 	if got.Labels["custom"] != "keep" {
 		t.Fatalf("expected existing labels to be preserved, got labels %#v", got.Labels)
