@@ -62,6 +62,33 @@ func TestPrepareWorkspace_NoDiffInResult(t *testing.T) {
 	}
 }
 
+func TestExecGitIgnoresGlobalAndEnvironmentConfig(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(homeDir, ".gitconfig"),
+		[]byte("[core]\n\tsshCommand = malicious-from-home\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
+	t.Setenv("GIT_CONFIG_VALUE_0", "malicious-from-env")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "0")
+
+	if out, err := execGit(dir, "config", "--get", "core.sshCommand"); err == nil {
+		t.Fatalf("execGit honored attacker-controlled git config: %q", out)
+	}
+}
+
 func TestFinalizeResult_EmptyWorkDir(t *testing.T) {
 	data, err := FinalizeResult("", "hello output")
 	if err != nil {
