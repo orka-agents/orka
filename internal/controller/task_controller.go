@@ -2977,10 +2977,25 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 		}
 		if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodUnknown {
 			keepServiceAccounts[pod.Spec.ServiceAccountName] = struct{}{}
+			if podIsOrkaWorkerPod(pod) {
+				repairBindings[pod.Spec.ServiceAccountName] = struct{}{}
+			}
 		}
 	}
 
 	return keepServiceAccounts, repairBindings, nil
+}
+
+func podIsOrkaWorkerPod(pod *corev1.Pod) bool {
+	if pod == nil || pod.Labels[labels.LabelTask] == "" || pod.Labels[labels.LabelTaskType] == "" {
+		return false
+	}
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "Job" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {

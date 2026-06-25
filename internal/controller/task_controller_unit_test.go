@@ -2553,6 +2553,38 @@ func TestEnsureWorkerRBAC_DoesNotGrantRBACForPodOnlyWorkerServiceAccount(t *test
 	}
 }
 
+func TestEnsureWorkerRBAC_RepairsRBACForLiveOrkaWorkerPod(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	livePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ai-worker-pod",
+			Namespace: testNS,
+			Labels: map[string]string{
+				labels.LabelTask:     labels.SelectorValue("ai-task"),
+				labels.LabelTaskType: string(corev1alpha1.TaskTypeAI),
+			},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: "ai-job"}},
+		},
+		Spec:   corev1.PodSpec{ServiceAccountName: AIWorkerServiceAccount, Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	objects := []client.Object{livePod}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected live Orka worker pod ServiceAccount to be repaired: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected live Orka worker pod ClusterRoleBinding to be repaired: %v", err)
+	}
+}
+
 func TestHandleCompleted_PrunesUnusedWorkerRBAC(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
