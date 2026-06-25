@@ -627,6 +627,10 @@ func execGit(dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
+// gitIsolatedConfigEnv prevents untrusted inherited git config from
+// affecting worker-managed git commands. Attackers can steer reads and writes
+// with GIT_CONFIG/GIT_CONFIG_* or HOME/global/system config, so strip those
+// overrides and force git to ignore global and system config files.
 func gitIsolatedConfigEnv(env []string) []string {
 	isolated := make([]string, 0, len(env)+2)
 	for _, entry := range env {
