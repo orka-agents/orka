@@ -11,6 +11,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// SourceProviderGitHub is the canonical source provider value for GitHub repositories.
+const SourceProviderGitHub = "github"
+
 // RepositoryScanSpec defines the desired state of RepositoryScan.
 type RepositoryScanSpec struct {
 	// Provider is the source control provider. GitHub is the only supported v1 provider.

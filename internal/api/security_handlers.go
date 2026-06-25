@@ -41,11 +41,9 @@ type UpdateThreatModelRequest struct {
 	Source  string `json:"source,omitempty"`
 }
 
-const sourceProviderGitHub = "github"
-
 func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScanSpec) {
 	if spec.Provider == "" {
-		spec.Provider = sourceProviderGitHub
+		spec.Provider = corev1alpha1.SourceProviderGitHub
 	}
 	if spec.ValidationMode == "" {
 		spec.ValidationMode = "light"
@@ -67,8 +65,8 @@ func validateRepositoryScanSpec(spec corev1alpha1.RepositoryScanSpec) error {
 	if strings.TrimSpace(spec.RepoURL) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.repoURL is required")
 	}
-	if spec.Provider != "" && spec.Provider != sourceProviderGitHub {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.provider must be github")
+	if spec.Provider != "" && spec.Provider != corev1alpha1.SourceProviderGitHub {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.provider must be %s", corev1alpha1.SourceProviderGitHub))
 	}
 	if _, _, err := security.ParseGitHubRepositoryURL(spec.RepoURL); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())

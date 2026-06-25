@@ -114,12 +114,12 @@ func titleCaseMode(mode string) string {
 	return strings.ToUpper(mode[:1]) + mode[1:]
 }
 
-func repositoryScanValidationError(scan *corev1alpha1.RepositoryScan) error {
+func validateRepositoryScan(scan *corev1alpha1.RepositoryScan) error {
 	if strings.TrimSpace(scan.Spec.RepoURL) == "" {
 		return fmt.Errorf("spec.repoURL is required")
 	}
-	if scan.Spec.Provider != "" && scan.Spec.Provider != "github" {
-		return fmt.Errorf("spec.provider must be github")
+	if scan.Spec.Provider != "" && scan.Spec.Provider != corev1alpha1.SourceProviderGitHub {
+		return fmt.Errorf("spec.provider must be %s", corev1alpha1.SourceProviderGitHub)
 	}
 	if _, _, err := security.ParseGitHubRepositoryURL(scan.Spec.RepoURL); err != nil {
 		return err
@@ -161,7 +161,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	if validationErr := repositoryScanValidationError(scan); validationErr != nil {
+	if validationErr := validateRepositoryScan(scan); validationErr != nil {
 		if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 			s.Status.Phase = repositoryScanPhaseError
 			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{

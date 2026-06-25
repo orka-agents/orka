@@ -713,7 +713,7 @@ func githubTaskName(action string, number int, replayKey string) string {
 		base = strings.Trim(base[:maxBaseLen], "-")
 	}
 	if base == "" {
-		base = sourceProviderGitHub
+		base = corev1alpha1.SourceProviderGitHub
 	}
 	return base + "-" + deliveryHash
 }
