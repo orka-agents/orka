@@ -85,11 +85,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServicePort(),
 		)
 		Expect(err).NotTo(HaveOccurred())
-		gptModel = firstPreferredProxyModelSupportingEndpoint(
+		gptModel = firstPreferredProxyCodexModelSupportingEndpoint(
 			runtimeCatalog,
 			"/responses",
-			liveCopilotProxyGPTModelPreferences,
-			liveCopilotProxyGPTModelPrefixes...,
+			liveCopilotProxyCodexModelPreferences,
+			liveCopilotProxyCodexModelPrefixes...,
 		)
 		claudeModel = firstPreferredProxyModel(
 			runtimeCatalog,
@@ -123,7 +123,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	It("should let codex consume priorTaskRef state on a git workspace", func() {
 		if gptModel == "" {
-			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
+			Skip("Skipping Codex runtime live proxy check: no Codex-family GPT model with /responses support exposed")
 		}
 
 		DeferCleanup(func() {
