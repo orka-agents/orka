@@ -491,8 +491,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if !releasedPoolLeases {
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
+		var pruneErr error
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for deleted task")
+			pruneErr = err
 		}
 
 		// Release session lock if held
@@ -501,6 +503,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
 			}
+		}
+		if pruneErr != nil {
+			return ctrl.Result{}, pruneErr
 		}
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
@@ -1350,6 +1355,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	} else if usesWorkerRBAC {
 		if err := r.ensureWorkerRBAC(ctx, task); err != nil {
 			log.Error(err, "failed to repair worker RBAC for running task")
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -2806,6 +2812,7 @@ const (
 	DefaultAIWorkerClusterRoleName        = "orka-ai-worker-role"
 	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
 	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
+	workerClusterRoleKind                 = "ClusterRole"
 
 	maxWorkerClusterRoleBindingNameLength = 253
 	workerClusterRoleBindingHashLength    = 10
@@ -2946,9 +2953,21 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 			if err := r.deleteLegacyStaticWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 				return err
 			}
+			if err := r.deleteLegacyStaticWorkerRoleBinding(ctx, spec); err != nil {
+				return err
+			}
+			if err := r.deleteStaleManagedWorkerBindings(ctx, namespace, spec); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := r.deleteLegacyStaticWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+			return err
+		}
+		if err := r.deleteLegacyStaticWorkerRoleBinding(ctx, spec); err != nil {
+			return err
+		}
+		if err := r.deleteStaleManagedWorkerBindings(ctx, namespace, spec); err != nil {
 			return err
 		}
 		if err := r.deleteManagedWorkerRoleBinding(ctx, namespace, spec); err != nil {
@@ -3093,6 +3112,92 @@ func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, nam
 	return nil
 }
 
+func (r *TaskReconciler) deleteStaleManagedWorkerBindings(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	if err := r.deleteStaleManagedWorkerRoleBindings(ctx, namespace, spec); err != nil {
+		return err
+	}
+	return r.deleteStaleManagedWorkerClusterRoleBindings(ctx, namespace, spec)
+}
+
+func (r *TaskReconciler) deleteStaleManagedWorkerRoleBindings(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+
+	var bindings rbacv1.RoleBindingList
+	if err := r.List(ctx, &bindings, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("listing managed worker RoleBindings in namespace %s for pruning: %w", namespace, err)
+	}
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		if binding.Name == spec.clusterRoleBindingName || binding.Labels[managedByLabelKey] != managedByLabelValue {
+			continue
+		}
+		if !roleBindingReferencesWorkerServiceAccount(binding, spec, namespace) {
+			continue
+		}
+		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting stale managed worker RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+		}
+		log.Info("Deleted stale managed worker RoleBinding", "namespace", binding.Namespace, "binding", binding.Name, "serviceAccount", spec.serviceAccountName)
+	}
+	return nil
+}
+
+func (r *TaskReconciler) deleteStaleManagedWorkerClusterRoleBindings(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+
+	var bindings rbacv1.ClusterRoleBindingList
+	if err := r.List(ctx, &bindings); err != nil {
+		return fmt.Errorf("listing managed worker ClusterRoleBindings for namespace %s pruning: %w", namespace, err)
+	}
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		if binding.Name == spec.clusterRoleBindingName || binding.Labels[managedByLabelKey] != managedByLabelValue {
+			continue
+		}
+		if !clusterRoleBindingReferencesWorkerServiceAccount(binding, spec, namespace) {
+			continue
+		}
+		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting stale managed worker ClusterRoleBinding %s for namespace %s: %w", binding.Name, namespace, err)
+		}
+		log.Info("Deleted stale managed worker ClusterRoleBinding", "namespace", namespace, "binding", binding.Name, "serviceAccount", spec.serviceAccountName)
+	}
+	return nil
+}
+
+func (r *TaskReconciler) deleteLegacyStaticWorkerRoleBinding(ctx context.Context, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+	tier := workerTrustTierForServiceAccount(spec.serviceAccountName)
+	if tier == "" {
+		return nil
+	}
+	candidates := legacyStaticWorkerBindingNames(r.WorkerClusterRoleBindingNamePrefix, tier)
+	var bindings rbacv1.RoleBindingList
+	if err := r.List(ctx, &bindings); err != nil {
+		return fmt.Errorf("listing legacy static worker RoleBindings: %w", err)
+	}
+	for i := range bindings.Items {
+		binding := &bindings.Items[i]
+		if !slices.Contains(candidates, binding.Name) {
+			continue
+		}
+		subjectNamespaces := r.legacyStaticWorkerRoleBindingSubjectNamespaces(binding, spec)
+		if len(subjectNamespaces) == 0 {
+			continue
+		}
+		for _, subjectNamespace := range subjectNamespaces {
+			if err := r.ensureLegacyStaticWorkerReplacement(ctx, subjectNamespace, spec); err != nil {
+				return err
+			}
+		}
+		if err := r.Delete(ctx, binding); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting legacy static worker RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
+		}
+		log.Info("Deleted legacy static worker RoleBinding", "namespace", binding.Namespace, "binding", binding.Name, "serviceAccount", spec.serviceAccountName, "subjectNamespaces", subjectNamespaces)
+	}
+	return nil
+}
+
 func (r *TaskReconciler) deleteLegacyStaticWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
 	tier := workerTrustTierForServiceAccount(spec.serviceAccountName)
 	if tier == "" {
@@ -3102,11 +3207,7 @@ func (r *TaskReconciler) deleteLegacyStaticWorkerClusterRoleBinding(ctx context.
 	if prefix == "" {
 		prefix = managedByLabelValue
 	}
-	for _, name := range []string{
-		fmt.Sprintf("%s-%s-worker-rolebinding", managedByLabelValue, tier),
-		fmt.Sprintf("%s-%s-worker-rolebinding", prefix, tier),
-		fmt.Sprintf("%s-worker-rolebinding", tier),
-	} {
+	for _, name := range legacyStaticWorkerBindingNames(prefix, tier) {
 		if name == spec.clusterRoleBindingName {
 			continue
 		}
@@ -3115,6 +3216,31 @@ func (r *TaskReconciler) deleteLegacyStaticWorkerClusterRoleBinding(ctx context.
 		}
 	}
 	return nil
+}
+
+func legacyStaticWorkerBindingNames(prefix, tier string) []string {
+	if prefix == "" {
+		prefix = managedByLabelValue
+	}
+	names := []string{
+		fmt.Sprintf("%s-%s-worker-rolebinding", managedByLabelValue, tier),
+		fmt.Sprintf("%s-%s-worker-rolebinding", prefix, tier),
+		fmt.Sprintf("%s-worker-rolebinding", tier),
+	}
+	return compactStrings(names)
+}
+
+func compactStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	compact := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		compact = append(compact, value)
+	}
+	return compact
 }
 
 func workerTrustTierForServiceAccount(serviceAccountName string) string {
@@ -3158,11 +3284,44 @@ func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBindingByName(ctx context.
 	return nil
 }
 
+func (r *TaskReconciler) legacyStaticWorkerRoleBindingSubjectNamespaces(binding *rbacv1.RoleBinding, spec workerRBACSpec) []string {
+	if binding == nil {
+		return nil
+	}
+	if binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind || binding.RoleRef.Name != spec.clusterRoleName {
+		return nil
+	}
+	tier := workerTrustTierForServiceAccount(spec.serviceAccountName)
+	if binding.Labels[managedByLabelKey] == managedByLabelValue && binding.Name == workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, tier, binding.Namespace) {
+		return nil
+	}
+	namespaces := make([]string, 0, len(binding.Subjects))
+	seen := map[string]struct{}{}
+	for _, subject := range binding.Subjects {
+		if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != spec.serviceAccountName {
+			continue
+		}
+		subjectNamespace := subject.Namespace
+		if subjectNamespace == "" {
+			subjectNamespace = binding.Namespace
+		}
+		if subjectNamespace != binding.Namespace {
+			continue
+		}
+		if _, ok := seen[subjectNamespace]; ok {
+			continue
+		}
+		seen[subjectNamespace] = struct{}{}
+		namespaces = append(namespaces, subjectNamespace)
+	}
+	return namespaces
+}
+
 func (r *TaskReconciler) legacyStaticWorkerClusterRoleBindingSubjectNamespaces(crb *rbacv1.ClusterRoleBinding, spec workerRBACSpec) []string {
 	if crb == nil {
 		return nil
 	}
-	if crb.RoleRef.APIGroup != rbacv1.GroupName || crb.RoleRef.Kind != "ClusterRole" || crb.RoleRef.Name != spec.clusterRoleName {
+	if crb.RoleRef.APIGroup != rbacv1.GroupName || crb.RoleRef.Kind != workerClusterRoleKind || crb.RoleRef.Name != spec.clusterRoleName {
 		return nil
 	}
 	tier := workerTrustTierForServiceAccount(spec.serviceAccountName)
@@ -3182,6 +3341,28 @@ func (r *TaskReconciler) legacyStaticWorkerClusterRoleBindingSubjectNamespaces(c
 		namespaces = append(namespaces, subject.Namespace)
 	}
 	return namespaces
+}
+
+func roleBindingReferencesWorkerServiceAccount(binding *rbacv1.RoleBinding, spec workerRBACSpec, namespace string) bool {
+	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind || binding.RoleRef.Name != spec.clusterRoleName {
+		return false
+	}
+	for _, subject := range binding.Subjects {
+		if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != spec.serviceAccountName {
+			continue
+		}
+		if subject.Namespace == "" || subject.Namespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func clusterRoleBindingReferencesWorkerServiceAccount(binding *rbacv1.ClusterRoleBinding, spec workerRBACSpec, namespace string) bool {
+	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind || binding.RoleRef.Name != spec.clusterRoleName {
+		return false
+	}
+	return subjectsContain(binding.Subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: spec.serviceAccountName, Namespace: namespace})
 }
 
 func (r *TaskReconciler) ensureLegacyStaticWorkerReplacement(ctx context.Context, namespace string, spec workerRBACSpec) error {
@@ -3568,7 +3749,7 @@ func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBindin
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
+			Kind:     workerClusterRoleKind,
 			Name:     spec.clusterRoleName,
 		},
 		Subjects: []rbacv1.Subject{
@@ -3591,7 +3772,7 @@ func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.Clu
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
+			Kind:     workerClusterRoleKind,
 			Name:     spec.clusterRoleName,
 		},
 		Subjects: []rbacv1.Subject{

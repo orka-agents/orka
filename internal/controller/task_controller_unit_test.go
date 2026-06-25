@@ -1958,6 +1958,22 @@ func legacyStaticAIWorkerClusterRoleBinding(clusterRole, subjectNamespace string
 	}
 }
 
+func legacyStaticAIWorkerRoleBinding(namespace, clusterRole string) *rbacv1.RoleBinding {
+	return &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "orka-ai-worker-rolebinding", Namespace: namespace},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     clusterRole,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      AIWorkerServiceAccount,
+			Namespace: namespace,
+		}},
+	}
+}
+
 func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2500,6 +2516,44 @@ func TestEnsureWorkerRBAC_PrunesLegacyStaticClusterRoleBindingWithMissingSubject
 	}
 }
 
+func TestEnsureWorkerRBAC_PrunesLegacyStaticRoleBindingUnderNamespaceIsolation(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	objects := []client.Object{
+		legacyStaticAIWorkerRoleBinding("orka-system", DefaultAIWorkerClusterRoleName),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	r.EnforceNamespaceIsolation = true
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding", Namespace: "orka-system"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected legacy static AI RoleBinding under namespace isolation to be pruned, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PrunesPreviousPrefixManagedClusterRoleBinding(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	objects := []client.Object{
+		managedWorkerClusterRoleBinding("oldprefix-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	r.WorkerClusterRoleBindingNamePrefix = "newprefix"
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "oldprefix-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected previous-prefix managed AI ClusterRoleBinding to be pruned, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_PreservesManagedClusterRoleBindingThatCollidesWithLegacyStaticName(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2870,7 +2924,7 @@ func TestHandleDeletion_PrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 }
 
-func TestHandleDeletion_ContinuesAfterWorkerRBACPruneError(t *testing.T) {
+func TestHandleDeletion_ReturnsWorkerRBACPruneErrorBeforeFinalizerRemoval(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 	deletedAt := metav1.Now()
@@ -2896,8 +2950,15 @@ func TestHandleDeletion_ContinuesAfterWorkerRBACPruneError(t *testing.T) {
 	r.JobBuilder = NewJobBuilder(fc)
 
 	_, err := r.handleDeletion(ctx, task)
-	if err != nil {
-		t.Fatalf("expected deletion to continue after prune error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "injected prune failure") {
+		t.Fatalf("expected injected prune error, got %v", err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, got); err != nil {
+		t.Fatalf("getting task after failed deletion prune: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(got, labels.TaskFinalizer) {
+		t.Fatalf("expected finalizer to remain after prune failure, got %v", got.Finalizers)
 	}
 }
 
@@ -2932,6 +2993,32 @@ func TestHandleRunning_HarnessTaskPrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected running harness task to prune unused AI CRB, got err %v", err)
+	}
+}
+
+func TestHandleRunning_ReturnsWorkerRBACRepairError(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "running-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).WithObjects(task).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
+				return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}, obj.GetName(), errors.New("injected repair failure"))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+
+	_, err := r.handleRunning(ctx, task)
+	if err == nil || !strings.Contains(err.Error(), "injected repair failure") {
+		t.Fatalf("expected injected repair error, got %v", err)
 	}
 }
 
