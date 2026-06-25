@@ -72,7 +72,7 @@ func TestCoordinatorReadDeleteToolsEnforceNamespaceScope(t *testing.T) {
 			if res.Success {
 				t.Fatalf("expected namespace permission error, got success: %s", result)
 			}
-			if res.ErrorType != "permission_denied" {
+			if res.ErrorType != testPermissionDeniedErrorType {
 				t.Fatalf("errorType = %q, want permission_denied; result=%s", res.ErrorType, result)
 			}
 
