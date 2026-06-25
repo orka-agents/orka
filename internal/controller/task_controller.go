@@ -491,10 +491,8 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if !releasedPoolLeases {
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		var pruneErr error
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for deleted task")
-			pruneErr = err
 		}
 
 		// Release session lock if held
@@ -503,9 +501,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
 			}
-		}
-		if pruneErr != nil {
-			return ctrl.Result{}, pruneErr
 		}
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
@@ -1343,7 +1338,6 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && taskHasHarnessWrapperTurn(task) {
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for running harness task")
-			return ctrl.Result{}, err
 		}
 		return r.finishHarnessWrapperTask(ctx, task)
 	}
@@ -1633,11 +1627,19 @@ func (r *TaskReconciler) runningTaskJobTerminal(ctx context.Context, task *corev
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return true, nil
 		}
 		return false, fmt.Errorf("getting running task Job %s/%s before worker RBAC repair: %w", task.Namespace, jobName, err)
 	}
-	return job.Status.Succeeded > 0 || job.Status.Failed > 0, nil
+	for _, condition := range job.Status.Conditions {
+		if condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		if condition.Type == batchv1.JobComplete || condition.Type == batchv1.JobFailed {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func jobFailedDueToActiveDeadline(job *batchv1.Job) bool {
@@ -2982,6 +2984,9 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 			}
 			continue
 		}
+		if _, ok := keepServiceAccounts[spec.serviceAccountName]; ok {
+			continue
+		}
 		if err := r.deleteLegacyStaticWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 			return err
 		}
@@ -2996,9 +3001,6 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 		}
 		if err := r.deleteManagedWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 			return err
-		}
-		if _, ok := keepServiceAccounts[spec.serviceAccountName]; ok {
-			continue
 		}
 		if err := r.deleteManagedWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
@@ -3021,7 +3023,7 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 		if !task.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
+		if task.Status.Phase == "" || task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
 			serviceAccount, usesWorkerRBAC, err := r.workerServiceAccountForActiveTask(ctx, task)
 			if err != nil {
 				return nil, nil, err
@@ -3205,9 +3207,12 @@ func (r *TaskReconciler) deleteLegacyStaticWorkerRoleBinding(ctx context.Context
 		}
 		preserveReplacement := false
 		for _, subjectNamespace := range subjectNamespaces {
-			replacementEnsured, err := r.ensureLegacyStaticWorkerReplacement(ctx, subjectNamespace, spec)
+			replacementEnsured, preserveLegacy, err := r.ensureLegacyStaticWorkerReplacement(ctx, subjectNamespace, spec)
 			if err != nil {
 				return err
+			}
+			if preserveLegacy {
+				preserveReplacement = true
 			}
 			if replacementEnsured && r.EnforceNamespaceIsolation {
 				replacementSpec, ok := r.workerRBACSpecForServiceAccount(subjectNamespace, spec.serviceAccountName)
@@ -3237,7 +3242,7 @@ func (r *TaskReconciler) deleteLegacyStaticWorkerClusterRoleBinding(ctx context.
 		prefix = managedByLabelValue
 	}
 	for _, name := range legacyStaticWorkerBindingNames(prefix, tier) {
-		if name == spec.clusterRoleBindingName {
+		if !r.EnforceNamespaceIsolation && name == spec.clusterRoleBindingName {
 			continue
 		}
 		if err := r.deleteLegacyWorkerClusterRoleBindingByName(ctx, namespace, spec, name); err != nil {
@@ -3302,9 +3307,12 @@ func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBindingByName(ctx context.
 	}
 	preserveReplacement := false
 	for _, subjectNamespace := range subjectNamespaces {
-		replacementEnsured, err := r.ensureLegacyStaticWorkerReplacement(ctx, subjectNamespace, spec)
+		replacementEnsured, preserveLegacy, err := r.ensureLegacyStaticWorkerReplacement(ctx, subjectNamespace, spec)
 		if err != nil {
 			return err
+		}
+		if preserveLegacy {
+			preserveReplacement = true
 		}
 		if replacementEnsured && !r.EnforceNamespaceIsolation {
 			replacementSpec, ok := r.workerRBACSpecForServiceAccount(subjectNamespace, spec.serviceAccountName)
@@ -3383,8 +3391,19 @@ func (r *TaskReconciler) legacyStaticWorkerClusterRoleBindingSubjectNamespaces(c
 	return namespaces
 }
 
+func workerBindingNameMatchesNamespace(name, serviceAccountName, namespace string) bool {
+	tier := workerTrustTierForServiceAccount(serviceAccountName)
+	if tier == "" || namespace == "" {
+		return false
+	}
+	return strings.HasSuffix(name, fmt.Sprintf("-%s-worker-%s", tier, namespace))
+}
+
 func roleBindingReferencesWorkerServiceAccount(binding *rbacv1.RoleBinding, spec workerRBACSpec, namespace string) bool {
 	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind {
+		return false
+	}
+	if binding.RoleRef.Name != spec.clusterRoleName && !workerBindingNameMatchesNamespace(binding.Name, spec.serviceAccountName, namespace) {
 		return false
 	}
 	for _, subject := range binding.Subjects {
@@ -3402,43 +3421,50 @@ func clusterRoleBindingReferencesWorkerServiceAccount(binding *rbacv1.ClusterRol
 	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind {
 		return false
 	}
+	if binding.RoleRef.Name != spec.clusterRoleName && !workerBindingNameMatchesNamespace(binding.Name, spec.serviceAccountName, namespace) {
+		return false
+	}
 	return subjectsContain(binding.Subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: spec.serviceAccountName, Namespace: namespace})
 }
 
-func (r *TaskReconciler) ensureLegacyStaticWorkerReplacement(ctx context.Context, namespace string, spec workerRBACSpec) (bool, error) {
+func (r *TaskReconciler) ensureLegacyStaticWorkerReplacement(ctx context.Context, namespace string, spec workerRBACSpec) (bool, bool, error) {
 	if namespace == "" {
-		return false, nil
+		return false, false, nil
 	}
-	_, repairBindings, err := r.workerServiceAccountUsage(ctx, namespace)
+	keepServiceAccounts, repairBindings, err := r.workerServiceAccountUsage(ctx, namespace)
 	if apierrors.IsNotFound(err) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("checking legacy static worker ClusterRoleBinding subject namespace %s: %w", namespace, err)
+		logf.FromContext(ctx).Info("Preserving legacy static worker binding after subject namespace usage check failed", "namespace", namespace, "serviceAccount", spec.serviceAccountName, "error", err)
+		return false, true, nil
 	}
 	if _, ok := repairBindings[spec.serviceAccountName]; !ok {
-		return false, nil
+		if _, keep := keepServiceAccounts[spec.serviceAccountName]; keep {
+			return false, true, nil
+		}
+		return false, false, nil
 	}
 	replacementSpec, ok := r.workerRBACSpecForServiceAccount(namespace, spec.serviceAccountName)
 	if !ok {
-		return false, nil
+		return false, false, nil
 	}
 	if err := r.ensureWorkerServiceAccount(ctx, namespace, replacementSpec.serviceAccountName); err != nil {
-		return false, err
+		return false, false, err
 	}
 	if r.EnforceNamespaceIsolation {
 		if err := r.ensureWorkerRoleBinding(ctx, namespace, replacementSpec); err != nil {
-			return false, err
+			return false, false, err
 		}
 		if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, replacementSpec); err != nil {
-			return false, err
+			return false, false, err
 		}
-		return true, nil
+		return true, false, nil
 	}
 	if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, replacementSpec); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return true, nil
+	return true, false, nil
 }
 
 func (r *TaskReconciler) workerRBACSpecForServiceAccount(namespace, serviceAccountName string) (workerRBACSpec, bool) {

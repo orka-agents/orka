@@ -1118,6 +1118,7 @@ func TestResolveExecutionWorkspaceRequestValidatesResolvedTemplateNamespace(t *t
 }
 
 func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T) {
+	const controllerNamespace = "orka-system"
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
@@ -1128,13 +1129,13 @@ func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T
 
 	r := &TaskReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1alpha1.SandboxTemplate{
-			ObjectMeta: metav1.ObjectMeta{Name: "default-template", Namespace: "orka-system"},
+			ObjectMeta: metav1.ObjectMeta{Name: "default-template", Namespace: controllerNamespace},
 		}).Build(),
 		AgentSandboxEnabled: true,
 		AgentSandboxConfig: AgentSandboxConfig{
 			DefaultTemplate:     "default-template",
 			NamespaceStrategy:   AgentSandboxNamespaceStrategyController,
-			ControllerNamespace: "orka-system",
+			ControllerNamespace: controllerNamespace,
 		},
 	}
 	task := &corev1alpha1.Task{
@@ -1149,7 +1150,7 @@ func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T
 	if err != nil {
 		t.Fatalf("resolveExecutionWorkspaceRequest() error = %v", err)
 	}
-	if request.TemplateNamespace != "orka-system" || request.ClaimNamespace != "orka-system" {
+	if request.TemplateNamespace != controllerNamespace || request.ClaimNamespace != controllerNamespace {
 		t.Fatalf("resolved namespaces = template %q claim %q, want orka-system", request.TemplateNamespace, request.ClaimNamespace)
 	}
 }
