@@ -9,8 +9,8 @@ Capture a read-only GitHub PR closeout snapshot as JSON by default.
 
 Options:
   --repo PATH              Local git checkout path (default: .)
-  --github-repo OWNER/REPO GitHub repository override (default: gh repo view)
-  --pr NUMBER_OR_URL       PR number or URL (default: current branch PR)
+  --github-repo OWNER/REPO GitHub repository override for --pr (default: gh repo view)
+  --pr NUMBER_OR_URL       PR number or URL (default: current branch PR in local checkout)
   --summary                Print a concise human-readable summary instead of JSON
   --compact                Print compact JSON instead of pretty JSON
   -h, --help               Show this help
@@ -22,6 +22,7 @@ USAGE
 
 repo_path="."
 github_repo=""
+github_repo_explicit=0
 pr_selector=""
 summary=0
 compact=0
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --github-repo)
       [[ $# -ge 2 ]] || { echo "missing value for --github-repo" >&2; exit 2; }
       github_repo="$2"
+      github_repo_explicit=1
       shift 2
       ;;
     --pr)
@@ -89,7 +91,11 @@ pr_fields='number,url,title,state,isDraft,baseRefName,headRefName,headRefOid,mer
 if [[ -n "$pr_selector" ]]; then
   pr_json="$(gh pr view "$pr_selector" --repo "$github_repo" --json "$pr_fields")"
 else
-  pr_json="$(gh pr view --repo "$github_repo" --json "$pr_fields")"
+  if [[ "$github_repo_explicit" -eq 1 ]]; then
+    echo "--github-repo requires --pr; current-branch PR detection uses the local checkout" >&2
+    exit 2
+  fi
+  pr_json="$(gh pr view --json "$pr_fields")"
 fi
 
 pr_number="$(jq -r '.number' <<<"$pr_json")"
