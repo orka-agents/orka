@@ -3192,11 +3192,14 @@ func (r *TaskReconciler) ensureLegacyStaticWorkerReplacement(ctx context.Context
 	if namespace == "" {
 		return nil
 	}
-	keepServiceAccounts, _, err := r.workerServiceAccountUsage(ctx, namespace)
+	_, repairBindings, err := r.workerServiceAccountUsage(ctx, namespace)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("checking legacy static worker ClusterRoleBinding subject namespace %s: %w", namespace, err)
 	}
-	if _, ok := keepServiceAccounts[spec.serviceAccountName]; !ok {
+	if _, ok := repairBindings[spec.serviceAccountName]; !ok {
 		return nil
 	}
 	replacementSpec, ok := r.workerRBACSpecForServiceAccount(namespace, spec.serviceAccountName)

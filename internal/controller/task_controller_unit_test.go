@@ -1942,9 +1942,9 @@ func managedWorkerClusterRoleBinding(name, clusterRole, serviceAccount string) *
 	}
 }
 
-func legacyStaticWorkerClusterRoleBinding(name, clusterRole, serviceAccount, subjectNamespace string) *rbacv1.ClusterRoleBinding {
+func legacyStaticAIWorkerClusterRoleBinding(clusterRole, subjectNamespace string) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: "orka-ai-worker-rolebinding"},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: rbacv1.GroupName,
 			Kind:     "ClusterRole",
@@ -1952,7 +1952,7 @@ func legacyStaticWorkerClusterRoleBinding(name, clusterRole, serviceAccount, sub
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
-			Name:      serviceAccount,
+			Name:      AIWorkerServiceAccount,
 			Namespace: subjectNamespace,
 		}},
 	}
@@ -2398,7 +2398,7 @@ func TestEnsureWorkerRBAC_PrunesLegacyStaticClusterRoleBindingForInstallNamespac
 	scheme := newTestScheme()
 	ctx := context.Background()
 	objects := []client.Object{
-		legacyStaticWorkerClusterRoleBinding("orka-ai-worker-rolebinding", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount, "orka-system"),
+		legacyStaticAIWorkerClusterRoleBinding(DefaultAIWorkerClusterRoleName, "orka-system"),
 	}
 	r := newUnitReconciler(scheme, objects...)
 	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
@@ -2423,7 +2423,7 @@ func TestEnsureWorkerRBAC_EnsuresReplacementBeforePruningLegacyStaticClusterRole
 	}
 	objects := []client.Object{
 		activeAI,
-		legacyStaticWorkerClusterRoleBinding("orka-ai-worker-rolebinding", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount, legacyNamespace),
+		legacyStaticAIWorkerClusterRoleBinding(DefaultAIWorkerClusterRoleName, legacyNamespace),
 	}
 	r := newUnitReconciler(scheme, objects...)
 	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
@@ -2440,6 +2440,63 @@ func TestEnsureWorkerRBAC_EnsuresReplacementBeforePruningLegacyStaticClusterRole
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-legacy-active"}, &rbacv1.ClusterRoleBinding{}); err != nil {
 		t.Fatalf("expected active legacy namespace AI ClusterRoleBinding replacement to exist: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_DoesNotCreateReplacementForPodOnlyLegacyStaticSubject(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	legacyNamespace := "legacy-pod-only"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-pod", Namespace: legacyNamespace},
+		Spec:       corev1.PodSpec{ServiceAccountName: AIWorkerServiceAccount},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	objects := []client.Object{
+		pod,
+		legacyStaticAIWorkerClusterRoleBinding(DefaultAIWorkerClusterRoleName, legacyNamespace),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected legacy static AI ClusterRoleBinding to be pruned for pod-only subject, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-legacy-pod-only"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no replacement ClusterRoleBinding for pod-only evidence, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PrunesLegacyStaticClusterRoleBindingWithMissingSubjectNamespace(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	missingNamespace := "missing-legacy"
+	legacy := legacyStaticAIWorkerClusterRoleBinding(DefaultAIWorkerClusterRoleName, missingNamespace)
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).WithObjects(legacy).Build()
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			listOpts := (&client.ListOptions{}).ApplyOptions(opts)
+			if listOpts.Namespace == missingNamespace {
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, missingNamespace)
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected legacy static AI ClusterRoleBinding with missing subject namespace to be pruned, got err %v", err)
 	}
 }
 
@@ -2482,7 +2539,7 @@ func TestEnsureWorkerRBAC_PreservesLegacyStaticClusterRoleBindingWithUnexpectedR
 	scheme := newTestScheme()
 	ctx := context.Background()
 	objects := []client.Object{
-		legacyStaticWorkerClusterRoleBinding("orka-ai-worker-rolebinding", "custom-ai-worker-role", AIWorkerServiceAccount, "orka-system"),
+		legacyStaticAIWorkerClusterRoleBinding("custom-ai-worker-role", "orka-system"),
 	}
 	r := newUnitReconciler(scheme, objects...)
 	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
