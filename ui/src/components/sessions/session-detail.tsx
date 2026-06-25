@@ -6,11 +6,23 @@ import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Trash2 } from 'lucide-react'
 import { TranscriptViewer } from './transcript-viewer'
 import { useSession, useDeleteSession } from '@/hooks/use-sessions'
+import { toast } from 'sonner'
 
 export function SessionDetail({ sessionId }: { sessionId: string }) {
   const { data: session, isLoading } = useSession(sessionId)
   const deleteSession = useDeleteSession()
   const navigate = useNavigate()
+
+  const handleDelete = async () => {
+    if (!session || !confirm(`Delete session "${session.name}"?`)) return
+    try {
+      await deleteSession.mutateAsync(session.name)
+      toast.success('Session deleted')
+      navigate({ to: '/sessions' })
+    } catch (err) {
+      toast.error(`Failed to delete session: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -28,7 +40,7 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
-        <Link to="/sessions"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <Link to="/sessions"><Button variant="ghost" size="icon" aria-label="Back to sessions"><ArrowLeft className="h-4 w-4" /></Button></Link>
         <PageHeader
           className="flex-1"
           title={session.name}
@@ -37,10 +49,7 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
             <Button
               variant="destructive"
               size="sm"
-              onClick={async () => {
-                await deleteSession.mutateAsync(session.name)
-                navigate({ to: '/sessions' })
-              }}
+              onClick={handleDelete}
             >
               <Trash2 className="mr-2 h-4 w-4" /> Delete
             </Button>

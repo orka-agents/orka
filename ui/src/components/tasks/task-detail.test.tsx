@@ -137,6 +137,7 @@ describe('TaskDetail', () => {
 
   it('delete button removes task and navigates', async () => {
     const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -151,9 +152,11 @@ describe('TaskDetail', () => {
       expect(screen.getByText('del-task')).toBeInTheDocument()
     })
     await user.click(screen.getByRole('button', { name: /delete/i }))
+    expect(confirmSpy).toHaveBeenCalledWith('Delete task "del-task"?')
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/tasks' })
     })
+    confirmSpy.mockRestore()
   })
 
   it('shows conditions when present', async () => {

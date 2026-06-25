@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
@@ -11,12 +11,11 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 import { useUIStore } from '@/stores/ui'
-import { useAllFindings } from './use-security'
+import { useAllFindings, useRunSecurityScan } from './use-security'
 
-function createWrapper() {
-  const queryClient = new QueryClient({
+function createWrapper(queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
-  })
+  })) {
   return ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
@@ -76,5 +75,47 @@ describe('useAllFindings', () => {
     expect(requests[0].searchParams.has('cursor')).toBe(false)
     expect(requests[1].searchParams.get('limit')).toBe('100')
     expect(requests[1].searchParams.get('cursor')).toBe('1')
+  })
+})
+
+describe('useRunSecurityScan', () => {
+  it('starts scans with namespace as a query parameter and invalidates repository lists', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+    })
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    useUIStore.setState({ namespace: 'qa-ns', sidebarCollapsed: false, theme: 'light' })
+    let requestURL: URL | undefined
+    let receivedBody: unknown
+
+    server.use(
+      http.post('/api/v1/security/repositories/:name/scans', async ({ request }) => {
+        requestURL = new URL(request.url)
+        receivedBody = await request.json()
+        return HttpResponse.json({
+          id: 'scan-1',
+          namespace: 'qa-ns',
+          repositoryScan: 'demo-repo',
+          taskName: 'scan-task',
+          mode: 'manual',
+          phase: 'queued',
+          startedAt: '2026-01-01T00:00:00Z',
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useRunSecurityScan('demo-repo'), {
+      wrapper: createWrapper(queryClient),
+    })
+
+    await act(async () => {
+      await result.current.mutateAsync()
+    })
+
+    expect(requestURL?.searchParams.get('namespace')).toBe('qa-ns')
+    expect(receivedBody).toEqual({})
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['security', 'scans', 'qa-ns', 'demo-repo'] })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['security', 'repository', 'qa-ns', 'demo-repo'] })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['security', 'repositories', 'qa-ns'] })
   })
 })

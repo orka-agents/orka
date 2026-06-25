@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryScans, useRunSecurityScan } from '@/hooks/use-security'
 import type { RepositoryScan } from '@/schemas/security'
+import { toast } from 'sonner'
 
 function timeAgo(ts?: string) {
   if (!ts) return 'Never'
@@ -65,6 +66,13 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
   const runScan = useRunSecurityScan(repo.metadata.name)
   const lastScanAt = repo.status?.lastScanAt ?? repo.status?.lastSuccessfulScanAt
 
+  const handleRunScan = () => {
+    runScan.mutate(undefined, {
+      onSuccess: () => toast.success('Security scan started'),
+      onError: (error) => toast.error(`Failed to start security scan: ${error instanceof Error ? error.message : 'Unknown error'}`),
+    })
+  }
+
   return (
     <Card className="transition-colors hover:border-primary/50">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
@@ -97,7 +105,7 @@ function RepositoryCard({ repo }: { repo: RepositoryScan }) {
           <Link to="/security/$repoId" params={{ repoId: repo.metadata.name }}>
             <Button variant="outline">Open</Button>
           </Link>
-          <Button variant="secondary" onClick={() => runScan.mutate()} disabled={runScan.isPending}>
+          <Button variant="secondary" onClick={handleRunScan} disabled={runScan.isPending}>
             <RefreshCcw className="mr-2 h-4 w-4" />
             Scan Now
           </Button>

@@ -103,6 +103,7 @@ describe('SessionList', () => {
 
   it('delete button calls deleteSession', async () => {
     const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/sessions', () =>
         HttpResponse.json({
@@ -116,8 +117,10 @@ describe('SessionList', () => {
       expect(screen.getByText('sess-del')).toBeInTheDocument()
     })
     await user.click(screen.getByRole('button'))
+    expect(confirmSpy).toHaveBeenCalledWith('Delete session "sess-del"?')
     // Verify no error - mutation fires
     expect(screen.getByText('sess-del')).toBeInTheDocument()
+    confirmSpy.mockRestore()
   })
 
   it('timeAgo covers minutes, hours, and days', async () => {

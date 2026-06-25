@@ -78,9 +78,11 @@ export function TaskList() {
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label={`Delete task ${task.metadata.name}`}
                       onClick={(e) => {
                         e.preventDefault()
                         e.stopPropagation()
+                        if (!confirm(`Delete task "${task.metadata.name}"?`)) return
                         deleteTask.mutate(task.metadata.name)
                       }}
                     >

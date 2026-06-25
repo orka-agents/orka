@@ -16,6 +16,7 @@ import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { useTask, useDeleteTask } from '@/hooks/use-tasks'
 import { useNavigate } from '@tanstack/react-router'
+import { toast } from 'sonner'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -30,6 +31,17 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const { data: task, isLoading } = useTask(taskId)
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
+
+  const handleDelete = async () => {
+    if (!task || !confirm(`Delete task "${task.metadata.name}"?`)) return
+    try {
+      await deleteTask.mutateAsync(task.metadata.name)
+      toast.success('Task deleted')
+      navigate({ to: '/tasks' })
+    } catch (err) {
+      toast.error(`Failed to delete task: ${err instanceof Error ? err.message : 'Unknown error'}`)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -48,7 +60,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Link to="/tasks"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+          <Link to="/tasks"><Button variant="ghost" size="icon" aria-label="Back to tasks"><ArrowLeft className="h-4 w-4" /></Button></Link>
           <PageHeader
             title={task.metadata.name}
             description={`${task.metadata.namespace} · ${task.spec.type}`}
@@ -66,10 +78,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           <Button
             variant="destructive"
             size="sm"
-            onClick={async () => {
-              await deleteTask.mutateAsync(task.metadata.name)
-              navigate({ to: '/tasks' })
-            }}
+            onClick={handleDelete}
           >
             <Trash2 className="mr-2 h-4 w-4" /> Delete
           </Button>
