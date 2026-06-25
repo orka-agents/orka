@@ -142,12 +142,16 @@ func codexToolListAllowsBash(tools []string) bool {
 }
 
 func isDisallowedCodexBashTool(tool string) bool {
+	// Scoped Bash deny entries still target shell execution. Codex cannot
+	// disable shell execution or enforce command scopes, so reject them.
 	return isCodexBashAlias(codexToolName(tool))
 }
 
 func isUnscopedCodexBashTool(tool string) bool {
 	tool = strings.TrimSpace(tool)
 	if _, _, ok := strings.Cut(tool, "("); ok {
+		// A scoped Bash allow entry is narrower than full Bash access; treating it
+		// as satisfying Codex's shell requirement would silently widen policy.
 		return false
 	}
 	return isCodexBashAlias(tool)
