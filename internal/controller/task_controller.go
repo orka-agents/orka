@@ -3145,17 +3145,45 @@ func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBindingByName(ctx context.
 		return fmt.Errorf("getting legacy static worker ClusterRoleBinding %s: %w", name, err)
 	}
 
-	desiredSubject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: spec.serviceAccountName, Namespace: namespace}
-	bindsWorkerServiceAccount := subjectsContain(legacy.Subjects, desiredSubject)
-	if !bindsWorkerServiceAccount {
+	if !r.legacyStaticWorkerClusterRoleBindingMatches(legacy, spec) {
 		return nil
 	}
 
 	if err := r.Delete(ctx, legacy); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("deleting legacy static worker ClusterRoleBinding %s: %w", name, err)
 	}
-	log.Info("Deleted legacy static worker ClusterRoleBinding", "namespace", namespace, "binding", name, "serviceAccount", spec.serviceAccountName)
+	log.Info("Deleted legacy static worker ClusterRoleBinding", "namespace", namespace, "binding", name, "serviceAccount", spec.serviceAccountName, "subjectNamespaces", serviceAccountSubjectNamespaces(legacy.Subjects, spec.serviceAccountName))
 	return nil
+}
+
+func (r *TaskReconciler) legacyStaticWorkerClusterRoleBindingMatches(crb *rbacv1.ClusterRoleBinding, spec workerRBACSpec) bool {
+	if crb == nil {
+		return false
+	}
+	if crb.RoleRef.APIGroup != rbacv1.GroupName || crb.RoleRef.Kind != "ClusterRole" || crb.RoleRef.Name != spec.clusterRoleName {
+		return false
+	}
+	tier := workerTrustTierForServiceAccount(spec.serviceAccountName)
+	for _, subject := range crb.Subjects {
+		if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != spec.serviceAccountName {
+			continue
+		}
+		if crb.Labels[managedByLabelKey] == managedByLabelValue && crb.Name == workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, tier, subject.Namespace) {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func serviceAccountSubjectNamespaces(subjects []rbacv1.Subject, serviceAccountName string) []string {
+	namespaces := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		if subject.Kind == rbacv1.ServiceAccountKind && subject.Name == serviceAccountName {
+			namespaces = append(namespaces, subject.Namespace)
+		}
+	}
+	return namespaces
 }
 
 func (r *TaskReconciler) deleteManagedWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {

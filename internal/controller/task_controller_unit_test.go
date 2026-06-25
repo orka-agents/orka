@@ -1942,6 +1942,22 @@ func managedWorkerClusterRoleBinding(name, clusterRole, serviceAccount string) *
 	}
 }
 
+func legacyStaticWorkerClusterRoleBinding(name, clusterRole, serviceAccount, subjectNamespace string) *rbacv1.ClusterRoleBinding {
+	return &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     clusterRole,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      serviceAccount,
+			Namespace: subjectNamespace,
+		}},
+	}
+}
+
 func TestEnsureWorkerRBAC_CreatesOnlyTaskRequiredResources(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2375,6 +2391,77 @@ func TestEnsureWorkerRBAC_PreservesUnmarkedLegacyServiceAccount(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected stale managed CRB to be pruned, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PrunesLegacyStaticClusterRoleBindingForInstallNamespaceSubject(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	objects := []client.Object{
+		legacyStaticWorkerClusterRoleBinding("orka-ai-worker-rolebinding", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount, "orka-system"),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected legacy static AI ClusterRoleBinding with install-namespace subject to be pruned, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PreservesManagedClusterRoleBindingThatCollidesWithLegacyStaticName(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	objects := []client.Object{
+		&rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "orka-ai-worker-rolebinding",
+				Labels: map[string]string{
+					managedByLabelKey: managedByLabelValue,
+				},
+			},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     DefaultAIWorkerClusterRoleName,
+			},
+			Subjects: []rbacv1.Subject{{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      AIWorkerServiceAccount,
+				Namespace: "rolebinding",
+			}},
+		},
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected managed dynamic binding with legacy-name collision to be preserved: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PreservesLegacyStaticClusterRoleBindingWithUnexpectedRole(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	objects := []client.Object{
+		legacyStaticWorkerClusterRoleBinding("orka-ai-worker-rolebinding", "custom-ai-worker-role", AIWorkerServiceAccount, "orka-system"),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected static-name binding with custom role to be preserved: %v", err)
 	}
 }
 
