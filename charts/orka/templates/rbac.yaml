@@ -106,11 +106,11 @@ rules:
 
   # RBAC permissions (for chat K8s tools and managed worker bindings)
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "roles", "rolebindings"]
+    resources: ["clusterroles", "roles"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
-    verbs: ["create", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
