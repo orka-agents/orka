@@ -9,6 +9,7 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 - **Scope discipline** — implement exactly what's asked, nothing more.
 - **Pre-land/pre-commit code changes**: use `$autoreview` until no accepted/actionable findings remain, unless equivalent manual review already done, trivial/docs-only, or user opts out.
 - **Git push discipline** — after making a change, push to the current branch when it is not `main`; never push directly to `main`.
+- **Post-PR closeout** — after creating or updating an agent-authored PR, use `$pr-closeout` until current CI/review blockers are resolved, unless the human opts out or the PR is intentionally draft/WIP.
 
 ## Continuous Review
 
@@ -29,7 +30,7 @@ Before creating or updating a GitHub PR or issue body for agent-authored work, r
 
 ## PR Closeout
 
-When asked to drive a PR to green/merge-ready after implementation or review, use `$pr-closeout` (`.agents/skills/pr-closeout/SKILL.md`): resolve merge conflicts, fix failing CI, address or push back on unresolved review threads, reply on GitHub and resolve authorized comments, push the non-main PR branch, and repeat until CI is green and no unresolved actionable review threads remain.
+After creating or updating an agent-authored PR, use `$pr-closeout` (`.agents/skills/pr-closeout/SKILL.md`) by default, like `$autoreview` is used before landing. Resolve merge conflicts, fix failing CI, address or push back on unresolved review threads, reply on GitHub and resolve addressed comments, push the non-main PR branch, and repeat until current CI is green and no unresolved actionable review threads remain. Skip only when the human opts out, the PR is intentionally draft/WIP, or the remaining blocker is external/human-only. Do not merge or enable auto-merge unless explicitly asked.
 
 ## Build & Test
 

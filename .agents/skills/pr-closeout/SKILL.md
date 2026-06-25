@@ -1,18 +1,18 @@
 ---
 name: pr-closeout
-description: Drive a GitHub pull request to merge-ready after implementation or review. Use when the user asks to fix merge conflicts, make CI green, handle unresolved PR review comments, reply to or resolve review threads, push PR branch updates, or repeat until a PR is green and review-clean.
+description: Drive a GitHub pull request to merge-ready after implementation or review. Use automatically after creating or updating an agent-authored PR unless the user opts out or the PR is intentionally draft/WIP; also use when asked to fix merge conflicts, make CI green, handle unresolved PR review comments, reply to or resolve review threads, push PR branch updates, or repeat until a PR is green and review-clean.
 ---
 
 # PR Closeout
 
-Drive the current GitHub PR from “has feedback or failing checks” to “currently merge-ready.” This is an orchestration workflow over git, GitHub review threads, CI logs, local verification, and optional `$autoreview`; it is not a replacement for `$autoreview`.
+Drive the current GitHub PR from “has feedback or failing checks” to “currently merge-ready.” Run this automatically after creating or updating an agent-authored PR unless the user opts out or the PR is intentionally draft/WIP. This is an orchestration workflow over git, GitHub review threads, CI logs, local verification, and optional `$autoreview`; it is not a replacement for `$autoreview`.
 
 ## Guardrails
 
-- Treat the user’s closeout request as the scope. Fix merge conflicts, CI failures, and unresolved actionable review feedback; avoid unrelated cleanup.
-- Do not perform GitHub writes (reply, resolve threads, submit reviews, merge, enable auto-merge, or push) unless the user explicitly authorized that write. A request like “reply and resolve each comment,” “push updates,” or “drive this PR until green” authorizes the matching writes. When resolving a review thread under that authorization, reply on GitHub with the fix or pushback evidence before resolving it.
+- Treat automatic post-PR closeout or the user’s closeout request as the scope. Fix merge conflicts, CI failures, and unresolved actionable review feedback; avoid unrelated cleanup.
+- Creating or updating an agent-authored PR authorizes normal closeout writes for that PR: push fixes to the non-main PR branch, reply on GitHub with fix/pushback evidence, and resolve review threads after replying when they are addressed. A request like “reply and resolve each comment,” “push updates,” or “drive this PR until green” authorizes the same writes. Do not submit reviews, merge, enable auto-merge, retarget the PR, force-push, or perform destructive git operations unless explicitly asked.
 - Never push directly to `main`. For PR branches, commit with `git commit -s` when a commit is needed, then push the current branch.
-- Do not amend, rebase, force-push, retarget, or merge the PR unless the user specifically asks or the branch owner’s workflow clearly requires it.
+- Do not amend, rebase, force-push, retarget, merge, or enable auto-merge unless the user specifically asks or the branch owner’s workflow clearly requires it.
 - Redact secrets from logs and summaries. Do not paste tokens, auth URLs, JWTs, TxTokens, cookies, or credentials.
 - Prefer evidence over deference: push back on review comments that are invalid, stale, duplicate, or would introduce a regression, and explain why with code/test evidence.
 - Say “currently no unresolved actionable review threads remain,” not “reviewers will have no more comments.” Future review activity cannot be guaranteed.
@@ -70,7 +70,7 @@ Drive the current GitHub PR from “has feedback or failing checks” to “curr
 
 9. Repeat until no current blockers remain.
    - Re-check mergeability, required checks, review decision, and unresolved review threads after every push or GitHub write batch.
-   - If checks are queued or running, wait for the current run set to finish. Poll at reasonable intervals; do not spin indefinitely after a stable pass/fail state.
+   - If checks are queued, pending, or running, wait for the current run set to finish. Poll at reasonable intervals; do not spin indefinitely after a stable pass/fail state.
    - If new reviewer comments arrive during the loop, classify and address them like the first batch.
    - Stop when the PR currently has no merge conflicts, required checks are green, and no unresolved actionable review threads remain.
    - If blocked, report the exact blocker: failing external check, missing GitHub auth, ambiguous review request, required human approval, branch protection, or reviewer decision not yet updated.
