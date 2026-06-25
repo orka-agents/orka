@@ -1342,7 +1342,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
 		return r.failTask(ctx, task, "harness runtime turn identity is missing")
 	}
-	if task.Spec.Type != corev1alpha1.TaskTypeAgent || strings.TrimSpace(task.Status.JobName) != "" {
+	if _, usesWorkerRBAC, err := r.workerServiceAccountForActiveTask(ctx, task); err != nil {
+		log.Error(err, "failed to classify running task worker RBAC")
+		return ctrl.Result{}, err
+	} else if usesWorkerRBAC {
 		if err := r.ensureWorkerRBAC(ctx, task); err != nil {
 			log.Error(err, "failed to repair worker RBAC for running task")
 			return ctrl.Result{}, err
@@ -3010,9 +3013,6 @@ func (r *TaskReconciler) workerServiceAccountForActiveTask(ctx context.Context, 
 		return workerServiceAccountForTask(task), true, nil
 	}
 
-	if strings.TrimSpace(task.Status.JobName) != "" {
-		return workerServiceAccountForTask(task), true, nil
-	}
 	if task.Spec.AgentRef == nil {
 		return "", false, nil
 	}
@@ -3033,6 +3033,9 @@ func (r *TaskReconciler) workerServiceAccountForActiveTask(ctx context.Context, 
 	}
 	if agent.Spec.Runtime != nil || agentTaskJobBackendUnsupportedReason(task, agent) != "" {
 		return "", false, nil
+	}
+	if strings.TrimSpace(task.Status.JobName) != "" {
+		return workerServiceAccountForTask(task), true, nil
 	}
 	return workerServiceAccountForTask(task), true, nil
 }
