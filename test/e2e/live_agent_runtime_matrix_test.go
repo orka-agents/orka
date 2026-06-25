@@ -122,6 +122,9 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 	})
 
 	It("should let codex consume priorTaskRef state on a git workspace", func() {
+		if strings.EqualFold(strings.TrimSpace(firstSetEnv("E2E_LIVE_COPILOT_SKIP_CODEX_RUNTIME")), "true") {
+			Skip("Skipping Codex runtime live proxy check: live Copilot proxy currently rejects Codex CLI internal metadata")
+		}
 		if gptModel == "" {
 			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
 		}

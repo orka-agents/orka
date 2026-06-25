@@ -272,6 +272,7 @@ YAML
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE="${copilot_proxy_namespace}" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_NAME="${copilot_proxy_service}" \
   E2E_LIVE_COPILOT_PROXY_SERVICE_PORT="${copilot_proxy_service_port}" \
+  E2E_LIVE_COPILOT_SKIP_CODEX_RUNTIME="${E2E_LIVE_COPILOT_SKIP_CODEX_RUNTIME:-true}" \
   go test -tags=e2e ./test/e2e/ -timeout 45m -v -ginkgo.v \
     -ginkgo.focus="Live Copilot Proxy Provider|Live Chat API|Live Anthropic Compat API|Live Agent Runtime Matrix"
 
