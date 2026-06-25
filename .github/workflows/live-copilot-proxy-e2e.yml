@@ -26,7 +26,7 @@ jobs:
     env:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       KIND_CLUSTER: orka-live-copilot-proxy-e2e
-      COPILOT_PROXY_IMAGE: docker.io/sozercan/copilot-proxy:latest
+      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:latest
     steps:
       - name: Decide whether live e2e can run
         id: gate
@@ -92,7 +92,7 @@ jobs:
       - name: Install kind
         if: steps.gate.outputs.run == 'true'
         run: |
-          curl -fsSL -o ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
