@@ -568,9 +568,6 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 		harnessWrapperPlannedAtAnno,
 		harnessWrapperMetadataAnno,
 	} {
-		if task.Annotations == nil {
-			break
-		}
 		if value, ok := task.Annotations[key]; ok && strings.TrimSpace(value) != "" {
 			latest.Annotations[key] = value
 		}
