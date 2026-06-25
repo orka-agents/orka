@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -192,18 +193,30 @@ var _ = AfterSuite(func() {
 	}
 
 	By("undeploying the controller-manager")
-	cmd = exec.Command("make", "undeploy")
-	_, _ = utils.Run(cmd)
+	runCleanupCommand(2*time.Minute, "kubectl", "delete", "--ignore-not-found=true", "--wait=false", "-k", "config/default")
 
 	By("uninstalling CRDs")
-	cmd = exec.Command("make", "uninstall")
-	_, _ = utils.Run(cmd)
+	runCleanupCommand(2*time.Minute, "kubectl", "delete", "--ignore-not-found=true", "--wait=false", "-k", "config/crd")
 
 	By("removing manager namespace")
-	cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
-	_, _ = utils.Run(cmd)
+	runCleanupCommand(2*time.Minute, "kubectl", "delete", "ns", namespace, "--ignore-not-found", "--wait=false")
 
 })
+
+func runCleanupCommand(timeout time.Duration, name string, args ...string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	output, err := utils.Run(cmd)
+	if ctx.Err() == context.DeadlineExceeded {
+		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup command %q timed out after %s; continuing because the kind cluster teardown handles remaining resources\n", strings.Join(cmd.Args, " "), timeout)
+		return
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup command %q failed: %v\n%s\n", strings.Join(cmd.Args, " "), err, output)
+	}
+}
 
 // loadEnvFile reads a .env file and sets environment variables that are not already set.
 func loadEnvFile(path string) {
