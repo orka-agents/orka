@@ -537,6 +537,7 @@ start_orka_api_port_forward() {
   log "Starting Orka API port-forward on localhost:${local_port}"
   nohup kubectl -n "${ORKA_NAMESPACE}" port-forward "svc/${ORKA_API_SERVICE_NAME}" "${local_port}:8080" >"${log_file}" 2>&1 </dev/null &
   pid="$!"
+  disown "${pid}" 2>/dev/null || true
   printf '%s\n' "${pid}" >"${pid_file}"
 }
 
@@ -549,6 +550,7 @@ stop_orka_api_port_forward() {
   pid="$(cat "${pid_file}")"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
     kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" 2>/dev/null || true
   fi
   rm -f "${pid_file}"
 }
