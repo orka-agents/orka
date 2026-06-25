@@ -2293,6 +2293,9 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	if err := r.validateExecutionWorkspaceProviderConfig(ws, provider); err != nil {
 		return err
 	}
+	if err := r.validateExecutionWorkspaceNamespaceIsolation(task, ws, provider); err != nil {
+		return err
+	}
 	return validateExecutionWorkspacePolicies(task, ws)
 }
 
@@ -2377,6 +2380,21 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 		}
 	}
 	return nil
+}
+
+func (r *TaskReconciler) validateExecutionWorkspaceNamespaceIsolation(
+	task *corev1alpha1.Task,
+	ws *corev1alpha1.ExecutionWorkspaceSpec,
+	provider corev1alpha1.WorkspaceProvider,
+) error {
+	if !r.EnforceNamespaceIsolation || provider != corev1alpha1.WorkspaceProviderAgentSandbox {
+		return nil
+	}
+	templateNamespace, templateNamespaceSource := executionWorkspaceTemplateNamespaceAndSource(ws, task.Namespace, r.AgentSandboxConfig)
+	if templateNamespace == task.Namespace {
+		return nil
+	}
+	return fmt.Errorf("execution workspace resolved template namespace %q from %s must match task namespace %q when namespace isolation is enforced", templateNamespace, templateNamespaceSource, task.Namespace)
 }
 
 func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {

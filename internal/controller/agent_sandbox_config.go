@@ -188,14 +188,19 @@ func executionWorkspaceTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg
 }
 
 func executionWorkspaceTemplateNamespace(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg AgentSandboxConfig) string {
+	namespace, _ := executionWorkspaceTemplateNamespaceAndSource(ws, taskNamespace, cfg)
+	return namespace
+}
+
+func executionWorkspaceTemplateNamespaceAndSource(ws *corev1alpha1.ExecutionWorkspaceSpec, taskNamespace string, cfg AgentSandboxConfig) (string, string) {
 	if ws != nil && ws.TemplateRef != nil && strings.TrimSpace(ws.TemplateRef.Namespace) != "" {
-		return strings.TrimSpace(ws.TemplateRef.Namespace)
+		return strings.TrimSpace(ws.TemplateRef.Namespace), "templateRef.namespace"
 	}
 	cfg = cfg.WithDefaults()
 	if cfg.NamespaceStrategy == AgentSandboxNamespaceStrategyController && strings.TrimSpace(cfg.ControllerNamespace) != "" {
-		return strings.TrimSpace(cfg.ControllerNamespace)
+		return strings.TrimSpace(cfg.ControllerNamespace), "agent sandbox controller namespace"
 	}
-	return taskNamespace
+	return taskNamespace, "task namespace"
 }
 
 func substrateTemplateName(ws *corev1alpha1.ExecutionWorkspaceSpec, cfg SubstrateConfig) string {
