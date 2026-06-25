@@ -599,9 +599,9 @@ patch_controller_for_agent_sandbox() {
 }
 
 apply_sandbox_template() {
-  log "Creating agent-sandbox template ${sandbox_template_name}"
+  log "Creating agent-sandbox template and warm pool ${sandbox_template_name}"
   kubectl apply -f - <<YAML
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: ${sandbox_template_name}
@@ -644,6 +644,16 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ${sandbox_template_name}
+  namespace: ${orka_namespace}
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: ${sandbox_template_name}
 YAML
 }
 
@@ -817,7 +827,7 @@ verify_retained_claim_reused() {
   log "Verifying retained session SandboxClaim/${claim}"
   kubectl -n "${orka_namespace}" get sandboxclaim "${claim}" -o json |
     jq -e --arg template "${sandbox_template_name}" '
-      .spec.sandboxTemplateRef.name == $template
+      .spec.warmPoolRef.name == $template
       and ((.status.sandbox.name // "") != "")
     ' >/dev/null
 

@@ -18,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -62,9 +62,9 @@ const (
 type AgentSandboxConfig struct {
 	// RouterURL is the optional base URL for an agent-sandbox router service.
 	RouterURL string
-	// DefaultTemplate is used when an enabled execution workspace omits templateRef.name.
+	// DefaultTemplate is the default agent-sandbox SandboxWarmPool name used when a workspace omits templateRef.name.
 	DefaultTemplate string
-	// WarmPoolPolicy selects whether workspace claims may use warm pools.
+	// WarmPoolPolicy is retained for the legacy worker environment contract.
 	WarmPoolPolicy string
 	// NamespaceStrategy selects where sandbox lifecycle resources are managed.
 	NamespaceStrategy string
@@ -264,7 +264,7 @@ func (r *TaskReconciler) resolveAgentSandboxWorkspaceRequest(ctx context.Context
 		request.ReuseKey = task.Spec.SessionRef.Name
 	}
 
-	if err := r.validateExecutionWorkspaceTemplateExists(ctx, task, request); err != nil {
+	if err := r.validateExecutionWorkspaceWarmPoolExists(ctx, task, request); err != nil {
 		return nil, err
 	}
 
@@ -469,7 +469,7 @@ func resolveSubstrateActorPoolReference(
 	return pool, nil
 }
 
-func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Context, task *corev1alpha1.Task, request *AgentSandboxWorkspaceRequest) error {
+func (r *TaskReconciler) validateExecutionWorkspaceWarmPoolExists(ctx context.Context, task *corev1alpha1.Task, request *AgentSandboxWorkspaceRequest) error {
 	if r == nil || r.Client == nil || request == nil || request.TemplateName == "" {
 		return nil
 	}
@@ -477,7 +477,7 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 		ctx = context.Background()
 	}
 
-	// The upstream agent-sandbox SDK accepts only template name plus claim namespace,
+	// The upstream agent-sandbox SDK v0.5 claims a SandboxWarmPool by name,
 	// so validate the effective namespace where the SandboxClaim will be created.
 	lookupNamespace := request.ClaimNamespace
 	if strings.TrimSpace(lookupNamespace) == "" {
@@ -487,20 +487,20 @@ func (r *TaskReconciler) validateExecutionWorkspaceTemplateExists(ctx context.Co
 		lookupNamespace = task.Namespace
 	}
 
-	template := &sandboxextv1alpha1.SandboxTemplate{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: lookupNamespace, Name: request.TemplateName}, template)
+	warmPool := &sandboxextv1beta1.SandboxWarmPool{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: lookupNamespace, Name: request.TemplateName}, warmPool)
 	if err == nil {
 		return nil
 	}
 	if apierrors.IsNotFound(err) {
 		return fmt.Errorf(
-			"execution workspace template %q not found in namespace %q",
+			"execution workspace warm pool %q not found in namespace %q",
 			request.TemplateName,
 			lookupNamespace,
 		)
 	}
 	return fmt.Errorf(
-		"failed to validate execution workspace template %q in namespace %q: %w",
+		"failed to validate execution workspace warm pool %q in namespace %q: %w",
 		request.TemplateName,
 		lookupNamespace,
 		err,

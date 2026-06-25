@@ -43,7 +43,7 @@ import (
 	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -56,7 +56,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
-	utilruntime.Must(sandboxextv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -243,7 +243,7 @@ func main() {
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
 		agentSandboxConfig.DefaultTemplate,
-		"Default execution workspace template name used when a Task omits execution.workspace.templateRef.name.")
+		"Default agent-sandbox SandboxWarmPool name used when a Task omits execution.workspace.templateRef.name.")
 	flag.StringVar(&agentSandboxConfig.WarmPoolPolicy, "agent-sandbox-warm-pool-policy",
 		agentSandboxConfig.WarmPoolPolicy,
 		"Agent sandbox warm pool policy (disabled, template).")
