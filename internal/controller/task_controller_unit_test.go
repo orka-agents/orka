@@ -2526,13 +2526,18 @@ func TestEnsureWorkerRBAC_DoesNotPrunePendingAgentWorkerRBAC(t *testing.T) {
 	ctx := context.Background()
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "legacy-agent", Namespace: testNS}}
 	pendingAgent := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "pending-agent", Namespace: testNS},
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-agent", Namespace: testNS, UID: types.UID("pending-agent-uid")},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: "pending-agent-job"},
 	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: pendingAgent.Status.JobName, Namespace: testNS,
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: pendingAgent.Name, UID: pendingAgent.UID}},
+	}}
 	objects := []client.Object{
 		agent,
 		pendingAgent,
+		job,
 		managedWorkerServiceAccount(VendorWorkerServiceAccount),
 		managedWorkerClusterRoleBinding("orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName, VendorWorkerServiceAccount),
 	}

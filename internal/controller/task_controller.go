@@ -3012,6 +3012,11 @@ func (r *TaskReconciler) workerServiceAccountForActiveTask(ctx context.Context, 
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return workerServiceAccountForTask(task), true, nil
 	}
+	if ok, err := r.agentTaskHasWorkerJob(ctx, task); err != nil {
+		return "", false, err
+	} else if ok {
+		return workerServiceAccountForTask(task), true, nil
+	}
 
 	if task.Spec.AgentRef == nil {
 		return "", false, nil
@@ -3034,10 +3039,30 @@ func (r *TaskReconciler) workerServiceAccountForActiveTask(ctx context.Context, 
 	if agent.Spec.Runtime != nil || agentTaskJobBackendUnsupportedReason(task, agent) != "" {
 		return "", false, nil
 	}
-	if strings.TrimSpace(task.Status.JobName) != "" {
-		return workerServiceAccountForTask(task), true, nil
-	}
 	return workerServiceAccountForTask(task), true, nil
+}
+
+func (r *TaskReconciler) agentTaskHasWorkerJob(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	jobName := strings.TrimSpace(task.Status.JobName)
+	if jobName == "" {
+		return false, nil
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting agent worker Job %s/%s for RBAC liveness: %w", task.Namespace, jobName, err)
+	}
+	for _, owner := range job.OwnerReferences {
+		if owner.Kind == "Task" && owner.Name == task.Name && owner.UID == task.UID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
