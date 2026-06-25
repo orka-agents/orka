@@ -2639,6 +2639,36 @@ func TestHandleCompleted_PrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 }
 
+func TestHandleCompleted_ReturnsWorkerRBACPruneError(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "done-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).WithObjects(
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
+				return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}, obj.GetName(), errors.New("injected prune failure"))
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}).Build()
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+
+	_, err := r.handleCompleted(ctx, task)
+	if err == nil || !strings.Contains(err.Error(), "injected prune failure") {
+		t.Fatalf("expected injected prune error, got %v", err)
+	}
+}
+
 func TestHandleDeletion_PrunesUnusedWorkerRBAC(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2662,6 +2692,44 @@ func TestHandleDeletion_PrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected deleted task to prune unused AI CRB, got err %v", err)
+	}
+}
+
+func TestHandleDeletion_ReturnsWorkerRBACPruneErrorBeforeFinalizerRemoval(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	deletedAt := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "deleted-ai", Namespace: testNS, DeletionTimestamp: &deletedAt, Finalizers: []string{labels.TaskFinalizer}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).WithObjects(
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
+				return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}, obj.GetName(), errors.New("injected prune failure"))
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}).Build()
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+
+	_, err := r.handleDeletion(ctx, task)
+	if err == nil || !strings.Contains(err.Error(), "injected prune failure") {
+		t.Fatalf("expected injected prune error, got %v", err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, got); err != nil {
+		t.Fatalf("getting task after failed deletion prune: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(got, labels.TaskFinalizer) {
+		t.Fatalf("expected finalizer to remain after prune failure, got %v", got.Finalizers)
 	}
 }
 

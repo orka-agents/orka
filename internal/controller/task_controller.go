@@ -491,8 +491,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if !releasedPoolLeases {
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
+		var pruneErr error
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for deleted task")
+			pruneErr = err
 		}
 
 		// Release session lock if held
@@ -501,6 +503,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
 			}
+		}
+		if pruneErr != nil {
+			return ctrl.Result{}, pruneErr
 		}
 
 		// Remove finalizer
@@ -1779,8 +1784,10 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	if !releasedPoolLeases {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	var pruneErr error
 	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 		log.Error(err, "failed to prune unused worker RBAC for terminal task")
+		pruneErr = err
 	}
 
 	// Send webhook if configured and not already sent
@@ -1802,6 +1809,9 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 	if !terminalEventRecorded {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if pruneErr != nil {
+		return ctrl.Result{}, pruneErr
 	}
 
 	return ctrl.Result{}, nil
