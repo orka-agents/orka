@@ -1044,21 +1044,25 @@ func TestHandleChat(t *testing.T) {
 	})
 
 	t.Run("blocked namespace returns 403", func(t *testing.T) {
-		objs := providerCRD("default", "default", "test-type", "test-model")
-		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
-		ss := newTestSessionStore(t)
-		rs := newTestResultStore(t)
-		ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+		for _, namespace := range []string{"kube-system", "kube-public", "mercan-system"} {
+			t.Run(namespace, func(t *testing.T) {
+				objs := providerCRD("default", "default", "test-type", "test-model")
+				fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+				ss := newTestSessionStore(t)
+				rs := newTestResultStore(t)
+				ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
 
-		app := fiber.New()
-		app.Post("/api/v1/chat", ch.HandleChat)
+				app := fiber.New()
+				app.Post("/api/v1/chat", ch.HandleChat)
 
-		body, _ := json.Marshal(ChatRequest{Message: "hello", Namespace: "kube-system"})
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := app.Test(req)
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+				body, _ := json.Marshal(ChatRequest{Message: "hello", Namespace: namespace})
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := app.Test(req)
+				require.NoError(t, err)
+				assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+			})
+		}
 	})
 
 	t.Run("namespace mismatch with watch namespace returns 403", func(t *testing.T) {
