@@ -88,7 +88,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		gptModel = firstPreferredProxyModelSupportingEndpoint(
 			runtimeCatalog,
 			"/responses",
-			liveCopilotProxyGPTModelPreferences,
+			liveCopilotProxyCodexRuntimeModelPreferences,
 			liveCopilotProxyGPTModelPrefixes...,
 		)
 		claudeModel = firstPreferredProxyModel(
