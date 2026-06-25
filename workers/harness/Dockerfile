@@ -20,6 +20,9 @@ FROM --platform=$TARGETPLATFORM golang:1.26 AS target-go
 # Runtime stage with common CLI dependencies for generic, Codex, and Claude adapters.
 FROM node:22-slim
 
+# Keep this explicit so live Copilot-proxy compatibility moves deliberately.
+ARG CODEX_CLI_VERSION=0.141.0
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
@@ -31,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code \
+RUN npm install -g @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code \
     && npm cache clean --force
 
 COPY --from=target-go /usr/local/go /usr/local/go
