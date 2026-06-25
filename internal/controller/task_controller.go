@@ -140,7 +140,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=bind
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
@@ -493,7 +493,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		}
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for deleted task")
-			return ctrl.Result{}, err
 		}
 
 		// Release session lock if held
@@ -600,6 +599,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC")
+			return ctrl.Result{}, err
 		}
 		if reason := agentTaskJobBackendUnsupportedReason(task, agent); reason != "" {
 			return r.failTask(ctx, task, reason)
@@ -1781,7 +1781,6 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 		log.Error(err, "failed to prune unused worker RBAC for terminal task")
-		return ctrl.Result{}, err
 	}
 
 	// Send webhook if configured and not already sent
@@ -2805,10 +2804,11 @@ const (
 	maxWorkerClusterRoleBindingNameLength = 253
 	workerClusterRoleBindingHashLength    = 10
 
-	managedByLabelKey       = "app.kubernetes.io/managed-by"
-	managedByLabelValue     = "orka"
-	orkaManagedByLabelKey   = "orka.ai/managed-by"
-	workerRBACOwnedLabelKey = "orka.ai/worker-rbac-owned"
+	managedByLabelKey         = "app.kubernetes.io/managed-by"
+	managedByLabelValue       = "orka"
+	orkaManagedByLabelKey     = "orka.ai/managed-by"
+	workerRBACOwnedLabelKey   = "orka.ai/worker-rbac-owned"
+	workerRBACOwnedLabelValue = "true"
 )
 
 type workerRBACSpec struct {
@@ -3097,6 +3097,7 @@ func (r *TaskReconciler) deleteLegacyStaticWorkerClusterRoleBinding(ctx context.
 		prefix = managedByLabelValue
 	}
 	for _, name := range []string{
+		fmt.Sprintf("%s-%s-worker-rolebinding", managedByLabelValue, tier),
 		fmt.Sprintf("%s-%s-worker-rolebinding", prefix, tier),
 		fmt.Sprintf("%s-worker-rolebinding", tier),
 	} {
@@ -3135,9 +3136,8 @@ func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBindingByName(ctx context.
 	}
 
 	desiredSubject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: spec.serviceAccountName, Namespace: namespace}
-	managed := legacy.Labels[managedByLabelKey] == managedByLabelValue
 	bindsWorkerServiceAccount := subjectsContain(legacy.Subjects, desiredSubject)
-	if !managed && !bindsWorkerServiceAccount {
+	if !bindsWorkerServiceAccount {
 		return nil
 	}
 
@@ -3199,7 +3199,7 @@ func workerServiceAccountOwnedByOrka(sa *corev1.ServiceAccount) bool {
 	if sa == nil || sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		return false
 	}
-	if sa.Labels[workerRBACOwnedLabelKey] == scheduledRunLabelValue {
+	if sa.Labels[workerRBACOwnedLabelKey] == workerRBACOwnedLabelValue {
 		return true
 	}
 	return false
@@ -3217,7 +3217,7 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 				Namespace: namespace,
 				Labels: map[string]string{
 					orkaManagedByLabelKey:   managedByLabelValue,
-					workerRBACOwnedLabelKey: scheduledRunLabelValue,
+					workerRBACOwnedLabelKey: workerRBACOwnedLabelValue,
 				},
 			},
 		}

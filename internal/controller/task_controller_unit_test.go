@@ -1915,7 +1915,7 @@ func managedWorkerServiceAccount(name string) *corev1.ServiceAccount {
 			Namespace: testNS,
 			Labels: map[string]string{
 				orkaManagedByLabelKey:   managedByLabelValue,
-				workerRBACOwnedLabelKey: scheduledRunLabelValue,
+				workerRBACOwnedLabelKey: workerRBACOwnedLabelValue,
 			},
 		},
 	}
@@ -2696,7 +2696,7 @@ func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
 	}
-	if got.Labels[workerRBACOwnedLabelKey] == scheduledRunLabelValue {
+	if got.Labels[workerRBACOwnedLabelKey] == workerRBACOwnedLabelValue {
 		t.Fatalf("expected existing externally managed ServiceAccount not to get ownership marker, got labels %#v", got.Labels)
 	}
 	if got.Labels["custom"] != "keep" {
