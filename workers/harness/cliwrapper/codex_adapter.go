@@ -120,6 +120,13 @@ func validateCodexToolPolicy(cfg *agentEnvConfig) error {
 				strings.TrimSpace(tool),
 			)
 		}
+		if strings.TrimSpace(tool) != "" && !isCodexWebSearchTool(tool) {
+			return fmt.Errorf(
+				"codex runtime cannot enforce %s=%q because the Codex CLI only supports disabling WebSearch",
+				workerenv.DisallowedTools,
+				strings.TrimSpace(tool),
+			)
+		}
 	}
 	if cfg.AllowedToolsSet && !codexToolListAllowsBash(cfg.AllowedTools) {
 		return fmt.Errorf(
@@ -322,12 +329,11 @@ func codexWebSearchSetting(cfg *agentEnvConfig) (string, bool) {
 }
 
 func hasWebSearchTool(tools []string) bool {
-	for _, tool := range tools {
-		if normalizeToolName(tool) == "websearch" {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(tools, isCodexWebSearchTool)
+}
+
+func isCodexWebSearchTool(tool string) bool {
+	return normalizeToolName(tool) == "websearch"
 }
 
 func normalizeToolName(tool string) string {

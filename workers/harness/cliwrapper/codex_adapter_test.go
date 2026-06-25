@@ -141,6 +141,46 @@ func TestCodexAdapterRejectsDisallowedBash(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterRejectsUnsupportedDisallowedTools(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tool string
+	}{
+		{name: "write", tool: "Write"},
+		{name: "mixed", tool: "WebSearch,Write"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(workerenv.AllowBash, "true")
+			t.Setenv(workerenv.DisallowedTools, tc.tool)
+			adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+
+			_, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+			if err == nil {
+				t.Fatal("BuildCommand error = nil, want unsupported Codex disallowlist error")
+			}
+			if !strings.Contains(err.Error(), workerenv.DisallowedTools) ||
+				!strings.Contains(err.Error(), "only supports disabling WebSearch") {
+				t.Fatalf("BuildCommand error = %v, want unsupported Codex disallowlist error", err)
+			}
+		})
+	}
+}
+
+func TestCodexAdapterAllowsDisallowedWebSearch(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.DisallowedTools, "WebSearch")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
+	if err != nil {
+		t.Fatalf("BuildCommand error = %v, want WebSearch disallowlist to be enforced", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if !strings.Contains(strings.Join(spec.Args, " "), "--config web_search=disabled") {
+		t.Fatalf("args = %#v, want web_search disabled", spec.Args)
+	}
+}
+
 func TestCodexAdapterCleansTempFilesOnWorkspaceStatError(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
