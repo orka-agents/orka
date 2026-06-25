@@ -9,14 +9,8 @@ import { ApiError } from '@/lib/api-client'
 export function ThreatModelEditor({ repositoryName }: { repositoryName: string }) {
   const { data, isLoading, error } = useThreatModel(repositoryName)
   const updateThreatModel = useUpdateThreatModel(repositoryName)
-  const [content, setContent] = useState('')
-  const [initialized, setInitialized] = useState(false)
-
-  const currentContent = data?.content
-  if (currentContent !== undefined && !initialized) {
-    setContent(currentContent)
-    setInitialized(true)
-  }
+  const [draftContent, setDraftContent] = useState<string | null>(null)
+  const content = draftContent ?? data?.content ?? ''
 
   const notFound = error instanceof ApiError && error.status === 404
 
@@ -38,7 +32,7 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
             Edit the generated threat model to guide future scans and patch prioritization.
           </p>
         </div>
-        <Button onClick={save} disabled={updateThreatModel.isPending}>Save</Button>
+        <Button onClick={save} disabled={updateThreatModel.isPending || content.trim().length === 0}>Save</Button>
       </CardHeader>
       <CardContent>
         {isLoading ? (
@@ -51,8 +45,9 @@ export function ThreatModelEditor({ repositoryName }: { repositoryName: string }
               </div>
             )}
             <textarea
+              aria-label="Threat model content"
               value={content}
-              onChange={(event) => setContent(event.target.value)}
+              onChange={(event) => setDraftContent(event.target.value)}
               className="min-h-72 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
               placeholder="Document trust boundaries, auth assumptions, key assets, external integrations, and the attack surfaces worth prioritizing."
             />

@@ -57,7 +57,7 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
         <Bot className="h-4 w-4 text-primary" />
       </div>
       <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="whitespace-pre-wrap text-sm text-foreground">{message.content}</div>
+        <div className="whitespace-pre-wrap break-words text-sm text-foreground [overflow-wrap:anywhere]">{message.content}</div>
 
         {/* Cross-silo links: tasks created during this turn link into the graph. */}
         {message.tasksCreatedNames && message.tasksCreatedNames.length > 0 && (

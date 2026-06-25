@@ -39,6 +39,7 @@ export function ChatInput({ onSend }: ChatInputProps) {
     <div className="border-t border-border bg-card p-4">
       <div className="mx-auto flex max-w-3xl items-end gap-2">
         <textarea
+          aria-label="Message the meta agent"
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -50,6 +51,7 @@ export function ChatInput({ onSend }: ChatInputProps) {
         />
         <Button
           size="icon"
+          aria-label="Send message"
           onClick={handleSubmit}
           disabled={!input.trim() || isStreaming}
           className="h-10 w-10 shrink-0 rounded-xl"
