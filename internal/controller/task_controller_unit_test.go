@@ -2226,6 +2226,30 @@ func TestEnsureWorkerRBAC_PrunesStaleManagedResourcesForUnusedTiers(t *testing.T
 	}
 }
 
+func TestEnsureWorkerRBAC_PrunesLegacyStaticWorkerClusterRoleBinding(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	legacy := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "orka-ai-worker-rolebinding"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: DefaultAIWorkerClusterRoleName},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      AIWorkerServiceAccount,
+			Namespace: testNS,
+		}},
+	}
+	r := newUnitReconciler(scheme, legacy)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected legacy static AI CRB to be pruned, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_DoesNotTreatScheduledParentAsUsingWorkerRBAC(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()

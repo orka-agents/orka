@@ -1778,6 +1778,7 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 		log.Error(err, "failed to prune unused worker RBAC for terminal task")
+		return ctrl.Result{}, err
 	}
 
 	// Send webhook if configured and not already sent
@@ -2933,7 +2934,13 @@ func (r *TaskReconciler) pruneUnusedWorkerRBAC(ctx context.Context, namespace, s
 			} else if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 				return err
 			}
+			if err := r.deleteLegacyStaticWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+				return err
+			}
 			continue
+		}
+		if err := r.deleteLegacyStaticWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+			return err
 		}
 		if err := r.deleteManagedWorkerRoleBinding(ctx, namespace, spec); err != nil {
 			return err
@@ -3049,6 +3056,67 @@ func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, nam
 		return fmt.Errorf("deleting stale worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
 	}
 	log.Info("Deleted stale worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName)
+	return nil
+}
+
+func (r *TaskReconciler) deleteLegacyStaticWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	tier := workerTrustTierForServiceAccount(spec.serviceAccountName)
+	if tier == "" {
+		return nil
+	}
+	prefix := r.WorkerClusterRoleBindingNamePrefix
+	if prefix == "" {
+		prefix = managedByLabelValue
+	}
+	for _, name := range []string{
+		fmt.Sprintf("%s-%s-worker-rolebinding", prefix, tier),
+		fmt.Sprintf("%s-worker-rolebinding", tier),
+	} {
+		if name == spec.clusterRoleBindingName {
+			continue
+		}
+		if err := r.deleteLegacyWorkerClusterRoleBindingByName(ctx, namespace, spec, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func workerTrustTierForServiceAccount(serviceAccountName string) string {
+	switch serviceAccountName {
+	case AIWorkerServiceAccount:
+		return "ai"
+	case VendorWorkerServiceAccount:
+		return "vendor"
+	case ContainerWorkerServiceAccount:
+		return "container"
+	default:
+		return ""
+	}
+}
+
+func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBindingByName(ctx context.Context, namespace string, spec workerRBACSpec, name string) error {
+	log := logf.FromContext(ctx)
+	legacy := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: name}, legacy)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting legacy static worker ClusterRoleBinding %s: %w", name, err)
+	}
+
+	desiredSubject := rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: spec.serviceAccountName, Namespace: namespace}
+	managed := legacy.Labels[managedByLabelKey] == managedByLabelValue
+	bindsWorkerServiceAccount := subjectsContain(legacy.Subjects, desiredSubject)
+	if !managed && !bindsWorkerServiceAccount {
+		return nil
+	}
+
+	if err := r.Delete(ctx, legacy); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting legacy static worker ClusterRoleBinding %s: %w", name, err)
+	}
+	log.Info("Deleted legacy static worker ClusterRoleBinding", "namespace", namespace, "binding", name, "serviceAccount", spec.serviceAccountName)
 	return nil
 }
 
