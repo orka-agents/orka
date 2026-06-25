@@ -491,6 +491,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if !releasedPoolLeases {
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
+		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
+			log.Error(err, "failed to prune unused worker RBAC for deleted task")
+		}
 
 		// Release session lock if held
 		if task.Spec.SessionRef != nil {
@@ -1766,7 +1769,6 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 		log.Error(err, "failed to prune unused worker RBAC for terminal task")
-		return ctrl.Result{}, err
 	}
 
 	// Send webhook if configured and not already sent
@@ -2951,6 +2953,9 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 	}
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
+		if !task.DeletionTimestamp.IsZero() {
+			continue
+		}
 		if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
 			continue
 		}
@@ -3054,13 +3059,7 @@ func workerServiceAccountOwnedByOrka(sa *corev1.ServiceAccount) bool {
 	if sa.Labels[workerRBACOwnedLabelKey] == scheduledRunLabelValue {
 		return true
 	}
-	return len(sa.Labels) == 1 &&
-		len(sa.Annotations) == 0 &&
-		len(sa.OwnerReferences) == 0 &&
-		len(sa.Finalizers) == 0 &&
-		len(sa.Secrets) == 0 &&
-		len(sa.ImagePullSecrets) == 0 &&
-		sa.AutomountServiceAccountToken == nil
+	return false
 }
 
 func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespace, name string) error {

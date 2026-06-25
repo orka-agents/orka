@@ -2323,7 +2323,7 @@ func TestEnsureWorkerRBAC_PreservesCustomizedUnusedServiceAccountWithoutAppOwner
 	}
 }
 
-func TestEnsureWorkerRBAC_PrunesLegacyOrkaManagedServiceAccountWithoutExternalOwner(t *testing.T) {
+func TestEnsureWorkerRBAC_PreservesUnmarkedLegacyServiceAccount(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 	legacySA := &corev1.ServiceAccount{
@@ -2346,8 +2346,8 @@ func TestEnsureWorkerRBAC_PrunesLegacyOrkaManagedServiceAccountWithoutExternalOw
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected legacy Orka-managed SA to be pruned, got err %v", err)
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected unmarked legacy SA to remain: %v", err)
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected stale managed CRB to be pruned, got err %v", err)
@@ -2575,6 +2575,32 @@ func TestHandleCompleted_PrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected terminal task to prune unused AI CRB, got err %v", err)
+	}
+}
+
+func TestHandleDeletion_PrunesUnusedWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	deletedAt := metav1.Now()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "deleted-ai", Namespace: testNS, DeletionTimestamp: &deletedAt, Finalizers: []string{labels.TaskFinalizer}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	objects := []client.Object{
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+
+	_, _ = r.handleDeletion(ctx, task)
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected deleted task to prune unused AI SA, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected deleted task to prune unused AI CRB, got err %v", err)
 	}
 }
 

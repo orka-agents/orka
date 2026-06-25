@@ -303,30 +303,6 @@ rules:
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.controller.enforceNamespaceIsolation }}
-kind: RoleBinding
-metadata:
-  name: {{ include "orka.aiWorkerClusterRoleBindingName" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-{{- else }}
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "orka.aiWorkerClusterRoleBindingName" . }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-{{- end }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "orka.aiWorkerClusterRoleName" . }}
-subjects:
-  - kind: ServiceAccount
-    name: orka-ai-worker
-    namespace: {{ .Release.Namespace }}
----
 # Vendor Worker Role (restricted worker for external agent providers)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -397,30 +373,6 @@ rules:
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.controller.enforceNamespaceIsolation }}
-kind: RoleBinding
-metadata:
-  name: {{ include "orka.vendorWorkerClusterRoleBindingName" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-{{- else }}
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "orka.vendorWorkerClusterRoleBindingName" . }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-{{- end }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "orka.vendorWorkerClusterRoleName" . }}
-subjects:
-  - kind: ServiceAccount
-    name: orka-vendor-worker
-    namespace: {{ .Release.Namespace }}
----
 # Container Worker Role (minimal worker for container tasks)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -436,28 +388,4 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks"]
     verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-{{- if .Values.controller.enforceNamespaceIsolation }}
-kind: RoleBinding
-metadata:
-  name: {{ include "orka.containerWorkerClusterRoleBindingName" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-{{- else }}
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "orka.containerWorkerClusterRoleBindingName" . }}
-  labels:
-    {{- include "orka.labels" . | nindent 4 }}
-{{- end }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "orka.containerWorkerClusterRoleName" . }}
-subjects:
-  - kind: ServiceAccount
-    name: orka-container-worker
-    namespace: {{ .Release.Namespace }}
 {{- end }}
