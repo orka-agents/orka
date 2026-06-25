@@ -20,7 +20,10 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 )
 
-const testProviderOpenAI = "openai"
+const (
+	testProviderOpenAI            = "openai"
+	testPermissionDeniedErrorType = "permission_denied"
+)
 
 func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	fc := newFakeClient()
@@ -73,7 +76,7 @@ func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationF
 		},
 		GenerateTaskName: func() string { return "blocked-task" },
 		AuthorizeTaskCreate: func(context.Context, *corev1alpha1.Task) *ChatToolError {
-			return &ChatToolError{Type: "permission_denied", Message: "task blocked by context token"}
+			return &ChatToolError{Type: testPermissionDeniedErrorType, Message: "task blocked by context token"}
 		},
 	})
 
@@ -90,7 +93,7 @@ func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationF
 	if r.Success {
 		t.Fatalf("expected authorization failure, got success: %#v", r)
 	}
-	if r.ErrorType != "permission_denied" {
+	if r.ErrorType != testPermissionDeniedErrorType {
 		t.Fatalf("errorType = %q, want permission_denied", r.ErrorType)
 	}
 

@@ -31,15 +31,16 @@ func TestCoordinatorReadDeleteToolsEnforceNamespaceScope(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		tool    Tool
-		args    map[string]any
-		objects []client.Object
+		name                string
+		tool                Tool
+		args                map[string]any
+		objects             []client.Object
+		assertTaskUnchanged bool
 	}{
 		{name: "check task progress", tool: &CheckTaskProgressTool{}, args: map[string]any{nameField: "victim-task", namespaceField: "victim-ns"}, objects: []client.Object{victimTask}},
 		{name: "fetch task output", tool: &FetchTaskOutputTool{}, args: map[string]any{nameField: "victim-task", namespaceField: "victim-ns"}, objects: []client.Object{victimTask}},
 		{name: "wait for task", tool: &WaitForTaskTool{}, args: map[string]any{nameField: "victim-task", namespaceField: "victim-ns", timeoutField: 1}, objects: []client.Object{victimTask}},
-		{name: "cancel task", tool: &ChatCancelTaskTool{}, args: map[string]any{nameField: "victim-task", namespaceField: "victim-ns"}, objects: []client.Object{victimTask}},
+		{name: "cancel task", tool: &ChatCancelTaskTool{}, args: map[string]any{nameField: "victim-task", namespaceField: "victim-ns"}, objects: []client.Object{victimTask}, assertTaskUnchanged: true},
 		{name: "list tasks", tool: &ListTasksTool{}, args: map[string]any{namespaceField: "victim-ns"}, objects: []client.Object{victimTask}},
 		{name: "list agents", tool: &ListAgentsTool{}, args: map[string]any{namespaceField: "victim-ns"}, objects: []client.Object{victimAgent}},
 	}
@@ -73,6 +74,16 @@ func TestCoordinatorReadDeleteToolsEnforceNamespaceScope(t *testing.T) {
 			}
 			if res.ErrorType != "permission_denied" {
 				t.Fatalf("errorType = %q, want permission_denied; result=%s", res.ErrorType, result)
+			}
+
+			if tt.assertTaskUnchanged {
+				var task corev1alpha1.Task
+				if err := fc.Get(ctx, client.ObjectKey{Name: "victim-task", Namespace: "victim-ns"}, &task); err != nil {
+					t.Fatalf("victim task was mutated or deleted after denied cancel: %v", err)
+				}
+				if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+					t.Fatalf("victim task phase = %q, want %q", task.Status.Phase, corev1alpha1.TaskPhaseSucceeded)
+				}
 			}
 		})
 	}
