@@ -153,6 +153,7 @@ jobs:
           # Do not let generated website content overwrite preserved Helm
           # repository artifacts at the Pages root.
           rsync -a \
+            --exclude='/charts' \
             --exclude='/charts/***' \
             --exclude='/index.yaml' \
             --exclude='/*.tgz' \
