@@ -20,9 +20,10 @@ Drive the current GitHub PR from “has feedback or failing checks” to “curr
 ## Workflow
 
 1. Resolve the PR and branch state.
-   - Use the PR supplied by the user, otherwise resolve the current branch PR with `gh pr view --json number,url,baseRefName,headRefName,headRepositoryOwner,mergeStateStatus,reviewDecision`.
+   - Use the PR supplied by the user, otherwise resolve the current branch PR with `gh pr view --json number,url,baseRefName,headRefName,headRepositoryOwner,mergeStateStatus,reviewDecision,headRefOid`.
    - Run `git status --short --branch` and `git remote -v`; stop before destructive operations if the checkout is dirty with unrelated user changes.
    - Fetch the PR base and head. Use the PR’s actual base branch, not an assumed `main`.
+   - Before editing, confirm the checkout is on the PR head branch and commit: `git branch --show-current` should match `headRefName`, and `git rev-parse HEAD` should match `headRefOid` after fetch. If not, check out the PR head branch or stop and report why it cannot be checked out safely.
 
 2. Build a live closeout snapshot.
    - Inspect mergeability, current review decision, unresolved review threads, and required/failing checks.
@@ -72,7 +73,7 @@ Drive the current GitHub PR from “has feedback or failing checks” to “curr
    - Re-check mergeability, required checks, review decision, and unresolved review threads after every push or GitHub write batch.
    - If checks are queued, pending, or running, wait for the current run set to finish. Poll at reasonable intervals; do not spin indefinitely after a stable pass/fail state.
    - If new reviewer comments arrive during the loop, classify and address them like the first batch.
-   - Stop when the PR currently has no merge conflicts, required checks are green, and no unresolved actionable review threads remain.
+   - Stop when the PR currently has no merge conflicts, required checks are green, no unresolved actionable review threads remain, and `reviewDecision` is non-blocking. Treat `CHANGES_REQUESTED` or required `REVIEW_REQUIRED` as a human/reviewer blocker unless the remaining state is clearly stale and can be addressed by reply/resolve actions.
    - If blocked, report the exact blocker: failing external check, missing GitHub auth, ambiguous review request, required human approval, branch protection, or reviewer decision not yet updated.
 
 ## Final Report
@@ -86,4 +87,4 @@ Include:
 - Review threads addressed, pushed back, resolved, or left open with reasons.
 - Local verification commands run.
 - `$autoreview` status if it was required and run, or why it was intentionally not run.
-- Current merge-readiness status and any remaining human/external blockers.
+- Current merge-readiness status, including review-decision state, and any remaining human/external blockers.
