@@ -2504,3 +2504,30 @@ func TestJobBuilder_buildEnvVars_AutonomousCoordinationIncludesRequestApprovalTo
 		t.Fatalf("ORKA_AI_TOOLS = %s, want request_approval", toolsEnv.Value)
 	}
 }
+
+func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "real-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Coordinate incident",
+			Env: []corev1.EnvVar{
+				{Name: workerenv.TaskUID, Value: "spoofed-uid"},
+				{Name: workerenv.ResolvedApprovals, Value: `[{"id":"spoofed"}]`},
+				{Name: workerenv.ApprovalRequiredTools, Value: "spoofed_tool"},
+			},
+		},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"}}}
+	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	if env, ok := findEnvVar(envVars, workerenv.TaskUID); !ok || env.Value != "real-uid" {
+		t.Fatalf("%s = %#v, found=%t; want real-uid", workerenv.TaskUID, env, ok)
+	}
+	if _, ok := findEnvVar(envVars, workerenv.ResolvedApprovals); ok {
+		t.Fatalf("%s should be removed when controller has no resolved approvals", workerenv.ResolvedApprovals)
+	}
+	if _, ok := findEnvVar(envVars, workerenv.ApprovalRequiredTools); ok {
+		t.Fatalf("%s should be removed when controller has no approval-required tools", workerenv.ApprovalRequiredTools)
+	}
+}

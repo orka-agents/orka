@@ -450,3 +450,54 @@ func TestApprovalGateDeclinedDecisionDoesNotExecuteAndContinues(t *testing.T) {
 		t.Fatalf("declined approval executed gated tool")
 	}
 }
+
+func TestApprovalGateDeclinedExplicitApprovalTargetDoesNotExecuteWithoutRequiredTools(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	var executions atomic.Int32
+	toolspkg.DefaultRegistry.Register(recordingTool{
+		name: gatedDispatchTool,
+		onExecute: func(json.RawMessage) {
+			executions.Add(1)
+		},
+	})
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	target := approvalTargetForTest(t, args)
+	declined := resolvedApprovalForTarget(target)
+	declined.Status = approvals.StatusDeclined
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{declined})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-1",
+					Name:      gatedDispatchTool,
+					Arguments: args,
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: "decline handled", StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		toolspkg.DefaultRegistry.ToLLMTools([]string{gatedDispatchTool}),
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "decline handled" {
+		t.Fatalf("result = %q, want decline handled", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("declined explicit approval target executed gated tool")
+	}
+}

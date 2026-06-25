@@ -578,8 +578,16 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
 
-	// Add task-level env vars
+	// Add task-level env vars, then restore controller-owned env vars so task
+	// authors cannot spoof identity or approval state.
 	envVars = append(envVars, task.Spec.Env...)
+	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
+	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
+	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
+	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
+	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
+	envVars = setControllerEnv(envVars, workerenv.ResolvedApprovals, "")
+	envVars = setControllerEnv(envVars, workerenv.ApprovalRequiredTools, "")
 	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
@@ -624,9 +632,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
-	if opts.ResolvedApprovalsJSON != "" {
-		envVars = append(envVars, corev1.EnvVar{Name: workerenv.ResolvedApprovals, Value: opts.ResolvedApprovalsJSON})
-	}
+	envVars = setControllerEnv(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)

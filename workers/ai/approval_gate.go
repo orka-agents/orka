@@ -113,37 +113,36 @@ func (g *approvalGate) requiresApproval(toolName string) bool {
 }
 
 func (g *approvalGate) preScan(ctx context.Context, calls []llm.ToolCall) (*approvalBatchDecision, error) {
-	if !g.enabled() {
+	if g == nil {
 		return nil, nil
 	}
 	for _, call := range calls {
 		toolName := strings.TrimSpace(call.Name)
-		if !g.requiresApproval(toolName) {
-			continue
-		}
+		requiresApproval := g.requiresApproval(toolName)
 		target, err := g.targetForCall(toolName, call.Arguments)
 		if err != nil {
 			return nil, err
 		}
 		decision, found := g.resolvedDecision(target)
-		if !found {
-			if err := g.emitApprovalRequest(ctx, target, call.ID); err != nil {
-				return nil, err
-			}
-			return &approvalBatchDecision{
-				result: fmt.Sprintf(
-					"approval requested for %s (approvalID %s); parked until a human decides",
-					target.TargetTool,
-					target.ApprovalID,
-				),
-			}, nil
-		}
-		if decision.Status != approvals.StatusApproved {
+		if found && decision.Status != approvals.StatusApproved {
 			return &approvalBatchDecision{
 				continueLLM: true,
 				toolResults: deniedBatchToolResults(calls, call.ID, decision),
 			}, nil
 		}
+		if !requiresApproval || found {
+			continue
+		}
+		if err := g.emitApprovalRequest(ctx, target, call.ID); err != nil {
+			return nil, err
+		}
+		return &approvalBatchDecision{
+			result: fmt.Sprintf(
+				"approval requested for %s (approvalID %s); parked until a human decides",
+				target.TargetTool,
+				target.ApprovalID,
+			),
+		}, nil
 	}
 	return nil, nil
 }
@@ -244,14 +243,15 @@ func (g *approvalGate) prepareApprovedCall(
 	toolName string,
 	args json.RawMessage,
 ) (json.RawMessage, string, bool, error) {
-	if !g.requiresApproval(toolName) {
-		return args, "", false, nil
-	}
+	requiresApproval := g.requiresApproval(toolName)
 	target, err := g.targetForCall(toolName, args)
 	if err != nil {
 		return nil, "", false, err
 	}
 	decision, found := g.resolvedDecision(target)
+	if !requiresApproval && !found {
+		return args, "", false, nil
+	}
 	if !found {
 		return nil, "", false, fmt.Errorf("approval %s for %s is not resolved", target.ApprovalID, target.TargetTool)
 	}
