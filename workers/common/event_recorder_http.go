@@ -186,6 +186,7 @@ func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts .
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	bodyPreview, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_, _ = io.CopyN(io.Discard, resp.Body, 64<<10)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf(
 			"controller rejected execution event: HTTP %d: %s",

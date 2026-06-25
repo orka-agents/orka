@@ -113,7 +113,7 @@ func (g *approvalGate) requiresApproval(toolName string) bool {
 }
 
 func (g *approvalGate) preScan(ctx context.Context, calls []llm.ToolCall) (*approvalBatchDecision, error) {
-	if g == nil {
+	if g == nil || (!g.enabled() && len(g.resolved) == 0) {
 		return nil, nil
 	}
 	for _, call := range calls {
