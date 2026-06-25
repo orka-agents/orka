@@ -491,10 +491,8 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if !releasedPoolLeases {
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		var pruneErr error
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for deleted task")
-			pruneErr = err
 		}
 
 		// Release session lock if held
@@ -504,10 +502,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
-		if pruneErr != nil {
-			return ctrl.Result{}, pruneErr
-		}
-
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
 		if err := r.Update(ctx, task); err != nil {
@@ -1342,6 +1336,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && taskHasHarnessWrapperTurn(task) {
+		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
+			log.Error(err, "failed to prune unused worker RBAC for running harness task")
+		}
 		return r.finishHarnessWrapperTask(ctx, task)
 	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
@@ -1353,7 +1350,6 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	} else if usesWorkerRBAC {
 		if err := r.ensureWorkerRBAC(ctx, task); err != nil {
 			log.Error(err, "failed to repair worker RBAC for running task")
-			return ctrl.Result{}, err
 		}
 	}
 

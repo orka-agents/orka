@@ -2870,7 +2870,7 @@ func TestHandleDeletion_PrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 }
 
-func TestHandleDeletion_ReturnsWorkerRBACPruneErrorBeforeFinalizerRemoval(t *testing.T) {
+func TestHandleDeletion_ContinuesAfterWorkerRBACPruneError(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 	deletedAt := metav1.Now()
@@ -2896,15 +2896,42 @@ func TestHandleDeletion_ReturnsWorkerRBACPruneErrorBeforeFinalizerRemoval(t *tes
 	r.JobBuilder = NewJobBuilder(fc)
 
 	_, err := r.handleDeletion(ctx, task)
-	if err == nil || !strings.Contains(err.Error(), "injected prune failure") {
-		t.Fatalf("expected injected prune error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected deletion to continue after prune error, got %v", err)
 	}
-	got := &corev1alpha1.Task{}
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, got); err != nil {
-		t.Fatalf("getting task after failed deletion prune: %v", err)
+}
+
+func TestHandleRunning_HarnessTaskPrunesUnusedWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "harness-agent",
+			Namespace: testNS,
+			Annotations: map[string]string{
+				harnessWrapperStartedAnno:       scheduledRunLabelValue,
+				harnessWrapperTurnIDAnnotation:  "turn-1",
+				harnessWrapperRuntimeAnnotation: "runtime-1",
+				harnessWrapperCorrelationIDAnno: "corr-1",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
-	if !controllerutil.ContainsFinalizer(got, labels.TaskFinalizer) {
-		t.Fatalf("expected finalizer to remain after prune failure, got %v", got.Finalizers)
+	objects := []client.Object{
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+
+	_, _ = r.handleRunning(ctx, task)
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected running harness task to prune unused AI SA, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected running harness task to prune unused AI CRB, got err %v", err)
 	}
 }
 
