@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Substrate Deploy"
-  short_description: "Stand up Agent Substrate workspaces on kind for Orka"
-  default_prompt: "Use $agent-substrate-deploy to stand up Agent Substrate on a dedicated local kind cluster wired to Orka and run an Orka agent Task through a Substrate-backed execution workspace."
+  short_description: "Stand up Agent Substrate direct e2e on kind for Orka"
+  default_prompt: "Use $agent-substrate-deploy to stand up Agent Substrate on a dedicated local kind cluster wired to Orka, validate the direct Substrate e2e smoke path, and treat workspace-backed Orka agent Tasks as an expected-failure/future API check until harness support lands."

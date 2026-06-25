@@ -1,14 +1,15 @@
 ---
 name: agent-sandbox-deploy
-description: Stand up the upstream kubernetes-sigs agent-sandbox workspace provider on a local kind cluster and run an Orka agent Task through a sandbox-backed workspace. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot agent-sandbox execution workspaces for Orka (Task.spec.execution.workspace with provider agent-sandbox).
+description: Stand up the upstream kubernetes-sigs agent-sandbox workspace provider on a local kind cluster, validate the currently supported install/config and plain-agent paths, and treat workspace-backed Orka agent Tasks as expected-failure/future API checks until harness support lands. Use when the user asks to install, enable, deploy, configure, validate, demo, or troubleshoot agent-sandbox execution workspaces for Orka (Task.spec.execution.workspace with provider agent-sandbox).
 ---
 
 # Agent Sandbox Deploy
 
 Stand up the experimental [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)
-workspace provider against an Orka controller on a local kind cluster, then
-validate it by running a `type: agent` Task whose `spec.execution.workspace`
-routes to an agent-sandbox workspace.
+workspace provider against an Orka controller on a local kind cluster. Today,
+validate install/config and the plain harness-backed agent path; treat a
+`type: agent` Task with `spec.execution.workspace` as an expected-failure check
+for the documented harness gate until workspace-backed agent Tasks are wired.
 
 This skill is for **local/kind evaluation and validation**, not production.
 Orka does not install or manage upstream agent-sandbox CRDs, the router,
@@ -57,31 +58,53 @@ Use `$kindctl` so the kubeconfig stays scoped to this repo/worktree and never
 touches `~/.kube/config`. Every command below runs against the kindctl
 kubeconfig.
 
+Use a resolved `kindctl` binary for the snippets below. Prefer `KINDCTL_BIN` or
+`PATH`; fall back to the repo-local skill checkout when it exists:
+
+```bash
+kindctl="${KINDCTL_BIN:-$(command -v kindctl || true)}"
+if [ -z "$kindctl" ] && [ -x .agents/skills/kindctl/bin/kindctl ]; then
+  kindctl=.agents/skills/kindctl/bin/kindctl
+fi
+test -x "$kindctl"
+```
+
 1. **Create the repo-scoped cluster.**
 
-   ```bash
-   .agents/skills/kindctl/bin/kindctl create
-   .agents/skills/kindctl/bin/kindctl kubectl get nodes
-   ```
-
-   > **Registry precondition for `AGENTIC=1`.** The agentic layer
-   > `docker push`es to `localhost:${KIND_REGISTRY_PORT}` (default `5001`) and
-   > expects the kind node to pull from it as a containerd mirror. A default
-   > kindctl cluster has **no** such image registry (kindctl's own "registry" is
-   > a JSON cluster-metadata store, not a Docker registry). Either:
+   > **Registry precondition for `AGENTIC=1`: do this before cluster create.** The
+   > agentic layer `docker push`es to `localhost:${KIND_REGISTRY_PORT}` (default
+   > `5001`) and expects the kind node to pull from it as a containerd mirror. A
+   > default kindctl cluster has **no** such image registry (kindctl's own
+   > "registry" is a JSON cluster-metadata store, not a Docker registry). Either:
    > - commit a repo `.kind/cluster.yaml` + `.kind/setup.sh` that stands up a
-   >   `localhost:5001` registry and wires the containerd mirror before running
-   >   the agentic layer, **or**
-   > - run with `AGENTIC=0` for a base-layer-only install (no model run), **or**
-   > - point the script at pre-loaded images via `ORKA_SANDBOX_RUNTIME_IMAGE` /
-   >   `ORKA_SANDBOX_ROUTER_IMAGE` that you `kindctl load` yourself.
-   > Confirm the registry path with the user before assuming `AGENTIC=1` works on
-   > a bare kindctl cluster.
+   >   `localhost:5001` registry and wires the containerd mirror **before** running
+   >   `"$kindctl" create`; if the cluster already exists, delete/recreate it after
+   >   adding those files, **or**
+   > - run with `AGENTIC=0` for a base-layer-only install (no router/model run).
+   > `AGENTIC=1` always builds and `docker push`es the runtime and router images;
+   > `ORKA_SANDBOX_RUNTIME_IMAGE` only changes the runtime image tag/reference and
+   > there is no router-image override in the installer. Confirm the registry path
+   > with the user before assuming `AGENTIC=1` works on a bare kindctl cluster.
+
+   ```bash
+   "$kindctl" create
+   "$kindctl" kubectl get nodes
+   ```
 
 2. **Deploy the Orka controller** into the cluster with `$orka-kind-deploy`
    (build + load controller and worker images, install CRDs, roll out
-   `orka-controller-manager`). The harness wrapper image must be present too —
-   sandbox runs re-exec the agent CLI inside the sandbox.
+   `orka-controller-manager`). Run the deploy under the kindctl-scoped kubeconfig
+   so its `kubectl` discovery sees the repo-scoped cluster:
+
+   ```bash
+   orka_kind_deploy="${ORKA_KIND_DEPLOY_BIN:-.codex/skills/orka-kind-deploy/scripts/deploy_orka_kind.sh}"
+   test -x "$orka_kind_deploy"
+   eval "$("$kindctl" env)"
+   "$orka_kind_deploy"
+   ```
+
+   The harness wrapper image must be present too — sandbox runs re-exec the
+   agent CLI inside the sandbox.
 
 3. **Install agent-sandbox** by driving the canonical script against the kindctl
    kubeconfig. Export `KUBECONFIG` from kindctl so the script's `kubectl` calls
@@ -89,8 +112,8 @@ kubeconfig.
    the script reads:
 
    ```bash
-   eval "$(.agents/skills/kindctl/bin/kindctl env)"   # exports scoped KUBECONFIG
-   kube="$(.agents/skills/kindctl/bin/kindctl path)"   # ~/.kube/kind/<name>.kubeconfig
+   eval "$("$kindctl" env)"   # exports scoped KUBECONFIG
+   kube="$("$kindctl" path)"   # ~/.kube/kind/<name>.kubeconfig
    ORKA_DEMO_CLUSTER="$(basename "$kube" .kubeconfig)" \
    AGENTIC=0 \
      bash hack/demos/cluster/install-agent-sandbox.sh
@@ -102,15 +125,28 @@ kubeconfig.
    the kindctl cluster. Verify the selected context in the script's logs before
    continuing. Use `AGENTIC=1` only once the registry precondition above is met.
 
-4. **Stand up the model proxy (vekil) — pause for the human.** The agentic layer
-   calls the vekil deploy script with `--skip-wait`, which starts a GitHub
-   device-code login. **Surface the login URL and code to the user and wait for
-   their confirmation; never complete the login on their behalf.** This mirrors
-   the `$vekil-reverse-proxy-deploy` guardrail.
+4. **Optional: add the agentic/model layer (vekil) — pause for the human.**
+   Skip this step for base-layer-only or model-free validation. For a
+   model-backed smoke, first satisfy the registry/image precondition above, then
+   rerun the installer with `AGENTIC=1` so it deploys the sandbox runtime/router,
+   vekil, model/git Secrets, and the API client ServiceAccount:
 
    ```bash
-   .agents/skills/kindctl/bin/kindctl kubectl -n vekil-system logs deploy/vekil | grep 'login/device'
+   eval "$("$kindctl" env)"
+   kube="$("$kindctl" path)"
+   agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v0.4.6}"
+   go mod download "sigs.k8s.io/agent-sandbox@${agent_sandbox_version}"
+   test -d "$(go env GOMODCACHE)/sigs.k8s.io/agent-sandbox@${agent_sandbox_version}/clients/python/agentic-sandbox-client/sandbox-router"
+   ORKA_DEMO_CLUSTER="$(basename "$kube" .kubeconfig)" \
+   AGENTIC=1 \
+     bash hack/demos/cluster/install-agent-sandbox.sh
    ```
+
+   The agentic layer calls the vekil deploy script with `--skip-wait`, which
+   starts a GitHub device-code login. **Surface the login URL and code to the
+   user and wait for their confirmation; never complete the login on their
+   behalf.** This mirrors the `$vekil-reverse-proxy-deploy` guardrail. First
+   disarm the liveness race below; then read and surface the device-code prompt.
 
    > **Login race (verified live 2026-06): disarm vekil's liveness probe before
    > surfacing the code.** vekil binds its port only after the Copilot login
@@ -120,30 +156,53 @@ kubeconfig.
    > pod before handing the user a code:
    >
    > ```bash
-   > .agents/skills/kindctl/bin/kindctl kubectl -n vekil-system patch deploy vekil \
-   >   --type=json -p '[{"op":"remove","path":"/spec/template/spec/containers/0/livenessProbe"}]'
+   > "$kindctl" kubectl -n vekil-system get deploy vekil >/dev/null
+   > if "$kindctl" kubectl -n vekil-system get deploy vekil \
+   >   -o jsonpath='{.spec.template.spec.containers[0].livenessProbe.httpGet.path}' | grep -q .; then
+   >   "$kindctl" kubectl -n vekil-system patch deploy vekil \
+   >     --type=json -p '[{"op":"remove","path":"/spec/template/spec/containers/0/livenessProbe"}]'
+   > fi
+   > "$kindctl" kubectl -n vekil-system scale deploy/vekil --replicas=0
+   > for _ in $(seq 1 60); do
+   >   [ -z "$("$kindctl" kubectl -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil -o name 2>/dev/null)" ] && break
+   >   sleep 2
+   > done
+   > test -z "$("$kindctl" kubectl -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil -o name 2>/dev/null)"
+   > "$kindctl" kubectl -n vekil-system scale deploy/vekil --replicas=1
+   > for _ in $(seq 1 60); do
+   >   [ "$("$kindctl" kubectl -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "1" ] && break
+   >   sleep 2
+   > done
+   > test "$("$kindctl" kubectl -n vekil-system get pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil --no-headers 2>/dev/null | wc -l | tr -d ' ')" = "1"
    > ```
    >
-   > GitHub device codes expire in ~15 min; surface promptly, and if it expires,
-   > bounce the pod (`kindctl kubectl -n vekil-system delete pod -l app=vekil`)
-   > for a fresh code rather than waiting.
+   > Then read the code from the single fresh pod:
+   >
+   > ```bash
+   > "$kindctl" kubectl -n vekil-system logs deploy/vekil | grep 'login/device'
+   > ```
+   >
+   > GitHub device codes expire in
+   > ~15 min; surface promptly, and if it expires, bounce the pod
+   > (`"$kindctl" kubectl -n vekil-system delete pod -l app.kubernetes.io/name=vekil,app.kubernetes.io/instance=vekil`) for a fresh code
+   > rather than waiting.
 
    Then wait for readiness before any model-backed Task:
 
    ```bash
-   .agents/skills/kindctl/bin/kindctl kubectl -n vekil-system exec deploy/vekil -- \
+   "$kindctl" kubectl -n vekil-system exec deploy/vekil -- \
      wget -qO- http://127.0.0.1:1337/readyz
    ```
 
-   If you only need to validate Orka's sandbox plumbing (claim → ready →
-   exec → cleanup) without a real model, prefer the model-free e2e in step 6
-   instead of standing up vekil.
+   If you only need model-free confidence, run the CI parity script below. It
+   validates installation/configuration only while workspace-backed agent Tasks
+   remain gated; it is not a claim/readiness/exec/cleanup smoke.
 
 ## Validate
 
 > **Known gate (verified live 2026-06): agent Tasks with an execution workspace
-> are rejected by the current service-backed harness runtime.** The smoke Task
-> below fails immediately with
+> are rejected by the current service-backed harness runtime.** Any Task that
+> sets `spec.execution.workspace` fails immediately with
 > `status.executionWorkspace.reason=WorkspaceValidationFailed` and message
 > `execution workspace is not supported by harness runtime yet` — an
 > unconditional gate in `internal/controller/harness_wrapper.go`
@@ -151,24 +210,90 @@ kubeconfig.
 > run through the long-lived `agent-harness-wrapper` service, and the
 > Task→sandbox-workspace path for agents is not wired through it yet. A **plain**
 > agent Task (no `execution.workspace`) runs fine through the harness + model
-> proxy, so use that to confirm the model path; use the model-free e2e
-> (`scripts/live-agent-sandbox-e2e.sh`) to confirm sandbox plumbing. Treat the
-> Task YAML below as the intended API once the harness wires workspaces.
+> proxy, so use that to confirm the model path. The model-free e2e currently
+> confirms installation/configuration only; it deliberately skips the
+> execution-workspace Task smoke while the harness gate is present. Treat only
+> the execution-workspace YAML in the optional expected-failure check as the
+> intended future API once the harness wires workspaces.
 
-Run the live smoke Task from the concept doc against the kindctl cluster
-(namespace, agent, and template match `install-agent-sandbox.sh`'s defaults):
+Do **not** use an execution-workspace agent Task as the success criterion yet.
+Validate the two currently wired paths separately:
+
+- **Model path through the harness** (requires the optional `AGENTIC=1` step and
+  vekil ready): run a plain agent Task with no `execution.workspace` and wait
+  for it to succeed.
 
 ```bash
-.agents/skills/kindctl/bin/kindctl kubectl apply -f - <<'YAML'
+"$kindctl" kubectl -n demo-magic apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: sandbox-codex-agent
+  namespace: demo-magic
+spec:
+  runtime:
+    type: codex
+    defaultMaxTurns: 1
+    defaultAllowBash: true
+  model:
+    name: gpt-5.5
+  secretRef:
+    name: sandbox-model-key
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: orka-live-model-smoke
+  namespace: demo-magic
+spec:
+  type: agent
+  agentRef:
+    name: sandbox-codex-agent
+  agentRuntime:
+    maxTurns: 1
+  timeout: 10m0s
+  prompt: "Reply exactly: ORKA_LIVE_MODEL_OK"
+YAML
+
+"$kindctl" kubectl -n demo-magic \
+  wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-model-smoke --timeout=10m
+```
+
+- **Installation/configuration parity**: run the model-free CI parity script
+  below when you want a self-contained cluster bring-up with fake model
+  credentials. It verifies the install/config path, but it does **not** exercise
+  claim → ready → exec → cleanup while the harness gate is present.
+
+If you need to demonstrate the intended API shape before harness workspace
+support lands, run it only as an **expected-failure** check and wait for the gate
+instead of `Succeeded`:
+
+```bash
+"$kindctl" kubectl apply -f - <<'YAML'
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: sandbox-codex-agent
+  namespace: demo-magic
+spec:
+  runtime:
+    type: codex
+    defaultMaxTurns: 1
+    defaultAllowBash: true
+  model:
+    name: gpt-5.5
+  secretRef:
+    name: sandbox-model-key
+---
 apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: orka-live-sandbox-smoke
-  namespace: orka-system
+  namespace: demo-magic
 spec:
   type: agent
   agentRef:
-    name: claude-agent
+    name: sandbox-codex-agent
   agentRuntime:
     maxTurns: 1
   timeout: 10m0s
@@ -182,21 +307,26 @@ spec:
   prompt: "Reply exactly: ORKA_LIVE_SANDBOX_OK"
 YAML
 
-.agents/skills/kindctl/bin/kindctl kubectl -n orka-system \
-  wait --for=jsonpath='{.status.phase}'=Succeeded task/orka-live-sandbox-smoke --timeout=10m
+"$kindctl" kubectl -n demo-magic \
+  wait --for=jsonpath='{.status.executionWorkspace.reason}'=WorkspaceValidationFailed \
+  task/orka-live-sandbox-smoke --timeout=2m
 ```
 
-A successful sandbox wrapper log includes the claimed workspace name, e.g.
-`completed in sandbox workspace sandbox-claim-...`. Orka Task status does **not**
-expose sandbox claim/exec/cleanup state — read worker logs and upstream
-agent-sandbox resources for lifecycle detail.
+Once the harness wires agent Tasks to execution workspaces, the expected-failure
+check can become the live success smoke. At that point, a successful sandbox
+wrapper log should include the claimed workspace name, e.g. `completed in
+sandbox workspace sandbox-claim-...`. Orka Task status does **not** expose
+sandbox claim/exec/cleanup state — read worker logs and upstream agent-sandbox
+resources for lifecycle detail.
 
 ### Model-free CI parity
 
 `scripts/live-agent-sandbox-e2e.sh` (run by the `Live Agent Sandbox E2E`
-workflow) stands up the whole path with a deterministic fake `claude` CLI and
-**no model access**. Use it to validate Orka's sandbox plumbing independently of
-provider availability:
+workflow) stands up a clean kind cluster with fake model credentials and **no
+model access**. Because the current harness-wrapper runtime is service-backed,
+the script logs `Skipping agent-sandbox Task smoke...` and does not create a
+SandboxClaim or exercise the router exec data path. Use it for installation and
+controller-flag CI parity, not as proof of workspace execution:
 
 ```bash
 bash scripts/live-agent-sandbox-e2e.sh
