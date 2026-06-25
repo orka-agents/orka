@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		controllerPFCmd    *exec.Cmd
 		token              string
 		gptModel           string
+		gptModelSkipReason string
 		claudeModel        string
 		geminiModel        string
 		claudeSessionName  string
@@ -85,11 +87,13 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServicePort(),
 		)
 		Expect(err).NotTo(HaveOccurred())
-		gptModel = firstPreferredProxyModelSupportingEndpoint(
-			runtimeCatalog,
-			"/responses",
-			liveCopilotProxyCodexRuntimeModelPreferences,
-		)
+		gptModel = strings.TrimSpace(os.Getenv("E2E_LIVE_CODEX_RUNTIME_MODEL"))
+		if gptModel == "" {
+			gptModelSkipReason = "E2E_LIVE_CODEX_RUNTIME_MODEL not set"
+		} else if !runtimeCatalog.modelSupportsEndpoint(gptModel, "/responses") {
+			gptModelSkipReason = "configured E2E_LIVE_CODEX_RUNTIME_MODEL does not advertise /responses support"
+			gptModel = ""
+		}
 		claudeModel = firstPreferredProxyModel(
 			runtimeCatalog,
 			liveCopilotProxyClaudeModelPreferences,
@@ -122,7 +126,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	It("should let codex consume priorTaskRef state on a git workspace", func() {
 		if gptModel == "" {
-			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
+			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
 		}
 
 		DeferCleanup(func() {
