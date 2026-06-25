@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sozercan/orka/internal/workerenv"
@@ -112,7 +113,7 @@ func validateCodexToolPolicy(cfg *agentEnvConfig) error {
 		)
 	}
 	for _, tool := range cfg.DisallowedTools {
-		if isCodexBashTool(tool) {
+		if isDisallowedCodexBashTool(tool) {
 			return fmt.Errorf(
 				"codex runtime cannot enforce %s=%q because the Codex CLI cannot disable shell execution",
 				workerenv.DisallowedTools,
@@ -130,21 +131,36 @@ func validateCodexToolPolicy(cfg *agentEnvConfig) error {
 }
 
 func codexToolListAllowsBash(tools []string) bool {
-	for _, tool := range tools {
-		if isCodexBashTool(tool) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(tools, isUnscopedCodexBashTool)
 }
 
-func isCodexBashTool(tool string) bool {
+func isDisallowedCodexBashTool(tool string) bool {
+	return isCodexBashAlias(codexToolName(tool))
+}
+
+func isUnscopedCodexBashTool(tool string) bool {
+	tool = strings.TrimSpace(tool)
+	if _, _, ok := strings.Cut(tool, "("); ok {
+		return false
+	}
+	return isCodexBashAlias(tool)
+}
+
+func isCodexBashAlias(tool string) bool {
 	switch normalizeToolName(tool) {
 	case "bash", "shell", "codeexec", "terminal":
 		return true
 	default:
 		return false
 	}
+}
+
+func codexToolName(toolSpec string) string {
+	toolSpec = strings.TrimSpace(toolSpec)
+	if name, _, ok := strings.Cut(toolSpec, "("); ok {
+		toolSpec = name
+	}
+	return strings.TrimSpace(toolSpec)
 }
 
 func buildCodexArgs(
