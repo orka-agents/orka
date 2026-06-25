@@ -87,7 +87,7 @@ if [[ "$github_repo" != */* || -z "$owner" || -z "$repo" ]]; then
   exit 2
 fi
 
-pr_fields='number,url,title,state,isDraft,baseRefName,headRefName,headRefOid,mergeStateStatus,reviewDecision,author,headRepositoryOwner'
+pr_fields='number,url,title,state,isDraft,baseRefName,headRefName,headRefOid,mergeStateStatus,reviewDecision,updatedAt,author,headRepositoryOwner'
 if [[ -n "$pr_selector" ]]; then
   pr_json="$(gh pr view "$pr_selector" --repo "$github_repo" --json "$pr_fields")"
 else
@@ -103,6 +103,13 @@ head_ref="$(jq -r '.headRefName // ""' <<<"$pr_json")"
 head_oid="$(jq -r '.headRefOid // ""' <<<"$pr_json")"
 review_decision="$(jq -r '.reviewDecision // ""' <<<"$pr_json")"
 merge_state="$(jq -r '.mergeStateStatus // ""' <<<"$pr_json")"
+pr_updated_epoch="$(jq -r '(.updatedAt // empty) | fromdateiso8601' <<<"$pr_json" 2>/dev/null || echo 0)"
+now_epoch="$(date +%s)"
+if [[ "$pr_updated_epoch" =~ ^[0-9]+$ && "$pr_updated_epoch" -gt 0 ]]; then
+  pr_updated_age_seconds=$((now_epoch - pr_updated_epoch))
+else
+  pr_updated_age_seconds=-1
+fi
 
 current_branch="$(git branch --show-current 2>/dev/null || true)"
 local_head="$(git rev-parse HEAD 2>/dev/null || true)"
@@ -164,7 +171,7 @@ unresolved_threads_json="$(jq '[.[] | select(.isResolved == false) | {id, isOutd
 
 read_checks() {
   local mode="$1"
-  local checks_tmp checks_err checks_output checks_error_text checks_exit_code checks_items checks_lookup_failed no_checks
+  local checks_tmp checks_err checks_output checks_error_text checks_exit_code checks_items checks_lookup_failed no_checks no_checks_pending
   local args=(pr checks "$pr_number" --repo "$github_repo")
   if [[ "$mode" == "required" ]]; then
     args+=(--required)
@@ -183,11 +190,15 @@ read_checks() {
 
   checks_lookup_failed=false
   no_checks=false
+  no_checks_pending=false
   if [[ -n "$checks_output" ]] && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$checks_output"; then
     checks_items="$checks_output"
   elif [[ "$checks_output" == *"no required checks reported"* || "$checks_error_text" == *"no required checks reported"* || "$checks_output" == *"no checks reported"* || "$checks_error_text" == *"no checks reported"* ]]; then
     checks_items='[]'
     no_checks=true
+    if [[ "$mode" == "all" && "$pr_updated_age_seconds" -ge 0 && "$pr_updated_age_seconds" -lt 900 ]]; then
+      no_checks_pending=true
+    fi
   else
     checks_items='[]'
     checks_lookup_failed=true
@@ -205,7 +216,9 @@ read_checks() {
     --argjson commandExitCode "$checks_exit_code" \
     --arg commandError "$checks_error_text" \
     --argjson lookupFailed "$checks_lookup_failed" \
-    '{items:$items, commandExitCode:$commandExitCode, commandError:$commandError, lookupFailed:$lookupFailed, summary:(reduce $items[] as $c ({total:0}; .total += 1 | .[$c.bucket] = ((.[$c.bucket] // 0) + 1)))}'
+    --argjson noChecksReported "$no_checks" \
+    --argjson noChecksPending "$no_checks_pending" \
+    '{items:$items, commandExitCode:$commandExitCode, commandError:$commandError, lookupFailed:$lookupFailed, noChecksReported:$noChecksReported, noChecksPending:$noChecksPending, summary:(reduce $items[] as $c ({total:0}; .total += 1 | .[$c.bucket] = ((.[$c.bucket] // 0) + 1)))}'
 }
 
 checks_result="$(read_checks all)"
@@ -220,16 +233,20 @@ checks_error="$(jq -r '.commandError' <<<"$checks_result")"
 required_checks_error="$(jq -r '.commandError' <<<"$required_checks_result")"
 checks_lookup_failed="$(jq -r '.lookupFailed' <<<"$checks_result")"
 required_checks_lookup_failed="$(jq -r '.lookupFailed' <<<"$required_checks_result")"
+all_checks_no_checks_reported="$(jq -r '.noChecksReported' <<<"$checks_result")"
+all_checks_no_checks_pending="$(jq -r '.noChecksPending' <<<"$checks_result")"
+required_checks_no_checks_reported="$(jq -r '.noChecksReported' <<<"$required_checks_result")"
 
 local_json="$(jq -n \
   --arg currentBranch "$current_branch" \
   --arg headOid "$local_head" \
   --arg upstream "$upstream" \
   --arg statusShort "$status_short" \
+  --argjson prUpdatedAgeSeconds "$pr_updated_age_seconds" \
   --argjson dirty "$dirty" \
   --argjson branchMatches "$branch_matches" \
   --argjson headMatches "$head_matches" \
-  '{currentBranch:$currentBranch, headOid:$headOid, upstream:$upstream, dirty:$dirty, branchMatchesPrHead:$branchMatches, headMatchesPrHeadOid:$headMatches, statusShort:$statusShort}')"
+  '{currentBranch:$currentBranch, headOid:$headOid, upstream:$upstream, dirty:$dirty, branchMatchesPrHead:$branchMatches, headMatchesPrHeadOid:$headMatches, prUpdatedAgeSeconds:$prUpdatedAgeSeconds, statusShort:$statusShort}')"
 
 unresolved_count="$(jq 'length' <<<"$unresolved_threads_json")"
 failing_count="$(jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length' <<<"$required_checks_json")"
@@ -253,7 +270,7 @@ if [[ "$failing_count" -gt 0 ]]; then
 else
   failing_checks=false
 fi
-if [[ "$pending_count" -gt 0 ]]; then
+if [[ "$pending_count" -gt 0 || "$all_checks_no_checks_pending" == "true" ]]; then
   pending_checks=true
 else
   pending_checks=false
@@ -279,13 +296,16 @@ snapshot="$(jq -n \
   --argjson requiredChecksCommandExitCode "$required_checks_exit" \
   --argjson checksLookupFailed "$checks_lookup_failed" \
   --argjson requiredChecksLookupFailed "$required_checks_lookup_failed" \
+  --argjson allChecksNoChecksReported "$all_checks_no_checks_reported" \
+  --argjson allChecksNoChecksPending "$all_checks_no_checks_pending" \
+  --argjson requiredChecksNoChecksReported "$required_checks_no_checks_reported" \
   --argjson requiredChecks "$required_checks_json" \
   --argjson reviewDecisionBlocking "$review_blocking" \
   --argjson mergeStateBlocking "$merge_blocking" \
   --argjson failingChecks "$failing_checks" \
   --argjson pendingChecks "$pending_checks" \
   --argjson unresolvedReviewThreads "$unresolved_threads" \
-  '{generatedAt:$generatedAt, repository:$repository, local:$local, pr:$pr, reviewThreads:{unresolvedCount:($unresolvedThreads|length), unresolved:$unresolvedThreads}, checks:{summary:$checksSummary, requiredSummary:$checksSummary, allSummary:$allChecksSummary, commandExitCode:$checksCommandExitCode, requiredCommandExitCode:$requiredChecksCommandExitCode, commandError:$checksCommandError, requiredCommandError:$requiredChecksCommandError, lookupFailed:($checksLookupFailed or $requiredChecksLookupFailed), requiredLookupFailed:$requiredChecksLookupFailed, items:$checks, requiredItems:$requiredChecks}, blockers:{wrongHeadBranch:($local.branchMatchesPrHead|not), wrongHeadSha:($local.headMatchesPrHeadOid|not), dirtyWorktree:$local.dirty, mergeStateBlocking:$mergeStateBlocking, reviewDecisionBlocking:$reviewDecisionBlocking, unresolvedReviewThreads:$unresolvedReviewThreads, checksLookupFailed:($checksLookupFailed or $requiredChecksLookupFailed), failingChecks:$failingChecks, pendingChecks:$pendingChecks}}')"
+  '{generatedAt:$generatedAt, repository:$repository, local:$local, pr:$pr, reviewThreads:{unresolvedCount:($unresolvedThreads|length), unresolved:$unresolvedThreads}, checks:{summary:$checksSummary, requiredSummary:$checksSummary, allSummary:$allChecksSummary, commandExitCode:$checksCommandExitCode, requiredCommandExitCode:$requiredChecksCommandExitCode, commandError:$checksCommandError, requiredCommandError:$requiredChecksCommandError, lookupFailed:($checksLookupFailed or $requiredChecksLookupFailed), requiredLookupFailed:$requiredChecksLookupFailed, allNoChecksReported:$allChecksNoChecksReported, allNoChecksPending:$allChecksNoChecksPending, requiredNoChecksReported:$requiredChecksNoChecksReported, items:$checks, requiredItems:$requiredChecks}, blockers:{wrongHeadBranch:($local.branchMatchesPrHead|not), wrongHeadSha:($local.headMatchesPrHeadOid|not), dirtyWorktree:$local.dirty, mergeStateBlocking:$mergeStateBlocking, reviewDecisionBlocking:$reviewDecisionBlocking, unresolvedReviewThreads:$unresolvedReviewThreads, checksLookupFailed:($checksLookupFailed or $requiredChecksLookupFailed), failingChecks:$failingChecks, pendingChecks:$pendingChecks}}')"
 
 if [[ "$summary" -eq 1 ]]; then
   jq -r '
@@ -297,7 +317,7 @@ if [[ "$summary" -eq 1 ]]; then
     "Review decision: \(.pr.reviewDecision // "")",
     "Unresolved review threads: \(.reviewThreads.unresolvedCount)",
     "Required checks: total=\(.checks.requiredSummary.total // 0) pass=\(.checks.requiredSummary.pass // 0) pending=\(.checks.requiredSummary.pending // 0) fail=\(.checks.requiredSummary.fail // 0) cancel=\(.checks.requiredSummary.cancel // 0) lookupFailed=\(.checks.requiredLookupFailed) exit=\(.checks.requiredCommandExitCode)",
-    "All checks: total=\(.checks.allSummary.total // 0) pass=\(.checks.allSummary.pass // 0) pending=\(.checks.allSummary.pending // 0) fail=\(.checks.allSummary.fail // 0) cancel=\(.checks.allSummary.cancel // 0) lookupFailed=\(.checks.lookupFailed) exit=\(.checks.commandExitCode)",
+    "All checks: total=\(.checks.allSummary.total // 0) pass=\(.checks.allSummary.pass // 0) pending=\(.checks.allSummary.pending // 0) fail=\(.checks.allSummary.fail // 0) cancel=\(.checks.allSummary.cancel // 0) noChecksPending=\(.checks.allNoChecksPending) lookupFailed=\(.checks.lookupFailed) exit=\(.checks.commandExitCode)",
     "Blockers: \(.blockers)"
   ' <<<"$snapshot"
 elif [[ "$compact" -eq 1 ]]; then

@@ -38,7 +38,7 @@ For a specific PR:
 .agents/skills/pr-closeout/scripts/pr_snapshot.sh --pr 123 --summary
 ```
 
-The helper is read-only and reports local branch/head state, PR metadata, unresolved review threads, all-check buckets, required-check buckets, and blocker booleans. Required-check buckets drive `failingChecks`/`pendingChecks`; optional check states are informational until classified. Review-comment bodies are intentionally omitted from helper output to avoid logging secrets. It requires `git`, `gh`, and `jq`. If it fails because of auth, missing tools, or unsupported `gh` behavior, report the blocker and fall back to explicit `gh pr view`, `gh pr checks`, and GraphQL review-thread reads.
+The helper is read-only and reports local branch/head state, PR metadata, unresolved review threads, all-check buckets, required-check buckets, and blocker booleans. Required-check buckets drive `failingChecks`/`pendingChecks`; optional check states are informational until classified. Review-comment bodies are intentionally omitted from helper output to avoid logging secrets. If all-check lookup reports no checks on a recent PR head, the helper treats that as pending/unknown so post-push CI attachment races do not look green. It requires `git`, `gh`, and `jq`. If it fails because of auth, missing tools, or unsupported `gh` behavior, report the blocker and fall back to explicit `gh pr view`, `gh pr checks`, and GraphQL review-thread reads.
 
 ## Pick PR Target
 
