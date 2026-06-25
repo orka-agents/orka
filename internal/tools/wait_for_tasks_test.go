@@ -55,6 +55,17 @@ func TestWaitForTasksTool_Parameters(t *testing.T) {
 	}
 }
 
+func markWaitTestTaskAsChild(task *corev1alpha1.Task, parent string) {
+	if task.Labels == nil {
+		task.Labels = map[string]string{}
+	}
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Labels[labels.LabelParentTask] = labels.SelectorValue(parent)
+	task.Annotations[labels.AnnotationParentTaskName] = parent
+}
+
 func TestWaitForTasksTool_Execute(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -171,6 +182,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envOrkaTaskName, parentTaskName)
 			t.Setenv(envOrkaTaskNamespace, testNamespace)
 
 			// Set up HTTP test server for result fetching
@@ -199,6 +211,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 			scheme := newTestScheme()
 			objs := make([]client.Object, 0, len(tt.tasks))
 			for i := range tt.tasks {
+				markWaitTestTaskAsChild(&tt.tasks[i], parentTaskName)
 				objs = append(objs, &tt.tasks[i])
 			}
 
@@ -309,6 +322,7 @@ func TestWaitForTasksTool_Execute_TruncatesLongStructuredSummary(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaControllerURL, server.URL)
 
 	task := &corev1alpha1.Task{
@@ -318,6 +332,8 @@ func TestWaitForTasksTool_Execute_TruncatesLongStructuredSummary(t *testing.T) {
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
 		},
 	}
+
+	markWaitTestTaskAsChild(task, parentTaskName)
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(newTestScheme()).
@@ -381,6 +397,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaControllerURL, server.URL)
 
 	task := &corev1alpha1.Task{
@@ -400,6 +417,8 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
 		},
 	}
+
+	markWaitTestTaskAsChild(task, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -461,6 +480,7 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 
 	// Create a failed task with auto-retry annotations
 	failedTask := &corev1alpha1.Task{
@@ -494,6 +514,8 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(envOrkaControllerURL, srv.URL)
+
+	markWaitTestTaskAsChild(failedTask, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -560,6 +582,7 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 
 	// Task with retries already exhausted
 	failedTask := &corev1alpha1.Task{
@@ -589,6 +612,8 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(envOrkaControllerURL, srv.URL)
+
+	markWaitTestTaskAsChild(failedTask, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -647,6 +672,7 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 
 	// Succeeded task with auto-retry — should NOT trigger retry
 	succeededTask := &corev1alpha1.Task{
@@ -674,6 +700,8 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(envOrkaControllerURL, srv.URL)
+
+	markWaitTestTaskAsChild(succeededTask, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -708,6 +736,7 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 
 	// Server returns 500 for result fetch
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -728,6 +757,8 @@ func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
 		},
 	}
+
+	markWaitTestTaskAsChild(task, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -757,6 +788,7 @@ func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 
 	// Server returns 200 but invalid JSON
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -777,6 +809,8 @@ func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
 			ResultRef: &corev1alpha1.ResultReference{Available: true},
 		},
 	}
+
+	markWaitTestTaskAsChild(task, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -806,6 +840,7 @@ func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
 
 func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaTaskName, parentTaskName)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -825,6 +860,8 @@ func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
 			Message: "completed with warnings",
 		},
 	}
+
+	markWaitTestTaskAsChild(task, parentTaskName)
 
 	scheme := newTestScheme()
 	fakeClient := fake.NewClientBuilder().
@@ -849,5 +886,56 @@ func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
 	}
 	if waitResult.Results[0].Result != "completed with warnings" {
 		t.Errorf("expected message fallback, got %q", waitResult.Results[0].Result)
+	}
+}
+
+func TestWaitForTasksTool_ExecuteRejectsNonChildTask(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	t.Setenv(envOrkaControllerURL, "http://127.0.0.1:1")
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTaskAName,
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				labels.LabelParentTask: labels.SelectorValue("other-parent"),
+			},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: "other-parent",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+	argsJSON, err := json.Marshal(WaitForTasksArgs{Tasks: []string{testTaskAName}, Timeout: shortPollIntervalString})
+	if err != nil {
+		t.Fatalf("failed to marshal args: %v", err)
+	}
+
+	result, err := tool.Execute(context.Background(), argsJSON)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var got WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if len(got.Results) != 1 {
+		t.Fatalf("len(results) = %d, want 1", len(got.Results))
+	}
+	if got.Results[0].Phase != taskPhaseErrorString {
+		t.Fatalf("phase = %q, want %q", got.Results[0].Phase, taskPhaseErrorString)
+	}
+	if !strings.Contains(got.Results[0].Result, "not a child") {
+		t.Fatalf("result = %q, want child authorization error", got.Results[0].Result)
 	}
 }

@@ -134,6 +134,11 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("%s environment variable is not set", envOrkaTaskNamespace)
 	}
 
+	parentTaskName := os.Getenv(envOrkaTaskName)
+	if parentTaskName == "" {
+		return "", fmt.Errorf("%s environment variable is not set", envOrkaTaskName)
+	}
+
 	deadline := time.Now().Add(timeout)
 	pollInterval := 5 * time.Second
 	ticker := time.NewTicker(pollInterval)
@@ -156,6 +161,12 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if err != nil {
 				results[taskName].Phase = taskPhaseErrorString
 				results[taskName].Result = fmt.Sprintf("error: %v", err)
+				continue
+			}
+
+			if !isWaitForTasksChildOfParent(&task, parentTaskName) {
+				results[taskName].Phase = taskPhaseErrorString
+				results[taskName].Result = "error: task is not a child of the current coordinator"
 				continue
 			}
 
@@ -262,6 +273,24 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 // Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
+
+func isWaitForTasksChildOfParent(task *corev1alpha1.Task, parentTaskName string) bool {
+	if task == nil || parentTaskName == "" {
+		return false
+	}
+	if task.Annotations[labels.AnnotationParentTaskName] == parentTaskName {
+		return true
+	}
+	if task.Labels[labels.LabelParentTask] == labels.SelectorValue(parentTaskName) {
+		return true
+	}
+	for _, owner := range task.OwnerReferences {
+		if owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Kind == taskKindString && owner.Name == parentTaskName {
+			return true
+		}
+	}
+	return false
+}
 
 func truncateWaitTaskSummary(summary string) string {
 	if len(summary) <= maxWaitTaskSummaryChars {

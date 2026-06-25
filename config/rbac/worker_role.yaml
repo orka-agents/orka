@@ -22,7 +22,9 @@ kind: ClusterRole
 metadata:
   name: ai-worker-role
 rules:
-# ConfigMaps: skills/session lookup and namespace-scoped code_exec result persistence
+# ConfigMaps: skills/session lookup and namespace-scoped code_exec result persistence.
+# Avoid list/watch from worker pods so a compromised worker cannot enumerate
+# namespace result ConfigMaps.
 - apiGroups:
   - ""
   resources:
@@ -31,8 +33,6 @@ rules:
   - create
   - delete
   - get
-  - list
-  - watch
 # Secrets: read existing credentials and create ephemeral code_exec code Secrets
 - apiGroups:
   - ""
@@ -61,15 +61,14 @@ rules:
   - create
   - update
   - delete
-# Orka Task CRDs (for coordination - delegate and wait)
+# Orka Task CRDs (for coordination - delegate and wait). Do not grant
+# list/watch: coordination tools must operate only on explicit child task names.
 - apiGroups:
   - core.orka.ai
   resources:
   - tasks
   verbs:
   - get
-  - list
-  - watch
   - create
   - patch
   - delete
@@ -257,15 +256,14 @@ kind: ClusterRole
 metadata:
   name: vendor-worker-role
 rules:
-# ConfigMaps: read-only (skills, non-secret lookup)
+# ConfigMaps: read-only (skills, non-secret lookup). Avoid list/watch from
+# worker pods so result ConfigMaps cannot be enumerated.
 - apiGroups:
   - ""
   resources:
   - configmaps
   verbs:
   - get
-  - list
-  - watch
 # Orka Tool CRDs
 - apiGroups:
   - core.orka.ai
@@ -284,15 +282,14 @@ rules:
   - create
   - update
   - delete
-# Orka Task CRDs (for coordination - delegate and wait)
+# Orka Task CRDs (for coordination - delegate and wait). Do not grant
+# list/watch: coordination tools must operate only on explicit child task names.
 - apiGroups:
   - core.orka.ai
   resources:
   - tasks
   verbs:
   - get
-  - list
-  - watch
   - create
   - patch
   - delete
