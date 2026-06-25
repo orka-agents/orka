@@ -122,7 +122,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
@@ -1763,6 +1763,10 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 	if !releasedPoolLeases {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
+		log.Error(err, "failed to prune unused worker RBAC for terminal task")
+		return ctrl.Result{}, err
 	}
 
 	// Send webhook if configured and not already sent

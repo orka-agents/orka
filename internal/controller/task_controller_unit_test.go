@@ -2553,6 +2553,31 @@ func TestEnsureWorkerRBAC_DoesNotGrantRBACForPodOnlyWorkerServiceAccount(t *test
 	}
 }
 
+func TestHandleCompleted_PrunesUnusedWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "done-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	objects := []client.Object{
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+
+	_, _ = r.handleCompleted(ctx, task)
+
+	if err := r.Get(ctx, types.NamespacedName{Name: AIWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected terminal task to prune unused AI SA, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected terminal task to prune unused AI CRB, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
