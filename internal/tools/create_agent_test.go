@@ -558,6 +558,21 @@ func TestResolveRuntimeSecretRef_RejectsUnauthorizedSecretRef(t *testing.T) {
 	}
 }
 
+func TestResolveRuntimeSecretRef_FailsClosedWhenAuthorizationRequiredWithoutAuthorizer(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		RequireSecretReadAuthorization: true,
+	})
+
+	_, err := resolveRuntimeSecretRef(ctx, fc, defaultNamespace, corev1alpha1.AgentRuntimeClaude, testRuntimeCredsSecretName)
+	if err == nil {
+		t.Fatal("expected fail-closed authorization error")
+	}
+	if !strings.Contains(err.Error(), "requires secret credential authorization") {
+		t.Fatalf("error = %v, want missing authorizer failure", err)
+	}
+}
+
 func TestCreateAgentTool_Execute_AcceptsCustomRuntimeSecretRef(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
