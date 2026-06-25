@@ -48,5 +48,11 @@ ui/coverage/
 # E2E test environment variables
 test/e2e/.env
 
+# Demo recording artifacts
+hack/demos/out/
+
+# Local QA tracker spreadsheets may include mocked auth/resource names.
+docs/qa/*.csv
+
 .plans/
 .claude/worktrees/
