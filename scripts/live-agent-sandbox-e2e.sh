@@ -41,7 +41,7 @@ sanitize_image_tag() {
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
-agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.4.6}"
+agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.0}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -51,6 +51,7 @@ orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
 e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
 fake_claude_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
+harness_wrapper_image="${ORKA_HARNESS_WRAPPER_IMAGE:-orka-agent-harness-wrapper:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 agent_name="${ORKA_AGENT_SANDBOX_AGENT:-orka-agent-sandbox-e2e-agent}"
@@ -70,8 +71,8 @@ api_pf_log="${work_dir}/api-port-forward.log"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
-if [[ "${agent_sandbox_version}" != "v0.4.6" ]]; then
-  die "this e2e is pinned to agent-sandbox v0.4.6 to match go.mod"
+if [[ "${agent_sandbox_version}" != "v0.5.0" ]]; then
+  die "this e2e is pinned to agent-sandbox v0.5.0 to match go.mod"
 fi
 
 cleanup_one_port_forward() {
@@ -552,8 +553,17 @@ deploy_sandbox_router() {
 
   router_namespace="${orka_namespace}"
   log "Deploying upstream sandbox router into ${router_namespace}"
-  awk -v image="${sandbox_router_image}" '{ gsub(/\$\{ROUTER_IMAGE\}/, image); print }' "${router_yaml}" |
-    kubectl -n "${router_namespace}" apply -f -
+  awk -v image="${sandbox_router_image}" '
+    {
+      gsub(/\$\{ROUTER_IMAGE\}/, image)
+      if ($0 ~ /name: ALLOW_UNAUTHENTICATED_ROUTER/) { allow = 1 }
+      if (allow == 1 && $0 ~ /value: "false"/) {
+        sub(/value: "false"/, "value: \"true\"")
+        allow = 0
+      }
+      print
+    }
+  ' "${router_yaml}" | kubectl -n "${router_namespace}" apply -f -
   run kubectl -n "${router_namespace}" rollout status deployment/sandbox-router-deployment --timeout=5m
 }
 
@@ -889,15 +899,18 @@ main() {
   write_fake_claude_dockerfile
   log "Building fake Claude worker/runtime image ${fake_claude_image}"
   run docker build -t "${fake_claude_image}" -f "${fake_dockerfile}" .
+  log "Building harness-wrapper service image ${harness_wrapper_image}"
+  run make docker-build-harness-wrapper HARNESS_WRAPPER_IMG="${harness_wrapper_image}"
   build_sandbox_router_image
 
   log "Loading images into Kind cluster ${kind_cluster}"
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
   run kind load docker-image "${fake_claude_image}" --name "${kind_cluster}"
+  run kind load docker-image "${harness_wrapper_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_router_image}" --name "${kind_cluster}"
 
   log "Deploying Orka manager"
-  run make deploy IMG="${manager_image}"
+  run make deploy IMG="${manager_image}" HARNESS_WRAPPER_IMG="${harness_wrapper_image}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
