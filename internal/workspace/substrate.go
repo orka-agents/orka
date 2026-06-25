@@ -7,22 +7,18 @@ MIT License - see LICENSE file for details.
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
 	ateapipb "github.com/sozercan/orka/internal/substratepb"
+	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -411,7 +407,7 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 					ResumeLatency: resumeLatency,
 				}, nil
 			}
-			if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/healthz", nil, nil); err == nil {
+			if err := e.workspaceDaemonError(e.workspaceDaemonClient().Health(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken))); err == nil {
 				readyAt := e.now()
 				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)
 				placement, density := e.substrateTelemetry(ctx, actor)
@@ -463,8 +459,7 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 		)
 	}
 
-	var resp substrateExecResponse
-	body := substrateExecRequest{
+	body := daemonprotocol.ExecRequest{
 		Command:        append([]string(nil), req.Command...),
 		Env:            copyStringMap(req.Env),
 		WorkDir:        req.WorkDir,
@@ -473,11 +468,12 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 		MaxOutputBytes: req.MaxOutputBytes,
 		Detach:         true,
 	}
-	if err := e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/exec", body, &resp); err != nil {
+	resp, err := e.workspaceDaemonClient().Exec(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), body)
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("exec", ctxErr)
 		}
-		return nil, err
+		return nil, e.workspaceDaemonError(err)
 	}
 	if resp.ExecID != "" {
 		polled, err := e.pollExec(ctx, actorID, resp.ExecID)
@@ -487,7 +483,7 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 			}
 			return nil, err
 		}
-		resp = *polled
+		resp = polled
 	}
 	result := &ExecResult{
 		Ref:             req.Ref,
@@ -506,19 +502,20 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 	return result, nil
 }
 
-func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*substrateExecResponse, error) {
+func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*daemonprotocol.ExecResponse, error) {
 	backoff := substrateExecInitialPollInterval
 	for {
-		var resp substrateExecResponse
-		if err := e.daemonRequest(ctx, actorID, http.MethodGet, "/v1/exec/"+url.PathEscape(execID), nil, &resp); err != nil {
+		resp, err := e.workspaceDaemonClient().ExecStatus(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), execID)
+		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, contextError("exec", ctxErr)
 			}
-			if !retryableWorkspaceError(err) {
-				return nil, err
+			workspaceErr := e.workspaceDaemonError(err)
+			if !retryableWorkspaceError(workspaceErr) {
+				return nil, workspaceErr
 			}
 		} else if !resp.Running {
-			return &resp, nil
+			return resp, nil
 		}
 		if err := sleepContext(ctx, backoff); err != nil {
 			return nil, contextError("exec", err)
@@ -540,16 +537,15 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 	if actorID == "" {
 		return nil, NewError("upload", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
-	files := make([]substrateUploadFile, 0, len(req.Artifacts))
+	files := make([]daemonprotocol.UploadFile, 0, len(req.Artifacts))
 	for _, artifact := range req.Artifacts {
-		files = append(files, substrateUploadFile{
+		files = append(files, daemonprotocol.UploadFile{
 			Path:    artifact.Path,
 			Data:    append([]byte(nil), artifact.Data...),
 			Mode:    artifact.Mode,
 			ModTime: artifact.ModTime,
 		})
 	}
-	var resp substrateUploadResponse
 	authToken := e.handoffToken
 	if req.BootstrapHandoff {
 		bootstrapToken, err := e.requireBootstrapToken("upload")
@@ -566,18 +562,11 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 			replaceSubstrateHandoffUploadToken(files, mintedToken)
 		}
 	}
-	if err := e.daemonRequestWithAuthToken(
-		ctx,
-		actorID,
-		http.MethodPut,
-		"/v1/files",
-		substrateUploadRequest{Files: files},
-		&resp,
-		authToken,
-	); err != nil {
-		return nil, err
+	resp, err := e.workspaceDaemonClient().Upload(ctx, e.workspaceDaemonActorRequest(actorID, authToken), daemonprotocol.UploadRequest{Files: files})
+	if err != nil {
+		return nil, e.workspaceDaemonError(err)
 	}
-	return &UploadResult{Ref: req.Ref, Artifacts: resp.Artifacts}, nil
+	return &UploadResult{Ref: req.Ref, Artifacts: daemonArtifactsToWorkspace(resp.Artifacts)}, nil
 }
 
 func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context.Context, ref WorkspaceRef) (string, error) {
@@ -615,7 +604,7 @@ func (e *SubstrateWorkspaceExecutor) mintSessionIdentityHandoffToken(ctx context
 	return token, nil
 }
 
-func replaceSubstrateHandoffUploadToken(files []substrateUploadFile, token string) {
+func replaceSubstrateHandoffUploadToken(files []daemonprotocol.UploadFile, token string) {
 	if len(files) == 1 {
 		files[0].Data = []byte(token)
 		return
@@ -627,6 +616,37 @@ func replaceSubstrateHandoffUploadToken(files []substrateUploadFile, token strin
 	}
 }
 
+func daemonArtifactsToWorkspace(in []daemonprotocol.Artifact) []Artifact {
+	out := make([]Artifact, 0, len(in))
+	for _, artifact := range in {
+		out = append(out, Artifact{
+			Path:    artifact.Path,
+			Size:    artifact.Size,
+			Digest:  artifact.Digest,
+			Mode:    artifact.Mode,
+			ModTime: artifact.ModTime,
+		})
+	}
+	return out
+}
+
+func daemonDownloadedArtifactsToWorkspace(in []daemonprotocol.DownloadedArtifact) []DownloadedArtifact {
+	out := make([]DownloadedArtifact, 0, len(in))
+	for _, artifact := range in {
+		out = append(out, DownloadedArtifact{
+			Artifact: Artifact{
+				Path:    artifact.Path,
+				Size:    artifact.Size,
+				Digest:  artifact.Digest,
+				Mode:    artifact.Mode,
+				ModTime: artifact.ModTime,
+			},
+			Data: append([]byte(nil), artifact.Data...),
+		})
+	}
+	return out
+}
+
 func (e *SubstrateWorkspaceExecutor) Download(ctx context.Context, req DownloadRequest) (*DownloadResult, error) {
 	ctx, cancel := contextWithTimeout(ctx, req.Timeout)
 	defer cancel()
@@ -634,11 +654,11 @@ func (e *SubstrateWorkspaceExecutor) Download(ctx context.Context, req DownloadR
 	if actorID == "" {
 		return nil, NewError("download", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
-	var resp substrateDownloadResponse
-	if err := e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/files/download", substrateDownloadRequest{Paths: req.Paths}, &resp); err != nil {
-		return nil, err
+	resp, err := e.workspaceDaemonClient().Download(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), daemonprotocol.DownloadRequest{Paths: req.Paths})
+	if err != nil {
+		return nil, e.workspaceDaemonError(err)
 	}
-	return &DownloadResult{Ref: req.Ref, Artifacts: resp.Artifacts}, nil
+	return &DownloadResult{Ref: req.Ref, Artifacts: daemonDownloadedArtifactsToWorkspace(resp.Artifacts)}, nil
 }
 
 func (e *SubstrateWorkspaceExecutor) Release(ctx context.Context, req ReleaseRequest) (*ReleaseResult, error) {
@@ -825,182 +845,6 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 	}, nil
 }
 
-// SubstratePoolTelemetry reports safe actor/worker density for a single Orka pool.
-func (e *SubstrateWorkspaceExecutor) SubstratePoolTelemetry(
-	ctx context.Context,
-	prefix string,
-	template TemplateRef,
-	workerPool TemplateRef,
-) (Density, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
-	workers, err := e.control.ListWorkers(ctx)
-	if err != nil {
-		return Density{}, err
-	}
-	actors, err := e.control.ListActors(ctx)
-	if err != nil {
-		return Density{}, err
-	}
-	filteredActors := make([]substrateActor, 0, len(actors))
-	actorIDs := make(map[string]struct{}, len(actors))
-	for _, actor := range actors {
-		actorID := strings.TrimSpace(actor.ActorID)
-		if prefix != "" && !strings.HasPrefix(actorID, prefix+"-") {
-			continue
-		}
-		if strings.TrimSpace(template.Namespace) != "" && strings.TrimSpace(actor.TemplateNamespace) != strings.TrimSpace(template.Namespace) {
-			continue
-		}
-		if strings.TrimSpace(template.Name) != "" && strings.TrimSpace(actor.TemplateName) != strings.TrimSpace(template.Name) {
-			continue
-		}
-		filteredActors = append(filteredActors, actor)
-		actorIDs[actorID] = struct{}{}
-	}
-	filteredWorkers := make([]substrateWorker, 0, len(workers))
-	for _, worker := range workers {
-		if strings.TrimSpace(workerPool.Name) != "" && strings.TrimSpace(worker.WorkerPool) != strings.TrimSpace(workerPool.Name) {
-			continue
-		}
-		if strings.TrimSpace(workerPool.Namespace) != "" && strings.TrimSpace(worker.WorkerNamespace) != strings.TrimSpace(workerPool.Namespace) {
-			continue
-		}
-		if workerActorID := strings.TrimSpace(worker.ActorID); workerActorID != "" {
-			if _, ok := actorIDs[workerActorID]; !ok {
-				continue
-			}
-		} else if strings.TrimSpace(workerPool.Name) == "" {
-			continue
-		}
-		filteredWorkers = append(filteredWorkers, worker)
-	}
-	return substrateDensity(filteredWorkers, filteredActors), nil
-}
-
-// EnsureSubstrateActors creates deterministic actor records for a pool target.
-func (e *SubstrateWorkspaceExecutor) EnsureSubstrateActors(
-	ctx context.Context,
-	prefix string,
-	target int,
-	template TemplateRef,
-) (int, error) {
-	if target <= 0 {
-		return 0, nil
-	}
-	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
-	if prefix == "" {
-		return 0, NewError("ensure substrate actors", ErrorKindInvalidArgument, "actor prefix is required", false, nil)
-	}
-	created := 0
-	for i := range target {
-		actorID := deterministicSubstratePoolActorID(prefix, i)
-		if actor, err := e.control.GetActor(ctx, actorID); err == nil {
-			if err := validateSubstrateActorTemplateForOp("ensure substrate actors", actor, template); err != nil {
-				return created, err
-			}
-			continue
-		} else if !IsKind(err, ErrorKindNotFound) {
-			return created, err
-		}
-		if _, err := e.control.CreateActor(ctx, actorID, template.Namespace, template.Name); err != nil {
-			if IsKind(err, ErrorKindAlreadyExists) {
-				actor, getErr := e.control.GetActor(ctx, actorID)
-				if getErr != nil {
-					return created, getErr
-				}
-				if err := validateSubstrateActorTemplateForOp("ensure substrate actors", actor, template); err != nil {
-					return created, err
-				}
-				continue
-			}
-			return created, err
-		}
-		created++
-	}
-	return created, nil
-}
-
-// ConvergeSubstrateActors creates missing deterministic actors below target and
-// deletes deterministic pool actors at or above target.
-func (e *SubstrateWorkspaceExecutor) ConvergeSubstrateActors(
-	ctx context.Context,
-	prefix string,
-	target int,
-	template TemplateRef,
-) (int, int, error) {
-	if target < 0 {
-		return 0, 0, NewError("converge substrate actors", ErrorKindInvalidArgument, "actor target must be non-negative", false, nil)
-	}
-	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
-	if prefix == "" {
-		return 0, 0, NewError("converge substrate actors", ErrorKindInvalidArgument, "actor prefix is required", false, nil)
-	}
-
-	created := 0
-	if target > 0 {
-		var err error
-		created, err = e.EnsureSubstrateActors(ctx, prefix, target, template)
-		if err != nil {
-			return created, 0, err
-		}
-	}
-
-	deleted, err := e.PruneSubstrateActors(ctx, prefix, target)
-	if err != nil {
-		return created, deleted, err
-	}
-	return created, deleted, nil
-}
-
-// PruneSubstrateActors deletes deterministic pool actors at or above target.
-func (e *SubstrateWorkspaceExecutor) PruneSubstrateActors(
-	ctx context.Context,
-	prefix string,
-	target int,
-) (int, error) {
-	if target < 0 {
-		return 0, NewError("prune substrate actors", ErrorKindInvalidArgument, "actor target must be non-negative", false, nil)
-	}
-	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
-	if prefix == "" {
-		return 0, NewError("prune substrate actors", ErrorKindInvalidArgument, "actor prefix is required", false, nil)
-	}
-
-	actors, err := e.control.ListActors(ctx)
-	if err != nil {
-		return 0, err
-	}
-	actorsByOrdinal := make(map[int]string)
-	ordinals := make([]int, 0)
-	for _, actor := range actors {
-		ordinal, ok := substratePoolActorOrdinal(actor.ActorID, prefix)
-		if !ok || ordinal < target {
-			continue
-		}
-		if _, exists := actorsByOrdinal[ordinal]; exists {
-			continue
-		}
-		actorsByOrdinal[ordinal] = strings.TrimSpace(actor.ActorID)
-		ordinals = append(ordinals, ordinal)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(ordinals)))
-
-	deleted := 0
-	for _, ordinal := range ordinals {
-		if err := e.control.DeleteActor(ctx, actorsByOrdinal[ordinal]); err != nil {
-			if IsKind(err, ErrorKindNotFound) {
-				continue
-			}
-			return deleted, err
-		}
-		deleted++
-	}
-	return deleted, nil
-}
-
 func deterministicSubstratePoolActorID(prefix string, ordinal int) string {
 	return fmt.Sprintf("%s-%05d", prefix, ordinal)
 }
@@ -1109,7 +953,7 @@ func substrateDensity(workers []substrateWorker, actors []substrateActor) Densit
 }
 
 func (e *SubstrateWorkspaceExecutor) scrubDaemon(ctx context.Context, actorID string) error {
-	return e.daemonRequest(ctx, actorID, http.MethodPost, "/v1/scrub", substrateScrubRequest{Paths: defaultSubstrateScrubPaths()}, nil)
+	return e.workspaceDaemonError(e.workspaceDaemonClient().Scrub(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), daemonprotocol.ScrubRequest{Paths: defaultSubstrateScrubPaths()}))
 }
 
 func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, actorID string) error {
@@ -1127,75 +971,50 @@ func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, ac
 	restoreCtx, cancel := context.WithTimeout(restoreCtx, 10*time.Second)
 	defer cancel()
 
-	return e.daemonRequestWithAuthToken(
+	err = e.workspaceDaemonClient().UploadNoResponse(
 		restoreCtx,
-		actorID,
-		http.MethodPut,
-		"/v1/files",
-		substrateUploadRequest{
-			Files: []substrateUploadFile{{
+		e.workspaceDaemonActorRequest(actorID, bootstrapToken),
+		daemonprotocol.UploadRequest{
+			Files: []daemonprotocol.UploadFile{{
 				Path: substrateHandoffTokenUploadPath,
 				Data: []byte(e.handoffToken),
 				Mode: 0o600,
 			}},
 		},
-		nil,
-		bootstrapToken,
 	)
+	return e.workspaceDaemonError(err)
 }
 
-func (e *SubstrateWorkspaceExecutor) daemonRequest(ctx context.Context, actorID, method, path string, body any, out any) error {
-	return e.daemonRequestWithAuthToken(ctx, actorID, method, path, body, out, e.handoffToken)
+func (e *SubstrateWorkspaceExecutor) workspaceDaemonClient() daemonprotocol.Client {
+	return daemonprotocol.HTTPClient{
+		RouterURL:      e.routerURL,
+		ActorDNSSuffix: e.actorDNSSuffix,
+		HTTPClient:     e.httpClient,
+	}
 }
 
-func (e *SubstrateWorkspaceExecutor) daemonRequestWithAuthToken(
-	ctx context.Context,
-	actorID string,
-	method string,
-	path string,
-	body any,
-	out any,
-	authToken string,
-) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return NewError("daemon request", ErrorKindInvalidArgument, "failed to encode request", false, err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	endpoint, err := e.daemonURL(path)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-	if err != nil {
-		return NewError("daemon request", ErrorKindInvalidArgument, "failed to create request", false, err)
-	}
-	req.Host = actorID + "." + e.actorDNSSuffix
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if strings.TrimSpace(authToken) != "" {
-		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(authToken))
-	}
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
-		return NewError("daemon request", ErrorKindUnknown, "daemon request failed", true, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return NewError("daemon request", ErrorKindUnknown, fmt.Sprintf("daemon returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data))), resp.StatusCode >= 500, nil)
-	}
-	if out == nil {
+func (e *SubstrateWorkspaceExecutor) workspaceDaemonActorRequest(actorID, authValue string) daemonprotocol.ActorRequest {
+	return daemonprotocol.ActorRequest{ActorID: actorID, AuthValue: authValue}
+}
+
+func (e *SubstrateWorkspaceExecutor) workspaceDaemonError(err error) error {
+	if err == nil {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return NewError("daemon request", ErrorKindUnknown, "failed to decode response", false, err)
+	var daemonErr *daemonprotocol.Error
+	if !errors.As(err, &daemonErr) {
+		return NewError("daemon request", ErrorKindUnknown, "daemon request failed", true, err)
 	}
-	return nil
+	switch daemonErr.Reason {
+	case daemonprotocol.ErrorReasonEncodeRequest, daemonprotocol.ErrorReasonInvalidURL, daemonprotocol.ErrorReasonCreateRequest:
+		return NewError("daemon request", ErrorKindInvalidArgument, daemonErr.Message, false, daemonErr.Cause)
+	case daemonprotocol.ErrorReasonRequestFailed, daemonprotocol.ErrorReasonStatus:
+		return NewError("daemon request", ErrorKindUnknown, daemonErr.Message, daemonErr.Retryable, daemonErr.Cause)
+	case daemonprotocol.ErrorReasonDecodeResponse:
+		return NewError("daemon request", ErrorKindUnknown, daemonErr.Message, false, daemonErr.Cause)
+	default:
+		return NewError("daemon request", ErrorKindUnknown, daemonErr.Error(), daemonErr.Retryable, daemonErr.Cause)
+	}
 }
 
 func (e *SubstrateWorkspaceExecutor) requireBootstrapToken(op string) (string, error) {
@@ -1212,16 +1031,6 @@ func retryableWorkspaceError(err error) bool {
 		return workspaceErr.Retryable
 	}
 	return true
-}
-
-func (e *SubstrateWorkspaceExecutor) daemonURL(path string) (string, error) {
-	base, err := url.Parse(e.routerURL)
-	if err != nil {
-		return "", NewError("daemon request", ErrorKindInvalidArgument, "invalid router URL", false, err)
-	}
-	cleanPath := "/" + strings.TrimLeft(path, "/")
-	base.Path = strings.TrimRight(base.Path, "/") + cleanPath
-	return base.String(), nil
 }
 
 func substrateActorID(ref WorkspaceRef) string {
@@ -1275,57 +1084,6 @@ func defaultSubstrateScrubPaths() []string {
 		"/app/" + substrateSessionCertUploadPath,
 		"/app/" + substrateSessionKeyUploadPath,
 	}
-}
-
-type substrateExecRequest struct {
-	Command        []string          `json:"command"`
-	Env            map[string]string `json:"env,omitempty"`
-	WorkDir        string            `json:"workDir,omitempty"`
-	Stdin          []byte            `json:"stdin,omitempty"`
-	TimeoutSeconds int64             `json:"timeoutSeconds,omitempty"`
-	MaxOutputBytes int64             `json:"maxOutputBytes,omitempty"`
-	Detach         bool              `json:"detach,omitempty"`
-	Resident       bool              `json:"resident,omitempty"`
-	ResidentKey    string            `json:"residentKey,omitempty"`
-}
-
-type substrateExecResponse struct {
-	ExecID          string    `json:"execId,omitempty"`
-	Running         bool      `json:"running,omitempty"`
-	Stdout          string    `json:"stdout"`
-	Stderr          string    `json:"stderr"`
-	ExitCode        int       `json:"exitCode"`
-	StdoutTruncated bool      `json:"stdoutTruncated"`
-	StderrTruncated bool      `json:"stderrTruncated"`
-	StartedAt       time.Time `json:"startedAt"`
-	FinishedAt      time.Time `json:"finishedAt"`
-}
-
-type substrateUploadRequest struct {
-	Files []substrateUploadFile `json:"files"`
-}
-
-type substrateUploadFile struct {
-	Path    string    `json:"path"`
-	Data    []byte    `json:"data"`
-	Mode    uint32    `json:"mode,omitempty"`
-	ModTime time.Time `json:"modTime,omitempty"`
-}
-
-type substrateUploadResponse struct {
-	Artifacts []Artifact `json:"artifacts"`
-}
-
-type substrateDownloadRequest struct {
-	Paths []string `json:"paths,omitempty"`
-}
-
-type substrateDownloadResponse struct {
-	Artifacts []DownloadedArtifact `json:"artifacts"`
-}
-
-type substrateScrubRequest struct {
-	Paths []string `json:"paths"`
 }
 
 type grpcSubstrateControlClient struct {

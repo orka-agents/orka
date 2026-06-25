@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/workspace/statusrules"
 )
 
 const (
@@ -93,12 +94,7 @@ func resolveWorkspaceProvider(ws *corev1alpha1.ExecutionWorkspaceSpec, defaultPr
 }
 
 func supportedWorkspaceProvider(provider corev1alpha1.WorkspaceProvider) bool {
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox, corev1alpha1.WorkspaceProviderSubstrate:
-		return true
-	default:
-		return false
-	}
+	return statusrules.IsSupportedProvider(provider)
 }
 
 // WorkspaceProviderSupported reports whether provider is a recognized execution

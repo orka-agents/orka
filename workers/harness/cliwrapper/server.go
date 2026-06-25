@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,7 +255,8 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := validateTurnPathSegment(request.TurnID); err != nil {
+	eventStreamPath, err := harness.EventStreamPath(request.TurnID)
+	if err != nil {
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -290,7 +292,7 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
-		EventStreamPath:  harness.TurnsPath + "/" + path.Clean(string(request.TurnID)) + "/events",
+		EventStreamPath:  eventStreamPath,
 	})
 }
 
@@ -298,15 +300,13 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(w, r) {
 		return
 	}
-	trimmed := strings.TrimPrefix(r.URL.Path, harness.TurnsPath+"/")
-	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
-	if len(parts) != 2 {
-		writeSafeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	turnID := harness.HarnessTurnID(parts[0])
-	if err := validateTurnPathSegment(turnID); err != nil {
-		writeSafeError(w, http.StatusBadRequest, err.Error())
+	turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+	if err != nil {
+		if errors.Is(err, harness.ErrTurnPathNotFound) {
+			writeSafeError(w, http.StatusNotFound, "not found")
+		} else {
+			writeSafeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 	s.mu.RLock()
@@ -316,7 +316,7 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusNotFound, "turn not found")
 		return
 	}
-	switch parts[1] {
+	switch resource {
 	case "events":
 		if r.Method != http.MethodGet {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1016,17 +1016,6 @@ func removeTurnEnv(env []string, names ...string) []string {
 
 func writeSafeError(w http.ResponseWriter, status int, message string) {
 	harness.WriteError(w, status, events.RedactExecutionEventText(message))
-}
-
-func validateTurnPathSegment(turnID harness.HarnessTurnID) error {
-	value := strings.TrimSpace(string(turnID))
-	if value == "" {
-		return fmt.Errorf("turn id is required")
-	}
-	if value == "." || value == ".." || strings.Contains(value, "/") || strings.Contains(value, "\\") {
-		return fmt.Errorf("turn id must be a single safe path segment")
-	}
-	return nil
 }
 
 type turnState struct {

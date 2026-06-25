@@ -58,10 +58,19 @@ rules:
   - ""
   resources:
   - secrets
-  - serviceaccounts
   verbs:
   - create
   - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
   - get
   - list
   - update
@@ -254,6 +263,7 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - clusterrolebindings
+  - rolebindings
   verbs:
   - create
   - delete
@@ -263,9 +273,18 @@ rules:
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
+  resourceNames:
+  - ai-worker-role
+  - container-worker-role
+  - vendor-worker-role
   resources:
   - clusterroles
-  - rolebindings
+  verbs:
+  - bind
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
   - roles
   verbs:
   - get

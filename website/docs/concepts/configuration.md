@@ -93,7 +93,7 @@ spec:
 | `enabled` | bool | `false` | Enable agent-to-agent coordination tools |
 | `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
-| `approvalRequiredTools` | list | `[]` | Tool names that require human approval before execution in autonomous coordination mode |
+| `approvalRequiredTools` | list | `[]` | Custom Tool CRD names that require human approval before execution in enabled autonomous coordination mode. Built-in tools, including `request_approval`, are rejected |
 | `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
 | `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
 | `maxDepth` | int32 | `3` | Maximum delegation depth |
@@ -669,6 +669,7 @@ Key configuration values for the Helm chart:
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
 | `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
+| `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `controller.apiPort` | `8080` | REST API port |
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
@@ -689,6 +690,7 @@ Key configuration values for the Helm chart:
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
+| `client.namespace` | `""` | Client ServiceAccount namespace override. Empty defaults to `controller.watchNamespace` when namespace isolation is enforced and `watchNamespace` is set, otherwise the release namespace. |
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
@@ -750,6 +752,8 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
 | `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--oidc-allowed-subjects` | `ORKA_OIDC_ALLOWED_SUBJECTS` env or `""` | Required comma-separated OIDC subject allowlist patterns when OIDC is enabled |
+| `--oidc-namespace` | `ORKA_OIDC_NAMESPACE` env or `default` | Namespace assigned to authorized OIDC callers for namespace isolation |
 | `--context-token-profile` | `ORKA_CONTEXT_TOKEN_PROFILE` env or `""` | Context-token profile for external API requests. Currently supports `kontxt` |
 | `--context-token-issuer` | `ORKA_CONTEXT_TOKEN_ISSUER` env or `""` | Context-token issuer URL. Requires `--context-token-profile` and `--context-token-audience` when set |
 | `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
@@ -833,11 +837,13 @@ When this feature is enabled, harness wrapper pods need RBAC for the upstream sa
 
 ### External API OIDC Authentication
 
-ServiceAccount bearer token authentication is always available. To allow external callers such as GitHub Actions to authenticate directly with OIDC JWTs, configure both issuer and audience:
+ServiceAccount bearer token authentication is always available. To allow external callers such as GitHub Actions to authenticate directly with OIDC JWTs, configure issuer, audience, an explicit subject allowlist, and the namespace assigned to OIDC callers:
 
 ```bash
 --oidc-issuer=https://token.actions.githubusercontent.com
 --oidc-audience=orka-ci
+--oidc-allowed-subjects=repo:my-org/my-repo:ref:refs/heads/main
+--oidc-namespace=ci
 ```
 
 The same settings can be supplied with environment variables:
@@ -845,11 +851,13 @@ The same settings can be supplied with environment variables:
 ```bash
 ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com
 ORKA_OIDC_AUDIENCE=orka-ci
+ORKA_OIDC_ALLOWED_SUBJECTS=repo:my-org/my-repo:ref:refs/heads/main
+ORKA_OIDC_NAMESPACE=ci
 # Optional; when omitted, Orka discovers the JWKS URL from the issuer metadata.
 ORKA_OIDC_JWKS_URL=https://token.actions.githubusercontent.com/.well-known/jwks
 ```
 
-OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, and a non-empty `sub`. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, a non-empty `sub`, and a `sub` value that matches `--oidc-allowed-subjects`. Wildcards `*` and `?` are supported in allowlist patterns; use the narrowest GitHub Actions subject for the trusted repository, branch, environment, or workflow. Authorized OIDC callers are bound to `--oidc-namespace` (or `default` when omitted) so namespace isolation can reject requests for other namespaces. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
 
 ### External API Context-Token Authentication
 

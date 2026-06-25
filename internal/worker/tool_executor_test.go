@@ -1984,3 +1984,24 @@ func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
 		t.Errorf("response size = %d bytes, want exactly 10MB", len(result))
 	}
 }
+
+func TestToolExecutor_Execute_IdempotencyKeyReservedHeaderConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("server should not be called when Idempotency-Key conflicts")
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL: server.URL,
+		Headers: map[string]string{
+			"Idempotency-Key": "tool-key",
+		},
+	}}}
+	ctx := WithToolIdempotencyKey(context.Background(), "approval-key")
+
+	_, err := executor.Execute(ctx, tool, json.RawMessage(`{"input":"test"}`))
+	if err == nil || !strings.Contains(err.Error(), "reserved header") {
+		t.Fatalf("Execute() error = %v, want reserved header conflict", err)
+	}
+}

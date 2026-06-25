@@ -627,6 +627,31 @@ func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordination
 	}
 }
 
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRejectBuiltIns(t *testing.T) {
+	for _, toolName := range []string{"request_approval", "create_container_task"} {
+		t.Run(toolName, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						Autonomous:            true,
+						ApprovalRequiredTools: []string{toolName},
+					},
+				},
+			}
+			if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+				!strings.Contains(err.Error(), "cannot include built-in tool") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want built-in rejection", err)
+			}
+		})
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -1995,6 +2020,76 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 				t.Errorf("unexpected subject: %#v", subject)
 			}
 		})
+	}
+}
+
+func TestEnsureWorkerRBAC_UsesNamespacedRoleBindingsWhenIsolationEnforced(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.EnforceNamespaceIsolation = true
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount string
+		binding        string
+		clusterRole    string
+	}{
+		{AIWorkerServiceAccount, "orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			rb := &rbacv1.RoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.binding, Namespace: testNS}, rb); err != nil {
+				t.Fatalf("expected RoleBinding %s/%s to exist: %v", testNS, tt.binding, err)
+			}
+			if rb.RoleRef.Kind != "ClusterRole" || rb.RoleRef.Name != tt.clusterRole {
+				t.Fatalf("unexpected roleRef: %#v", rb.RoleRef)
+			}
+			if len(rb.Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %d", len(rb.Subjects))
+			}
+			subject := rb.Subjects[0]
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
+				t.Fatalf("unexpected subject: %#v", subject)
+			}
+
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.binding}, crb); !apierrors.IsNotFound(err) {
+				t.Fatalf("expected no ClusterRoleBinding %s, got err %v and object %#v", tt.binding, err, crb)
+			}
+		})
+	}
+}
+
+func TestEnsureWorkerRBAC_IsolationDeletesManagedLegacyClusterRoleBindings(t *testing.T) {
+	scheme := newTestScheme()
+	legacy := workerClusterRoleBinding(testNS, workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        "old-ai-worker-role",
+		clusterRoleBindingName: "orka-ai-worker-test-ns",
+	})
+	legacy.Subjects = append(legacy.Subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: "extra-worker", Namespace: testNS})
+	r := newUnitReconciler(scheme, legacy)
+	r.EnforceNamespaceIsolation = true
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "orka-ai-worker-test-ns"}, crb); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected managed legacy ClusterRoleBinding to be deleted, got err %v", err)
+	}
+
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "orka-ai-worker-test-ns", Namespace: testNS}, rb); err != nil {
+		t.Fatalf("expected replacement RoleBinding to exist: %v", err)
 	}
 }
 
@@ -3408,6 +3503,48 @@ func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected phase Pending for retry, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_AutonomousJobFailedWithPendingApprovalParksBeforeRetry(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-failed-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-fail-approval", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-fail-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-failed-approval-agent"},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-fail-approval",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-failed-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-job-fail-approval" {
+		t.Fatalf("task status = %#v, want parked Running without retry", task.Status)
 	}
 }
 
@@ -5018,6 +5155,59 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
 	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderSubstrate, "orka-codex", "requires substrate to be enabled")
+	assertNoJobsForTask(t, r, task)
+}
+
+func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderDetails(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-unsupported-provider", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProvider("provider-native"),
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	status := updated.Status.ExecutionWorkspace
+	if status == nil {
+		t.Fatal("ExecutionWorkspace status is nil")
+	}
+	if status.Provider != "" || status.TemplateRef != nil {
+		t.Fatalf("unsupported provider status provider=%q template=%#v, want provider-neutral empty details", status.Provider, status.TemplateRef)
+	}
+	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed || status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
+		t.Fatalf("workspace status phase/reason = %q/%q, want Failed/WorkspaceValidationFailed", status.Phase, status.Reason)
+	}
+	if !strings.Contains(status.Message, "unsupported execution workspace provider") {
+		t.Fatalf("workspace status message = %q, want unsupported provider", status.Message)
+	}
 	assertNoJobsForTask(t, r, task)
 }
 

@@ -229,7 +229,7 @@ func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, name
 }
 
 func (h *Handlers) listTaskApprovalEvents(ctx context.Context, namespace, taskName string) ([]store.ExecutionEvent, error) {
-	return approvals.ListEvents(ctx, h.executionEventStore, namespace, taskName)
+	return newTaskTimelineReader(h.executionEventStore, namespace, taskName).listMatching(ctx, approvals.EventTypes())
 }
 
 func approvalDecisionActor(userInfo *UserInfo) string {

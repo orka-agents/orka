@@ -9,6 +9,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
 )
 
 const (
@@ -225,13 +228,7 @@ func TestSubstrateConvergeActorsDeletesDeterministicActorsAboveTarget(t *testing
 			{ActorID: "other-pool-00099", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 2, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err != nil {
@@ -260,13 +257,7 @@ func TestSubstratePruneActorsDeletesDeterministicActorsAboveTarget(t *testing.T)
 			{ActorID: "other-pool-00002", TemplateNamespace: "ate-demo", TemplateName: "orka-codex-ci", Status: substrateStatusSuspended},
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	deleted, err := executor.PruneSubstrateActors(t.Context(), prefix, 1)
 	if err != nil {
@@ -297,13 +288,7 @@ func TestSubstrateConvergeActorsReturnsPartialPruneCountOnError(t *testing.T) {
 			NewError("delete actor", ErrorKindUnknown, "delete failed", false, nil),
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err == nil {
@@ -323,13 +308,7 @@ func TestSubstrateConvergeActorsRejectsTemplateMismatchBelowTarget(t *testing.T)
 	control := &recordingSubstrateControlClient{
 		templateName: "old-template",
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 2, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err == nil {
@@ -369,13 +348,7 @@ func TestSubstrateConvergeActorsRevalidatesConcurrentCreateAlreadyExists(t *test
 				createErr:    NewError("create actor", ErrorKindAlreadyExists, "actor already exists", false, nil),
 				templateName: tt.templateName,
 			}
-			executor := &SubstrateWorkspaceExecutor{
-				control:        control,
-				httpClient:     http.DefaultClient,
-				routerURL:      "http://router.test",
-				actorDNSSuffix: "actors.test",
-				now:            time.Now,
-			}
+			executor := &SubstrateActorPoolExecutor{control: control}
 
 			created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 1, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 			if tt.wantErr {
@@ -417,13 +390,7 @@ func TestSubstrateConvergeActorsDeletesStaleTemplateActorsWhenTargetZero(t *test
 			{ActorID: "other-pool-00099", TemplateNamespace: "ate-demo", TemplateName: "old-template", Status: substrateStatusSuspended},
 		},
 	}
-	executor := &SubstrateWorkspaceExecutor{
-		control:        control,
-		httpClient:     http.DefaultClient,
-		routerURL:      "http://router.test",
-		actorDNSSuffix: "actors.test",
-		now:            time.Now,
-	}
+	executor := &SubstrateActorPoolExecutor{control: control}
 
 	created, deleted, err := executor.ConvergeSubstrateActors(t.Context(), prefix, 0, TemplateRef{Namespace: "ate-demo", Name: "orka-codex-ci"})
 	if err != nil {
@@ -1743,4 +1710,64 @@ func (c *recordingSubstrateControlClient) ListActors(ctx context.Context) ([]sub
 		return nil, c.listActorsErr
 	}
 	return append([]substrateActor(nil), c.actors...), nil
+}
+
+func TestWorkspaceDaemonErrorMapsRetryability(t *testing.T) {
+	tests := map[string]struct {
+		err       error
+		kind      ErrorKind
+		retryable bool
+		contains  string
+	}{
+		"invalid url": {
+			err:      &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonInvalidURL, Message: "invalid router URL"},
+			kind:     ErrorKindInvalidArgument,
+			contains: "invalid router URL",
+		},
+		"status 401": {
+			err:      &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonStatus, Message: "daemon returned HTTP 401: unauthorized", StatusCode: http.StatusUnauthorized, Retryable: false},
+			kind:     ErrorKindUnknown,
+			contains: "HTTP 401",
+		},
+		"status 503": {
+			err:       &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonStatus, Message: "daemon returned HTTP 503: warming", StatusCode: http.StatusServiceUnavailable, Retryable: true},
+			kind:      ErrorKindUnknown,
+			retryable: true,
+			contains:  "HTTP 503",
+		},
+		"decode": {
+			err:      &daemonprotocol.Error{Reason: daemonprotocol.ErrorReasonDecodeResponse, Message: "failed to decode response"},
+			kind:     ErrorKindUnknown,
+			contains: "decode",
+		},
+	}
+	executor := &SubstrateWorkspaceExecutor{}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			mapped := executor.workspaceDaemonError(tt.err)
+			if KindOf(mapped) != tt.kind {
+				t.Fatalf("kind = %s, want %s (err=%v)", KindOf(mapped), tt.kind, mapped)
+			}
+			var workspaceErr *Error
+			if !errors.As(mapped, &workspaceErr) {
+				t.Fatalf("mapped error = %T %[1]v, want workspace Error", mapped)
+			}
+			if workspaceErr.Retryable != tt.retryable {
+				t.Fatalf("Retryable = %t, want %t", workspaceErr.Retryable, tt.retryable)
+			}
+			if tt.contains != "" && !strings.Contains(mapped.Error(), tt.contains) {
+				t.Fatalf("error = %q, want contains %q", mapped.Error(), tt.contains)
+			}
+		})
+	}
+}
+
+func TestNewSubstrateActorPoolExecutorDoesNotRequireRouterConfig(t *testing.T) {
+	executor, err := NewSubstrateActorPoolExecutor(SubstrateConfig{ControlClient: &recordingSubstrateControlClient{}})
+	if err != nil {
+		t.Fatalf("NewSubstrateActorPoolExecutor() error = %v", err)
+	}
+	if executor == nil || executor.control == nil {
+		t.Fatalf("executor = %#v, want control-only adapter", executor)
+	}
 }

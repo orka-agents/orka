@@ -20,6 +20,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -38,6 +40,84 @@ import (
 )
 
 const testWatchNamespace = "prod"
+
+func TestHandlers_CreateTaskRequiresKubernetesRBACForTokenReviewUser(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction := action.(k8stesting.CreateAction)
+		review := createAction.GetObject().(*authorizationv1.SubjectAccessReview)
+		require.Equal(t, "system:serviceaccount:default:limited", review.Spec.User)
+		require.Equal(t, []string{"system:serviceaccounts", "system:serviceaccounts:default"}, review.Spec.Groups)
+		require.NotNil(t, review.Spec.ResourceAttributes)
+		require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+		require.Equal(t, "create", review.Spec.ResourceAttributes.Verb)
+		require.Equal(t, corev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+		require.Equal(t, "tasks", review.Spec.ResourceAttributes.Resource)
+		review.Status.Allowed = false
+		return true, review, nil
+	})
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: kubeClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:limited",
+			Groups:   []string{"system:serviceaccounts", "system:serviceaccounts:default"},
+			AuthType: AuthTypeTokenReview,
+		})
+		return c.Next()
+	})
+	app.Post("/tasks", handlers.CreateTask)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", map[string]any{
+		"name":  "denied-task",
+		"type":  "container",
+		"image": "alpine:3.20",
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	var created corev1alpha1.Task
+	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "denied-task", Namespace: "default"}, &created)
+	require.True(t, apierrors.IsNotFound(err), "denied task should not be created")
+}
+
+func TestHandlers_CreateTaskAllowsKubernetesRBACAuthorizedTokenReviewUser(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction := action.(k8stesting.CreateAction)
+		review := createAction.GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: kubeClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "system:serviceaccount:default:editor",
+			AuthType: AuthTypeTokenReview,
+		})
+		return c.Next()
+	})
+	app.Post("/tasks", handlers.CreateTask)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", map[string]any{
+		"name":  "allowed-task",
+		"type":  "container",
+		"image": "alpine:3.20",
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
 
 func setupTestHandlers() (*Handlers, *fiber.App) {
 	scheme := runtime.NewScheme()
@@ -3083,6 +3163,32 @@ func TestResolveNamespace_IsolationEnforced(t *testing.T) {
 			Namespace: "team-a",
 		})
 		ns, err := handlers.resolveNamespace(c, "team-b")
+		if err != nil {
+			return err
+		}
+		return c.SendString(ns)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestResolveNamespace_IsolationRejectsNamespaceLessAuthenticatedUser(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	db, _ := sqlite.NewDB(":memory:")
+	ss := sqlite.NewStore(db, ":memory:")
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
+
+	app := fiber.New()
+	app.Get("/test", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "oidc-user", AuthType: AuthTypeOIDC})
+		ns, err := handlers.resolveNamespace(c, "team-a")
 		if err != nil {
 			return err
 		}

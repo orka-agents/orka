@@ -298,7 +298,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			return fmt.Errorf("harness frame identity does not match running turn")
 		}
 		result.Frames = append(result.Frames, frame)
-		key := harnessFrameKey(frame)
+		key := harness.MappedFrameKey(frame)
 		_, alreadyAppended := existingFrameKeys[key]
 		if !alreadyAppended {
 			mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
@@ -436,38 +436,17 @@ func (r *TaskReconciler) existingHarnessFrameKeys(ctx context.Context, task *cor
 			if event.Seq > afterSeq {
 				afterSeq = event.Seq
 			}
-			var content struct {
-				Harness struct {
-					RuntimeSessionID string `json:"runtimeSessionID"`
-					TurnID           string `json:"turnID"`
-					CorrelationID    string `json:"correlationID"`
-					Seq              int64  `json:"seq"`
-				} `json:"harness"`
-			}
-			if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+			identity, ok := harness.MappedFrameIdentityFromEvent(event)
+			if !ok {
 				continue
 			}
-			keys[strings.Join([]string{
-				content.Harness.RuntimeSessionID,
-				content.Harness.TurnID,
-				content.Harness.CorrelationID,
-				strconv.FormatInt(content.Harness.Seq, 10),
-			}, "\x00")] = struct{}{}
+			keys[identity.Key()] = struct{}{}
 		}
 		if len(eventsList) < store.MaxExecutionEventLimit {
 			break
 		}
 	}
 	return keys, nil
-}
-
-func harnessFrameKey(frame harness.HarnessEventFrame) string {
-	return strings.Join([]string{
-		string(frame.RuntimeSessionID),
-		string(frame.TurnID),
-		frame.CorrelationID,
-		strconv.FormatInt(frame.Seq, 10),
-	}, "\x00")
 }
 
 // harnessWrapperTurnHasPersistedFrames reports whether the event store already
@@ -504,15 +483,11 @@ func (r *TaskReconciler) harnessWrapperTurnHasPersistedFrames(ctx context.Contex
 			if event.Seq > afterSeq {
 				afterSeq = event.Seq
 			}
-			var content struct {
-				Harness struct {
-					TurnID string `json:"turnID"`
-				} `json:"harness"`
-			}
-			if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+			identity, ok := harness.MappedFrameIdentityFromEvent(event)
+			if !ok {
 				continue
 			}
-			if strings.TrimSpace(content.Harness.TurnID) == wantTurnID {
+			if identity.HasTurnID(turnID) {
 				return true, nil
 			}
 		}

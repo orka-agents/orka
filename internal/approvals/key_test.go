@@ -97,3 +97,27 @@ func TestApprovalTargetArgsPreviewIsBounded(t *testing.T) {
 		t.Fatalf("TargetArgsPreview = %s, want truncation marker", target.TargetArgsPreview)
 	}
 }
+
+func TestApprovalTargetTextFieldsAreBounded(t *testing.T) {
+	largeAction := strings.Repeat("approve ", maxApprovalTargetTextChars)
+	largeRisk := strings.Repeat("risk ", maxApprovalTargetTextChars)
+	target, err := NewApprovalTarget(
+		"default",
+		"task-1",
+		"task-uid-1",
+		"dispatch_work_order",
+		json.RawMessage(`{"safe":"ok"}`),
+		largeAction,
+		largeRisk,
+		"warning",
+	)
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	if len([]rune(target.Action)) > maxApprovalTargetTextChars {
+		t.Fatalf("Action length = %d, want <= %d", len([]rune(target.Action)), maxApprovalTargetTextChars)
+	}
+	if len([]rune(target.RiskSummary)) > maxApprovalTargetTextChars {
+		t.Fatalf("RiskSummary length = %d, want <= %d", len([]rune(target.RiskSummary)), maxApprovalTargetTextChars)
+	}
+}

@@ -32,6 +32,9 @@ manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-github-oidc-e2e}"
 live_kontxt_image="${ORKA_LIVE_KONTXT_IMAGE:-orka-live-kontxt-e2e:live-github-oidc-e2e}"
 github_oidc_audience="${ORKA_GITHUB_OIDC_AUDIENCE:-orka-live-github-oidc-e2e}"
 github_oidc_issuer="${ORKA_GITHUB_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
+github_oidc_repository="${GITHUB_REPOSITORY:-sozercan/orka}"
+github_oidc_allowed_subjects="${ORKA_GITHUB_OIDC_ALLOWED_SUBJECTS:-repo:${github_oidc_repository}:*}"
+github_oidc_namespace="${ORKA_GITHUB_OIDC_NAMESPACE:-default}"
 github_oidc_token="${ORKA_GITHUB_OIDC_TOKEN:-}"
 kontxt_issuer="${ORKA_KONTXT_ISSUER:-https://kontxt-live.test}"
 kontxt_audience="${ORKA_KONTXT_AUDIENCE:-orka-live-kontxt-e2e}"
@@ -1080,6 +1083,8 @@ main() {
   run kubectl -n "${orka_namespace}" set env deployment/"${orka_controller_deployment}" \
     ORKA_OIDC_ISSUER="${github_oidc_issuer}" \
     ORKA_OIDC_AUDIENCE="${github_oidc_audience}" \
+    ORKA_OIDC_ALLOWED_SUBJECTS="${github_oidc_allowed_subjects}" \
+    ORKA_OIDC_NAMESPACE="${github_oidc_namespace}" \
     ORKA_OIDC_JWKS_URL- \
     ORKA_CONTEXT_TOKEN_PROFILE=kontxt \
     ORKA_CONTEXT_TOKEN_ISSUER="${kontxt_issuer}" \

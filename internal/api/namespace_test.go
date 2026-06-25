@@ -100,6 +100,16 @@ func TestResolveNamespace(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
+			name:             "enforceIsolation rejects namespace-less authenticated identity",
+			explicit:         "any-ns",
+			enforceIsolation: true,
+			userInfo: &UserInfo{
+				Username: "oidc-user",
+				AuthType: AuthTypeOIDC,
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
 			name:             "enforceIsolation with no userInfo allows any namespace",
 			explicit:         "any-ns",
 			enforceIsolation: true,

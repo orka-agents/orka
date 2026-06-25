@@ -162,7 +162,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 					metrics.RecordExecutionEventStreamError("task", "write")
 					return false
 				}
-				if pendingTerminal == nil && isTerminalExecutionEventType(event.Type) {
+				if pendingTerminal == nil && events.IsTerminalTaskEventType(event.Type) {
 					terminalCopy := event
 					pendingTerminal = &terminalCopy
 				}
@@ -552,48 +552,7 @@ func terminalExecutionEventThroughCursor(
 	taskName string,
 	cursor int64,
 ) (store.ExecutionEvent, bool, error) {
-	if cursor <= 0 {
-		return store.ExecutionEvent{}, false, nil
-	}
-	after := int64(0)
-	for {
-		batch, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  namespace,
-			StreamType: events.ExecutionEventStreamTypeTask,
-			StreamID:   taskName,
-			AfterSeq:   after,
-			EventTypes: terminalExecutionEventTypes(),
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return store.ExecutionEvent{}, false, err
-		}
-		if len(batch) == 0 {
-			return store.ExecutionEvent{}, false, nil
-		}
-		for _, event := range batch {
-			if event.Seq > cursor {
-				return store.ExecutionEvent{}, false, nil
-			}
-			if event.Seq > after {
-				after = event.Seq
-			}
-			if isTerminalExecutionEventType(event.Type) {
-				return event, true, nil
-			}
-		}
-		if len(batch) < store.MaxExecutionEventLimit {
-			return store.ExecutionEvent{}, false, nil
-		}
-	}
-}
-
-func terminalExecutionEventTypes() []string {
-	return []string{
-		events.ExecutionEventTypeTaskSucceeded,
-		events.ExecutionEventTypeTaskFailed,
-		events.ExecutionEventTypeTaskCancelled,
-	}
+	return newTaskTimelineReader(eventStore, namespace, taskName).terminalThroughCursor(ctx, cursor)
 }
 
 func terminalExecutionEventForCompletion(
@@ -603,42 +562,7 @@ func terminalExecutionEventForCompletion(
 	taskName string,
 	cursor int64,
 ) (store.ExecutionEvent, bool, int64, error) {
-	// Inspect from cursor-1 so reconnects that already observed a terminal event
-	// still receive stream_complete. The caller keeps this cursor separate from
-	// filtered SSE ids so excluded terminal events cannot be skipped when later
-	// matching events advance the public replay cursor.
-	after := cursor
-	if after > 0 {
-		after--
-	}
-	scannedThrough := cursor
-	for {
-		batch, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  namespace,
-			StreamType: events.ExecutionEventStreamTypeTask,
-			StreamID:   taskName,
-			AfterSeq:   after,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return store.ExecutionEvent{}, false, scannedThrough, err
-		}
-		if len(batch) == 0 {
-			return store.ExecutionEvent{}, false, scannedThrough, nil
-		}
-		for _, event := range batch {
-			if event.Seq > after {
-				after = event.Seq
-			}
-			scannedThrough = max(scannedThrough, event.Seq)
-			if isTerminalExecutionEventType(event.Type) {
-				return event, true, scannedThrough, nil
-			}
-		}
-		if len(batch) < store.MaxExecutionEventLimit {
-			return store.ExecutionEvent{}, false, scannedThrough, nil
-		}
-	}
+	return newTaskTimelineReader(eventStore, namespace, taskName).terminalForCompletion(ctx, cursor)
 }
 
 func writeExecutionEventSSEFrame(w *bufio.Writer, event store.ExecutionEvent) bool {
@@ -685,13 +609,4 @@ func writeExecutionEventStreamCompleteFrame(w *bufio.Writer, lastSeq int64, even
 		return false
 	}
 	return true
-}
-
-func isTerminalExecutionEventType(eventType string) bool {
-	switch eventType {
-	case events.ExecutionEventTypeTaskSucceeded, events.ExecutionEventTypeTaskFailed, events.ExecutionEventTypeTaskCancelled:
-		return true
-	default:
-		return false
-	}
 }

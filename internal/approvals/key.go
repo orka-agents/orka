@@ -18,7 +18,10 @@ import (
 	"github.com/sozercan/orka/internal/events"
 )
 
-const maxApprovalTargetArgsPreviewBytes = 8 * 1024
+const (
+	maxApprovalTargetArgsPreviewBytes = 8 * 1024
+	maxApprovalTargetTextChars        = 1024
+)
 
 // ApprovalTarget is the stable, sanitized contract for a human approval request.
 // It deliberately stores only a digest of target arguments, not raw side-effect
@@ -105,16 +108,28 @@ func NewApprovalTarget(
 	if strings.TrimSpace(action) == "" {
 		action = fmt.Sprintf("Execute %s", targetTool)
 	}
+	action = boundApprovalTargetText(action)
+	riskSummary = boundApprovalTargetText(riskSummary)
+	severity = boundApprovalTargetText(severity)
 	return ApprovalTarget{
 		ApprovalID:        ApprovalID(namespace, taskName, taskUID, targetTool, digest),
 		TaskUID:           strings.TrimSpace(taskUID),
 		TargetTool:        targetTool,
 		TargetArgsDigest:  digest,
 		TargetArgsPreview: preview,
-		Action:            strings.TrimSpace(action),
-		RiskSummary:       strings.TrimSpace(riskSummary),
-		Severity:          strings.TrimSpace(severity),
+		Action:            action,
+		RiskSummary:       riskSummary,
+		Severity:          severity,
 	}, nil
+}
+
+func boundApprovalTargetText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	bounded, _, _ := events.RedactAndTruncateExecutionEventText(value, maxApprovalTargetTextChars)
+	return bounded
 }
 
 func boundApprovalTargetArgsPreview(preview json.RawMessage) (json.RawMessage, error) {

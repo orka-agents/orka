@@ -58,14 +58,16 @@ func TestClientStartTurnMismatchedResponseIsError(t *testing.T) {
 	}
 }
 
-func TestClientStreamFramesRejectsDotSegmentTurnID(t *testing.T) {
+func TestClientStreamFramesRejectsUnsafeTurnID(t *testing.T) {
 	client, err := NewClient("http://127.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	err = client.StreamFrames(context.Background(), "..", 0, func(frame HarnessEventFrame) error { return nil })
-	if err == nil || !strings.Contains(err.Error(), "dot path segment") {
-		t.Fatalf("StreamFrames() error = %v, want dot segment rejection", err)
+	for _, turnID := range []HarnessTurnID{"..", "turn/one", `turn\one`} {
+		err = client.StreamFrames(context.Background(), turnID, 0, func(frame HarnessEventFrame) error { return nil })
+		if err == nil || !strings.Contains(err.Error(), "single safe path segment") {
+			t.Fatalf("StreamFrames(%q) error = %v, want unsafe segment rejection", turnID, err)
+		}
 	}
 }
 
