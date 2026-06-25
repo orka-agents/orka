@@ -10,7 +10,7 @@ Drive the current GitHub PR from “has feedback or failing checks” to “curr
 ## Guardrails
 
 - Treat the user’s closeout request as the scope. Fix merge conflicts, CI failures, and unresolved actionable review feedback; avoid unrelated cleanup.
-- Do not reply on GitHub, resolve threads, submit reviews, merge, enable auto-merge, or push unless the user explicitly authorized that write. A request like “reply and resolve each comment,” “push updates,” or “drive this PR until green” authorizes the matching writes.
+- Do not perform GitHub writes (reply, resolve threads, submit reviews, merge, enable auto-merge, or push) unless the user explicitly authorized that write. A request like “reply and resolve each comment,” “push updates,” or “drive this PR until green” authorizes the matching writes. When resolving a review thread under that authorization, reply on GitHub with the fix or pushback evidence before resolving it.
 - Never push directly to `main`. For PR branches, commit with `git commit -s` when a commit is needed, then push the current branch.
 - Do not amend, rebase, force-push, retarget, or merge the PR unless the user specifically asks or the branch owner’s workflow clearly requires it.
 - Redact secrets from logs and summaries. Do not paste tokens, auth URLs, JWTs, TxTokens, cookies, or credentials.
@@ -62,9 +62,10 @@ Drive the current GitHub PR from “has feedback or failing checks” to “curr
    - After pushing, re-fetch PR state instead of assuming GitHub accepted the update.
 
 8. Reply and resolve threads when authorized.
+   - Reply on GitHub before resolving each thread so reviewers can see what happened.
    - For each addressed thread, reply with a short, specific note: what changed, where, and what verification ran.
    - For invalid/stale/no-longer-valid comments, reply with the reason and evidence.
-   - Resolve only threads that are fixed, stale, invalid, duplicates, or intentionally superseded. Leave ambiguous or product-decision threads open and report them.
+   - Resolve only threads after replying, and only when they are fixed, stale, invalid, duplicates, or intentionally superseded. Leave ambiguous or product-decision threads open and report them.
    - Re-query thread state after replies/resolutions; do not rely on local bookkeeping.
 
 9. Repeat until no current blockers remain.

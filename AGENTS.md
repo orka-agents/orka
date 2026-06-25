@@ -29,7 +29,7 @@ Before creating or updating a GitHub PR or issue body for agent-authored work, r
 
 ## PR Closeout
 
-When asked to drive a PR to green/merge-ready after implementation or review, use `$pr-closeout` (`.agents/skills/pr-closeout/SKILL.md`): resolve merge conflicts, fix failing CI, address or push back on unresolved review threads, reply/resolve authorized comments, push the non-main PR branch, and repeat until CI is green and no unresolved actionable review threads remain.
+When asked to drive a PR to green/merge-ready after implementation or review, use `$pr-closeout` (`.agents/skills/pr-closeout/SKILL.md`): resolve merge conflicts, fix failing CI, address or push back on unresolved review threads, reply on GitHub and resolve authorized comments, push the non-main PR branch, and repeat until CI is green and no unresolved actionable review threads remain.
 
 ## Build & Test
 
