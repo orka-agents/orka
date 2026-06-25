@@ -174,11 +174,12 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 						"type": "string",
 						"description": "Required secret name containing runtime credentials for runtime agents. Secrets are never auto-discovered."
 					}
-				}
+				},
+				"required": ["type", "secretRef"]
 			}
 		},
 		"required": ["role", "systemPrompt"]
-	}`)
+		}`)
 }
 
 // Execute creates an Agent CRD dynamically

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -173,7 +174,7 @@ func TestAuthorizeContextTokenToolAgentCreateRejectsSpecOutsideTokenConstraints(
 	msg := err.Error()
 	require.Contains(t, msg, "context token is not authorized")
 
-	failures, failureErr := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+	failures, failureErr := contextTokenAgentSpecFailures(context.Background(), nil, token, cfg, agent)
 	require.NoError(t, failureErr)
 	joined := strings.Join(failures, "\n")
 	require.Contains(t, joined, `agent provider "anthropic" is not allowed by token context`)
@@ -195,9 +196,41 @@ func TestContextTokenAgentSpecFailuresRejectsCrossNamespaceProviderRef(t *testin
 		},
 	}
 
-	failures, err := contextTokenAgentSpecFailures(context.Background(), nil, token, agent)
+	cfg := enforceContextTokenAuthorizationConfig()
+	failures, err := contextTokenAgentSpecFailures(context.Background(), nil, token, cfg, agent)
 	require.NoError(t, err)
 	require.Contains(t, strings.Join(failures, "\n"), `agent provider namespace "team-b" does not match token context "team-a"`)
+}
+
+func TestContextTokenAgentSpecFailuresRejectsUnauthorizedRuntimeSecretRef(t *testing.T) {
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+			SecretRef: &corev1.LocalObjectReference{Name: "codex-runtime-openai"},
+		},
+	}
+	token := &ContextToken{
+		Scopes: []string{ContextTokenScopeAgentsWrite},
+		TransactionContext: map[string]any{
+			"namespace": "team-a",
+			"secret":    "codex-runtime-copilot",
+		},
+	}
+
+	failures, err := contextTokenAgentSpecFailures(context.Background(), nil, token, cfg, agent)
+	require.NoError(t, err)
+	joined := strings.Join(failures, "\n")
+	require.Contains(t, joined, `agent runtime credentials require one of scopes "orka:secrets:credentials:read"`)
+	require.Contains(t, joined, `agent runtime secret "codex-runtime-openai" does not match token context "codex-runtime-copilot"`)
+
+	token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+	token.TransactionContext["secret"] = "codex-runtime-openai"
+	failures, err = contextTokenAgentSpecFailures(context.Background(), nil, token, cfg, agent)
+	require.NoError(t, err)
+	require.Empty(t, failures)
 }
 
 func TestContextTokenTaskReadFailures(t *testing.T) {

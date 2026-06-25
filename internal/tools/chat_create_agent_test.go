@@ -22,6 +22,29 @@ import (
 
 const testProviderOpenAI = "openai"
 
+func TestChatCreateAgentTool_ParametersRequireRuntimeSecretRef(t *testing.T) {
+	tool := &ChatCreateAgentTool{}
+	var schema map[string]any
+	if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+		t.Fatalf("Parameters returned invalid JSON: %v", err)
+	}
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatalf("properties = %T, want map[string]any", schema[jsonSchemaPropertiesField])
+	}
+	runtimeSchema, ok := props[runtimeField].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime schema = %T, want map[string]any", props[runtimeField])
+	}
+	required, ok := runtimeSchema[jsonSchemaRequiredField].([]any)
+	if !ok {
+		t.Fatalf("runtime.required = %T, want []any", runtimeSchema[jsonSchemaRequiredField])
+	}
+	if !containsAnyString(required, jsonSchemaTypeField) || !containsAnyString(required, secretRefField) {
+		t.Fatalf("runtime.required = %#v, want type and secretRef", required)
+	}
+}
+
 func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -190,6 +213,9 @@ func TestParseRuntimeConfig_RejectsOmittedSecretRef(t *testing.T) {
 	if !strings.Contains(errResult, "runtime secretRef is required") {
 		t.Fatalf("error = %q, want it to mention required secretRef", errResult)
 	}
+	if strings.Contains(errResult, claudeCredentialsSecretName) || strings.Contains(errResult, claudeAPIKeySecretName) {
+		t.Fatalf("error = %q, must not disclose runtime secret candidates", errResult)
+	}
 	if agent.Spec.SecretRef != nil {
 		t.Fatalf("agent.Spec.SecretRef = %#v, want nil", agent.Spec.SecretRef)
 	}
@@ -216,6 +242,9 @@ func TestParseRuntimeConfig_RejectsOmittedCodexSecretRef(t *testing.T) {
 	}
 	if !strings.Contains(errResult, "runtime secretRef is required") {
 		t.Fatalf("error = %q, want it to mention required secretRef", errResult)
+	}
+	if strings.Contains(errResult, codexRuntimeCopilotSecretName) || strings.Contains(errResult, codexProxyTokenSecretName) {
+		t.Fatalf("error = %q, must not disclose runtime secret candidates", errResult)
 	}
 	if agent.Spec.SecretRef != nil {
 		t.Fatalf("agent.Spec.SecretRef = %#v, want nil", agent.Spec.SecretRef)
@@ -256,6 +285,33 @@ func TestParseRuntimeConfig_AppliesRuntimeDefaults(t *testing.T) {
 	}
 	if agent.Spec.Runtime.DefaultAllowBash == nil || *agent.Spec.Runtime.DefaultAllowBash {
 		t.Fatalf("defaultAllowBash = %v, want false", agent.Spec.Runtime.DefaultAllowBash)
+	}
+}
+
+func TestParseRuntimeConfig_RejectsUnauthorizedSecretRef(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRuntimeCredsSecretName,
+			Namespace: defaultNamespace,
+		},
+	})
+	agent := &corev1alpha1.Agent{}
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		AuthorizeSecretRead: func(context.Context, string, string) *ChatToolError {
+			return &ChatToolError{Type: "authorization_failed", Message: "secret blocked by context token"}
+		},
+	})
+	args := map[string]any{runtimeField: map[string]any{jsonSchemaTypeField: runtimeTypeClaude, secretRefField: testRuntimeCredsSecretName}}
+
+	errResult, ok := parseRuntimeConfig(ctx, fc, defaultNamespace, args, agent)
+	if ok {
+		t.Fatal("expected parseRuntimeConfig to fail")
+	}
+	if !strings.Contains(errResult, "not authorized") || !strings.Contains(errResult, "secret blocked by context token") {
+		t.Fatalf("error = %q, want authorization failure", errResult)
+	}
+	if agent.Spec.SecretRef != nil {
+		t.Fatalf("agent.Spec.SecretRef = %#v, want nil", agent.Spec.SecretRef)
 	}
 }
 

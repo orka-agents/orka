@@ -48,6 +48,21 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatalf("properties = %T, want map[string]any", schema[jsonSchemaPropertiesField])
+	}
+	runtimeSchema, ok := props[runtimeField].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime schema = %T, want map[string]any", props[runtimeField])
+	}
+	required, ok := runtimeSchema[jsonSchemaRequiredField].([]any)
+	if !ok {
+		t.Fatalf("runtime.required = %T, want []any", runtimeSchema[jsonSchemaRequiredField])
+	}
+	if !containsAnyString(required, jsonSchemaTypeField) || !containsAnyString(required, secretRefField) {
+		t.Fatalf("runtime.required = %#v, want type and secretRef", required)
+	}
 }
 
 func TestCreateAgentTool_Execute(t *testing.T) {
@@ -491,6 +506,9 @@ func TestCreateAgentTool_Execute_RejectsOmittedRuntimeSecretRef(t *testing.T) {
 	if !strings.Contains(err.Error(), "runtime secretRef is required") {
 		t.Fatalf("error = %v, want it to mention required secretRef", err)
 	}
+	if strings.Contains(err.Error(), claudeCredentialsSecretName) || strings.Contains(err.Error(), claudeAPIKeySecretName) {
+		t.Fatalf("error = %v, must not disclose runtime secret candidates", err)
+	}
 }
 
 func TestCreateAgentTool_Execute_RejectsOmittedCodexRuntimeSecretRef(t *testing.T) {
@@ -517,6 +535,26 @@ func TestCreateAgentTool_Execute_RejectsOmittedCodexRuntimeSecretRef(t *testing.
 	}
 	if !strings.Contains(err.Error(), "runtime secretRef is required") {
 		t.Fatalf("error = %v, want it to mention required secretRef", err)
+	}
+	if strings.Contains(err.Error(), codexRuntimeCopilotSecretName) || strings.Contains(err.Error(), codexProxyTokenSecretName) {
+		t.Fatalf("error = %v, must not disclose runtime secret candidates", err)
+	}
+}
+
+func TestResolveRuntimeSecretRef_RejectsUnauthorizedSecretRef(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		AuthorizeSecretRead: func(context.Context, string, string) *ChatToolError {
+			return &ChatToolError{Type: "authorization_failed", Message: "secret blocked by transaction"}
+		},
+	})
+
+	_, err := resolveRuntimeSecretRef(ctx, fc, defaultNamespace, corev1alpha1.AgentRuntimeClaude, testRuntimeCredsSecretName)
+	if err == nil {
+		t.Fatal("expected authorization error")
+	}
+	if !strings.Contains(err.Error(), "not authorized") || !strings.Contains(err.Error(), "secret blocked by transaction") {
+		t.Fatalf("error = %v, want authorization failure", err)
 	}
 }
 

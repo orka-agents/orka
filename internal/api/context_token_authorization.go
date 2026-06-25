@@ -338,7 +338,7 @@ func authorizeContextTokenToolAgentCreate(ctx context.Context, k8sClient client.
 		failures = append(failures, fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.AgentWriteScopes, ",")))
 	}
 	failures = append(failures, contextTokenAgentMutationFailures(token, agent.Namespace, agent.Name)...)
-	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, cfg, agent)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -354,7 +354,7 @@ func authorizeContextTokenAgentSpec(ctx context.Context, k8sClient client.Client
 	if !cfg.Enabled() || token == nil || agent == nil {
 		return nil
 	}
-	failures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	failures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, cfg, agent)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -411,7 +411,7 @@ func authorizeContextTokenToolAgentUpdate(ctx context.Context, k8sClient client.
 		return nil
 	}
 	failures := contextTokenAgentWriteFailures(token, cfg, agent.Namespace, agent.Name)
-	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, agent)
+	specFailures, err := contextTokenAgentSpecFailures(ctx, k8sClient, token, cfg, agent)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -945,7 +945,7 @@ func contextTokenProviderUseFailures(token *ContextToken, cfg ContextTokenAuthor
 	return failures
 }
 
-func contextTokenAgentSpecFailures(ctx context.Context, c client.Client, token *ContextToken, agent *corev1alpha1.Agent) ([]string, error) {
+func contextTokenAgentSpecFailures(ctx context.Context, c client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, agent *corev1alpha1.Agent) ([]string, error) {
 	if token == nil || agent == nil {
 		return nil, nil
 	}
@@ -960,7 +960,34 @@ func contextTokenAgentSpecFailures(ctx context.Context, c client.Client, token *
 		failures = append(failures, contextTokenProviderModelConstraintFailures(token, fb.Provider, fb.Model, tokenNamespace, hasTokenNamespace, "agent fallback ")...)
 	}
 	failures = append(failures, contextTokenAgentSpecToolFailures(token, authzCtx)...)
+	failures = append(failures, contextTokenAgentRuntimeSecretFailures(token, cfg, agent, tokenNamespace, hasTokenNamespace)...)
 	return failures, nil
+}
+
+func contextTokenAgentRuntimeSecretFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, agent *corev1alpha1.Agent, tokenNamespace string, hasTokenNamespace bool) []string {
+	if token == nil || agent == nil || agent.Spec.Runtime == nil || agent.Spec.SecretRef == nil {
+		return nil
+	}
+	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+	if secretName == "" {
+		return nil
+	}
+
+	failures := []string{}
+	if hasTokenNamespace && strings.TrimSpace(agent.Namespace) != "" && agent.Namespace != tokenNamespace {
+		failures = append(failures, fmt.Sprintf("agent runtime secret namespace %q does not match token context %q", agent.Namespace, tokenNamespace))
+	}
+	requiredScopes := cfg.SecretCredentialReadScopes()
+	if len(requiredScopes) > 0 && !hasAnyScope(token.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf(
+			"agent runtime credentials require one of scopes %q",
+			strings.Join(requiredScopes, ","),
+		))
+	}
+	if want, ok := contextString(token.TransactionContext, "secret"); ok && secretName != want {
+		failures = append(failures, fmt.Sprintf("agent runtime secret %q does not match token context %q", secretName, want))
+	}
+	return failures
 }
 
 func contextTokenAgentSpecNamespaceFailures(agent *corev1alpha1.Agent, tokenNamespace string, hasTokenNamespace bool) []string {

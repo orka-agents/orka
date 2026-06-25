@@ -59,7 +59,11 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 
 	requested = strings.TrimSpace(requested)
 	if requested == "" {
-		return nil, fmt.Errorf("runtime secretRef is required for %s runtime agents; provide one of %s explicitly", runtimeType, strings.Join(candidates, ", "))
+		return nil, fmt.Errorf("runtime secretRef is required for %s runtime agents; provide runtime.secretRef explicitly", runtimeType)
+	}
+
+	if err := authorizeRuntimeSecretRef(ctx, namespace, requested); err != nil {
+		return nil, err
 	}
 
 	exists, err := secretExists(ctx, k8sClient, namespace, requested)
@@ -70,6 +74,23 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 		return nil, fmt.Errorf("runtime secretRef %q not found in namespace %q", requested, namespace)
 	}
 	return &corev1.LocalObjectReference{Name: requested}, nil
+}
+
+func authorizeRuntimeSecretRef(ctx context.Context, namespace, secretName string) error {
+	tc := GetToolContext(ctx)
+	if tc == nil {
+		return nil
+	}
+	if tc.AuthorizeSecretRead != nil {
+		if authErr := tc.AuthorizeSecretRead(ctx, namespace, secretName); authErr != nil {
+			return fmt.Errorf("runtime secretRef %q is not authorized: %s", secretName, authErr.Message)
+		}
+		return nil
+	}
+	if tc.RequireSecretReadAuthorization {
+		return fmt.Errorf("runtime secretRef %q requires secret credential authorization", secretName)
+	}
+	return nil
 }
 
 func resolveWorkspaceGitSecretRef(ctx context.Context, k8sClient client.Reader, namespace string, agent *corev1alpha1.Agent, requested string) (*corev1.LocalObjectReference, error) {
