@@ -97,25 +97,35 @@ describe('useTaskEvents', () => {
             }],
           })
         }
-        expect(after).toBe('1000')
+        if (after === '1000') {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 1000,
+            latestSeq: 1001,
+            events: [{
+              id: 'default/task/my-task/1001',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1001,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              inputTokens: 11,
+              outputTokens: 13,
+              createdAt: '2026-01-01T00:00:01Z',
+            }],
+          })
+        }
+        expect(after).toBe('1001')
         return HttpResponse.json({
           namespace: 'default',
           streamType: 'task',
           streamID: params.id,
-          afterSeq: 1000,
+          afterSeq: 1001,
           latestSeq: 1001,
-          events: [{
-            id: 'default/task/my-task/1001',
-            namespace: 'default',
-            streamType: 'task',
-            streamID: params.id,
-            seq: 1001,
-            type: 'ModelRequestCompleted',
-            severity: 'info',
-            inputTokens: 11,
-            outputTokens: 13,
-            createdAt: '2026-01-01T00:00:01Z',
-          }],
+          events: [],
         })
       }),
     )
@@ -128,6 +138,16 @@ describe('useTaskEvents', () => {
       '?namespace=default&limit=1000&after=1000',
     ])
     expect(result.current.data?.latestSeq).toBe(1001)
+    expect(result.current.data?.events.map((event) => event.seq)).toEqual([1000, 1001])
+
+    await act(async () => {
+      await result.current.refetch()
+    })
+    expect(requests).toEqual([
+      '?namespace=default&limit=1000',
+      '?namespace=default&limit=1000&after=1000',
+      '?namespace=default&limit=1000&after=1001',
+    ])
     expect(result.current.data?.events.map((event) => event.seq)).toEqual([1000, 1001])
   })
 })

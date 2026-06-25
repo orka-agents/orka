@@ -82,8 +82,9 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 
 	providerName = responseProviderName(resp, tp.inner)
 	setResponseAttributes(span, resp, providerName)
-	tp.recordOperationDuration(ctx, durationSeconds, providerName, requestModel(req), "")
-	tp.recordTokenUsage(ctx, resp, providerName, requestModel(req))
+	modelName := responseModel(resp, req)
+	tp.recordOperationDuration(ctx, durationSeconds, providerName, modelName, "")
+	tp.recordTokenUsage(ctx, resp, providerName, modelName)
 	return resp, nil
 }
 
@@ -168,6 +169,13 @@ func requestModel(req *CompletionRequest) string {
 		return ""
 	}
 	return req.Model
+}
+
+func responseModel(resp *CompletionResponse, req *CompletionRequest) string {
+	if resp != nil && strings.TrimSpace(resp.Model) != "" {
+		return resp.Model
+	}
+	return requestModel(req)
 }
 
 func requestAttributes(req *CompletionRequest, providerName string, stream bool) []attribute.KeyValue {

@@ -34,6 +34,8 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
+	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -634,9 +636,17 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 
 	k8sClient := newFakeClient(parentTask(), researcherAgent())
 	tool := NewDelegateTaskTool(k8sClient)
+	shutdown, err := orkatracing.Init("test", false)
+	if err != nil {
+		t.Fatalf("tracing init: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+	spanHarness := testutil.NewSpanHarness(t)
+	ctx, span := orkatracing.Tracer("test").Start(context.Background(), "parent-tool")
+	defer span.End()
 
 	args := json.RawMessage(`{"agent": "researcher", "prompt": "Investigate this"}`)
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(ctx, args)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -682,6 +692,16 @@ func TestDelegateTaskTool_Execute_ChildTaskFields(t *testing.T) {
 	}
 	if childTask.Annotations[labels.AnnotationCoordinationDepth] != "2" {
 		t.Errorf("annotation orka.ai/coordination-depth = %q, want %q", childTask.Annotations[labels.AnnotationCoordinationDepth], "2")
+	}
+	if childTask.Annotations[labels.AnnotationTraceParent] == "" {
+		t.Fatalf("missing %s annotation on delegated child task", labels.AnnotationTraceParent)
+	}
+	extracted := orkatracing.ExtractTaskTraceContext(context.Background(), childTask)
+	_, childSpan := orkatracing.Tracer("test").Start(extracted, "child-task")
+	childSpan.End()
+	ended := spanHarness.Recorder.Ended()
+	if len(ended) == 0 || ended[len(ended)-1].Parent().TraceID() != span.SpanContext().TraceID() {
+		t.Fatalf("delegated child trace parent was not propagated")
 	}
 
 	// Verify spec

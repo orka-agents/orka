@@ -26,6 +26,7 @@ function timeAgo(ts?: string): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+
 export function TaskDetail({ taskId }: { taskId: string }) {
   const { data: task, isLoading } = useTask(taskId)
   const { data: taskEventsResponse } = useTaskEvents(taskId)

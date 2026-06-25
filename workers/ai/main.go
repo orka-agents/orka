@@ -906,7 +906,7 @@ func executeAgentLoopWithEvents(
 				common.WithEventContent(eventContent(map[string]any{
 					"iteration": iteration + 1,
 					"model":     model,
-					"provider":  provider.Name(),
+					"provider":  llm.ProviderTelemetryName(provider),
 				})),
 			)
 			return "", fmt.Errorf("completion failed: %w", err)
@@ -916,7 +916,7 @@ func executeAgentLoopWithEvents(
 			common.WithEventContent(eventContent(map[string]any{
 				"iteration":    iteration + 1,
 				"model":        firstNonBlankOriginal(resp.Model, model),
-				"provider":     provider.Name(),
+				"provider":     firstNonBlankOriginal(resp.Provider, llm.ProviderTelemetryName(provider)),
 				"inputTokens":  resp.InputTokens,
 				"outputTokens": resp.OutputTokens,
 				"stopReason":   resp.StopReason,

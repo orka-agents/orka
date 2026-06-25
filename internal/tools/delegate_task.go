@@ -21,6 +21,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	orkatracing "github.com/sozercan/orka/internal/tracing"
 )
 
 // DelegateTaskTool implements multi-agent task delegation
@@ -453,6 +454,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, dc.parentTask, childTask, dc.args.Agent); err != nil {
 		return "", err
 	}
+	orkatracing.StampTaskTraceContext(ctx, childTask)
 
 	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(dc.parentTask)
 	if err != nil {

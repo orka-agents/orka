@@ -63,11 +63,12 @@ const taskEventsPageLimit = '1000'
 export async function fetchTaskEvents(
   id: string,
   namespace: string,
+  previous?: TaskEventsResponse,
 ): Promise<TaskEventsResponse> {
-  let afterSeq = 0
+  let afterSeq = previous?.latestSeq ?? 0
   let targetLatestSeq: number | undefined
   let response: TaskEventsResponse | undefined
-  const events: ExecutionEvent[] = []
+  const events: ExecutionEvent[] = [...(previous?.events ?? [])]
 
   let keepFetching = true
   while (keepFetching) {
@@ -100,20 +101,30 @@ export async function fetchTaskEvents(
   }
 
   return {
-    namespace: response?.namespace ?? namespace,
-    streamType: response?.streamType ?? 'task',
-    streamID: response?.streamID ?? id,
-    afterSeq: 0,
-    latestSeq: targetLatestSeq ?? response?.latestSeq ?? 0,
+    namespace: response?.namespace ?? previous?.namespace ?? namespace,
+    streamType: response?.streamType ?? previous?.streamType ?? 'task',
+    streamID: response?.streamID ?? previous?.streamID ?? id,
+    afterSeq: previous?.afterSeq ?? 0,
+    latestSeq: targetLatestSeq ?? response?.latestSeq ?? previous?.latestSeq ?? 0,
     events,
   }
 }
 
-export function useTaskEvents(id: string, refetchInterval = 5000) {
+export function useTaskEvents(
+  id: string,
+  refetchInterval: number | false = 5000,
+) {
+  const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
+  const queryKey = ['taskEvents', id, namespace] as const
   return useQuery({
-    queryKey: ['taskEvents', id, namespace],
-    queryFn: () => fetchTaskEvents(id, namespace),
+    queryKey,
+    queryFn: () =>
+      fetchTaskEvents(
+        id,
+        namespace,
+        queryClient.getQueryData<TaskEventsResponse>(queryKey),
+      ),
     enabled: Boolean(id),
     refetchInterval,
   })

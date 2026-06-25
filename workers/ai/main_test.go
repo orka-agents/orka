@@ -615,6 +615,7 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 			InputTokens:  12,
 			OutputTokens: 8,
 			Model:        "test-model",
+			Provider:     "azure.ai.openai",
 		},
 	}
 	recorder := common.NewFakeEventRecorder()
@@ -652,6 +653,20 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	}
 	if strings.Contains(string(data), "sk-test12345678901234567890") {
 		t.Fatalf("AI worker events leaked fake API key: %s", data)
+	}
+	var sawTelemetryProvider bool
+	for _, event := range recorder.Events() {
+		if event.Type != events.ExecutionEventTypeModelRequestCompleted {
+			continue
+		}
+		var content map[string]any
+		if err := json.Unmarshal(event.Content, &content); err != nil {
+			t.Fatalf("unmarshal model event content: %v", err)
+		}
+		sawTelemetryProvider = content["provider"] == "azure.ai.openai"
+	}
+	if !sawTelemetryProvider {
+		t.Fatalf("model completion event did not preserve response provider: %#v", recorder.Events())
 	}
 }
 
