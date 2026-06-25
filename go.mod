@@ -3,7 +3,7 @@ module github.com/sozercan/orka
 go 1.26.2
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.50.2
+	github.com/anthropics/anthropic-sdk-go v1.52.0
 	github.com/aramase/kontxt v0.0.1
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
