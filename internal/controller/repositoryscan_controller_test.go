@@ -2471,51 +2471,83 @@ func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
 	return sqlitestore.NewStore(db, ":memory:")
 }
 
-func TestRepositoryScanReconcileRejectsInvalidRepositoryURL(t *testing.T) {
-	ctx := context.Background()
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme() error = %v", err)
-	}
-	scan := &corev1alpha1.RepositoryScan{
-		TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "invalid-url",
-			Namespace:  defaultNS,
-			Generation: 1,
+func TestRepositoryScanReconcileRejectsInvalidRepositorySpec(t *testing.T) {
+	tests := []struct {
+		name       string
+		spec       corev1alpha1.RepositoryScanSpec
+		wantReason string
+	}{
+		{
+			name: "missing repo url",
+			spec: corev1alpha1.RepositoryScanSpec{
+				AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scanner"},
+			},
+			wantReason: repositoryScanValidationReasonMissingRepoURL,
 		},
-		Spec: corev1alpha1.RepositoryScanSpec{
-			RepoURL:          "https://attacker.example/owner/repo.git",
-			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scanner"},
+		{
+			name: "unsupported provider",
+			spec: corev1alpha1.RepositoryScanSpec{
+				Provider:         "gitlab",
+				RepoURL:          "https://github.com/owner/repo.git",
+				AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scanner"},
+			},
+			wantReason: repositoryScanValidationReasonUnsupportedProvider,
+		},
+		{
+			name: "invalid repo url",
+			spec: corev1alpha1.RepositoryScanSpec{
+				RepoURL:          "https://attacker.example/owner/repo.git",
+				AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scanner"},
+			},
+			wantReason: repositoryScanValidationReasonInvalidRepoURL,
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
-	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme}
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}}
 
-	if _, err := reconciler.Reconcile(ctx, req); err != nil {
-		t.Fatalf("initial Reconcile() error = %v", err)
-	}
-	if _, err := reconciler.Reconcile(ctx, req); err != nil {
-		t.Fatalf("validation Reconcile() error = %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatalf("AddToScheme() error = %v", err)
+			}
+			scan := &corev1alpha1.RepositoryScan{
+				TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "invalid-spec",
+					Namespace:  defaultNS,
+					Generation: 1,
+				},
+				Spec: tt.spec,
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.RepositoryScan{}).WithObjects(scan).Build()
+			reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: scan.Name, Namespace: scan.Namespace}}
 
-	updated := &corev1alpha1.RepositoryScan{}
-	if err := cl.Get(ctx, req.NamespacedName, updated); err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	if updated.Status.Phase != repositoryScanPhaseError {
-		t.Fatalf("status phase = %q, want %q", updated.Status.Phase, repositoryScanPhaseError)
-	}
-	condition := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
-	if condition == nil || condition.Reason != "InvalidRepositoryURL" {
-		t.Fatalf("Ready condition = %#v, want InvalidRepositoryURL", condition)
-	}
-	var tasks corev1alpha1.TaskList
-	if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
-		t.Fatalf("List tasks error = %v", err)
-	}
-	if len(tasks.Items) != 0 {
-		t.Fatalf("created %d tasks for invalid repository URL, want 0", len(tasks.Items))
+			if _, err := reconciler.Reconcile(ctx, req); err != nil {
+				t.Fatalf("initial Reconcile() error = %v", err)
+			}
+			if _, err := reconciler.Reconcile(ctx, req); err != nil {
+				t.Fatalf("validation Reconcile() error = %v", err)
+			}
+
+			updated := &corev1alpha1.RepositoryScan{}
+			if err := cl.Get(ctx, req.NamespacedName, updated); err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if updated.Status.Phase != repositoryScanPhaseError {
+				t.Fatalf("status phase = %q, want %q", updated.Status.Phase, repositoryScanPhaseError)
+			}
+			condition := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			if condition == nil || condition.Reason != tt.wantReason {
+				t.Fatalf("Ready condition = %#v, want %s", condition, tt.wantReason)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
+				t.Fatalf("List tasks error = %v", err)
+			}
+			if len(tasks.Items) != 0 {
+				t.Fatalf("created %d tasks for invalid repository spec, want 0", len(tasks.Items))
+			}
+		})
 	}
 }

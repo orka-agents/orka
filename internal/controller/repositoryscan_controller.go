@@ -73,6 +73,11 @@ const (
 	// status message on the CRD.
 	repositoryScanConditionMessageLimit  = 32 * 1024
 	repositoryScanConditionMessageSuffix = "\n...[truncated]"
+
+	repositoryScanValidationReasonMissingRepoURL      = "MissingRepositoryURL"
+	repositoryScanValidationReasonUnsupportedProvider = "UnsupportedProvider"
+	repositoryScanValidationReasonInvalidRepoURL      = "InvalidRepositoryURL"
+	repositoryScanValidationReasonInvalidSpec         = "InvalidSpec"
 )
 
 // RepositoryScanReconciler reconciles RepositoryScan resources.
@@ -114,17 +119,43 @@ func titleCaseMode(mode string) string {
 	return strings.ToUpper(mode[:1]) + mode[1:]
 }
 
+type repositoryScanValidationError struct {
+	reason  string
+	message string
+}
+
+func (e *repositoryScanValidationError) Error() string {
+	return e.message
+}
+
 func validateRepositoryScan(scan *corev1alpha1.RepositoryScan) error {
 	if strings.TrimSpace(scan.Spec.RepoURL) == "" {
-		return fmt.Errorf("spec.repoURL is required")
+		return &repositoryScanValidationError{
+			reason:  repositoryScanValidationReasonMissingRepoURL,
+			message: "spec.repoURL is required",
+		}
 	}
 	if scan.Spec.Provider != "" && scan.Spec.Provider != corev1alpha1.SourceProviderGitHub {
-		return fmt.Errorf("spec.provider must be %s", corev1alpha1.SourceProviderGitHub)
+		return &repositoryScanValidationError{
+			reason:  repositoryScanValidationReasonUnsupportedProvider,
+			message: fmt.Sprintf("spec.provider must be %s", corev1alpha1.SourceProviderGitHub),
+		}
 	}
 	if _, _, err := security.ParseGitHubRepositoryURL(scan.Spec.RepoURL); err != nil {
-		return err
+		return &repositoryScanValidationError{
+			reason:  repositoryScanValidationReasonInvalidRepoURL,
+			message: err.Error(),
+		}
 	}
 	return nil
+}
+
+func repositoryScanValidationReason(err error) string {
+	var validationErr *repositoryScanValidationError
+	if errors.As(err, &validationErr) && validationErr.reason != "" {
+		return validationErr.reason
+	}
+	return repositoryScanValidationReasonInvalidSpec
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositoryscans,verbs=get;list;watch;create;update;patch;delete
@@ -167,7 +198,7 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
 				Type:               "Ready",
 				Status:             metav1.ConditionFalse,
-				Reason:             "InvalidRepositoryURL",
+				Reason:             repositoryScanValidationReason(validationErr),
 				Message:            repositoryScanConditionMessage(validationErr.Error(), "invalid repository URL"),
 				LastTransitionTime: metav1.Now(),
 				ObservedGeneration: s.Generation,
