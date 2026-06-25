@@ -44,6 +44,12 @@ func (r *RetryProvider) Name() string {
 	return r.inner.Name()
 }
 
+// TelemetryProviderName delegates to the inner provider so tracing preserves
+// concrete provider identity through retry wrapping.
+func (r *RetryProvider) TelemetryProviderName() string {
+	return ProviderTelemetryName(r.inner)
+}
+
 // Complete calls the inner provider's Complete with retry logic.
 func (r *RetryProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	var lastErr error
@@ -166,5 +172,6 @@ func (r *RetryProvider) backoff(attempt int) time.Duration {
 	return time.Duration(delay)
 }
 
-// Ensure RetryProvider implements Provider
+// Ensure RetryProvider implements Provider and TelemetryIdentity.
 var _ Provider = (*RetryProvider)(nil)
+var _ TelemetryIdentity = (*RetryProvider)(nil)

@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { Task, TaskEventsResponse } from '@/schemas/task'
+import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
 
 interface ListResponse<T> {
   items: T[]
@@ -58,12 +58,62 @@ export function useDeleteTask() {
   })
 }
 
+const taskEventsPageLimit = '1000'
+
+export async function fetchTaskEvents(
+  id: string,
+  namespace: string,
+): Promise<TaskEventsResponse> {
+  let afterSeq = 0
+  let targetLatestSeq: number | undefined
+  let response: TaskEventsResponse | undefined
+  const events: ExecutionEvent[] = []
+
+  let keepFetching = true
+  while (keepFetching) {
+    const params: Record<string, string> = {
+      namespace,
+      limit: taskEventsPageLimit,
+    }
+    if (afterSeq > 0) {
+      params.after = String(afterSeq)
+    }
+
+    const pageResponse = await api.get<TaskEventsResponse>(
+      `/tasks/${id}/events`,
+      params,
+    )
+    response = pageResponse
+    targetLatestSeq ??= pageResponse.latestSeq
+    events.push(...pageResponse.events)
+
+    const lastEvent = pageResponse.events[pageResponse.events.length - 1]
+    const lastSeq = lastEvent?.seq ?? afterSeq
+    if (lastSeq <= afterSeq) {
+      keepFetching = false
+      continue
+    }
+    afterSeq = lastSeq
+    if (afterSeq >= targetLatestSeq || pageResponse.events.length === 0) {
+      keepFetching = false
+    }
+  }
+
+  return {
+    namespace: response?.namespace ?? namespace,
+    streamType: response?.streamType ?? 'task',
+    streamID: response?.streamID ?? id,
+    afterSeq: 0,
+    latestSeq: targetLatestSeq ?? response?.latestSeq ?? 0,
+    events,
+  }
+}
+
 export function useTaskEvents(id: string, refetchInterval = 5000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['taskEvents', id, namespace],
-    queryFn: () =>
-      api.get<TaskEventsResponse>(`/tasks/${id}/events`, { namespace }),
+    queryFn: () => fetchTaskEvents(id, namespace),
     enabled: Boolean(id),
     refetchInterval,
   })

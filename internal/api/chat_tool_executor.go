@@ -221,8 +221,8 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		return marshalResult(result)
 	}
 
-	// The registry tools return JSON-marshaled ChatToolResult strings.
-	// Parse them back into ToolResult for consistent span attributes.
+	// Registry tools return JSON-marshaled ChatToolResult strings. Validate
+	// that shape before passing the original tool result through unchanged.
 	var tr ToolResult
 	if jsonErr := json.Unmarshal([]byte(resultStr), &tr); jsonErr == nil {
 		return resultStr, nil

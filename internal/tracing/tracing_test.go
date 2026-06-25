@@ -10,6 +10,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestInit(t *testing.T) {
@@ -53,5 +55,24 @@ func TestTracer(t *testing.T) {
 	tracer := Tracer("test")
 	if tracer == nil {
 		t.Fatal("Tracer() returned nil")
+	}
+}
+
+func TestResourceIncludesEnvironmentAttributes(t *testing.T) {
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=dev,orka.cluster=kind")
+
+	res, err := Resource(context.Background(), "test-service")
+	if err != nil {
+		t.Fatalf("Resource() error = %v", err)
+	}
+	attrs := map[attribute.Key]attribute.Value{}
+	for _, attr := range res.Attributes() {
+		attrs[attr.Key] = attr.Value
+	}
+	if got := attrs["deployment.environment"].AsString(); got != "dev" {
+		t.Fatalf("deployment.environment = %q, want dev", got)
+	}
+	if got := attrs["orka.cluster"].AsString(); got != "kind" {
+		t.Fatalf("orka.cluster = %q, want kind", got)
 	}
 }

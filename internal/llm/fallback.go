@@ -41,6 +41,13 @@ func (f *FallbackProvider) Name() string {
 	return fmt.Sprintf("fallback(%s)", f.primary.Name())
 }
 
+// TelemetryProviderName delegates to the primary provider so error telemetry
+// emitted before a concrete fallback response is available uses the configured
+// serving provider identity instead of the wrapper name.
+func (f *FallbackProvider) TelemetryProviderName() string {
+	return ProviderTelemetryName(f.primary)
+}
+
 // Complete tries the primary provider, then falls back on failure.
 func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	logger := log.FromContext(ctx)
@@ -218,5 +225,6 @@ func (f *FallbackProvider) shortestCooldown() Provider {
 	return shortest
 }
 
-// Ensure FallbackProvider implements Provider.
+// Ensure FallbackProvider implements Provider and TelemetryIdentity.
 var _ Provider = (*FallbackProvider)(nil)
+var _ TelemetryIdentity = (*FallbackProvider)(nil)

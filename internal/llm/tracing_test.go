@@ -205,6 +205,27 @@ func TestTracingProviderCompleteErrorSetsErrorType(t *testing.T) {
 	}
 }
 
+func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	inner := &telemetryProvider{
+		name:          "openai",
+		telemetryName: "azure-openai",
+		err:           &ProviderError{Provider: "azure-openai", Message: "rate limited", StatusCode: 401},
+	}
+	tp := NewTracingProvider(NewRetryProvider(inner, 1))
+
+	_, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrProviderName, genai.ProviderAzureOpenAI)
+}
+
 func TestTracingProviderStreamEmitsFirstChunk(t *testing.T) {
 	h := testutil.NewSpanHarness(t)
 	mh := testutil.NewMetricHarness(t)

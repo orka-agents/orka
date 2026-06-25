@@ -2446,7 +2446,12 @@ func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
 
 func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_INSECURE", "true")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "3s")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE", "/var/run/otel/metrics-ca.pem")
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=secret")
 	builder := setupJobBuilder()
 	builder.EnableTelemetry = true
 	traceparent := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
@@ -2464,11 +2469,21 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
 		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
 	}
-	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); !ok || got.Value != "otel-collector:4317" {
-		t.Fatalf("OTEL_EXPORTER_OTLP_ENDPOINT = %#v, found=%v", got, ok)
+	for name, want := range map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":            "otel-collector:4317",
+		"OTEL_EXPORTER_OTLP_TRACES_INSECURE":     "true",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT":     "3s",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION":  "gzip",
+		"OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE": "/var/run/otel/metrics-ca.pem",
+	} {
+		if got, ok := findEnvVar(envVars, name); !ok || got.Value != want {
+			t.Fatalf("%s = %#v, found=%v, want %q", name, got, ok, want)
+		}
 	}
-	if _, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_HEADERS"); ok {
-		t.Fatal("OTEL_EXPORTER_OTLP_HEADERS must not be copied into task workloads")
+	for _, name := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"} {
+		if _, ok := findEnvVar(envVars, name); ok {
+			t.Fatalf("%s must not be copied into task workloads", name)
+		}
 	}
 	if got, ok := findEnvVar(envVars, workerenv.TraceParent); !ok || got.Value == "" {
 		t.Fatalf("%s = %#v, found=%v", workerenv.TraceParent, got, ok)

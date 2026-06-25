@@ -146,13 +146,6 @@ export const taskWithPlanSchema = taskSchema.extend({
 export type PlanState = z.infer<typeof planStateSchema>
 export type TaskWithPlan = z.infer<typeof taskWithPlanSchema>
 
-const inputUsageKey = 'inputTokens' as const
-const outputUsageKey = 'outputTokens' as const
-const eventUsageFieldSchemas = {
-  [inputUsageKey]: z.number().optional(),
-  [outputUsageKey]: z.number().optional(),
-}
-
 export const executionEventSchema = z.object({
   id: z.string(),
   namespace: z.string(),
@@ -169,11 +162,13 @@ export const executionEventSchema = z.object({
   provider: z.string().optional(),
   model: z.string().optional(),
   stopReason: z.string().optional(),
+  inputTokens: z.number().optional(),
+  outputTokens: z.number().optional(),
   summary: z.string().optional(),
   content: z.unknown().optional(),
   contentText: z.string().optional(),
   createdAt: z.string(),
-}).extend(eventUsageFieldSchemas)
+})
 
 export const taskEventsResponseSchema = z.object({
   namespace: z.string(),

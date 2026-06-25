@@ -406,10 +406,10 @@ func main() {
 	flag.StringVar(&contextTokenToolTokenTTL, "context-token-tool-token-ttl",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"),
 		"Requested TTL for outbound tool TxTokens. Defaults to 2m when TTS is enabled.")
-	flag.BoolVar(&enableTracing, "enable-tracing", false,
-		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-telemetry", false,
-		"Alias for --enable-tracing; enables OpenTelemetry traces and metrics.")
+		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
+	flag.BoolVar(&enableTracing, "enable-tracing", false,
+		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
 
 	opts := zap.Options{
 		Development: true,

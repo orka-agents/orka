@@ -83,6 +83,7 @@ func Resource(ctx context.Context, serviceName string) (*resource.Resource, erro
 		version = info.Main.Version
 	}
 	return resource.New(ctx,
+		resource.WithFromEnv(),
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(serviceName),
 			semconv.ServiceVersionKey.String(version),
@@ -115,7 +116,8 @@ func suppressExporterShutdownError(err error) error {
 		return nil
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "failed to upload metrics") && strings.Contains(msg, "connection refused") {
+	if strings.Contains(msg, "failed to upload metrics") &&
+		(strings.Contains(msg, "connection refused") || strings.Contains(msg, "context deadline exceeded")) {
 		return nil
 	}
 	return err
