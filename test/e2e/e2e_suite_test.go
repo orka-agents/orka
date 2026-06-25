@@ -200,6 +200,7 @@ var _ = AfterSuite(func() {
 
 	By("removing manager namespace")
 	runCleanupCommand(2*time.Minute, "kubectl", "delete", "ns", namespace, "--ignore-not-found", "--wait=false")
+	runCleanupCommand(2*time.Minute, "kubectl", "wait", "--for=delete", "namespace/"+namespace, "--timeout=120s")
 
 })
 

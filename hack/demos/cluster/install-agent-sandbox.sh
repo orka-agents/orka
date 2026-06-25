@@ -79,6 +79,49 @@ else
   log "kind cluster ${cluster_name} not found; using current context $(kubectl config current-context)"
 fi
 
+reconcile_vekil_network_policy() {
+  local ns="$1"
+  local port
+  local selector_yaml
+
+  kubectl -n "${ns}" get service vekil >/dev/null \
+    || die "vekil Service ${ns}/vekil is missing; cannot reconcile NetworkPolicy for clients"
+  port="$(kubectl -n "${ns}" get service vekil -o jsonpath='{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
+  port="${port:-1337}"
+  selector_yaml="$(kubectl -n "${ns}" get deployment vekil -o json \
+    | jq -r '.spec.selector.matchLabels // {} | to_entries[] | "      \(.key): \(.value | @json)"')"
+  [[ -n "${selector_yaml}" ]] || die "vekil Deployment ${ns}/vekil has no selector labels for NetworkPolicy"
+
+  kubectl -n "${ns}" apply -f - <<YAML
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vekil-ingress
+  namespace: ${ns}
+  labels:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/instance: vekil
+    app.kubernetes.io/managed-by: vekil-reverse-proxy-deploy
+spec:
+  podSelector:
+    matchLabels:
+${selector_yaml}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+        - namespaceSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+      ports:
+        - protocol: TCP
+          port: ${port}
+YAML
+}
+
 # Agentic layer: build + push the runtime + router images to the kind registry
 # (normal pods pull via localhost:<port>). Done BEFORE the template is applied
 # so the SandboxTemplate references an image that exists.
@@ -180,23 +223,18 @@ if [[ "${AGENTIC}" == "1" ]]; then
   if kubectl -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
     vekil_exists=1
   fi
-  if [[ -x "${vekil_script}" ]]; then
-    if [[ "${vekil_exists}" == 1 ]]; then
-      log "vekil already deployed in ${VEKIL_NS} — reconciling workload and NetworkPolicy"
-    else
-      log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
-    fi
+  if [[ "${vekil_exists}" == 1 ]]; then
+    log "vekil already deployed in ${VEKIL_NS} — reconciling only the managed NetworkPolicy"
+    reconcile_vekil_network_policy "${VEKIL_NS}"
+    kubectl -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil NetworkPolicy ${VEKIL_NS}/vekil-ingress was not reconciled"
+  elif [[ -x "${vekil_script}" ]]; then
+    log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
     bash "${vekil_script}" --context "$(kubectl config current-context)" --namespace "${VEKIL_NS}" --skip-wait
     kubectl -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
       || die "vekil NetworkPolicy ${VEKIL_NS}/vekil-ingress was not reconciled"
-    if [[ "${vekil_exists}" == 0 ]]; then
-      log "ACTION REQUIRED: complete the GitHub device-code login in vekil's logs:"
-      log "  kubectl -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
-    fi
-  elif [[ "${vekil_exists}" == 1 ]]; then
-    kubectl -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
-      || die "vekil already exists in ${VEKIL_NS}, but deploy script was not found and NetworkPolicy ${VEKIL_NS}/vekil-ingress is missing"
-    log "vekil already deployed in ${VEKIL_NS} with NetworkPolicy — reusing it"
+    log "ACTION REQUIRED: complete the GitHub device-code login in vekil's logs:"
+    log "  kubectl -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
   else
     log "vekil deploy script not found; provide an OpenAI-compatible proxy and set ${sandbox_model_secret}."
   fi
