@@ -1343,6 +1343,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && taskHasHarnessWrapperTurn(task) {
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for running harness task")
+			return ctrl.Result{}, err
 		}
 		return r.finishHarnessWrapperTask(ctx, task)
 	}
@@ -3123,12 +3124,12 @@ func (r *TaskReconciler) deleteStaleManagedWorkerRoleBindings(ctx context.Contex
 	log := logf.FromContext(ctx)
 
 	var bindings rbacv1.RoleBindingList
-	if err := r.List(ctx, &bindings, client.InNamespace(namespace)); err != nil {
+	if err := r.List(ctx, &bindings, client.InNamespace(namespace), client.MatchingLabels{managedByLabelKey: managedByLabelValue}); err != nil {
 		return fmt.Errorf("listing managed worker RoleBindings in namespace %s for pruning: %w", namespace, err)
 	}
 	for i := range bindings.Items {
 		binding := &bindings.Items[i]
-		if binding.Name == spec.clusterRoleBindingName || binding.Labels[managedByLabelKey] != managedByLabelValue {
+		if r.EnforceNamespaceIsolation && binding.Name == spec.clusterRoleBindingName {
 			continue
 		}
 		if !roleBindingReferencesWorkerServiceAccount(binding, spec, namespace) {
@@ -3146,12 +3147,12 @@ func (r *TaskReconciler) deleteStaleManagedWorkerClusterRoleBindings(ctx context
 	log := logf.FromContext(ctx)
 
 	var bindings rbacv1.ClusterRoleBindingList
-	if err := r.List(ctx, &bindings); err != nil {
+	if err := r.List(ctx, &bindings, client.MatchingLabels{managedByLabelKey: managedByLabelValue}); err != nil {
 		return fmt.Errorf("listing managed worker ClusterRoleBindings for namespace %s pruning: %w", namespace, err)
 	}
 	for i := range bindings.Items {
 		binding := &bindings.Items[i]
-		if binding.Name == spec.clusterRoleBindingName || binding.Labels[managedByLabelKey] != managedByLabelValue {
+		if !r.EnforceNamespaceIsolation && binding.Name == spec.clusterRoleBindingName {
 			continue
 		}
 		if !clusterRoleBindingReferencesWorkerServiceAccount(binding, spec, namespace) {
@@ -3344,7 +3345,7 @@ func (r *TaskReconciler) legacyStaticWorkerClusterRoleBindingSubjectNamespaces(c
 }
 
 func roleBindingReferencesWorkerServiceAccount(binding *rbacv1.RoleBinding, spec workerRBACSpec, namespace string) bool {
-	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind || binding.RoleRef.Name != spec.clusterRoleName {
+	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind {
 		return false
 	}
 	for _, subject := range binding.Subjects {
@@ -3359,7 +3360,7 @@ func roleBindingReferencesWorkerServiceAccount(binding *rbacv1.RoleBinding, spec
 }
 
 func clusterRoleBindingReferencesWorkerServiceAccount(binding *rbacv1.ClusterRoleBinding, spec workerRBACSpec, namespace string) bool {
-	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind || binding.RoleRef.Name != spec.clusterRoleName {
+	if binding == nil || binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != workerClusterRoleKind {
 		return false
 	}
 	return subjectsContain(binding.Subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: spec.serviceAccountName, Namespace: namespace})
@@ -3436,9 +3437,6 @@ func (r *TaskReconciler) deleteManagedWorkerServiceAccount(ctx context.Context, 
 	}
 	if err != nil {
 		return fmt.Errorf("getting stale worker ServiceAccount %s/%s for pruning: %w", namespace, name, err)
-	}
-	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
-		return nil
 	}
 	if !workerServiceAccountOwnedByOrka(sa) {
 		return nil

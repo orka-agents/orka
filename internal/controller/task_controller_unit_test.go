@@ -2539,7 +2539,7 @@ func TestEnsureWorkerRBAC_PrunesPreviousPrefixManagedClusterRoleBinding(t *testi
 	scheme := newTestScheme()
 	ctx := context.Background()
 	objects := []client.Object{
-		managedWorkerClusterRoleBinding("oldprefix-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("oldprefix-ai-worker-test-ns", "old-ai-worker-role", AIWorkerServiceAccount),
 	}
 	r := newUnitReconciler(scheme, objects...)
 	r.WorkerClusterRoleBindingNamePrefix = "newprefix"
@@ -2551,6 +2551,32 @@ func TestEnsureWorkerRBAC_PrunesPreviousPrefixManagedClusterRoleBinding(t *testi
 
 	if err := r.Get(ctx, types.NamespacedName{Name: "oldprefix-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected previous-prefix managed AI ClusterRoleBinding to be pruned, got err %v", err)
+	}
+}
+
+func TestEnsureWorkerRBAC_PrunesSameNameManagedRoleBindingWhenNamespaceIsolationDisabled(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	spec := workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        DefaultAIWorkerClusterRoleName,
+		clusterRoleBindingName: "orka-ai-worker-test-ns",
+	}
+	objects := []client.Object{
+		workerRoleBinding(testNS, spec),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	aiTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "ai", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+
+	if err := r.ensureWorkerRBAC(ctx, aiTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: testNS}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected same-name managed RoleBinding to be pruned when namespace isolation is disabled, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected desired ClusterRoleBinding to exist: %v", err)
 	}
 }
 
@@ -2993,6 +3019,45 @@ func TestHandleRunning_HarnessTaskPrunesUnusedWorkerRBAC(t *testing.T) {
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected running harness task to prune unused AI CRB, got err %v", err)
+	}
+}
+
+func TestHandleRunning_HarnessTaskReturnsWorkerRBACPruneError(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "harness-agent",
+			Namespace: testNS,
+			Annotations: map[string]string{
+				harnessWrapperStartedAnno:       scheduledRunLabelValue,
+				harnessWrapperTurnIDAnnotation:  "turn-1",
+				harnessWrapperRuntimeAnnotation: "runtime-1",
+				harnessWrapperCorrelationIDAnno: "corr-1",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).WithObjects(
+		task,
+		managedWorkerServiceAccount(AIWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName, AIWorkerServiceAccount),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
+				return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}, obj.GetName(), errors.New("injected harness prune failure"))
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}).Build()
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+
+	_, err := r.handleRunning(ctx, task)
+	if err == nil || !strings.Contains(err.Error(), "injected harness prune failure") {
+		t.Fatalf("expected injected harness prune error, got %v", err)
 	}
 }
 
