@@ -278,7 +278,7 @@ else
   pr_state_blocking=true
 fi
 case "$merge_state" in
-  DIRTY|UNKNOWN|BLOCKED|BEHIND|DRAFT)
+  DIRTY|UNKNOWN|BLOCKED|BEHIND|DRAFT|UNSTABLE)
     merge_blocking=true
     ;;
   *)
