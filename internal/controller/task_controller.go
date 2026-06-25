@@ -147,6 +147,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/portforward,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods;nodes,verbs=get;list
 
 // updateStatusWithRetry updates the task status with retry on conflict.

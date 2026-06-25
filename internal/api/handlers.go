@@ -469,6 +469,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenTaskCreate(c, authReq, namespace); err != nil {
 		return err
 	}
+	if err := h.authorizeKubernetesTaskAccess(c, "create", namespace, name); err != nil {
+		return err
+	}
 
 	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))
 
@@ -507,6 +510,9 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	}
 	opts.Namespace = namespace
 	if err := h.authorizeContextTokenAction(c, "listTasks", h.contextTokenAuthorization.TaskListScopes); err != nil {
+		return err
+	}
+	if err := h.authorizeKubernetesTaskAccess(c, "list", namespace, ""); err != nil {
 		return err
 	}
 
@@ -571,6 +577,9 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenTaskRead(c, "getTask", namespace, id); err != nil {
 		return err
 	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -623,6 +632,9 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "deleteTask", h.contextTokenAuthorization.TaskDeleteScopes); err != nil {
 		return err
 	}
+	if err := h.authorizeKubernetesTaskAccess(c, "delete", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -651,6 +663,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeContextTokenTaskRead(c, "getTaskLogs", namespace, id); err != nil {
+		return err
+	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, id); err != nil {
 		return err
 	}
 
@@ -765,6 +780,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenTaskRead(c, "getTaskResult", namespace, id); err != nil {
 		return err
 	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -803,6 +821,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeContextTokenTaskRead(c, "getTaskPlan", namespace, id); err != nil {
+		return err
+	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, id); err != nil {
 		return err
 	}
 
@@ -1552,6 +1573,9 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenTaskRead(c, "getTaskChildren", namespace, taskName); err != nil {
 		return err
 	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, taskName); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if h.contextTokenAuthorization.Enabled() {
@@ -1607,6 +1631,9 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenTaskRead(c, "listTaskArtifacts", namespace, id); err != nil {
 		return err
 	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, id); err != nil {
+		return err
+	}
 
 	task := &corev1alpha1.Task{}
 	ctx := c.Context()
@@ -1645,6 +1672,9 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return err
 	}
 	if err := h.authorizeContextTokenTaskRead(c, "downloadTaskArtifact", namespace, id); err != nil {
+		return err
+	}
+	if err := h.authorizeKubernetesTaskAccess(c, "get", namespace, id); err != nil {
 		return err
 	}
 
