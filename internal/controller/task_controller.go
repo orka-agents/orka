@@ -493,6 +493,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		}
 		if err := r.pruneUnusedWorkerRBAC(ctx, task.Namespace, ""); err != nil {
 			log.Error(err, "failed to prune unused worker RBAC for deleted task")
+			return ctrl.Result{}, err
 		}
 
 		// Release session lock if held
@@ -917,14 +918,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure only the worker ServiceAccount and RBAC required for this task exist in the task namespace
+	// Ensure only the worker ServiceAccount and RBAC required for this task exist in the task namespace.
+	// Worker identities are no longer statically bound for every trust tier, so
+	// selected-tier RBAC must exist before creating a Job that references it.
 	if err := r.ensureWorkerRBAC(ctx, task); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
 		if r.Recorder != nil {
 			r.Recorder.Eventf(task, corev1.EventTypeWarning, workerRBACReconcileFailedReason,
 				"failed to ensure worker RBAC in namespace %q: %v", task.Namespace, err)
 		}
-		// Non-fatal: continue with job creation, it may still work
+		return ctrl.Result{}, err
 	}
 
 	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
@@ -1338,6 +1341,12 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
 		return r.failTask(ctx, task, "harness runtime turn identity is missing")
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent || strings.TrimSpace(task.Status.JobName) != "" {
+		if err := r.ensureWorkerRBAC(ctx, task); err != nil {
+			log.Error(err, "failed to repair worker RBAC for running task")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Populate ChildTaskStatus for coordinator tasks

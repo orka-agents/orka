@@ -4287,7 +4287,7 @@ func TestCreateTaskJob_AITaskWithAgent(t *testing.T) {
 	}
 }
 
-func TestCreateTaskJob_RBACReconcileFailureEmitsWarningAndContinues(t *testing.T) {
+func TestCreateTaskJob_RBACReconcileFailureEmitsWarningAndStops(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 	task := &corev1alpha1.Task{
@@ -4327,22 +4327,22 @@ func TestCreateTaskJob_RBACReconcileFailureEmitsWarningAndContinues(t *testing.T
 	r.Recorder = recorder
 
 	result, err := r.createTaskJob(ctx, task, nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected RBAC reconcile error")
 	}
-	if result.RequeueAfter != 5*time.Second {
-		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
+	if result != (ctrl.Result{}) {
+		t.Errorf("expected empty result, got %#v", result)
 	}
-	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		t.Errorf("expected phase Running, got %s", task.Status.Phase)
-	}
-	if task.Status.JobName == "" {
-		t.Error("expected JobName to be set")
+	if task.Status.JobName != "" {
+		t.Fatalf("expected no JobName after RBAC failure, got %q", task.Status.JobName)
 	}
 
-	job := &batchv1.Job{}
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
-		t.Fatalf("expected Job to be created despite RBAC warning: %v", err)
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(task.Namespace)); err != nil {
+		t.Fatalf("listing Jobs: %v", err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("expected no Job to be created after RBAC failure, got %d", len(jobs.Items))
 	}
 
 	select {
