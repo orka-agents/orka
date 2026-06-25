@@ -2525,6 +2525,36 @@ func TestEnsureWorkerRBAC_DoesNotPrunePendingAgentWorkerRBAC(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkerRBAC_DoesNotPruneLegacyPendingAgentWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "legacy-agent", Namespace: testNS}}
+	pendingAgent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-agent", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	objects := []client.Object{
+		agent,
+		pendingAgent,
+		managedWorkerServiceAccount(VendorWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName, VendorWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: VendorWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected legacy pending agent vendor ServiceAccount to remain: %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-vendor-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); err != nil {
+		t.Fatalf("expected legacy pending agent vendor ClusterRoleBinding to remain: %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_DoesNotGrantRBACForPodOnlyWorkerServiceAccount(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()

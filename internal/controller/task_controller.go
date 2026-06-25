@@ -2956,11 +2956,14 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 		if !task.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if task.Spec.Type == corev1alpha1.TaskTypeAgent && strings.TrimSpace(task.Status.JobName) == "" {
-			continue
-		}
 		if task.Status.Phase == corev1alpha1.TaskPhasePending || task.Status.Phase == corev1alpha1.TaskPhaseRunning {
-			serviceAccount := workerServiceAccountForTask(task)
+			serviceAccount, usesWorkerRBAC, err := r.workerServiceAccountForActiveTask(ctx, task)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !usesWorkerRBAC {
+				continue
+			}
 			keepServiceAccounts[serviceAccount] = struct{}{}
 			repairBindings[serviceAccount] = struct{}{}
 		}
@@ -2981,6 +2984,41 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 	}
 
 	return keepServiceAccounts, repairBindings, nil
+}
+
+func (r *TaskReconciler) workerServiceAccountForActiveTask(ctx context.Context, task *corev1alpha1.Task) (string, bool, error) {
+	if task == nil {
+		return "", false, nil
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return workerServiceAccountForTask(task), true, nil
+	}
+
+	if strings.TrimSpace(task.Status.JobName) != "" {
+		return workerServiceAccountForTask(task), true, nil
+	}
+	if task.Spec.AgentRef == nil {
+		return "", false, nil
+	}
+
+	agent := &corev1alpha1.Agent{}
+	agentNS := task.Spec.AgentRef.Namespace
+	if agentNS == "" {
+		agentNS = task.Namespace
+	}
+	if r.EnforceNamespaceIsolation && agentNS != task.Namespace {
+		return "", false, nil
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("getting agent %s/%s for worker RBAC liveness: %w", agentNS, task.Spec.AgentRef.Name, err)
+	}
+	if agent.Spec.Runtime != nil || agentTaskJobBackendUnsupportedReason(task, agent) != "" {
+		return "", false, nil
+	}
+	return workerServiceAccountForTask(task), true, nil
 }
 
 func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
