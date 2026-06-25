@@ -1502,6 +1502,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
 				return result, err
 			}
+			resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if resumingAfterApproval {
+				return r.handleAutonomousIteration(ctx, task)
+			}
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
@@ -2658,17 +2665,25 @@ var approvalRequiredBuiltInTools = map[string]bool{
 	"delegate_task":           true,
 	"delete_agent":            true,
 	"delete_tool":             true,
+	"file_read":               true,
 	"file_write":              true,
+	"get_issue":               true,
+	"list_issues":             true,
+	"list_pull_requests":      true,
 	"merge_pull_request":      true,
 	"post_review_comment":     true,
 	"propose_memory":          true,
+	"recall_memory":           true,
 	"remember":                true,
 	"request_approval":        true,
 	"review_pull_request":     true,
+	"search_transcript":       true,
 	"send_message":            true,
 	"update_agent":            true,
 	"update_plan":             true,
 	"wait_for_tasks":          true,
+	"web_fetch":               true,
+	"web_search":              true,
 }
 
 // handleScheduled manages the scheduling loop for recurring tasks.

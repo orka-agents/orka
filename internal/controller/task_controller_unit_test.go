@@ -628,7 +628,7 @@ func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordination
 }
 
 func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRejectBuiltIns(t *testing.T) {
-	for _, toolName := range []string{"request_approval", "create_container_task"} {
+	for _, toolName := range []string{"request_approval", "create_container_task", "web_search", "file_read", "web_fetch", "list_issues", "get_issue", "list_pull_requests", "recall_memory", "search_transcript"} {
 		t.Run(toolName, func(t *testing.T) {
 			r := &TaskReconciler{}
 			task := &corev1alpha1.Task{
@@ -3545,6 +3545,49 @@ func TestHandleRunning_AutonomousJobFailedWithPendingApprovalParksBeforeRetry(t 
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-job-fail-approval" {
 		t.Fatalf("task status = %#v, want parked Running without retry", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousJobFailedWithApprovedApprovalResumesBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-failed-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-fail-approved", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-fail-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-failed-approved-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-fail-approved",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-failed-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-failed-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-failed-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", task.Status)
 	}
 }
 
@@ -6948,7 +6991,7 @@ func TestHandleAutonomousIteration_ApprovedAtMaxIterationResumes(t *testing.T) {
 	if _, err := r.handleAutonomousIteration(context.Background(), task); err != nil {
 		t.Fatalf("initial park error = %v", err)
 	}
-	appendApprovalDecisionForControllerTest(t, r, task, "approval-resume", events.ExecutionEventTypeApprovalApproved)
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-resume")
 	result, err := r.handleAutonomousIteration(context.Background(), task)
 	if err != nil {
 		t.Fatalf("resume error = %v", err)
@@ -6961,7 +7004,7 @@ func TestHandleAutonomousIteration_ApprovedAtMaxIterationResumes(t *testing.T) {
 	}
 }
 
-func appendApprovalDecisionForControllerTest(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, approvalID, typ string) {
+func appendApprovalDecisionForControllerTest(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, approvalID string) {
 	t.Helper()
 	content, err := json.Marshal(map[string]string{
 		"approvalID": approvalID,
@@ -6976,7 +7019,7 @@ func appendApprovalDecisionForControllerTest(t *testing.T, r *TaskReconciler, ta
 		StreamType: store.ExecutionEventStreamTypeTask,
 		StreamID:   task.Name,
 		TaskName:   task.Name,
-		Type:       typ,
+		Type:       events.ExecutionEventTypeApprovalApproved,
 		ToolCallID: approvalID,
 		Severity:   events.ExecutionEventSeverityInfo,
 		Summary:    "approval decided",
@@ -7008,7 +7051,7 @@ func TestHandleAutonomousIteration_FastApprovalAtMaxIterationResumes(t *testing.
 	}
 	r := newUnitReconciler(scheme, task, agent, job)
 	appendApprovalRequestedForControllerTest(t, r, task, "approval-fast")
-	appendApprovalDecisionForControllerTest(t, r, task, "approval-fast", events.ExecutionEventTypeApprovalApproved)
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-fast")
 
 	_, err := r.handleAutonomousIteration(context.Background(), task)
 	if err != nil {
@@ -7073,7 +7116,7 @@ func TestHandleAutonomousIteration_ResolvedApprovalResumesBeforeGoalComplete(t *
 	}
 	r := newUnitReconciler(scheme, task, agent, job)
 	appendApprovalRequestedForControllerTest(t, r, task, "approval-goal")
-	appendApprovalDecisionForControllerTest(t, r, task, "approval-goal", events.ExecutionEventTypeApprovalApproved)
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-goal")
 	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-approval-goal-resume", &store.PlanState{
 		GoalComplete: true,
 		Summary:      "done",
