@@ -88,6 +88,8 @@ log "Ensuring namespace ${demo_namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 log "Allowing namespace ${demo_namespace} to reach the vekil NetworkPolicy"
 kubectl label namespace "${demo_namespace}" vekil.sozercan.io/access=true --overwrite >/dev/null
+log "Allowing Orka namespace ${orka_namespace} to reach the vekil NetworkPolicy"
+kubectl label namespace "${orka_namespace}" vekil.sozercan.io/access=true --overwrite >/dev/null
 
 # --- Provider api-key Secret (placeholder; vekil holds the real session) ----
 log "Creating provider api-key Secret ${demo_namespace}/${provider_secret}"

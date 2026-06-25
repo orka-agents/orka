@@ -167,14 +167,36 @@ if [[ "${AGENTIC}" == "1" ]]; then
   fi
 
   # ---- vekil model proxy (one-time GitHub device-code login) ------------
-  vekil_script="${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"
+  vekil_script=""
+  for candidate in \
+    "${repo_root}/.codex/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh" \
+    "${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"; do
+    if [[ -x "${candidate}" ]]; then
+      vekil_script="${candidate}"
+      break
+    fi
+  done
+  vekil_exists=0
   if kubectl -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
-    log "vekil already deployed in ${VEKIL_NS} — reusing it"
-  elif [[ -x "${vekil_script}" ]]; then
-    log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
-    bash "${vekil_script}" --context "$(kubectl config current-context)" --namespace "${VEKIL_NS}" --skip-wait || true
-    log "ACTION REQUIRED: complete the GitHub device-code login in vekil's logs:"
-    log "  kubectl -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
+    vekil_exists=1
+  fi
+  if [[ -x "${vekil_script}" ]]; then
+    if [[ "${vekil_exists}" == 1 ]]; then
+      log "vekil already deployed in ${VEKIL_NS} — reconciling workload and NetworkPolicy"
+    else
+      log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
+    fi
+    bash "${vekil_script}" --context "$(kubectl config current-context)" --namespace "${VEKIL_NS}" --skip-wait
+    kubectl -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil NetworkPolicy ${VEKIL_NS}/vekil-ingress was not reconciled"
+    if [[ "${vekil_exists}" == 0 ]]; then
+      log "ACTION REQUIRED: complete the GitHub device-code login in vekil's logs:"
+      log "  kubectl -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
+    fi
+  elif [[ "${vekil_exists}" == 1 ]]; then
+    kubectl -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil already exists in ${VEKIL_NS}, but deploy script was not found and NetworkPolicy ${VEKIL_NS}/vekil-ingress is missing"
+    log "vekil already deployed in ${VEKIL_NS} with NetworkPolicy — reusing it"
   else
     log "vekil deploy script not found; provide an OpenAI-compatible proxy and set ${sandbox_model_secret}."
   fi

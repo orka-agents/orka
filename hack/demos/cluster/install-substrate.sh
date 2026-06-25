@@ -197,8 +197,13 @@ if [[ "${AGENTIC}" == "1" ]]; then
   log "Ensuring substrate demo namespace ${SUBSTRATE_NS}"
   kubectl --context "${ctx}" create namespace "${SUBSTRATE_NS}" --dry-run=client -o yaml \
     | kubectl --context "${ctx}" apply -f -
-  log "Allowing namespace ${SUBSTRATE_NS} to reach the vekil NetworkPolicy"
+  log "Ensuring substrate template namespace ${SUBSTRATE_TEMPLATE_NS}"
+  kubectl --context "${ctx}" create namespace "${SUBSTRATE_TEMPLATE_NS}" --dry-run=client -o yaml \
+    | kubectl --context "${ctx}" apply -f -
+  log "Allowing namespaces ${SUBSTRATE_NS} and ${SUBSTRATE_TEMPLATE_NS} to reach the vekil NetworkPolicy"
   kubectl --context "${ctx}" label namespace "${SUBSTRATE_NS}" \
+    vekil.sozercan.io/access=true --overwrite >/dev/null
+  kubectl --context "${ctx}" label namespace "${SUBSTRATE_TEMPLATE_NS}" \
     vekil.sozercan.io/access=true --overwrite >/dev/null
 
   # ---- 1. Codex-capable Actor image -------------------------------------
@@ -246,14 +251,28 @@ if [[ "${AGENTIC}" == "1" ]]; then
       break
     fi
   done
+  vekil_exists=0
   if kubectl --context "${ctx}" -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
-    log "vekil already deployed in ${VEKIL_NS} — leaving it (re-run device-code login if /readyz is down)"
-  elif [[ -x "${vekil_script}" ]]; then
-    log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
+    vekil_exists=1
+  fi
+  if [[ -x "${vekil_script}" ]]; then
+    if [[ "${vekil_exists}" == 1 ]]; then
+      log "vekil already deployed in ${VEKIL_NS} — reconciling workload and NetworkPolicy"
+    else
+      log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
+    fi
     bash "${vekil_script}" --context "${ctx}" --namespace "${VEKIL_NS}" --skip-wait
-    log "ACTION REQUIRED: complete the GitHub device-code login printed in vekil's logs:"
-    log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
-    log "  (visit the URL, enter the code; then /readyz returns 200)"
+    kubectl --context "${ctx}" -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil NetworkPolicy ${VEKIL_NS}/vekil-ingress was not reconciled"
+    if [[ "${vekil_exists}" == 0 ]]; then
+      log "ACTION REQUIRED: complete the GitHub device-code login printed in vekil's logs:"
+      log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
+      log "  (visit the URL, enter the code; then /readyz returns 200)"
+    fi
+  elif [[ "${vekil_exists}" == 1 ]]; then
+    kubectl --context "${ctx}" -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil already exists in ${VEKIL_NS}, but deploy script was not found and NetworkPolicy ${VEKIL_NS}/vekil-ingress is missing"
+    log "vekil already deployed in ${VEKIL_NS} with NetworkPolicy — reusing it"
   else
     die "vekil deploy script not found under .codex/skills or .claude/skills; install the skill or deploy an in-cluster OpenAI-compatible proxy before Demo 70"
   fi
