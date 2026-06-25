@@ -154,7 +154,6 @@ jobs:
           # repository artifacts at the Pages root.
           rsync -a \
             --exclude='/charts' \
-            --exclude='/charts/***' \
             --exclude='/index.yaml' \
             --exclude='/*.tgz' \
             --exclude='/*.prov' \
