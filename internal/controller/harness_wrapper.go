@@ -204,7 +204,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 		}
 		turnAccepted = true
-		if err := r.patchHarnessWrapperStarted(ctx, task); err != nil {
+		if err := r.patchHarnessWrapperStarted(ctx, task, request); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -527,6 +527,36 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	request harness.StartTurnRequest,
 ) error {
 	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if err := setHarnessWrapperPlannedTurnAnnotations(task, request); err != nil {
+		return err
+	}
+	task.Annotations[harnessWrapperStartedAnno] = "false"
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *corev1alpha1.Task, request harness.StartTurnRequest) error {
+	latest := &corev1alpha1.Task{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return err
+	}
+	patch := ctrlclient.MergeFrom(latest.DeepCopy())
+	// Write the planned turn identity together with started=true. Controller-runtime
+	// cache reads can lag immediately after patchHarnessWrapperPlannedTurn; without
+	// re-applying the deterministic identity here, a stale read can persist only
+	// harness-wrapper-started=true and the next Running reconcile fails the task as
+	// missing its turn identity.
+	if err := setHarnessWrapperPlannedTurnAnnotations(latest, request); err != nil {
+		return err
+	}
+	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
+	if err := r.Patch(ctx, latest, patch); err != nil {
+		return err
+	}
+	latest.DeepCopyInto(task)
+	return nil
+}
+
+func setHarnessWrapperPlannedTurnAnnotations(task *corev1alpha1.Task, request harness.StartTurnRequest) error {
 	if task.Annotations == nil {
 		task.Annotations = map[string]string{}
 	}
@@ -534,7 +564,6 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperRuntimeAnnotation] = string(request.RuntimeSessionID)
 	task.Annotations[harnessWrapperCorrelationIDAnno] = request.CorrelationID
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
-	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
 	plannedMetadata := make(map[string]string, len(request.Metadata))
 	for key, value := range request.Metadata {
@@ -548,23 +577,6 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 		return err
 	}
 	task.Annotations[harnessWrapperMetadataAnno] = string(metadata)
-	return r.Patch(ctx, task, patch)
-}
-
-func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *corev1alpha1.Task) error {
-	latest := &corev1alpha1.Task{}
-	if err := r.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
-		return err
-	}
-	patch := ctrlclient.MergeFrom(latest.DeepCopy())
-	if latest.Annotations == nil {
-		latest.Annotations = map[string]string{}
-	}
-	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
-	if err := r.Patch(ctx, latest, patch); err != nil {
-		return err
-	}
-	latest.DeepCopyInto(task)
 	return nil
 }
 
