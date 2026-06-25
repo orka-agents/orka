@@ -127,6 +127,13 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		if err := r.patchHarnessWrapperPlannedTurn(ctx, task, request); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Persist the deterministic turn identity in a separate reconcile before
+		// accepting the turn. The Running path requires the planned identity
+		// annotations to be durable; keeping planning and start in one reconcile can
+		// leave a flaky observed state where started=true is visible but the identity
+		// annotations are not, causing handleRunning to fail the task as missing its
+		// harness runtime turn identity.
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
 	turnAccepted := startedPlannedTurn
 	if !startedPlannedTurn {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -96,6 +97,89 @@ func TestHarnessWrapperStartTurnUsesComputedAttemptForTurnID(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
+	startCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version:            harness.ProtocolVersion,
+				ProtocolVersion:    harness.ProtocolVersion,
+				Transport:          harness.HTTPTransport,
+				RuntimeName:        "codex",
+				ProviderKind:       harness.ProviderKindKubernetesService,
+				ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == harness.TurnsPath:
+			startCalls++
+			var request harness.StartTurnRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+				Version:          harness.ProtocolVersion,
+				Accepted:         true,
+				RuntimeSessionID: request.RuntimeSessionID,
+				TurnID:           request.TurnID,
+				CorrelationID:    request.CorrelationID,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task, agent := harnessWrapperTaskAndAgent()
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("first handlePending: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("first handlePending requeue = %s, want positive delay", result.RequeueAfter)
+	}
+	if startCalls != 0 {
+		t.Fatalf("StartTurn calls after planning = %d, want 0", startCalls)
+	}
+	var planned corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &planned); err != nil {
+		t.Fatalf("get planned task: %v", err)
+	}
+	if planned.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase after planning = %s, want Pending", planned.Status.Phase)
+	}
+	if !taskHasPlannedHarnessWrapperTurn(&planned) {
+		t.Fatalf("planned harness annotations missing: %#v", planned.Annotations)
+	}
+	if taskHasHarnessWrapperTurn(&planned) {
+		t.Fatalf("harness turn marked started during planning: %#v", planned.Annotations)
+	}
+	if got := planned.Annotations[harnessWrapperStartedAnno]; got != "false" {
+		t.Fatalf("%s = %q, want false", harnessWrapperStartedAnno, got)
+	}
+
+	if _, err := r.handlePending(context.Background(), &planned); err != nil {
+		t.Fatalf("second handlePending: %v", err)
+	}
+	if startCalls != 1 {
+		t.Fatalf("StartTurn calls after start = %d, want 1", startCalls)
+	}
+	var running corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &running); err != nil {
+		t.Fatalf("get running task: %v", err)
+	}
+	if running.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase after start = %s, want Running", running.Status.Phase)
+	}
+	if !taskHasHarnessWrapperTurn(&running) {
+		t.Fatalf("started harness annotations missing: %#v", running.Annotations)
+	}
+}
+
 func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -110,13 +194,7 @@ func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	secret := attachHarnessWrapperRuntimeSecret(task, agent)
 	r := newUnitReconciler(newTestScheme(), task, agent, secret)
-	if _, err := r.handlePending(context.Background(), task); err != nil {
-		t.Fatalf("handlePending: %v", err)
-	}
-	var running corev1alpha1.Task
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &running); err != nil {
-		t.Fatalf("get running task: %v", err)
-	}
+	running := runHarnessWrapperTaskToRunning(t, r, task)
 	if _, err := r.handleRunning(context.Background(), &running); err != nil {
 		t.Fatalf("handleRunning: %v", err)
 	}
@@ -318,16 +396,7 @@ func TestHarnessRuntimeMissingEndpointFailsAgentTask(t *testing.T) {
 
 func runHarnessWrapperTaskToCompletion(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task) corev1alpha1.Task {
 	t.Helper()
-	if _, err := r.handlePending(context.Background(), task); err != nil {
-		t.Fatalf("handlePending: %v", err)
-	}
-	var running corev1alpha1.Task
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &running); err != nil {
-		t.Fatalf("get running task: %v", err)
-	}
-	if running.Status.Phase != corev1alpha1.TaskPhaseRunning {
-		t.Fatalf("phase after pending = %s, want Running", running.Status.Phase)
-	}
+	running := runHarnessWrapperTaskToRunning(t, r, task)
 	if _, err := r.handleRunning(context.Background(), &running); err != nil {
 		t.Fatalf("handleRunning: %v", err)
 	}
@@ -336,6 +405,29 @@ func runHarnessWrapperTaskToCompletion(t *testing.T, r *TaskReconciler, task *co
 		t.Fatalf("get completed task: %v", err)
 	}
 	return updated
+}
+
+func runHarnessWrapperTaskToRunning(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task) corev1alpha1.Task {
+	t.Helper()
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("first handlePending: %v", err)
+	}
+	var current corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &current); err != nil {
+		t.Fatalf("get task after first pending: %v", err)
+	}
+	if current.Status.Phase == corev1alpha1.TaskPhasePending && taskHasPlannedHarnessWrapperTurn(&current) && !taskHasHarnessWrapperTurn(&current) {
+		if _, err := r.handlePending(context.Background(), &current); err != nil {
+			t.Fatalf("second handlePending: %v", err)
+		}
+		if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &current); err != nil {
+			t.Fatalf("get task after second pending: %v", err)
+		}
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase after pending = %s, want Running", current.Status.Phase)
+	}
+	return current
 }
 
 func harnessWrapperTaskAndAgent() (*corev1alpha1.Task, *corev1alpha1.Agent) {
