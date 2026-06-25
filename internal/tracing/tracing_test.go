@@ -11,7 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestInit(t *testing.T) {
@@ -19,14 +23,8 @@ func TestInit(t *testing.T) {
 		name    string
 		enabled bool
 	}{
-		{
-			name:    "disabled returns noop shutdown",
-			enabled: false,
-		},
-		{
-			name:    "enabled creates provider",
-			enabled: true,
-		},
+		{name: "disabled returns noop shutdown", enabled: false},
+		{name: "enabled creates provider", enabled: true},
 	}
 
 	for _, tt := range tests {
@@ -128,4 +126,57 @@ func TestOTLPProtocolSelectsHTTPExporter(t *testing.T) {
 		t.Fatalf("newMetricExporter() error = %v", err)
 	}
 	defer func() { _ = metricExporter.Shutdown(context.Background()) }()
+}
+
+func TestInitDisabledLeavesTracerProviderUnchanged(t *testing.T) {
+	previous := otel.GetTracerProvider()
+	shutdown, err := Init("test-service", false)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("Init() returned nil shutdown")
+	}
+	if got := otel.GetTracerProvider(); got != previous {
+		t.Fatalf("tracer provider changed in disabled mode: got %#v want %#v", got, previous)
+	}
+}
+
+func TestSDKSamplerEnvironmentAlwaysOffDropsSpans(t *testing.T) {
+	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+	recorder := tracetest.NewSpanRecorder()
+	// Intentionally omit WithSampler: the Go SDK provider reads OTEL_TRACES_SAMPLER
+	// from the environment when no explicit sampler option is supplied.
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer provider.Shutdown(context.Background()) //nolint:errcheck
+	_, span := provider.Tracer("test").Start(context.Background(), "dropped")
+	span.End()
+	if got := recorder.Ended(); len(got) != 0 {
+		t.Fatalf("ended spans = %d, want 0", len(got))
+	}
+}
+
+func TestSDKSamplerEnvironmentParentBasedPreservesSampledRemoteParent(t *testing.T) {
+	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_off")
+	recorder := tracetest.NewSpanRecorder()
+	// Intentionally omit WithSampler so this covers SDK environment sampler wiring.
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	defer provider.Shutdown(context.Background()) //nolint:errcheck
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("trace id: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	if err != nil {
+		t.Fatalf("span id: %v", err)
+	}
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled, Remote: true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), parent)
+	_, span := provider.Tracer("test").Start(ctx, "child")
+	span.End()
+	if got := recorder.Ended(); len(got) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(got))
+	}
 }

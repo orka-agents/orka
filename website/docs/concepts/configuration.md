@@ -958,19 +958,25 @@ env:
 
 | Flag / Environment Variable | Default | Description |
 |------------------------------|---------|-------------|
-| `--enable-tracing` | `false` | Enable OpenTelemetry tracing |
+| `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK default | Standard OpenTelemetry sampler configuration |
 
 ### Instrumented Components
 
 | Tracer | Span | Attributes |
 |--------|------|------------|
-| `orka.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
-| `orka.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
-| `orka.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
-| `orka.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
-| `orka.tools` | `tool.execute` | `tool.name`, `tool.success` |
-| `orka.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+| `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
+| `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
+| `orka.worker` / `orka.harness` | `task.run` | `orka.task.id`, `orka.task.namespace`, `orka.tenant`, `orka.agent.name` when known |
+| `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
+| `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
+| `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
+| `orka.controller` | `task.reconcile` | task name, namespace, type, and propagated trace context |
+
+Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
+executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
+children. Tool spans do not include raw arguments or result bodies.
 
 ### Example: Jaeger Setup
 

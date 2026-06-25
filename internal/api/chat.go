@@ -439,7 +439,11 @@ func (ch *ChatHandler) runToolLoop(
 	for iteration := 0; ; iteration++ {
 		iterTracer := tracing.Tracer("orka.chat")
 		iterCtx, iterSpan := iterTracer.Start(ctx, "chat.tool_loop.iteration",
-			trace.WithAttributes(attribute.Int("chat.iteration", iteration)),
+			trace.WithAttributes(
+				attribute.Int("chat.iteration", iteration),
+				attribute.String(tracing.AttrTenant, namespace),
+				attribute.String(genai.AttrRequestModel, model),
+			),
 		)
 
 		select {
@@ -476,6 +480,7 @@ func (ch *ChatHandler) runToolLoop(
 			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
+		iterSpan.SetAttributes(attribute.Int("chat.tool_call_count", len(resp.ToolCalls)))
 		usage.LLMCalls++
 		usage.InputTokens += resp.InputTokens
 		usage.OutputTokens += resp.OutputTokens

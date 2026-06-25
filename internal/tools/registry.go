@@ -211,13 +211,22 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		toolTelemetryName = unknownToolTelemetryName
 	}
 	toolTypeValue := toolType(ctx, tool)
+	toolKind := registryToolKind(name)
 	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, toolTelemetryName),
 		attribute.String(genai.AttrToolType, toolTypeValue),
 	}
-	if tc := GetToolContext(ctx); tc != nil && tc.ToolCallID != "" {
-		attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+	attrs = append(attrs, tracing.ToolAttributes(toolTelemetryName, toolKind, -1, "")...)
+	if tc := GetToolContext(ctx); tc != nil {
+		tenant := tc.Tenant
+		if tenant == "" {
+			tenant = tc.Namespace
+		}
+		attrs = append(attrs, tracing.TaskAttributes(tc.TaskID, tc.Namespace, tenant, "", "")...)
+		if tc.ToolCallID != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+		}
 	}
 	if ok {
 		if description := tool.Description(); description != "" {
@@ -228,6 +237,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+toolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
 	defer span.End()
 
+	// Keep histogram labels low-cardinality and separate from span-only task/result attributes.
 	metricAttrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, toolTelemetryName),
@@ -245,6 +255,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 
 	result, err := tool.Execute(ctx, args)
 	duration := time.Since(start).Seconds()
+	span.SetAttributes(tracing.ToolAttributes("", "", len(result), "")...)
 	if err != nil {
 		errType := fmt.Sprintf("%T", err)
 		span.RecordError(err)
@@ -329,6 +340,13 @@ func toolType(ctx context.Context, _ Tool) string {
 	// Registry tools are in-process functions. External Tool CRD/MCP execution is
 	// handled by worker.ToolExecutor and can be modeled as extension later.
 	return genai.ToolTypeFunction
+}
+
+func registryToolKind(name string) string {
+	if name == delegateTaskToolName {
+		return tracing.ToolKindDelegate
+	}
+	return tracing.ToolKindBuiltin
 }
 
 func recordToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {

@@ -319,6 +319,7 @@ type BaseEnv struct {
 	TaskUID            string
 	ResultEndpoint     string
 	ControllerURL      string
+	AgentName          string
 	TransactionID      string
 	TransactionProfile string
 }
@@ -332,6 +333,7 @@ func (e BaseEnv) EnvVars() []corev1.EnvVar {
 		Env(ControllerURL, e.ControllerURL),
 	}
 	envVars = AppendIfSet(envVars, TaskUID, e.TaskUID)
+	envVars = AppendIfSet(envVars, AgentName, e.AgentName)
 	envVars = AppendIfSet(envVars, TransactionID, e.TransactionID)
 	envVars = AppendIfSet(envVars, TransactionProfile, e.TransactionProfile)
 	return envVars
@@ -345,6 +347,7 @@ func ParseBaseEnv(getenv func(string) string) BaseEnv {
 		TaskUID:            getenv(TaskUID),
 		ResultEndpoint:     getenv(ResultEndpoint),
 		ControllerURL:      getenv(ControllerURL),
+		AgentName:          getenv(AgentName),
 		TransactionID:      getenv(TransactionID),
 		TransactionProfile: getenv(TransactionProfile),
 	}

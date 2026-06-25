@@ -852,7 +852,16 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		"wrapper":  "cli",
 		"maxTurns": "50",
 	}
+	if task != nil && task.Annotations != nil {
+		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
+			metadata["traceparent"] = traceparent
+		}
+		if tracestate := strings.TrimSpace(task.Annotations[labels.AnnotationTraceState]); tracestate != "" {
+			metadata["tracestate"] = tracestate
+		}
+	}
 	if agent != nil {
+		metadata["agentName"] = agent.Name
 		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
 			metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
 		}
@@ -1136,6 +1145,11 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(ctx context.Context, task *co
 			priorNS = task.Namespace
 		}
 		env = append(env, harness.TurnEnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
+	}
+	if task.Annotations != nil {
+		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
+			env = setHarnessTurnEnv(env, workerenv.TraceParent, traceparent)
+		}
 	}
 	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		env = append(env, harness.TurnEnvVar{Name: workerenv.ParentTask, Value: parentTask})

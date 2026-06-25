@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -62,4 +63,37 @@ func (h *MetricHarness) Collect(t *testing.T) metricdata.ResourceMetrics {
 		t.Fatalf("Collect() error = %v", err)
 	}
 	return rm
+}
+
+// AttributeMap converts span attributes to a key/value map for assertions.
+func AttributeMap(span sdktrace.ReadOnlySpan) map[string]attribute.Value {
+	attrs := map[string]attribute.Value{}
+	if span == nil {
+		return attrs
+	}
+	for _, kv := range span.Attributes() {
+		attrs[string(kv.Key)] = kv.Value
+	}
+	return attrs
+}
+
+// SpanNamed returns the first span with the given name.
+func SpanNamed(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
+	for _, span := range spans {
+		if span.Name() == name {
+			return span
+		}
+	}
+	return nil
+}
+
+// SpansNamed returns all spans with the given name in recorder order.
+func SpansNamed(spans []sdktrace.ReadOnlySpan, name string) []sdktrace.ReadOnlySpan {
+	out := []sdktrace.ReadOnlySpan{}
+	for _, span := range spans {
+		if span.Name() == name {
+			out = append(out, span)
+		}
+	}
+	return out
 }

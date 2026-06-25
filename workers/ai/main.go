@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,7 +24,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -123,6 +123,17 @@ func run() (err error) {
 			"baggage":     workerEnv.TraceBaggage,
 		})
 	}
+
+	taskAttrs := tracing.TaskAttributes(taskName, taskNamespace, taskNamespace, workerEnv.AgentName, "")
+	ctx, taskSpan := tracing.Tracer("orka.worker").Start(ctx, "task.run", trace.WithAttributes(taskAttrs...))
+	defer func() {
+		if err != nil {
+			errType := aiWorkerErrorType(err)
+			taskSpan.SetStatus(codes.Error, errType)
+			taskSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		}
+		taskSpan.End()
+	}()
 
 	transactionLogFields := workerenv.TransactionLogFields(
 		workerEnv.TransactionID, workerEnv.TransactionProfile,
@@ -936,6 +947,7 @@ func executeAgentLoopWithEvents(
 	}
 
 	for iteration := range maxIterations {
+		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, llmTools, baseToolCtx)
 		req := &llm.CompletionRequest{
 			Model:        model,
 			Messages:     messages,
@@ -954,7 +966,7 @@ func executeAgentLoopWithEvents(
 			})),
 		)
 
-		resp, err := provider.Complete(ctx, req)
+		resp, err := provider.Complete(stepCtx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
 			for _, m := range messages {
@@ -972,9 +984,12 @@ func executeAgentLoopWithEvents(
 					"messageCountAfter":  len(messages),
 				})),
 			)
-			resp, err = provider.Complete(ctx, req)
+			resp, err = provider.Complete(stepCtx, req)
 		}
 		if err != nil {
+			errType := aiWorkerErrorType(err)
+			stepSpan.SetStatus(codes.Error, errType)
+			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestFailed, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityError),
 				common.WithEventSummary(err.Error()),
@@ -984,8 +999,10 @@ func executeAgentLoopWithEvents(
 					"provider":  llm.ProviderTelemetryName(provider),
 				})),
 			)
+			stepSpan.End()
 			return "", fmt.Errorf("completion failed: %w", err)
 		}
+		stepSpan.SetAttributes(attribute.Int("agent.step.tool_call_count", len(resp.ToolCalls)))
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,
 			common.WithEventSummary("model request completed"),
 			common.WithEventContent(eventContent(map[string]any{
@@ -1011,6 +1028,7 @@ func executeAgentLoopWithEvents(
 
 		// If no tool calls, we're done
 		if len(resp.ToolCalls) == 0 {
+			stepSpan.End()
 			return resp.Content, nil
 		}
 
@@ -1026,7 +1044,7 @@ func executeAgentLoopWithEvents(
 		var continueLoop bool
 		var approvalErr error
 		messages, approvalResult, done, continueLoop, approvalErr = processApprovalBatch(
-			ctx,
+			stepCtx,
 			messages,
 			resp.ToolCalls,
 			approvalGate,
@@ -1036,12 +1054,18 @@ func executeAgentLoopWithEvents(
 			baseToolCtx,
 		)
 		if approvalErr != nil {
+			stepSpan.RecordError(approvalErr)
+			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(approvalErr))
+			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(approvalErr)))
+			stepSpan.End()
 			return "", approvalErr
 		}
 		if done {
+			stepSpan.End()
 			return approvalResult, nil
 		}
 		if continueLoop {
+			stepSpan.End()
 			continue
 		}
 
@@ -1069,10 +1093,10 @@ func executeAgentLoopWithEvents(
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				tools.RecordRejectedToolCall(ctx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
+				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
-					ctx,
+					stepCtx,
 					toolName,
 					tc.Arguments,
 					customToolForCall,
@@ -1084,14 +1108,11 @@ func executeAgentLoopWithEvents(
 				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
 			} else if customToolForCall != nil {
 				customTool := customToolForCall
-				execCtx := ctx
+				execCtx := worker.WithToolCallID(stepCtx, tc.ID)
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				executeCustomTool := func(callCtx context.Context) (string, error) {
-					return toolExecutor.Execute(callCtx, customTool, execArgs)
-				}
-				result, execErr = executeCustomToolWithTelemetry(execCtx, toolName, tc.ID, executeCustomTool)
+				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
 				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 					approvalGate.markFired(approvalKey)
 				}
@@ -1100,14 +1121,14 @@ func executeAgentLoopWithEvents(
 				if approvalKey != "" {
 					execArgs, execErr = injectIdempotencyKey(execArgs, approvalKey)
 				}
-				execCtx := ctx
+				execCtx := stepCtx
 				if baseToolCtx != nil {
 					toolCtxCopy := *baseToolCtx
 					toolCtxCopy.ToolCallID = tc.ID
 					if toolCtxCopy.Tenant == "" {
 						toolCtxCopy.Tenant = toolCtxCopy.Namespace
 					}
-					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
+					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
 				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
@@ -1144,6 +1165,7 @@ func executeAgentLoopWithEvents(
 				Name:       tc.Name,
 			})
 		}
+		stepSpan.End()
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
@@ -1157,49 +1179,43 @@ func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowed
 	return requestApprovalAdvertised
 }
 
-func executeCustomToolWithTelemetry(
+func aiWorkerErrorType(err error) string {
+	if err == nil {
+		return ""
+	}
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
+		return fmt.Sprintf("llm_status_%d", providerErr.StatusCode)
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+func startAgentStepSpan(
 	ctx context.Context,
-	toolName string,
-	toolCallID string,
-	execute func(context.Context) (string, error),
-) (string, error) {
-	start := time.Now()
+	iteration int,
+	provider llm.Provider,
+	model string,
+	llmTools []llm.Tool,
+	baseToolCtx *tools.ToolContext,
+) (context.Context, trace.Span) {
 	attrs := []attribute.KeyValue{
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolName),
-		attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+		attribute.Int("agent.step.iteration", iteration+1),
+		attribute.Int("agent.step.available_tools", len(llmTools)),
 	}
-	if toolCallID != "" {
-		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	if model != "" {
+		attrs = append(attrs, attribute.String(genai.AttrRequestModel, model))
 	}
-	ctx, span := tracing.GenAITracer(genai.InstrumentationName).Start(
-		ctx,
-		genai.OperationExecuteTool+" "+toolName,
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attrs...),
-	)
-	defer span.End()
-	result, err := execute(ctx)
-	metricAttrs := []attribute.KeyValue{
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolName),
-		attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+	if providerName := llm.ProviderTelemetryName(provider); providerName != "" {
+		attrs = append(attrs, attribute.String(genai.AttrProviderName, providerName))
 	}
-	if err != nil {
-		errType := fmt.Sprintf("%T", err)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	if baseToolCtx != nil {
+		tenant := baseToolCtx.Tenant
+		if tenant == "" {
+			tenant = baseToolCtx.Namespace
+		}
+		attrs = append(attrs, tracing.TaskAttributes(baseToolCtx.TaskID, baseToolCtx.Namespace, tenant, "", "")...)
 	}
-	if histogram, histErr := tracing.GenAIMeter(genai.InstrumentationName).Float64Histogram(
-		genai.MetricExecuteToolDuration,
-		metric.WithUnit(genai.UnitSeconds),
-		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
-	); histErr == nil {
-		histogram.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(metricAttrs...))
-	}
-	return result, err
+	return tracing.Tracer("orka.agent").Start(ctx, "agent.step", trace.WithAttributes(attrs...))
 }
 
 func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {

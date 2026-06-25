@@ -24,10 +24,12 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
 	toolspkg "github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/tracing/genai"
 	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const roleUser = "user"
@@ -675,31 +677,6 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	}
 }
 
-func TestExecuteCustomToolWithTelemetryRecordsSpan(t *testing.T) {
-	spans := testutil.NewSpanHarness(t)
-	execute := func(context.Context) (string, error) {
-		return "custom result", nil
-	}
-	result, err := executeCustomToolWithTelemetry(context.Background(), "custom_http_tool", "call-custom", execute)
-	if err != nil || result != "custom result" {
-		t.Fatalf("executeCustomToolWithTelemetry() result=%q err=%v", result, err)
-	}
-	for _, span := range spans.Recorder.Ended() {
-		if span.Name() != "execute_tool custom_http_tool" {
-			continue
-		}
-		attrs := map[string]string{}
-		for _, kv := range span.Attributes() {
-			attrs[string(kv.Key)] = kv.Value.AsString()
-		}
-		if attrs[genai.AttrToolType] != genai.ToolTypeExtension || attrs[genai.AttrToolCallID] != "call-custom" {
-			t.Fatalf("custom tool span attrs = %#v", attrs)
-		}
-		return
-	}
-	t.Fatalf("missing custom tool span, got %#v", spans.Recorder.Ended())
-}
-
 func TestAIWorkerRecordsRejectedToolTelemetry(t *testing.T) {
 	spans := testutil.NewSpanHarness(t)
 	provider := &mockProvider{responses: []*llm.CompletionResponse{
@@ -1086,4 +1063,76 @@ func hasEventTypes(got []string, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestExecuteAgentLoopTracingStepParentsModelAndToolSiblings(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(staticTestTool{name: customToolName})
+	llmTools := toolspkg.DefaultRegistry.ToLLMTools([]string{customToolName})
+	provider := llm.NewTracingProvider(&mockProvider{responses: []*llm.CompletionResponse{
+		{
+			Content: "calling tool",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call-1",
+				Name:      customToolName,
+				Arguments: json.RawMessage(`{"path":"README.md"}`),
+			}},
+			StopReason: "tool_use",
+			Model:      "test-model",
+		},
+		{Content: "done", StopReason: "end_turn", Model: "test-model"},
+	}})
+	baseToolCtx := &toolspkg.ToolContext{TaskID: "task-a", Namespace: "team-a", Tenant: "team-a"}
+	result, err := executeAgentLoopWithEvents(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "use tool"}}, "", "test-model",
+		llmTools, nil, nil, common.NoopEventRecorder{}, baseToolCtx,
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "done" {
+		t.Fatalf("result = %q, want done", result)
+	}
+
+	ended := spans.Recorder.Ended()
+	toolSpan := testutil.SpanNamed(ended, "execute_tool "+customToolName)
+	if toolSpan == nil {
+		t.Fatal("missing tool span")
+	}
+	var stepSpan sdktrace.ReadOnlySpan
+	for _, span := range testutil.SpansNamed(ended, "agent.step") {
+		attrs := testutil.AttributeMap(span)
+		if attrs["agent.step.tool_call_count"].AsInt64() == 1 {
+			stepSpan = span
+			break
+		}
+	}
+	if stepSpan == nil {
+		t.Fatal("missing first agent.step span")
+	}
+	var modelSpan sdktrace.ReadOnlySpan
+	for _, span := range testutil.SpansNamed(ended, "chat test-model") {
+		if span.Parent().SpanID() == stepSpan.SpanContext().SpanID() {
+			modelSpan = span
+			break
+		}
+	}
+	if modelSpan == nil {
+		t.Fatal("missing model span under first step")
+	}
+	if got, want := toolSpan.Parent().SpanID(), stepSpan.SpanContext().SpanID(); got != want {
+		t.Fatalf("tool parent = %s, want step %s", got, want)
+	}
+	if toolSpan.Parent().SpanID() == modelSpan.SpanContext().SpanID() {
+		t.Fatalf("tool span is child of model span; want sibling under step")
+	}
+	attrs := testutil.AttributeMap(stepSpan)
+	if got := attrs[tracing.AttrTaskID].AsString(); got != "task-a" {
+		t.Fatalf("step %s = %q", tracing.AttrTaskID, got)
+	}
 }

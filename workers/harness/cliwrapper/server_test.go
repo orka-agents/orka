@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -739,5 +741,64 @@ func TestServerStripsGitCredentialsFromReadOnlyCommandEnv(t *testing.T) {
 	}
 	if strings.Contains(last.Completed.Result, "token") {
 		t.Fatalf("read-only command received git credentials: %q", last.Completed.Result)
+	}
+}
+
+func TestServerRunTurnEmitsTaskRunSpanFromTraceparentMetadata(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentCtx, parentSpan := tracing.Tracer("test").Start(context.Background(), "controller")
+	carrier := tracing.InjectContext(parentCtx)
+	forgedCtx, forgedSpan := tracing.Tracer("test").Start(context.Background(), "forged")
+	forgedCarrier := tracing.InjectContext(forgedCtx)
+	forgedSpan.End()
+	request := validWrapperStartTurnRequest()
+	request.Metadata = map[string]string{
+		"traceparent": carrier.Get("traceparent"),
+		"agentName":   "agent-a",
+	}
+	request.Input.Env = append(request.Input.Env, harness.TurnEnvVar{
+		Name:  workerenv.TraceParent,
+		Value: forgedCarrier.Get("traceparent"),
+	})
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	_ = collectWrapperFrames(t, client, request.TurnID, 0)
+	parentSpan.End()
+
+	eventually(t, time.Second, func() bool {
+		return testutil.SpanNamed(spans.Recorder.Ended(), "task.run") != nil
+	})
+	taskRun := testutil.SpanNamed(spans.Recorder.Ended(), "task.run")
+	if taskRun == nil {
+		t.Fatal("missing task.run span")
+	}
+	if got, want := taskRun.Parent().SpanID(), parentSpan.SpanContext().SpanID(); got != want {
+		t.Fatalf("task.run parent = %s, want controller %s", got, want)
+	}
+	if got, forged := taskRun.Parent().SpanID(), forgedSpan.SpanContext().SpanID(); got == forged {
+		t.Fatalf("task.run used task-supplied forged traceparent %s", forged)
+	}
+	attrs := testutil.AttributeMap(taskRun)
+	if got := attrs[tracing.AttrTaskID].AsString(); got != request.TaskName {
+		t.Fatalf("%s = %q", tracing.AttrTaskID, got)
+	}
+	if got := attrs[tracing.AttrAgentName].AsString(); got != "agent-a" {
+		t.Fatalf("%s = %q", tracing.AttrAgentName, got)
 	}
 }

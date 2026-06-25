@@ -570,13 +570,17 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 
 // buildEnvVarsWithOptions builds the environment variables for the container using additional options.
 func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
-	envVars := workerenv.BaseEnv{
+	baseEnv := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
 		TaskUID:        string(task.UID),
 		ResultEndpoint: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
 		ControllerURL:  b.ControllerURL,
-	}.EnvVars()
+	}
+	if agent != nil {
+		baseEnv.AgentName = agent.Name
+	}
+	envVars := baseEnv.EnvVars()
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
@@ -591,6 +595,9 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
 	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
 	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
+	if agent != nil {
+		envVars = setControllerEnv(envVars, workerenv.AgentName, agent.Name)
+	}
 	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
 	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
@@ -811,7 +818,7 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 		return envVars
 	}
 	for _, envVar := range task.Spec.Env {
-		if task.Spec.Type == corev1alpha1.TaskTypeAI && isReservedAIWorkerTelemetryEnv(envVar.Name) {
+		if isReservedTaskTelemetryEnv(task, envVar.Name) {
 			continue
 		}
 		envVars = append(envVars, envVar)
@@ -819,12 +826,38 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 	return envVars
 }
 
+func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {
+	if task == nil {
+		return false
+	}
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI:
+		return isReservedAIWorkerTelemetryEnv(name)
+	case corev1alpha1.TaskTypeAgent:
+		return isReservedTraceContextEnv(name)
+	default:
+		return false
+	}
+}
+
 func isReservedAIWorkerTelemetryEnv(name string) bool {
+	if isReservedTraceContextEnv(name) {
+		return true
+	}
 	switch name {
-	case workerenv.EnableTelemetry, workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage, "OTEL_RESOURCE_ATTRIBUTES":
+	case workerenv.EnableTelemetry, "OTEL_RESOURCE_ATTRIBUTES":
 		return true
 	default:
 		return strings.HasPrefix(name, "OTEL_EXPORTER_OTLP")
+	}
+}
+
+func isReservedTraceContextEnv(name string) bool {
+	switch name {
+	case workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1293,8 +1326,11 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 				},
 			},
 		)
-		if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		switch task.Spec.Type {
+		case corev1alpha1.TaskTypeAI:
 			job.Spec.Template.Spec.Containers[0].Env = reserveAIWorkerTelemetryEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
+		case corev1alpha1.TaskTypeAgent:
+			job.Spec.Template.Spec.Containers[0].Env = reserveTraceContextEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
 		}
 		// Also mount as files for tools that read from filesystem
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
@@ -1316,6 +1352,15 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	return nil
+}
+
+func reserveTraceContextEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
+	for _, name := range []string{workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage} {
+		if !envVarExists(envVars, name) {
+			envVars = append(envVars, corev1.EnvVar{Name: name})
+		}
+	}
+	return envVars
 }
 
 func reserveAIWorkerTelemetryEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
