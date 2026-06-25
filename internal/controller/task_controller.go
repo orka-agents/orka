@@ -2977,8 +2977,10 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 		}
 		if pod.Status.Phase == corev1.PodPending || pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodUnknown {
 			keepServiceAccounts[pod.Spec.ServiceAccountName] = struct{}{}
-			if podIsOrkaWorkerPod(pod) {
-				repairBindings[pod.Spec.ServiceAccountName] = struct{}{}
+			if serviceAccount, ok, err := r.verifiedLiveWorkerPodServiceAccount(ctx, namespace, pod); err != nil {
+				return nil, nil, err
+			} else if ok {
+				repairBindings[serviceAccount] = struct{}{}
 			}
 		}
 	}
@@ -2986,16 +2988,61 @@ func (r *TaskReconciler) workerServiceAccountUsage(ctx context.Context, namespac
 	return keepServiceAccounts, repairBindings, nil
 }
 
-func podIsOrkaWorkerPod(pod *corev1.Pod) bool {
-	if pod == nil || pod.Labels[labels.LabelTask] == "" || pod.Labels[labels.LabelTaskType] == "" {
-		return false
+func (r *TaskReconciler) verifiedLiveWorkerPodServiceAccount(ctx context.Context, namespace string, pod *corev1.Pod) (string, bool, error) {
+	if pod == nil || pod.Labels[labels.LabelTask] == "" || pod.Labels[labels.LabelTaskType] == "" || pod.Spec.ServiceAccountName == "" {
+		return "", false, nil
 	}
+
+	jobName := ""
 	for _, owner := range pod.OwnerReferences {
 		if owner.Kind == "Job" {
-			return true
+			jobName = owner.Name
+			break
 		}
 	}
-	return false
+	if jobName == "" {
+		return "", false, nil
+	}
+
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("getting Job %s/%s for live worker pod RBAC repair: %w", namespace, jobName, err)
+	}
+	taskName := pod.Labels[labels.LabelTask]
+	if job.Labels[labels.LabelTask] != taskName || job.Labels[labels.LabelTaskType] != pod.Labels[labels.LabelTaskType] {
+		return "", false, nil
+	}
+
+	task := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("getting Task %s/%s for live worker pod RBAC repair: %w", namespace, taskName, err)
+	}
+	if task.Status.JobName != job.Name {
+		return "", false, nil
+	}
+
+	ownedByTask := false
+	for _, owner := range job.OwnerReferences {
+		if owner.Kind == "Task" && owner.Name == task.Name && owner.UID == task.UID {
+			ownedByTask = true
+			break
+		}
+	}
+	if !ownedByTask {
+		return "", false, nil
+	}
+
+	serviceAccount := workerServiceAccountForTask(task)
+	if pod.Spec.ServiceAccountName != serviceAccount {
+		return "", false, nil
+	}
+	return serviceAccount, true, nil
 }
 
 func (r *TaskReconciler) deleteManagedWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {

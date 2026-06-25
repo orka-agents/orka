@@ -2556,20 +2556,37 @@ func TestEnsureWorkerRBAC_DoesNotGrantRBACForPodOnlyWorkerServiceAccount(t *test
 func TestEnsureWorkerRBAC_RepairsRBACForLiveOrkaWorkerPod(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
+	taskUID := types.UID("ai-task-uid")
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai-task", Namespace: testNS, UID: taskUID},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, JobName: "ai-job"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ai-job",
+			Namespace: testNS,
+			Labels: map[string]string{
+				labels.LabelTask:     labels.SelectorValue(task.Name),
+				labels.LabelTaskType: string(corev1alpha1.TaskTypeAI),
+			},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: taskUID}},
+		},
+	}
 	livePod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "ai-worker-pod",
 			Namespace: testNS,
 			Labels: map[string]string{
-				labels.LabelTask:     labels.SelectorValue("ai-task"),
+				labels.LabelTask:     labels.SelectorValue(task.Name),
 				labels.LabelTaskType: string(corev1alpha1.TaskTypeAI),
 			},
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: "ai-job"}},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name}},
 		},
 		Spec:   corev1.PodSpec{ServiceAccountName: AIWorkerServiceAccount, Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	objects := []client.Object{livePod}
+	objects := []client.Object{task, job, livePod}
 	r := newUnitReconciler(scheme, objects...)
 	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
 
