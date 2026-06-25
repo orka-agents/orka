@@ -29,6 +29,8 @@ jobs:
       - name: Decide whether live e2e can run
         id: gate
         run: |
+          # Defensive guard: this workflow is intentionally not triggered by pull_request,
+          # but keep pull-request events secretless if that trigger is ever re-added.
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "reason=Skipping live copilot-proxy e2e for pull requests because it requires repository secrets." >> "$GITHUB_OUTPUT"
@@ -81,7 +83,7 @@ jobs:
       - name: Install kind
         if: steps.gate.outputs.run == 'true'
         run: |
-          curl -fsSL -o ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
