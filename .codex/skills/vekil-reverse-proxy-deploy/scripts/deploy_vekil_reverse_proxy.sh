@@ -17,6 +17,7 @@ Options:
   --port N                          listen and service port (default: 1337)
   --service-type TYPE               ClusterIP, NodePort, or LoadBalancer (default: ClusterIP)
   --no-network-policy               do not render the default restrictive NetworkPolicy
+                                    and delete the managed policy if it exists
   --providers-config PATH           JSON/YAML provider config to mount as a ConfigMap
   --providers-configmap NAME        ConfigMap name for providers config (default: <name>-providers)
   --env-secret ENV=SECRET:KEY       add env var from an existing Secret (repeatable)
@@ -265,6 +266,9 @@ is_positive_int "$port" || error "Invalid port: $port"
 ((10#$port <= 65535)) || error "Invalid port: $port"
 case "$service_type" in ClusterIP|NodePort|LoadBalancer) ;; *) error "Invalid service type: $service_type" ;; esac
 case "$log_level" in debug|info|error) ;; *) error "Invalid log level: $log_level" ;; esac
+if [[ "$network_policy" == "true" && "$service_type" != "ClusterIP" ]]; then
+  echo "Warning: --service-type $service_type exposes Vekil externally, but the default NetworkPolicy only permits labeled in-cluster sources. Use --no-network-policy or extend the policy for the intended external source ranges." >&2
+fi
 if [[ -n "$providers_configmap" ]]; then
   is_dns_subdomain "$providers_configmap" || error "Invalid ConfigMap name: $providers_configmap"
 else
@@ -547,6 +551,9 @@ spec:
         - podSelector:
             matchLabels:
               vekil.sozercan.io/access: "true"
+        - namespaceSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
       ports:
         - protocol: TCP
           port: $port
@@ -581,6 +588,10 @@ fi
 
 render_workload | k apply -f -
 
+if [[ "$network_policy" == "false" ]]; then
+  k -n "$namespace" delete networkpolicy "${name}-ingress" --ignore-not-found
+fi
+
 if [[ "$copilot_token_secret_changed" == "true" || "$providers_configmap_changed" == "true" ]]; then
   k -n "$namespace" rollout restart "deployment/$name"
 fi
@@ -596,8 +607,22 @@ Vekil service URL inside the cluster:
   http://$name.$namespace.svc.cluster.local:$port
 
 Access control:
-  The default NetworkPolicy allows in-cluster traffic only from pods in namespace '$namespace'
-  labeled 'vekil.sozercan.io/access=true'. NetworkPolicy enforcement depends on the cluster CNI.
+EOF_DONE
+if [[ "$network_policy" == "true" ]]; then
+  cat <<EOF_DONE
+  The default NetworkPolicy allows TCP/$port only from labeled in-cluster sources:
+    - pods in namespace '$namespace' labeled 'vekil.sozercan.io/access=true'
+    - pods in namespaces labeled 'vekil.sozercan.io/access=true'
+  NodePort/LoadBalancer traffic and kubelet probes may need additional ingress exceptions.
+  NetworkPolicy enforcement depends on the cluster CNI.
+EOF_DONE
+else
+  cat <<EOF_DONE
+  No NetworkPolicy is rendered. The managed policy '${name}-ingress' was deleted if it existed.
+  Ensure another authentication or network boundary protects this proxy before sharing it.
+EOF_DONE
+fi
+cat <<EOF_DONE
 
 Local verification:
   kubectl${context_name:+ --context $context_name} -n $namespace port-forward svc/$name $port:$port

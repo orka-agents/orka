@@ -197,6 +197,9 @@ if [[ "${AGENTIC}" == "1" ]]; then
   log "Ensuring substrate demo namespace ${SUBSTRATE_NS}"
   kubectl --context "${ctx}" create namespace "${SUBSTRATE_NS}" --dry-run=client -o yaml \
     | kubectl --context "${ctx}" apply -f -
+  log "Allowing namespace ${SUBSTRATE_NS} to reach the vekil NetworkPolicy"
+  kubectl --context "${ctx}" label namespace "${SUBSTRATE_NS}" \
+    vekil.sozercan.io/access=true --overwrite >/dev/null
 
   # ---- 1. Codex-capable Actor image -------------------------------------
   # The agentic run executes a real codex CLI INSIDE the gVisor Actor, so the

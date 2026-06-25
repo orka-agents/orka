@@ -97,6 +97,8 @@ kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/down
 
 log "Ensuring namespace ${demo_namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -
+log "Allowing namespace ${demo_namespace} to reach the vekil NetworkPolicy"
+kubectl label namespace "${demo_namespace}" vekil.sozercan.io/access=true --overwrite >/dev/null
 
 log "Applying orka-live SandboxTemplate (runtime image: ${runtime_image})"
 sed "s|REPLACE_RUNTIME_IMAGE|${runtime_image}|g; s|namespace: demo-magic|namespace: ${demo_namespace}|" \
