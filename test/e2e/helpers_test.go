@@ -814,6 +814,9 @@ func isLiveCopilotProxyUnsupportedMetadataParameterText(value string) bool {
 
 func liveCopilotProxyTaskFailedWithExternalProviderIssue(taskName string) bool {
 	task := fetchTaskSnapshot(taskName)
+	if taskContainsLiveCopilotProxyExternalProviderIssue(task) {
+		return true
+	}
 	if strings.TrimSpace(task.Status.JobName) == "" {
 		return false
 	}
@@ -823,7 +826,23 @@ func liveCopilotProxyTaskFailedWithExternalProviderIssue(taskName string) bool {
 	if err != nil {
 		return false
 	}
-	return isLiveCopilotProxyForbiddenText(output) || isLiveCopilotProxyUnsupportedMetadataParameterText(output)
+	return isLiveCopilotProxyExternalProviderIssueText(output)
+}
+
+func taskContainsLiveCopilotProxyExternalProviderIssue(task taskSnapshot) bool {
+	if isLiveCopilotProxyExternalProviderIssueText(task.Status.Message) {
+		return true
+	}
+	for _, condition := range task.Status.Conditions {
+		if isLiveCopilotProxyExternalProviderIssueText(condition.Message) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLiveCopilotProxyExternalProviderIssueText(value string) bool {
+	return isLiveCopilotProxyForbiddenText(value) || isLiveCopilotProxyUnsupportedMetadataParameterText(value)
 }
 
 func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {
