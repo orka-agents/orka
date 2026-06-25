@@ -2580,6 +2580,95 @@ func TestEnsureWorkerRBAC_PrunesSameNameManagedRoleBindingWhenNamespaceIsolation
 	}
 }
 
+func TestEnsureWorkerRBAC_PreservesActiveReplacementWhenLegacyClusterRoleBindingNameCollides(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	activeNamespace := "rolebinding"
+	activeAI := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-ai", Namespace: activeNamespace},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	objects := []client.Object{
+		activeAI,
+		legacyStaticAIWorkerClusterRoleBinding(DefaultAIWorkerClusterRoleName, activeNamespace),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding"}, got); err != nil {
+		t.Fatalf("expected colliding active replacement ClusterRoleBinding to be preserved: %v", err)
+	}
+	if got.Labels[managedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected preserved replacement to be controller-managed, got labels %#v", got.Labels)
+	}
+}
+
+func TestEnsureWorkerRBAC_PreservesActiveReplacementWhenLegacyRoleBindingNameCollides(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	activeNamespace := "rolebinding"
+	activeAI := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-ai", Namespace: activeNamespace},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	objects := []client.Object{
+		activeAI,
+		legacyStaticAIWorkerRoleBinding(activeNamespace, DefaultAIWorkerClusterRoleName),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	r.EnforceNamespaceIsolation = true
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := &rbacv1.RoleBinding{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-ai-worker-rolebinding", Namespace: activeNamespace}, got); err != nil {
+		t.Fatalf("expected colliding active replacement RoleBinding to be preserved: %v", err)
+	}
+	if got.Labels[managedByLabelKey] != managedByLabelValue {
+		t.Fatalf("expected preserved replacement to be controller-managed, got labels %#v", got.Labels)
+	}
+}
+
+func TestEnsureWorkerRBAC_DoesNotRepairDefaultHarnessAgentWorkerRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "default-agent", Namespace: testNS}}
+	pendingAgent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-agent", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	objects := []client.Object{
+		agent,
+		pendingAgent,
+		managedWorkerServiceAccount(VendorWorkerServiceAccount),
+		managedWorkerClusterRoleBinding("orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName, VendorWorkerServiceAccount),
+	}
+	r := newUnitReconciler(scheme, objects...)
+	containerTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testNS}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer}}
+
+	if err := r.ensureWorkerRBAC(ctx, containerTask); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: VendorWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected default harness agent not to preserve vendor worker ServiceAccount, got err %v", err)
+	}
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-vendor-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected default harness agent not to preserve vendor worker ClusterRoleBinding, got err %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_PreservesManagedClusterRoleBindingThatCollidesWithLegacyStaticName(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
@@ -2811,7 +2900,7 @@ func TestEnsureWorkerRBAC_DoesNotPrunePendingAgentWorkerRBAC(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkerRBAC_DoesNotPruneLegacyPendingAgentWorkerRBAC(t *testing.T) {
+func TestEnsureWorkerRBAC_PrunesDefaultPendingAgentWorkerRBAC(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "legacy-agent", Namespace: testNS}}
@@ -2833,11 +2922,11 @@ func TestEnsureWorkerRBAC_DoesNotPruneLegacyPendingAgentWorkerRBAC(t *testing.T)
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := r.Get(ctx, types.NamespacedName{Name: VendorWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); err != nil {
-		t.Fatalf("expected legacy pending agent vendor ServiceAccount to remain: %v", err)
+	if err := r.Get(ctx, types.NamespacedName{Name: VendorWorkerServiceAccount, Namespace: testNS}, &corev1.ServiceAccount{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected default pending agent vendor ServiceAccount to be pruned, got err %v", err)
 	}
-	if err := r.Get(ctx, types.NamespacedName{Name: "orka-vendor-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); err != nil {
-		t.Fatalf("expected legacy pending agent vendor ClusterRoleBinding to remain: %v", err)
+	if err := r.Get(ctx, types.NamespacedName{Name: "orka-vendor-worker-test-ns"}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected default pending agent vendor ClusterRoleBinding to be pruned, got err %v", err)
 	}
 }
 
@@ -3058,6 +3147,43 @@ func TestHandleRunning_HarnessTaskReturnsWorkerRBACPruneError(t *testing.T) {
 	_, err := r.handleRunning(ctx, task)
 	if err == nil || !strings.Contains(err.Error(), "injected harness prune failure") {
 		t.Fatalf("expected injected harness prune error, got %v", err)
+	}
+}
+
+func TestHandleRunning_SkipsWorkerRBACRepairForTerminalJob(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "running-ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, JobName: "running-ai-job"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: task.Status.JobName, Namespace: testNS},
+		Status:     batchv1.JobStatus{Succeeded: 1},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).WithObjects(task, job).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
+				return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}, obj.GetName(), errors.New("injected repair failure"))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+
+	_, err := r.handleRunning(ctx, task)
+	if err != nil {
+		t.Fatalf("expected terminal job handling to skip RBAC repair error, got %v", err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, got); err != nil {
+		t.Fatalf("getting task after running handler: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("expected task to complete from terminal job, got phase %q", got.Status.Phase)
 	}
 }
 
