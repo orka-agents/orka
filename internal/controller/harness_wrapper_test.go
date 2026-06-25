@@ -178,6 +178,47 @@ func TestPatchHarnessWrapperStartedPersistsTurnIdentityFromStaleRead(t *testing.
 	if _, ok := metadata["systemPrompt"]; ok {
 		t.Fatalf("metadata should omit systemPrompt: %#v", metadata)
 	}
+
+	updated.Annotations[harnessWrapperLastFrameSeqAnno] = "7"
+	updated.Annotations[harnessWrapperPlannedAtAnno] = "2026-01-02T03:04:05Z"
+	if err := r.Update(context.Background(), &updated); err != nil {
+		t.Fatalf("seed progress annotations: %v", err)
+	}
+	if err := r.patchHarnessWrapperStarted(context.Background(), &updated, request); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted again: %v", err)
+	}
+	var preserved corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &preserved); err != nil {
+		t.Fatalf("get preserved task: %v", err)
+	}
+	if got := preserved.Annotations[harnessWrapperLastFrameSeqAnno]; got != "7" {
+		t.Fatalf("last frame seq after restart patch = %q, want 7", got)
+	}
+	if got := preserved.Annotations[harnessWrapperPlannedAtAnno]; got != "2026-01-02T03:04:05Z" {
+		t.Fatalf("planned-at after restart patch = %q, want preserved timestamp", got)
+	}
+
+	preserved.Annotations[harnessWrapperTurnIDAnnotation] = "old-turn"
+	preserved.Annotations[harnessWrapperRuntimeAnnotation] = "old-runtime"
+	preserved.Annotations[harnessWrapperCorrelationIDAnno] = "old-correlation"
+	preserved.Annotations[harnessWrapperLastFrameSeqAnno] = "9"
+	preserved.Annotations[harnessWrapperPlannedAtAnno] = "2026-09-08T07:06:05Z"
+	if err := r.Update(context.Background(), &preserved); err != nil {
+		t.Fatalf("seed stale turn annotations: %v", err)
+	}
+	if err := r.patchHarnessWrapperStarted(context.Background(), &preserved, request); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted with stale turn: %v", err)
+	}
+	var reset corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &reset); err != nil {
+		t.Fatalf("get reset task: %v", err)
+	}
+	if got := reset.Annotations[harnessWrapperLastFrameSeqAnno]; got != "0" {
+		t.Fatalf("last frame seq for new turn = %q, want reset to 0", got)
+	}
+	if got := reset.Annotations[harnessWrapperPlannedAtAnno]; got == "" || got == "2026-09-08T07:06:05Z" {
+		t.Fatalf("planned-at for new turn = %q, want refreshed timestamp", got)
+	}
 }
 
 func TestHarnessRuntimeMissingEndpointFailsAgentTask(t *testing.T) {

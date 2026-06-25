@@ -560,11 +560,18 @@ func setHarnessWrapperPlannedTurnAnnotations(task *corev1alpha1.Task, request ha
 	if task.Annotations == nil {
 		task.Annotations = map[string]string{}
 	}
+	sameTurn := strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) == string(request.TurnID) &&
+		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) == string(request.RuntimeSessionID) &&
+		strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]) == request.CorrelationID
 	task.Annotations[harnessWrapperTurnIDAnnotation] = string(request.TurnID)
 	task.Annotations[harnessWrapperRuntimeAnnotation] = string(request.RuntimeSessionID)
 	task.Annotations[harnessWrapperCorrelationIDAnno] = request.CorrelationID
-	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
-	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	if !sameTurn || strings.TrimSpace(task.Annotations[harnessWrapperLastFrameSeqAnno]) == "" {
+		task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
+	}
+	if !sameTurn || strings.TrimSpace(task.Annotations[harnessWrapperPlannedAtAnno]) == "" {
+		task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	plannedMetadata := make(map[string]string, len(request.Metadata))
 	for key, value := range request.Metadata {
 		if key == "systemPrompt" || key == harnessWrapperSkillsFilesMeta {
