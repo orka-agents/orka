@@ -78,6 +78,15 @@ func TestExecGitIgnoresGlobalAndEnvironmentConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", homeDir)
+	exactConfigPath := filepath.Join(homeDir, "exact-gitconfig")
+	if err := os.WriteFile(
+		exactConfigPath,
+		[]byte("[core]\n\tsshCommand = malicious-from-exact\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG", exactConfigPath)
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
 	t.Setenv("GIT_CONFIG_VALUE_0", "malicious-from-env")
@@ -86,6 +95,18 @@ func TestExecGitIgnoresGlobalAndEnvironmentConfig(t *testing.T) {
 
 	if out, err := execGit(dir, "config", "--get", "core.sshCommand"); err == nil {
 		t.Fatalf("execGit honored attacker-controlled git config: %q", out)
+	}
+	if _, err := execGit(dir, "config", "user.email", "worker@example.com"); err != nil {
+		t.Fatalf("execGit config user.email failed: %v", err)
+	}
+	out, err := execGit(dir, "config", "--local", "--get", "user.email")
+	if err != nil || strings.TrimSpace(out) != "worker@example.com" {
+		t.Fatalf("execGit wrote user.email = %q, %v; want local config", strings.TrimSpace(out), err)
+	}
+	if data, err := os.ReadFile(exactConfigPath); err != nil {
+		t.Fatalf("ReadFile(exact config) error = %v", err)
+	} else if strings.Contains(string(data), "worker@example.com") {
+		t.Fatalf("execGit wrote local identity to attacker-selected GIT_CONFIG file: %q", data)
 	}
 }
 

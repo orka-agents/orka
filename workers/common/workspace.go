@@ -634,7 +634,8 @@ func gitIsolatedConfigEnv(env []string) []string {
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(strings.ToUpper(key), "GIT_CONFIG_") {
+		upperKey := strings.ToUpper(key)
+		if upperKey == "GIT_CONFIG" || strings.HasPrefix(upperKey, "GIT_CONFIG_") {
 			continue
 		}
 		isolated = append(isolated, entry)
