@@ -130,8 +130,9 @@ func validateCodexToolPolicy(cfg *agentEnvConfig) error {
 	}
 	if cfg.AllowedToolsSet && !codexToolListAllowsBash(cfg.AllowedTools) {
 		return fmt.Errorf(
-			"codex runtime cannot enforce %s without Bash because the Codex CLI cannot disable shell execution",
+			"codex runtime cannot enforce %s=%q without Bash because the Codex CLI cannot disable shell execution",
 			workerenv.AllowedTools,
+			trimmedTools(cfg.AllowedTools),
 		)
 	}
 	return nil

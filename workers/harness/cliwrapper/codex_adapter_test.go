@@ -69,7 +69,8 @@ func TestCodexAdapterRejectsAllowlistWithoutBash(t *testing.T) {
 		t.Fatal("BuildCommand error = nil, want unsupported Codex allowlist error")
 	}
 	if !strings.Contains(err.Error(), workerenv.AllowedTools) ||
-		!strings.Contains(err.Error(), "without Bash") {
+		!strings.Contains(err.Error(), "without Bash") ||
+		!strings.Contains(err.Error(), "Read") {
 		t.Fatalf("BuildCommand error = %v, want unsupported Codex allowlist error", err)
 	}
 }
