@@ -43,9 +43,11 @@ type testOIDCTokenOptions struct {
 	ExpiresAt  time.Time
 	NotBefore  *time.Time
 	Kid        string
+	Algorithm  string
 	Username   string
 	Email      string
 	Name       string
+	Namespace  string
 	Groups     []string
 	Roles      []string
 	RealmRoles []string
@@ -91,16 +93,18 @@ func newTestOIDCProvider(t *testing.T) *testOIDCProvider {
 
 func (p *testOIDCProvider) config() OIDCConfig {
 	return OIDCConfig{
-		Issuer:   p.server.URL,
-		Audience: p.aud,
-		JWKSURL:  p.server.URL + "/jwks",
+		Issuer:          p.server.URL,
+		Audience:        p.aud,
+		JWKSURL:         p.server.URL + "/jwks",
+		AllowedSubjects: []string{"*"},
 	}
 }
 
 func (p *testOIDCProvider) configWithoutJWKSURL() OIDCConfig {
 	return OIDCConfig{
-		Issuer:   p.server.URL,
-		Audience: p.aud,
+		Issuer:          p.server.URL,
+		Audience:        p.aud,
+		AllowedSubjects: []string{"*"},
 	}
 }
 
@@ -128,8 +132,13 @@ func (p *testOIDCProvider) issueToken(t *testing.T, opts testOIDCTokenOptions) s
 		kid = p.kid
 	}
 
+	algorithm := opts.Algorithm
+	if algorithm == "" {
+		algorithm = "RS256"
+	}
+
 	header := map[string]any{
-		"alg": "RS256",
+		"alg": algorithm,
 		"typ": "JWT",
 		"kid": kid,
 	}
@@ -150,6 +159,9 @@ func (p *testOIDCProvider) issueToken(t *testing.T, opts testOIDCTokenOptions) s
 	}
 	if opts.Name != "" {
 		claims["name"] = opts.Name
+	}
+	if opts.Namespace != "" {
+		claims["namespace"] = opts.Namespace
 	}
 	if opts.Groups != nil {
 		claims["groups"] = opts.Groups
@@ -229,6 +241,7 @@ func TestValidateOIDCToken_Valid(t *testing.T) {
 		Groups:     []string{"devs", "admins"},
 		Roles:      []string{"submitter"},
 		RealmRoles: []string{"reviewer"},
+		Namespace:  "team-a",
 	})
 
 	userInfo, err := validateOIDCToken(context.Background(), token, cfg)
@@ -256,6 +269,62 @@ func TestValidateOIDCToken_Valid(t *testing.T) {
 	}
 	if strings.Join(userInfo.Roles, ",") != "submitter,reviewer" {
 		t.Fatalf("Roles = %#v, want [submitter reviewer]", userInfo.Roles)
+	}
+	if userInfo.Namespace != defaultNamespace {
+		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, defaultNamespace)
+	}
+}
+
+func TestValidateOIDCToken_RequiresAllowedSubject(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = nil
+	token := provider.issueToken(t, testOIDCTokenOptions{})
+
+	_, err := validateOIDCToken(context.Background(), token, cfg)
+	if err == nil || !strings.Contains(err.Error(), "subject authorization") {
+		t.Fatalf("validateOIDCToken error = %v, want subject authorization error", err)
+	}
+}
+
+func TestValidateOIDCToken_RejectsUnauthorizedSubject(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = []string{"repo:trusted-org/trusted-repo:*"}
+	token := provider.issueToken(t, testOIDCTokenOptions{Subject: "repo:untrusted-org/untrusted-repo:ref:refs/heads/main"})
+
+	_, err := validateOIDCToken(context.Background(), token, cfg)
+	if err == nil || !strings.Contains(err.Error(), "not authorized") {
+		t.Fatalf("validateOIDCToken error = %v, want not authorized error", err)
+	}
+}
+
+func TestValidateOIDCToken_DefaultsNamespaceWhenUnspecified(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	token := provider.issueToken(t, testOIDCTokenOptions{})
+
+	userInfo, err := validateOIDCToken(context.Background(), token, cfg)
+	if err != nil {
+		t.Fatalf("validateOIDCToken returned error: %v", err)
+	}
+	if userInfo.Namespace != defaultNamespace {
+		t.Fatalf("Namespace = %q, want %q", userInfo.Namespace, defaultNamespace)
+	}
+}
+
+func TestValidateOIDCToken_AssignsConfiguredNamespace(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.Namespace = "ci-tenant"
+	token := provider.issueToken(t, testOIDCTokenOptions{})
+
+	userInfo, err := validateOIDCToken(context.Background(), token, cfg)
+	if err != nil {
+		t.Fatalf("validateOIDCToken returned error: %v", err)
+	}
+	if userInfo.Namespace != "ci-tenant" {
+		t.Fatalf("Namespace = %q, want ci-tenant", userInfo.Namespace)
 	}
 }
 

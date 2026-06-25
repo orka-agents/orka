@@ -1958,6 +1958,76 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkerRBAC_UsesNamespacedRoleBindingsWhenIsolationEnforced(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.EnforceNamespaceIsolation = true
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount string
+		binding        string
+		clusterRole    string
+	}{
+		{AIWorkerServiceAccount, "orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			rb := &rbacv1.RoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.binding, Namespace: testNS}, rb); err != nil {
+				t.Fatalf("expected RoleBinding %s/%s to exist: %v", testNS, tt.binding, err)
+			}
+			if rb.RoleRef.Kind != "ClusterRole" || rb.RoleRef.Name != tt.clusterRole {
+				t.Fatalf("unexpected roleRef: %#v", rb.RoleRef)
+			}
+			if len(rb.Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %d", len(rb.Subjects))
+			}
+			subject := rb.Subjects[0]
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
+				t.Fatalf("unexpected subject: %#v", subject)
+			}
+
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.binding}, crb); !apierrors.IsNotFound(err) {
+				t.Fatalf("expected no ClusterRoleBinding %s, got err %v and object %#v", tt.binding, err, crb)
+			}
+		})
+	}
+}
+
+func TestEnsureWorkerRBAC_IsolationDeletesManagedLegacyClusterRoleBindings(t *testing.T) {
+	scheme := newTestScheme()
+	legacy := workerClusterRoleBinding(testNS, workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        "old-ai-worker-role",
+		clusterRoleBindingName: "orka-ai-worker-test-ns",
+	})
+	legacy.Subjects = append(legacy.Subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: "extra-worker", Namespace: testNS})
+	r := newUnitReconciler(scheme, legacy)
+	r.EnforceNamespaceIsolation = true
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "orka-ai-worker-test-ns"}, crb); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected managed legacy ClusterRoleBinding to be deleted, got err %v", err)
+	}
+
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "orka-ai-worker-test-ns", Namespace: testNS}, rb); err != nil {
+		t.Fatalf("expected replacement RoleBinding to exist: %v", err)
+	}
+}
+
 func TestEnsureWorkerRBAC_UsesClusterRoleBindingPrefix(t *testing.T) {
 	scheme := newTestScheme()
 	r := newUnitReconciler(scheme)

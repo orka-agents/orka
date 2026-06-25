@@ -94,6 +94,18 @@ Enable `--enforce-namespace-isolation` to restrict users to their ServiceAccount
 - Workers cannot submit results to namespaces other than their own
 - All access denials are logged with caller identity and IP address
 
+### External OIDC Callers
+
+When OIDC API authentication is enabled, configure an explicit subject allowlist and namespace binding. For GitHub Actions, allow only the trusted repository, branch, environment, or workflow subjects that should call Orka; issuer and audience validation alone is not an authorization policy. Authorized OIDC callers are assigned `--oidc-namespace` (default `default`) so `--enforce-namespace-isolation=true` prevents them from selecting arbitrary tenant namespaces.
+
+```
+--oidc-issuer=https://token.actions.githubusercontent.com
+--oidc-audience=orka-ci
+--oidc-allowed-subjects=repo:my-org/my-repo:ref:refs/heads/main
+--oidc-namespace=ci
+--enforce-namespace-isolation=true
+```
+
 ### Per-Namespace Task Limits
 
 Use `--max-tasks-per-namespace` to cap the number of active (Pending/Running) tasks per namespace. Tasks exceeding the limit are requeued with backoff. Set to `0` (default) for unlimited.

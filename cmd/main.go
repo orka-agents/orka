@@ -60,6 +60,21 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+func splitCommaList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -100,6 +115,8 @@ func main() {
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
+	var oidcAllowedSubjects string
+	var oidcNamespace string
 	var contextTokenProfile string
 	var contextTokenIssuer string
 	var contextTokenAudience string
@@ -298,6 +315,10 @@ func main() {
 		"OIDC audience expected in external API bearer tokens. Requires --oidc-issuer when set.")
 	flag.StringVar(&oidcJWKSURL, "oidc-jwks-url", os.Getenv("ORKA_OIDC_JWKS_URL"),
 		"Optional OIDC JWKS URL. When empty, it is discovered from the issuer metadata.")
+	flag.StringVar(&oidcAllowedSubjects, "oidc-allowed-subjects", os.Getenv("ORKA_OIDC_ALLOWED_SUBJECTS"),
+		"Comma-separated OIDC subject allowlist patterns. Required when OIDC is enabled; supports shell-style wildcards.")
+	flag.StringVar(&oidcNamespace, "oidc-namespace", os.Getenv("ORKA_OIDC_NAMESPACE"),
+		"Namespace assigned to authorized OIDC callers for namespace isolation. Defaults to default.")
 	flag.StringVar(&contextTokenProfile, "context-token-profile", os.Getenv("ORKA_CONTEXT_TOKEN_PROFILE"),
 		"Context-token profile for external API requests (supported: kontxt).")
 	flag.StringVar(&contextTokenIssuer, "context-token-issuer", os.Getenv("ORKA_CONTEXT_TOKEN_ISSUER"),
@@ -796,9 +817,11 @@ func main() {
 		WatchNamespace:            watchNamespace,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		OIDC: api.OIDCConfig{
-			Issuer:   oidcIssuer,
-			Audience: oidcAudience,
-			JWKSURL:  oidcJWKSURL,
+			Issuer:          oidcIssuer,
+			Audience:        oidcAudience,
+			JWKSURL:         oidcJWKSURL,
+			AllowedSubjects: splitCommaList(oidcAllowedSubjects),
+			Namespace:       oidcNamespace,
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
