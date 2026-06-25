@@ -45,6 +45,8 @@ For testing against a local Kubernetes cluster, use the `$kindctl` skill to mana
 
 To stand up a reverse proxy for Anthropic/Gemini/OpenAI-compatible clients, use the `$vekil-reverse-proxy-deploy` skill. When it falls back to GitHub Copilot device-code login, surface the login code and URL to the user and wait for their confirmation before continuing — never complete the login on their behalf.
 
+To stand up an execution-workspace provider on a local kind cluster for evaluation, use the `$agent-sandbox-deploy` skill (kubernetes-sigs agent-sandbox; pairs with `$kindctl` for the cluster and `$orka-kind-deploy` for the controller) or the `$agent-substrate-deploy` skill (Agent Substrate; owns its own gVisor kind cluster, so it is not hosted on a `$kindctl` cluster). Both are local/kind eval only — Orka does not install or manage these providers in production — and both surface the `$vekil-reverse-proxy-deploy` device-code login to the user for confirmation rather than completing it.
+
 ## Verification
 
 Run after every change:
