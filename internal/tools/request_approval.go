@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/sozercan/orka/internal/approvals"
 )
@@ -34,10 +35,10 @@ func (t *RequestApprovalTool) Parameters() json.RawMessage {
 			"action":{"type":"string","description":"Human-readable action requiring approval"},
 			"riskSummary":{"type":"string","description":"Why this action needs approval"},
 			"severity":{"type":"string","enum":["warning","critical"],"description":"Approval severity"},
-			"targetTool":{"type":"string","description":"Optional exact side-effect tool name the approval covers"},
-			"targetArguments":{"type":"object","description":"Optional exact side-effect arguments the approval covers"}
+			"targetTool":{"type":"string","description":"Exact custom side-effect tool name the approval covers"},
+			"targetArguments":{"type":"object","description":"Exact side-effect arguments the approval covers"}
 		},
-		"required":["action"]
+		"required":["action","targetTool","targetArguments"]
 	}`)
 }
 
@@ -60,20 +61,15 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 	if toolCtx == nil || toolCtx.ApprovalEmitter == nil {
 		return "", fmt.Errorf("approval emitter is not configured")
 	}
-	targetTool := req.TargetTool
+	targetTool := strings.TrimSpace(req.TargetTool)
 	if targetTool == "" {
-		targetTool = requestApprovalToolName
+		return "", fmt.Errorf("targetTool is required")
 	}
 	if len(req.TargetArguments) == 0 {
-		fallbackArgs, err := json.Marshal(map[string]string{
-			"action":      req.Action,
-			"riskSummary": req.RiskSummary,
-			"severity":    req.Severity,
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to build approval target arguments: %w", err)
-		}
-		req.TargetArguments = fallbackArgs
+		return "", fmt.Errorf("targetArguments is required")
+	}
+	if _, ok := DefaultRegistry.Get(targetTool); ok {
+		return "", fmt.Errorf("targetTool %q is a built-in tool and cannot be approved with request_approval", targetTool)
 	}
 	target, err := approvals.NewApprovalTarget(toolCtx.Namespace, toolCtx.TaskID, toolCtx.TaskUID, targetTool, req.TargetArguments, req.Action, req.RiskSummary, req.Severity)
 	if err != nil {

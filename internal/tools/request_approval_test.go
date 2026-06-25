@@ -58,25 +58,36 @@ func TestRequestApprovalToolRequiresStrictEmitter(t *testing.T) {
 	}
 }
 
-func TestRequestApprovalToolActionOnlyRequestsUseDistinctApprovalIDs(t *testing.T) {
-	var got []approvals.ApprovalTarget
+func TestRequestApprovalToolRequiresConcreteTarget(t *testing.T) {
 	ctx := WithToolContext(context.Background(), &ToolContext{
 		Namespace: "default",
 		TaskID:    "task-1",
 		TaskUID:   "task-uid-1",
-		ApprovalEmitter: func(_ context.Context, target approvals.ApprovalTarget) error {
-			got = append(got, target)
+		ApprovalEmitter: func(context.Context, approvals.ApprovalTarget) error {
 			return nil
 		},
 	})
-	tool := NewRequestApprovalTool()
-	if _, err := tool.Execute(ctx, json.RawMessage(`{"action":"dispatch team"}`)); err != nil {
-		t.Fatalf("first Execute() error = %v", err)
+	_, err := NewRequestApprovalTool().Execute(ctx, json.RawMessage(`{"action":"dispatch team"}`))
+	if err == nil || err.Error() != "targetTool is required" {
+		t.Fatalf("Execute() error = %v, want targetTool required", err)
 	}
-	if _, err := tool.Execute(ctx, json.RawMessage(`{"action":"escalate incident"}`)); err != nil {
-		t.Fatalf("second Execute() error = %v", err)
-	}
-	if len(got) != 2 || got[0].ApprovalID == got[1].ApprovalID {
-		t.Fatalf("approval IDs = %#v, want distinct IDs for different action-only requests", got)
+}
+
+func TestRequestApprovalToolRejectsBuiltInTarget(t *testing.T) {
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Namespace: "default",
+		TaskID:    "task-1",
+		TaskUID:   "task-uid-1",
+		ApprovalEmitter: func(context.Context, approvals.ApprovalTarget) error {
+			return nil
+		},
+	})
+	_, err := NewRequestApprovalTool().Execute(ctx, json.RawMessage(`{
+		"action":"approve web search",
+		"targetTool":"web_search",
+		"targetArguments":{"query":"incident"}
+	}`))
+	if err == nil {
+		t.Fatal("expected built-in target rejection")
 	}
 }

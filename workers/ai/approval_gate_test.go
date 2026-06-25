@@ -375,9 +375,11 @@ func TestRequestApprovalToolCallStopsWorkerAfterEmitting(t *testing.T) {
 		&mockProvider{response: &llm.CompletionResponse{
 			Content: "requesting approval",
 			ToolCalls: []llm.ToolCall{{
-				ID:        "call-approval",
-				Name:      "request_approval",
-				Arguments: json.RawMessage(`{"action":"dispatch team"}`),
+				ID:   "call-approval",
+				Name: "request_approval",
+				Arguments: json.RawMessage(
+					`{"action":"dispatch team","targetTool":"dispatch_work_order","targetArguments":{"incident":"inc-1"}}`,
+				),
 			}},
 			StopReason: "tool_use",
 		}},
