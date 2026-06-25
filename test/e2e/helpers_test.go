@@ -118,8 +118,6 @@ var (
 	liveCopilotProxyCodexRuntimeModelPreferences = []string{
 		"gpt-5.3-codex",
 		"gpt-5-codex",
-		"gpt-5.5",
-		"gpt-5.2",
 	}
 	liveCopilotProxyChatGPTModelPreferences = []string{
 		"gpt-4o",
