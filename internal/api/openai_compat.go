@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -496,7 +495,7 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	capturedProvider := provider
 	capturedReq := req
 	capturedToolCtx := toolCtx
-	streamBaseCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)

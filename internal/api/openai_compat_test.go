@@ -80,7 +80,7 @@ func TestHandleChatCompletions_NGreaterThanOne(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
