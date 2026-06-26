@@ -143,7 +143,7 @@ func TestRegistryExecuteMissingToolEmitsFailedSpanAndMetric(t *testing.T) {
 		t.Fatal("expected missing tool error")
 	}
 
-	span := findSpanByName(spans.Recorder.Ended(), genai.OperationExecuteTool+" missing_tool")
+	span := findSpanByName(spans.Recorder.Ended(), genai.OperationExecuteTool+" "+unknownToolTelemetryName)
 	if span == nil {
 		t.Fatal("missing execute_tool span for missing tool")
 	}
@@ -154,8 +154,8 @@ func TestRegistryExecuteMissingToolEmitsFailedSpanAndMetric(t *testing.T) {
 	for _, kv := range span.Attributes() {
 		attrs[string(kv.Key)] = kv.Value
 	}
-	if got := attrs[genai.AttrToolName].AsString(); got != "missing_tool" {
-		t.Fatalf("tool name attr = %q, want missing_tool", got)
+	if got := attrs[genai.AttrToolName].AsString(); got != unknownToolTelemetryName {
+		t.Fatalf("tool name attr = %q, want unknown_tool", got)
 	}
 	rm := metrics.Collect(t)
 	if countMetricDataPoints(rm, genai.MetricExecuteToolDuration) != 1 {

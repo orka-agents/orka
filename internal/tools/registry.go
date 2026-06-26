@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,6 +123,11 @@ const trueStr = "true"
 
 const defaultMergeMethod = "squash"
 
+const (
+	unknownToolTelemetryName  = "unknown_tool"
+	rejectedToolTelemetryName = "rejected_tool"
+)
+
 // Tool is the interface for built-in tools
 type Tool interface {
 	// Name returns the tool name
@@ -181,10 +187,14 @@ func (r *Registry) List() []Tool {
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	start := time.Now()
 	tool, ok := r.Get(name)
+	toolTelemetryName := name
+	if !ok {
+		toolTelemetryName = unknownToolTelemetryName
+	}
 	toolTypeValue := toolType(ctx, tool)
 	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, name),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
 		attribute.String(genai.AttrToolType, toolTypeValue),
 	}
 	if tc := GetToolContext(ctx); tc != nil && tc.ToolCallID != "" {
@@ -196,12 +206,12 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		}
 	}
 	tracer := tracing.GenAITracer(genai.InstrumentationName)
-	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+toolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
 	defer span.End()
 
 	metricAttrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, name),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
 		attribute.String(genai.AttrToolType, toolTypeValue),
 	}
 	if !ok {
@@ -225,6 +235,48 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	}
 	recordToolDuration(ctx, duration, metricAttrs...)
 	return result, err
+}
+
+// RecordRejectedToolCall records a failed tool invocation that is rejected before
+// dispatch, for example by request-level allowlists or invalid arguments. It
+// intentionally does not execute the tool.
+func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, message string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	start := time.Now()
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
+	}
+	if toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	if errType == "" {
+		errType = "tool_rejected"
+	}
+	if message == "" {
+		message = errType
+	}
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+rejectedToolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	span.SetStatus(codes.Error, message)
+	span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+	span.End()
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
+		attribute.String(genai.AttrErrorType, errType),
+	}
+	recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+}
+
+// FailedToolResultForTelemetry detects structured tool failures for callers
+// that reject tool calls before dispatch but still need telemetry.
+func FailedToolResultForTelemetry(result string) (bool, string, string) {
+	return failedToolResult(result)
 }
 
 func failedToolResult(result string) (bool, string, string) {

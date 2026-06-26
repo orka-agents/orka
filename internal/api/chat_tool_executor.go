@@ -139,14 +139,18 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 	if e.allowedToolNames != nil {
 		if _, ok := e.allowedToolNames[toolCall.Name]; !ok {
 			result := toolError("unauthorized_tool", fmt.Sprintf("tool %q is not authorized for this request", toolCall.Name), "Use one of the available tools")
-			return marshalResult(result)
+			resultStr, err := marshalResult(result)
+			recordRejectedToolCall(ctx, toolCall, resultStr)
+			return resultStr, err
 		}
 	}
 
 	var args map[string]any
 	if err := json.Unmarshal(toolCall.Arguments, &args); err != nil {
 		result := toolError("invalid_arguments", fmt.Sprintf("failed to parse arguments: %v", err), "Ensure arguments are valid JSON")
-		return marshalResult(result)
+		resultStr, marshalErr := marshalResult(result)
+		recordRejectedToolCall(ctx, toolCall, resultStr)
+		return resultStr, marshalErr
 	}
 
 	toolCtx, cancel := context.WithTimeout(ctx, e.toolTimeout)
@@ -305,4 +309,15 @@ func marshalResult(result ToolResult) (string, error) {
 		return "", fmt.Errorf("failed to marshal tool result: %w", err)
 	}
 	return string(b), nil
+}
+
+func recordRejectedToolCall(ctx context.Context, toolCall llm.ToolCall, result string) {
+	if strings.TrimSpace(toolCall.Name) == "" || result == "" {
+		return
+	}
+	failed, errType, message := tools.FailedToolResultForTelemetry(result)
+	if !failed {
+		return
+	}
+	tools.RecordRejectedToolCall(ctx, toolCall.Name, toolCall.ID, errType, message)
 }

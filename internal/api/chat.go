@@ -26,6 +26,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -371,7 +372,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	sseSystemPrompt := systemPrompt
 	sseTools := tools
 	sseExecutor := executor
-	sseParentCtx := trace.ContextWithSpanContext(context.Background(), span.SpanContext())
+	sseParentCtx := baggage.ContextWithBaggage(
+		trace.ContextWithSpanContext(context.Background(), span.SpanContext()),
+		baggage.FromContext(ctx),
+	)
 
 	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {

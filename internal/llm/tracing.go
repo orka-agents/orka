@@ -222,7 +222,7 @@ func requestAttributes(req *CompletionRequest, providerName string, stream bool)
 		attrs = append(attrs, attribute.Float64(genai.AttrRequestTemperature, req.Temperature))
 	}
 	if len(req.StopSequences) > 0 {
-		attrs = append(attrs, attribute.StringSlice(genai.AttrRequestStopSequences, req.StopSequences))
+		attrs = append(attrs, attribute.Int(genai.AttrRequestStopSequences+".count", len(req.StopSequences)))
 	}
 	if req.ResponseFormat != nil && strings.TrimSpace(req.ResponseFormat.Type) != "" {
 		attrs = append(attrs, attribute.String(genai.AttrOutputType, req.ResponseFormat.Type))
