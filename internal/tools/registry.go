@@ -218,6 +218,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		err := fmt.Errorf("tool %q not found", name)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(genai.AttrErrorType, "tool_not_found"))
 		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, "tool_not_found"))
 		recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
 		return "", err
@@ -226,11 +227,14 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	result, err := tool.Execute(ctx, args)
 	duration := time.Since(start).Seconds()
 	if err != nil {
+		errType := fmt.Sprintf("%T", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, fmt.Sprintf("%T", err)))
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
 	} else if failed, errType, message := failedToolResult(result); failed {
 		span.SetStatus(codes.Error, message)
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
 	}
 	recordToolDuration(ctx, duration, metricAttrs...)

@@ -83,7 +83,7 @@ func (failingTracingTestTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object"}`)
 }
 func (failingTracingTestTool) Execute(context.Context, json.RawMessage) (string, error) {
-	return `{"success":false,"error":"bad input","errorType":"invalid_arguments"}`, nil
+	return `{"success":false,"error":"bad input","errorType":"` + errTypeInvalidArgs + `"}`, nil
 }
 
 func TestRegistryExecuteMarksStructuredToolFailure(t *testing.T) {
@@ -97,6 +97,13 @@ func TestRegistryExecuteMarksStructuredToolFailure(t *testing.T) {
 		if span.Name() == "execute_tool failing_tool" {
 			if span.Status().Code != codes.Error {
 				t.Fatalf("span status = %v, want error", span.Status())
+			}
+			attrs := map[string]attribute.Value{}
+			for _, kv := range span.Attributes() {
+				attrs[string(kv.Key)] = kv.Value
+			}
+			if got := attrs[genai.AttrErrorType].AsString(); got != errTypeInvalidArgs {
+				t.Fatalf("error type attr = %q, want invalid_arguments", got)
 			}
 			return
 		}
@@ -156,6 +163,9 @@ func TestRegistryExecuteMissingToolEmitsFailedSpanAndMetric(t *testing.T) {
 	}
 	if got := attrs[genai.AttrToolName].AsString(); got != unknownToolTelemetryName {
 		t.Fatalf("tool name attr = %q, want unknown_tool", got)
+	}
+	if got := attrs[genai.AttrErrorType].AsString(); got != "tool_not_found" {
+		t.Fatalf("error type attr = %q, want tool_not_found", got)
 	}
 	rm := metrics.Collect(t)
 	if countMetricDataPoints(rm, genai.MetricExecuteToolDuration) != 1 {
