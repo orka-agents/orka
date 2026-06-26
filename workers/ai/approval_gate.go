@@ -28,11 +28,13 @@ import (
 )
 
 const (
-	approvalAuthInjectBody                   = "body"
-	approvalIdempotencyHeader                = "Idempotency-Key"
-	approvalAuthRefUIDAnnotation             = "orka.fibey.io/approval-auth-ref-uid"
-	approvalAuthRefResourceVersionAnnotation = "orka.fibey.io/approval-auth-ref-resource-version"
-	approvalTargetURLField                   = "__orkaApprovalURL"
+	approvalAuthInjectBody                         = "body"
+	approvalIdempotencyHeader                      = "Idempotency-Key"
+	approvalAuthRefUIDAnnotation                   = "orka.ai/approval-auth-ref-uid"
+	approvalAuthRefResourceVersionAnnotation       = "orka.ai/approval-auth-ref-resource-version"
+	legacyApprovalAuthRefUIDAnnotation             = "orka.fibey.io/approval-auth-ref-uid"
+	legacyApprovalAuthRefResourceVersionAnnotation = "orka.fibey.io/approval-auth-ref-resource-version"
+	approvalTargetURLField                         = "__orkaApprovalURL"
 )
 
 var approvalMountRoots = []string{"/secrets/task", "/secrets/agent"}
@@ -182,6 +184,12 @@ func (g *approvalGate) preScan(
 						toolResults: blockingApprovalOverflowBatchToolResults(calls, call.ID, toolName),
 					}, nil
 				}
+				if len(g.resolved) > 0 && customTools[toolName] != nil {
+					return &approvalBatchDecision{
+						continueLLM: true,
+						toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
+					}, nil
+				}
 				continue
 			}
 			return &approvalBatchDecision{
@@ -285,6 +293,15 @@ func approvalApplyURLInterpolationTarget(
 ) error {
 	if customTool == nil || customTool.Spec.HTTP == nil || strings.TrimSpace(customTool.Spec.HTTP.URL) == "" {
 		return nil
+	}
+	if authBodyKey := approvalAuthBodyKey(customTool); authBodyKey != "" {
+		if approvalURLUsesPlaceholder(customTool, authBodyKey) {
+			return fmt.Errorf(
+				"approval-gated tool %q URL must not interpolate body auth key %q",
+				customTool.Name,
+				authBodyKey,
+			)
+		}
 	}
 	params, err := approvalDecodeTargetArgumentValues(args)
 	if err != nil {
@@ -392,6 +409,20 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 	if customTool == nil || customTool.Spec.HTTP == nil {
 		return nil
 	}
+	usesBodyAuth := customTool.Spec.HTTP.AuthSecretRef != nil &&
+		strings.TrimSpace(customTool.Spec.HTTP.AuthInject) == approvalAuthInjectBody
+	if usesBodyAuth {
+		if strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey) == "" {
+			return fmt.Errorf("approval-gated tool %q authBodyKey is required for body auth", customTool.Name)
+		}
+		if approvalURLUsesPlaceholder(customTool, customTool.Spec.HTTP.AuthBodyKey) {
+			return fmt.Errorf(
+				"approval-gated tool %q URL must not interpolate body auth key %q",
+				customTool.Name,
+				strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey),
+			)
+		}
+	}
 	for header := range customTool.Spec.HTTP.Headers {
 		if strings.EqualFold(strings.TrimSpace(header), approvalIdempotencyHeader) {
 			return fmt.Errorf(
@@ -416,6 +447,14 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 	return nil
 }
 
+func approvalURLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool {
+	if customTool == nil || customTool.Spec.HTTP == nil {
+		return false
+	}
+	key = strings.TrimSpace(key)
+	return key != "" && strings.Contains(customTool.Spec.HTTP.URL, "{{"+key+"}}")
+}
+
 func approvalMountedCredentialExists(key string) bool {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -433,8 +472,13 @@ func approvalAuthRefVersion(customTool *corev1alpha1.Tool) (string, string) {
 	if customTool == nil || customTool.Spec.HTTP == nil || customTool.Spec.HTTP.AuthSecretRef == nil {
 		return "", ""
 	}
-	return strings.TrimSpace(customTool.Annotations[approvalAuthRefUIDAnnotation]),
-		strings.TrimSpace(customTool.Annotations[approvalAuthRefResourceVersionAnnotation])
+	uid := strings.TrimSpace(customTool.Annotations[approvalAuthRefUIDAnnotation])
+	resourceVersion := strings.TrimSpace(customTool.Annotations[approvalAuthRefResourceVersionAnnotation])
+	if uid != "" || resourceVersion != "" {
+		return uid, resourceVersion
+	}
+	return strings.TrimSpace(customTool.Annotations[legacyApprovalAuthRefUIDAnnotation]),
+		strings.TrimSpace(customTool.Annotations[legacyApprovalAuthRefResourceVersionAnnotation])
 }
 
 func approvalTargetSpecDigestFromCustomTools(
@@ -575,6 +619,9 @@ func (g *approvalGate) prepareApprovedCall(
 					"approval history omitted blocking decisions; request approval again before executing %s",
 					strings.TrimSpace(toolName),
 				)
+			}
+			if len(g.resolved) > 0 && customTool != nil {
+				return nil, "", false, err
 			}
 			return args, "", false, nil
 		}

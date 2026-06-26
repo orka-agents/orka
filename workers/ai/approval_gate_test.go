@@ -609,6 +609,25 @@ func TestApprovalTargetSpecDigestKeepsHTTPToolSpecDigest(t *testing.T) {
 	}
 }
 
+func TestApprovalTargetArgumentsRejectsBodyAuthKeyURLInterpolation(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/items/{{" + approvalTestAuthKey + "}}")
+	customTool.Spec.HTTP.AuthInject = approvalAuthInjectBody
+	customTool.Spec.HTTP.AuthBodyKey = approvalTestAuthKey
+	customTool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	customTool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+
+	_, err := approvalTargetArguments(
+		json.RawMessage(fmt.Sprintf(`{%q:"model-supplied"}`, approvalTestAuthKey)),
+		customTool,
+	)
+	if err == nil || !strings.Contains(err.Error(), "body auth key") {
+		t.Fatalf("approvalTargetArguments() error = %v, want body auth URL interpolation rejection", err)
+	}
+}
+
 func TestApprovalTargetArgumentsKeepsBodyAuthKeyWithoutAuthRef(t *testing.T) {
 	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	customTool.Spec.HTTP.AuthInject = approvalAuthInjectBody
@@ -710,6 +729,35 @@ func TestApprovalTargetSpecDigestRejectsMountedCredentialSource(t *testing.T) {
 	}
 }
 
+func TestApprovalTargetSpecDigestRejectsBodyAuthWithoutBodyKey(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Spec.HTTP.AuthInject = approvalAuthInjectBody
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "authBodyKey is required") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want authBodyKey rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestRejectsBodyAuthKeyURLInterpolation(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/items/{{" + approvalTestAuthKey + "}}")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Spec.HTTP.AuthInject = approvalAuthInjectBody
+	tool.Spec.HTTP.AuthBodyKey = approvalTestAuthKey
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "body auth key") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want body auth URL interpolation rejection", err)
+	}
+}
+
 func TestApprovalTargetSpecDigestRejectsStaticIdempotencyHeader(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	tool.Spec.HTTP.Headers = map[string]string{"idempotency-key": "static"}
@@ -725,6 +773,18 @@ func TestApprovalTargetSpecDigestRequiresAuthSecretVersion(t *testing.T) {
 	_, err := approvalTargetSpecDigest(tool)
 	if err == nil || !strings.Contains(err.Error(), "auth secret version is not available") {
 		t.Fatalf("approvalTargetSpecDigest() error = %v, want auth secret version rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestReadsLegacyAuthRefAnnotations(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Annotations = map[string]string{
+		legacyApprovalAuthRefUIDAnnotation:             "legacy-uid-1",
+		legacyApprovalAuthRefResourceVersionAnnotation: "10",
+	}
+	if _, err := approvalTargetSpecDigest(tool); err != nil {
+		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
 	}
 }
 
@@ -1402,6 +1462,66 @@ func TestApprovalGateDeclinedExplicitCustomToolTargetDoesNotExecuteWithoutRequir
 	}
 	if executions.Load() != 0 {
 		t.Fatalf("declined explicit custom approval target executed custom tool")
+	}
+}
+
+func TestApprovalGateResolvedHistoryFailsClosedOnTargetBuildError(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL)
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		json.RawMessage(`{"incident":"inc-1"}`),
+		"dispatch",
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	declined := resolvedApprovalForTarget(target)
+	declined.Status = approvals.StatusDeclined
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{declined})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-dispatch",
+					Name:      gatedDispatchTool,
+					Arguments: json.RawMessage(`{"incident":"inc-1","__orkaApprovalURL":"x"}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("custom tool executed despite target build error with approval history")
 	}
 }
 
