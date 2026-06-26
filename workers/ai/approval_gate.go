@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -126,6 +127,9 @@ func (g *approvalGate) preScan(
 		requiresApproval := g.requiresApproval(toolName)
 		target, err := g.targetForCall(toolName, call.Arguments, customTools[toolName])
 		if err != nil {
+			if !requiresApproval {
+				continue
+			}
 			return nil, err
 		}
 		decision, found := g.resolvedDecision(target)
@@ -188,9 +192,6 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 func approvalTargetSpecDigestFromCustomTools(
 	customTools map[string]*corev1alpha1.Tool,
 ) func(context.Context, string) (string, error) {
-	if len(customTools) == 0 {
-		return nil
-	}
 	return func(_ context.Context, targetTool string) (string, error) {
 		targetTool = strings.TrimSpace(targetTool)
 		customTool := customTools[targetTool]
@@ -423,11 +424,37 @@ func handleExplicitRequestApprovalBatch(
 		}
 		result, err := executeRequestApprovalToolCall(ctx, call, customTools, eventRecorder, baseToolCtx)
 		if err != nil {
+			var validationErr *tools.RequestApprovalValidationError
+			if errors.As(err, &validationErr) {
+				return &approvalBatchDecision{
+					continueLLM: true,
+					toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
+				}, nil
+			}
 			return nil, err
 		}
 		return &approvalBatchDecision{result: result}, nil
 	}
 	return nil, nil
+}
+
+func approvalValidationBatchToolResults(
+	calls []llm.ToolCall,
+	invalidToolCallID string,
+	err error,
+) []llm.Message {
+	results := make([]llm.Message, 0, len(calls))
+	for _, call := range calls {
+		content := err.Error()
+		if call.ID != invalidToolCallID {
+			content = fmt.Sprintf(
+				"Not executed because the same tool-call batch contained invalid request_approval call %s",
+				invalidToolCallID,
+			)
+		}
+		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+	}
+	return results
 }
 
 func executeRequestApprovalToolCall(

@@ -587,7 +587,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
 	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
 	envVars = setControllerEnv(envVars, workerenv.ResolvedApprovals, "")
-	envVars = setControllerEnv(envVars, workerenv.ApprovalRequiredTools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
 	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
@@ -838,7 +838,7 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		depth = d
 	}
 
-	return append(envVars, workerenv.CoordinationEnv{
+	envVars = append(envVars, workerenv.CoordinationEnv{
 		Enabled:                 true,
 		MaxDepth:                int(agent.Spec.Coordination.MaxDepth),
 		MaxChildren:             int(agent.Spec.Coordination.MaxConcurrentChildren),
@@ -847,8 +847,8 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		AutonomousMode:          agent.Spec.Coordination.Autonomous,
 		AutonomousIteration:     int(task.Status.Iteration),
 		AutonomousMaxIterations: int(agent.Spec.Coordination.MaxIterations),
-		ApprovalRequiredTools:   agent.Spec.Coordination.ApprovalRequiredTools,
 	}.EnvVars()...)
+	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(agent.Spec.Coordination.ApprovalRequiredTools))
 }
 
 // addAIEnvVars adds AI-specific environment variables

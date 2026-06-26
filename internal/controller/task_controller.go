@@ -1371,17 +1371,8 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if elapsed > task.Spec.Timeout.Duration {
-			if r.isAutonomousTask(ctx, task) {
-				if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
-					return result, err
-				}
-				resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				if resumingAfterApproval {
-					return r.handleAutonomousIteration(ctx, task)
-				}
+			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
@@ -1478,15 +1469,8 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 					return ctrl.Result{RequeueAfter: time.Second}, nil
 				}
 				task = latest
-				if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+				if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
 					return result, err
-				}
-				resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				if resumingAfterApproval {
-					return r.handleAutonomousIteration(ctx, task)
 				}
 			}
 			if r.isWithinJobCreationVisibilityGracePeriod(task) {
@@ -1518,17 +1502,8 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if job.Status.Failed > 0 {
-		if r.isAutonomousTask(ctx, task) {
-			if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
-				return result, err
-			}
-			resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if resumingAfterApproval {
-				return r.handleAutonomousIteration(ctx, task)
-			}
+		if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+			return result, err
 		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
@@ -3448,6 +3423,24 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		return ctrl.Result{}, false, err
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if !r.isAutonomousTask(ctx, task) {
+		return ctrl.Result{}, false, nil
+	}
+	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		return result, true, err
+	}
+	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if resumingAfterApproval {
+		result, err := r.handleAutonomousIteration(ctx, task)
+		return result, true, err
+	}
+	return ctrl.Result{}, false, nil
 }
 
 func parseAnnotationInt64(value string) int64 {

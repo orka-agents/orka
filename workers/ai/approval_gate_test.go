@@ -477,6 +477,50 @@ func TestApprovalToolingRequiresAutonomousMode(t *testing.T) {
 	}
 }
 
+func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "bad approval",
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:        "call-approval",
+						Name:      "request_approval",
+						Arguments: json.RawMessage(`{"action":"missing target"}`),
+					},
+					{
+						ID:        "call-other",
+						Name:      "other_tool",
+						Arguments: json.RawMessage(`{"ok":true}`),
+					},
+				},
+				StopReason: "tool_use",
+			},
+			{Content: "corrected", StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "corrected" {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+}
+
 func TestRequestApprovalToolCallEmitsCustomToolSpecDigest(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()
@@ -538,6 +582,7 @@ func TestRequestApprovalToolCallStopsWorkerAfterEmitting(t *testing.T) {
 	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
 	t.Setenv(workerenv.AutonomousMode, "true")
 	recorder := common.NewFakeEventRecorder()
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
 
 	result, err := executeAgentLoopWithEvents(
 		context.Background(),
@@ -556,7 +601,7 @@ func TestRequestApprovalToolCallStopsWorkerAfterEmitting(t *testing.T) {
 		"",
 		"test-model",
 		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
-		nil,
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
 		nil,
 		recorder,
 		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},

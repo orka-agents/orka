@@ -42,6 +42,28 @@ func (t *RequestApprovalTool) Parameters() json.RawMessage {
 	}`)
 }
 
+type RequestApprovalValidationError struct {
+	Err error
+}
+
+func (e *RequestApprovalValidationError) Error() string {
+	if e == nil || e.Err == nil {
+		return "invalid request_approval arguments"
+	}
+	return e.Err.Error()
+}
+
+func (e *RequestApprovalValidationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func requestApprovalValidationError(format string, args ...any) error {
+	return &RequestApprovalValidationError{Err: fmt.Errorf(format, args...)}
+}
+
 type requestApprovalArgs struct {
 	Action          string          `json:"action"`
 	RiskSummary     string          `json:"riskSummary"`
@@ -54,7 +76,7 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 	var req requestApprovalArgs
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &req); err != nil {
-			return "", fmt.Errorf("failed to parse request_approval arguments: %w", err)
+			return "", requestApprovalValidationError("failed to parse request_approval arguments: %w", err)
 		}
 	}
 	toolCtx := GetToolContext(ctx)
@@ -63,20 +85,20 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 	targetTool := strings.TrimSpace(req.TargetTool)
 	if targetTool == "" {
-		return "", fmt.Errorf("targetTool is required")
+		return "", requestApprovalValidationError("targetTool is required")
 	}
 	if len(req.TargetArguments) == 0 {
-		return "", fmt.Errorf("targetArguments is required")
+		return "", requestApprovalValidationError("targetArguments is required")
 	}
 	if _, ok := DefaultRegistry.Get(targetTool); ok {
-		return "", fmt.Errorf("targetTool %q is a built-in tool and cannot be approved with request_approval", targetTool)
+		return "", requestApprovalValidationError("targetTool %q is a built-in tool and cannot be approved with request_approval", targetTool)
 	}
 	targetSpecDigest := ""
 	if toolCtx.ApprovalTargetSpecDigest != nil {
 		var err error
 		targetSpecDigest, err = toolCtx.ApprovalTargetSpecDigest(ctx, targetTool)
 		if err != nil {
-			return "", err
+			return "", requestApprovalValidationError("resolve target tool spec digest: %w", err)
 		}
 	}
 	target, err := approvals.NewApprovalTarget(
@@ -91,10 +113,10 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 		targetSpecDigest,
 	)
 	if err != nil {
-		return "", err
+		return "", requestApprovalValidationError("build approval target: %w", err)
 	}
 	if err := toolCtx.ApprovalEmitter(ctx, target); err != nil {
-		return "", err
+		return "", fmt.Errorf("emit approval request: %w", err)
 	}
 	return ChatToolSuccess(map[string]any{
 		"approvalID":       target.ApprovalID,

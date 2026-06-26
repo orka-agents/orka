@@ -2554,7 +2554,7 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 	if env, ok := findEnvVar(envVars, workerenv.ResolvedApprovals); !ok || env.Value != "" {
 		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.ResolvedApprovals, env, ok)
 	}
-	if _, ok := findEnvVar(envVars, workerenv.ApprovalRequiredTools); ok {
-		t.Fatalf("%s should be removed when controller has no approval-required tools", workerenv.ApprovalRequiredTools)
+	if env, ok := findEnvVar(envVars, workerenv.ApprovalRequiredTools); !ok || env.Value != "" {
+		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.ApprovalRequiredTools, env, ok)
 	}
 }
