@@ -128,7 +128,7 @@ func splitBlockingApprovalOverflow(
 	if len(resolved) == 0 {
 		return nil, false
 	}
-	filtered := resolved[:0]
+	filtered := make([]approvals.ResolvedApproval, 0, len(resolved))
 	blockingOverflow := false
 	for _, approval := range resolved {
 		if approvals.IsResolvedApprovalBlockingOverflow(approval) {
@@ -555,9 +555,7 @@ func (g *approvalGate) staleDecisionForTarget(target approvals.ApprovalTarget) (
 		if decision.TargetTool != target.TargetTool || decision.TargetArgsDigest != target.TargetArgsDigest {
 			continue
 		}
-		if decision.TargetSpecDigest != "" &&
-			target.TargetSpecDigest != "" &&
-			decision.TargetSpecDigest != target.TargetSpecDigest {
+		if target.TargetSpecDigest != "" && decision.TargetSpecDigest != target.TargetSpecDigest {
 			return decision, true
 		}
 	}

@@ -385,6 +385,33 @@ func TestApprovalGatePrepareApprovedCallSkipsUngatedMalformedArgs(t *testing.T) 
 	}
 }
 
+func TestSplitBlockingApprovalOverflowDoesNotMutateInput(t *testing.T) {
+	const (
+		firstApprovalID  = "first"
+		secondApprovalID = "second"
+	)
+	target := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
+	first := resolvedApprovalForTarget(target)
+	first.ID = firstApprovalID
+	second := resolvedApprovalForTarget(target)
+	second.ID = secondApprovalID
+	input := []approvals.ResolvedApproval{approvals.BlockingOverflowResolvedApproval(), first, second}
+
+	filtered, overflow := splitBlockingApprovalOverflow(input)
+	if !overflow {
+		t.Fatal("overflow = false, want true")
+	}
+	if len(filtered) != 2 || filtered[0].ID != firstApprovalID || filtered[1].ID != secondApprovalID {
+		t.Fatalf("filtered = %#v, want first/second", filtered)
+	}
+	inputPreserved := approvals.IsResolvedApprovalBlockingOverflow(input[0]) &&
+		input[1].ID == firstApprovalID &&
+		input[2].ID == secondApprovalID
+	if !inputPreserved {
+		t.Fatalf("input mutated by splitBlockingApprovalOverflow: %#v", input)
+	}
+}
+
 func TestApprovalGateResolvedDecisionPrefersExactApprovalID(t *testing.T) {
 	target := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
 	legacy := resolvedApprovalForTarget(target)
@@ -401,6 +428,26 @@ func TestApprovalGateResolvedDecisionPrefersExactApprovalID(t *testing.T) {
 	}
 	if got.ID != exact.ID || got.Status != approvals.StatusDeclined {
 		t.Fatalf("resolvedDecision() = %#v, want exact declined decision", got)
+	}
+}
+
+func TestApprovalGateStaleDecisionTreatsMissingSpecDigestAsStale(t *testing.T) {
+	target := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
+	legacy := resolvedApprovalForTarget(target)
+	legacy.TargetSpecDigest = ""
+	gate := &approvalGate{resolved: []approvals.ResolvedApproval{legacy}}
+
+	got, stale := gate.staleDecisionForTarget(approvals.ApprovalTarget{
+		TaskUID:          target.TaskUID,
+		TargetTool:       target.TargetTool,
+		TargetArgsDigest: target.TargetArgsDigest,
+		TargetSpecDigest: "current-spec-digest",
+	})
+	if !stale {
+		t.Fatal("staleDecisionForTarget() stale = false, want true for missing legacy spec digest")
+	}
+	if got.ID != legacy.ID {
+		t.Fatalf("staleDecisionForTarget() ID = %q, want %q", got.ID, legacy.ID)
 	}
 }
 
