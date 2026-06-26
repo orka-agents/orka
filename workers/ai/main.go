@@ -373,6 +373,8 @@ func clearApprovalAuthRefVersion(tool *corev1alpha1.Tool) {
 	}
 	delete(tool.Annotations, approvalAuthRefUIDAnnotation)
 	delete(tool.Annotations, approvalAuthRefResourceVersionAnnotation)
+	delete(tool.Annotations, legacyApprovalAuthRefUIDAnnotation)
+	delete(tool.Annotations, legacyApprovalAuthRefResourceVersionAnnotation)
 }
 
 func bindApprovalAuthRefVersion(
