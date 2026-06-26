@@ -127,6 +127,45 @@ func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	}
 }
 
+func TestPatchHarnessWrapperStartedCarriesPlannedIdentityFromLocalTask(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	localTask := task.DeepCopy()
+	r := newUnitReconciler(newTestScheme(), task.DeepCopy(), agent)
+
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), localTask, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	localTask.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
+		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
+		harnessWrapperCorrelationIDAnno: request.CorrelationID,
+		harnessWrapperLastFrameSeqAnno:  "0",
+		harnessWrapperPlannedAtAnno:     time.Now().UTC().Format(time.RFC3339Nano),
+		harnessWrapperMetadataAnno:      `{"runtime":"codex","wrapper":"cli"}`,
+	}
+
+	if err := r.patchHarnessWrapperStarted(context.Background(), localTask); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted: %v", err)
+	}
+
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	for key, want := range localTask.Annotations {
+		if got := updated.Annotations[key]; got != want {
+			t.Fatalf("annotation %s = %q, want %q", key, got, want)
+		}
+	}
+	if got := updated.Annotations[harnessWrapperStartedAnno]; got != scheduledRunLabelValue {
+		t.Fatalf("%s = %q, want %q", harnessWrapperStartedAnno, got, scheduledRunLabelValue)
+	}
+	if !taskHasHarnessWrapperTurn(&updated) {
+		t.Fatal("updated task should have a complete started harness-wrapper turn identity")
+	}
+}
+
 func TestHarnessRuntimeMissingEndpointFailsAgentTask(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	secret := attachHarnessWrapperRuntimeSecret(task, agent)
