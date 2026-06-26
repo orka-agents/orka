@@ -7440,6 +7440,40 @@ func TestResolvedApprovalsJSONForWorkerEnvPreservesOlderBlockingDecisionsWhenCom
 	}
 }
 
+func TestResolvedApprovalsJSONForWorkerEnvAddsBlockingOverflowSentinel(t *testing.T) {
+	resolved := make([]approvals.ResolvedApproval, 0, 900)
+	for i := range 900 {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:               fmt.Sprintf("approval-declined-%03d", i),
+			TaskUID:          "task-uid",
+			TargetTool:       "dispatch_work_order",
+			TargetArgsDigest: fmt.Sprintf("declined-digest-%03d", i),
+			Status:           approvals.StatusDeclined,
+		})
+	}
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	foundOverflow := false
+	for _, approval := range bounded {
+		if approvals.IsResolvedApprovalBlockingOverflow(approval) {
+			foundOverflow = true
+		}
+	}
+	if !foundOverflow {
+		t.Fatalf("blocking overflow sentinel missing from bounded payload of %d approvals", len(bounded))
+	}
+}
+
 func TestResolvedApprovalsJSONForWorkerEnvPreservesRecentApprovalWhenBlockingHistoryExceedsBudget(t *testing.T) {
 	resolved := make([]approvals.ResolvedApproval, 0, 801)
 	for i := range 800 {

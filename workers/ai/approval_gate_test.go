@@ -24,7 +24,10 @@ import (
 	"github.com/sozercan/orka/internal/worker"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
@@ -603,6 +606,72 @@ func TestApprovalTargetSpecDigestKeepsHTTPToolSpecDigest(t *testing.T) {
 	}
 }
 
+func TestBindApprovalAuthRefVersionClearsStaleAnnotationsWhenUnavailable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "missing-auth", Key: "credential"}
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "stale-uid",
+		approvalAuthRefResourceVersionAnnotation: "9",
+	}
+
+	bindApprovalAuthRefVersion(
+		context.Background(),
+		ctrlfake.NewClientBuilder().WithScheme(scheme).Build(),
+		"default",
+		tool,
+	)
+
+	if got := tool.Annotations[approvalAuthRefUIDAnnotation]; got != "" {
+		t.Fatalf("stale auth ref UID annotation = %q, want cleared", got)
+	}
+	if got := tool.Annotations[approvalAuthRefResourceVersionAnnotation]; got != "" {
+		t.Fatalf("stale auth ref resourceVersion annotation = %q, want cleared", got)
+	}
+}
+
+func TestApprovalTargetSpecDigestRejectsStaticIdempotencyHeader(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.Headers = map[string]string{"idempotency-key": "static"}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "reserved header") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want reserved header rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestRequiresAuthSecretVersion(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "credential"}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "auth secret version is not available") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want auth secret version rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestIncludesAuthSecretVersion(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "credential"}
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	first, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
+	}
+	tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+	second, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() second error = %v", err)
+	}
+	if first == second {
+		t.Fatalf("auth secret resourceVersion change did not affect approval target digest")
+	}
+}
+
 func TestApprovalTargetSpecDigestIncludesMCPStatusEndpoint(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		Spec: corev1alpha1.ToolSpec{
@@ -1083,6 +1152,113 @@ func TestApprovalGateStaleExplicitCustomToolSpecDoesNotExecuteWithoutRequiredToo
 	}
 	if executions.Load() != 0 {
 		t.Fatalf("stale explicit custom approval target executed custom tool")
+	}
+}
+
+func TestApprovalGateBlockingOverflowFailsClosedForUngatedCustomTool(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{approvals.BlockingOverflowResolvedApproval()})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-dispatch",
+					Name:      gatedDispatchTool,
+					Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: approvalTestCustomTool(toolServer.URL)},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("custom tool executed despite blocking approval overflow")
+	}
+}
+
+func TestApprovalGateBlockingOverflowAllowsMatchingApproval(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL)
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	specDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		specDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{
+		approvals.BlockingOverflowResolvedApproval(),
+		resolvedApprovalForTarget(target),
+	})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content:    "dispatching",
+				ToolCalls:  []llm.ToolCall{{ID: "call-dispatch", Name: gatedDispatchTool, Arguments: args}},
+				StopReason: "tool_use",
+			},
+			{Content: doneResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != doneResult {
+		t.Fatalf("result = %q, want done", result)
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("custom tool executions = %d, want matching approval to execute", executions.Load())
 	}
 }
 

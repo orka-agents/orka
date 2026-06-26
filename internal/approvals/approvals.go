@@ -17,6 +17,8 @@ const (
 	StatusDeclined  = "declined"
 	StatusExpired   = "expired"
 	StatusCancelled = "cancelled"
+
+	ResolvedApprovalBlockingOverflowID = "__orka_blocking_approval_decisions_omitted__"
 )
 
 type Approval struct {
@@ -134,6 +136,18 @@ func Pending(input []store.ExecutionEvent, now time.Time) []Approval {
 		}
 	}
 	return pending
+}
+
+func BlockingOverflowResolvedApproval() ResolvedApproval {
+	return ResolvedApproval{
+		ID:     ResolvedApprovalBlockingOverflowID,
+		Status: StatusDeclined,
+		Reason: "one or more blocking approval decisions were omitted from worker state; custom tool execution must fail closed",
+	}
+}
+
+func IsResolvedApprovalBlockingOverflow(approval ResolvedApproval) bool {
+	return strings.TrimSpace(approval.ID) == ResolvedApprovalBlockingOverflowID
 }
 
 func statusForEvent(eventType string) string {

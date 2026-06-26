@@ -23,16 +23,22 @@ import (
 	"github.com/sozercan/orka/workers/common"
 )
 
-const approvalAuthInjectBody = "body"
+const (
+	approvalAuthInjectBody                   = "body"
+	approvalIdempotencyHeader                = "Idempotency-Key"
+	approvalAuthRefUIDAnnotation             = "orka.fibey.io/approval-auth-ref-uid"
+	approvalAuthRefResourceVersionAnnotation = "orka.fibey.io/approval-auth-ref-resource-version"
+)
 
 type approvalGate struct {
-	namespace string
-	taskName  string
-	taskUID   string
-	required  map[string]struct{}
-	resolved  []approvals.ResolvedApproval
-	firedKeys map[string]bool
-	recorder  common.EventRecorder
+	namespace        string
+	taskName         string
+	taskUID          string
+	required         map[string]struct{}
+	resolved         []approvals.ResolvedApproval
+	blockingOverflow bool
+	firedKeys        map[string]bool
+	recorder         common.EventRecorder
 }
 
 type approvalBatchDecision struct {
@@ -48,18 +54,20 @@ func newApprovalGateFromEnv(recorder common.EventRecorder, baseToolCtx *tools.To
 	if err != nil {
 		return nil, err
 	}
+	resolved, blockingOverflow := splitBlockingApprovalOverflow(resolved)
 	namespace, taskName, taskUID := approvalScope(baseToolCtx)
 	if len(required) > 0 && strings.TrimSpace(taskUID) == "" {
 		return nil, fmt.Errorf("%s is required for approval-required tools", workerenv.TaskUID)
 	}
 	return &approvalGate{
-		namespace: namespace,
-		taskName:  taskName,
-		taskUID:   taskUID,
-		required:  required,
-		resolved:  resolved,
-		firedKeys: map[string]bool{},
-		recorder:  recorder,
+		namespace:        namespace,
+		taskName:         taskName,
+		taskUID:          taskUID,
+		required:         required,
+		resolved:         resolved,
+		blockingOverflow: blockingOverflow,
+		firedKeys:        map[string]bool{},
+		recorder:         recorder,
 	}, nil
 }
 
@@ -104,6 +112,24 @@ func parseResolvedApprovals(raw string) ([]approvals.ResolvedApproval, error) {
 	return resolved, nil
 }
 
+func splitBlockingApprovalOverflow(
+	resolved []approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, bool) {
+	if len(resolved) == 0 {
+		return nil, false
+	}
+	filtered := resolved[:0]
+	blockingOverflow := false
+	for _, approval := range resolved {
+		if approvals.IsResolvedApprovalBlockingOverflow(approval) {
+			blockingOverflow = true
+			continue
+		}
+		filtered = append(filtered, approval)
+	}
+	return filtered, blockingOverflow
+}
+
 func (g *approvalGate) enabled() bool {
 	return g != nil && len(g.required) > 0
 }
@@ -122,7 +148,7 @@ func (g *approvalGate) preScan(
 	allowedToolCalls map[string]struct{},
 	customTools map[string]*corev1alpha1.Tool,
 ) (*approvalBatchDecision, error) {
-	if g == nil || (!g.enabled() && len(g.resolved) == 0) {
+	if g == nil || (!g.enabled() && len(g.resolved) == 0 && !g.blockingOverflow) {
 		return nil, nil
 	}
 	for _, call := range calls {
@@ -162,6 +188,12 @@ func (g *approvalGate) preScan(
 				return &approvalBatchDecision{
 					continueLLM: true,
 					toolResults: staleApprovalBatchToolResults(calls, call.ID, staleDecision),
+				}, nil
+			}
+			if g.blockingOverflow && customTools[toolName] != nil {
+				return &approvalBatchDecision{
+					continueLLM: true,
+					toolResults: blockingApprovalOverflowBatchToolResults(calls, call.ID, toolName),
 				}, nil
 			}
 			continue
@@ -244,20 +276,44 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	if customTool == nil {
 		return "", nil
 	}
+	if err := validateApprovalCustomToolCompatibility(customTool); err != nil {
+		return "", err
+	}
+	uid, resourceVersion := approvalAuthRefVersion(customTool)
 	if customTool.Spec.MCP == nil || customTool.Spec.MCP.SubstrateActor == nil {
-		digest, err := approvals.TargetSpecDigest(customTool.Spec)
+		if uid == "" && resourceVersion == "" {
+			digest, err := approvals.TargetSpecDigest(customTool.Spec)
+			if err != nil {
+				return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
+			}
+			return digest, nil
+		}
+		targetIdentity := struct {
+			Spec                   corev1alpha1.ToolSpec `json:"spec"`
+			AuthRefUID             string                `json:"authRefUID,omitempty"`
+			AuthRefResourceVersion string                `json:"authRefResourceVersion,omitempty"`
+		}{
+			Spec:                   customTool.Spec,
+			AuthRefUID:             uid,
+			AuthRefResourceVersion: resourceVersion,
+		}
+		digest, err := approvals.TargetSpecDigest(targetIdentity)
 		if err != nil {
 			return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
 		}
 		return digest, nil
 	}
 	targetIdentity := struct {
-		Spec            corev1alpha1.ToolSpec `json:"spec"`
-		StatusEndpoint  string                `json:"statusEndpoint,omitempty"`
-		StatusRouteHost string                `json:"statusRouteHost,omitempty"`
+		Spec                   corev1alpha1.ToolSpec `json:"spec"`
+		StatusEndpoint         string                `json:"statusEndpoint,omitempty"`
+		StatusRouteHost        string                `json:"statusRouteHost,omitempty"`
+		AuthRefUID             string                `json:"authRefUID,omitempty"`
+		AuthRefResourceVersion string                `json:"authRefResourceVersion,omitempty"`
 	}{
-		Spec:           customTool.Spec,
-		StatusEndpoint: strings.TrimSpace(customTool.Status.Endpoint),
+		Spec:                   customTool.Spec,
+		StatusEndpoint:         strings.TrimSpace(customTool.Status.Endpoint),
+		AuthRefUID:             uid,
+		AuthRefResourceVersion: resourceVersion,
 	}
 	if customTool.Status.Actor != nil {
 		targetIdentity.StatusRouteHost = strings.TrimSpace(customTool.Status.Actor.RouteHost)
@@ -267,6 +323,36 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
 	}
 	return digest, nil
+}
+
+func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) error {
+	if customTool == nil || customTool.Spec.HTTP == nil {
+		return nil
+	}
+	for header := range customTool.Spec.HTTP.Headers {
+		if strings.EqualFold(strings.TrimSpace(header), approvalIdempotencyHeader) {
+			return fmt.Errorf(
+				"approval-gated tool %q must not set reserved header %q",
+				customTool.Name,
+				approvalIdempotencyHeader,
+			)
+		}
+	}
+	if customTool.Spec.HTTP.AuthSecretRef != nil {
+		uid, resourceVersion := approvalAuthRefVersion(customTool)
+		if uid == "" || resourceVersion == "" {
+			return fmt.Errorf("approval-gated tool %q auth secret version is not available", customTool.Name)
+		}
+	}
+	return nil
+}
+
+func approvalAuthRefVersion(customTool *corev1alpha1.Tool) (string, string) {
+	if customTool == nil || customTool.Spec.HTTP == nil || customTool.Spec.HTTP.AuthSecretRef == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(customTool.Annotations[approvalAuthRefUIDAnnotation]),
+		strings.TrimSpace(customTool.Annotations[approvalAuthRefResourceVersionAnnotation])
 }
 
 func approvalTargetSpecDigestFromCustomTools(
@@ -393,7 +479,10 @@ func (g *approvalGate) prepareApprovedCall(
 	customTool *corev1alpha1.Tool,
 ) (json.RawMessage, string, bool, error) {
 	requiresApproval := g.requiresApproval(toolName)
-	if !requiresApproval && (g == nil || len(g.resolved) == 0) {
+	if g == nil {
+		return args, "", false, nil
+	}
+	if !requiresApproval && len(g.resolved) == 0 && !g.blockingOverflow {
 		return args, "", false, nil
 	}
 	target, err := g.targetForCall(toolName, args, customTool)
@@ -404,7 +493,16 @@ func (g *approvalGate) prepareApprovedCall(
 		return nil, "", false, err
 	}
 	decision, found := g.resolvedDecision(target)
-	if !requiresApproval && !found {
+	if found {
+		if decision.Status != approvals.StatusApproved {
+			return nil, "", false, fmt.Errorf("approval %s for %s is %s", decision.ID, decision.TargetTool, decision.Status)
+		}
+		if g.firedKeys[target.ApprovalID] {
+			return nil, target.ApprovalID, true, nil
+		}
+		return args, target.ApprovalID, false, nil
+	}
+	if !requiresApproval {
 		if decision, stale := g.staleDecisionForTarget(target); stale {
 			return nil, "", false, fmt.Errorf(
 				"approval %s for %s no longer matches the current tool spec; request approval again",
@@ -412,18 +510,15 @@ func (g *approvalGate) prepareApprovedCall(
 				decision.TargetTool,
 			)
 		}
+		if g.blockingOverflow && customTool != nil {
+			return nil, "", false, fmt.Errorf(
+				"approval history omitted blocking decisions; request approval again before executing %s",
+				strings.TrimSpace(toolName),
+			)
+		}
 		return args, "", false, nil
 	}
-	if !found {
-		return nil, "", false, fmt.Errorf("approval %s for %s is not resolved", target.ApprovalID, target.TargetTool)
-	}
-	if decision.Status != approvals.StatusApproved {
-		return nil, "", false, fmt.Errorf("approval %s for %s is %s", decision.ID, decision.TargetTool, decision.Status)
-	}
-	if g.firedKeys[target.ApprovalID] {
-		return nil, target.ApprovalID, true, nil
-	}
-	return args, target.ApprovalID, false, nil
+	return nil, "", false, fmt.Errorf("approval %s for %s is not resolved", target.ApprovalID, target.TargetTool)
 }
 
 func (g *approvalGate) markFired(key string) {
@@ -563,6 +658,28 @@ func handleExplicitRequestApprovalBatch(
 		return &approvalBatchDecision{result: result}, nil
 	}
 	return nil, nil
+}
+
+func blockingApprovalOverflowBatchToolResults(
+	calls []llm.ToolCall,
+	blockedToolCallID string,
+	toolName string,
+) []llm.Message {
+	results := make([]llm.Message, 0, len(calls))
+	for _, call := range calls {
+		content := fmt.Sprintf(
+			"Not executed because approval history omitted blocking decisions; request approval again before executing %s",
+			toolName,
+		)
+		if call.ID != blockedToolCallID {
+			content = fmt.Sprintf(
+				"Not executed because the same tool-call batch contained approval-history overflow for %s",
+				toolName,
+			)
+		}
+		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+	}
+	return results
 }
 
 func staleApprovalBatchToolResults(

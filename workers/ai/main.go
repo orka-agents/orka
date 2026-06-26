@@ -359,11 +359,48 @@ func loadCustomTools(
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
+		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 
 		customTools[name] = tool
 	}
 
 	return customTools
+}
+
+func clearApprovalAuthRefVersion(tool *corev1alpha1.Tool) {
+	if tool == nil || tool.Annotations == nil {
+		return
+	}
+	delete(tool.Annotations, approvalAuthRefUIDAnnotation)
+	delete(tool.Annotations, approvalAuthRefResourceVersionAnnotation)
+}
+
+func bindApprovalAuthRefVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+) {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.AuthSecretRef == nil {
+		return
+	}
+	clearApprovalAuthRefVersion(tool)
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: namespace, Name: tool.Spec.HTTP.AuthSecretRef.Name}
+	if err := k8sClient.Get(ctx, key, secret); err != nil {
+		fmt.Printf(
+			"Warning: auth secret %q for tool %q was not available for approval binding: %v\n",
+			key.Name,
+			tool.Name,
+			err,
+		)
+		return
+	}
+	if tool.Annotations == nil {
+		tool.Annotations = map[string]string{}
+	}
+	tool.Annotations[approvalAuthRefUIDAnnotation] = string(secret.UID)
+	tool.Annotations[approvalAuthRefResourceVersionAnnotation] = secret.ResourceVersion
 }
 
 // buildLLMTools builds the combined tool list for the LLM

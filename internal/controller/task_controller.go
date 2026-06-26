@@ -1058,6 +1058,7 @@ func selectResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) ([
 	// Add older blocking terminal decisions before older approvals. Dropping an
 	// old approval can re-request approval; dropping an old decline/expiry can
 	// allow a previously denied target to execute.
+	omittedBlocking := false
 	for i, approval := range values {
 		if !resolvedApprovalBlocksExecution(approval) {
 			continue
@@ -1073,6 +1074,15 @@ func selectResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) ([
 		}
 		if added {
 			selectedIndexes[i] = struct{}{}
+		} else {
+			omittedBlocking = true
+		}
+	}
+	if omittedBlocking {
+		var err error
+		selected, err = ensureBlockingOverflowSentinelFitsWorkerEnv(selected)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -1094,6 +1104,28 @@ func selectResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) ([
 		}
 	}
 	return selected, nil
+}
+
+func ensureBlockingOverflowSentinelFitsWorkerEnv(
+	selected []approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, error) {
+	sentinel := approvals.BlockingOverflowResolvedApproval()
+	if slices.ContainsFunc(selected, approvals.IsResolvedApprovalBlockingOverflow) {
+		return selected, nil
+	}
+	for {
+		candidate := append([]approvals.ResolvedApproval{sentinel}, selected...)
+		if _, ok, err := marshalResolvedApprovalsForWorkerEnv(candidate); err != nil {
+			return nil, err
+		} else if ok {
+			return candidate, nil
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("blocking approval overflow sentinel does not fit worker env budget")
+		}
+		drop := len(selected) - 1
+		selected = append(selected[:drop], selected[drop+1:]...)
+	}
 }
 
 func appendResolvedApprovalIfWorkerEnvFits(
