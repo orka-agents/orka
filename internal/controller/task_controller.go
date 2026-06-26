@@ -2669,6 +2669,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	child.Spec.SuccessfulRunsHistoryLimit = nil
 	child.Spec.FailedRunsHistoryLimit = nil
 	child.Spec.Suspend = nil
+	tracing.StampTaskTraceContext(ctx, child)
 
 	// Set owner reference
 	if err := ctrl.SetControllerReference(task, child, r.Scheme); err != nil {

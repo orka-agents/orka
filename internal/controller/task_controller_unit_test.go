@@ -43,6 +43,8 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -4519,6 +4521,57 @@ func TestHandleScheduled_CopiesCoordinationToolInjectionDisableAnnotation(t *tes
 	}
 	if child.Annotations[labels.AnnotationParentTaskName] != task.Name {
 		t.Fatalf("child parent task annotation = %q, want %q", child.Annotations[labels.AnnotationParentTaskName], task.Name)
+	}
+}
+
+func TestHandleScheduled_StampsChildWithSchedulerTrace(t *testing.T) {
+	if shutdown, err := orkatracing.Init("test", false); err == nil {
+		t.Cleanup(func() { _ = shutdown(context.Background()) })
+	} else {
+		t.Fatalf("init tracing: %v", err)
+	}
+	testutil.NewSpanHarness(t)
+	ctx, span := orkatracing.Tracer("test").Start(context.Background(), "scheduler")
+	defer span.End()
+
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())
+	startingDeadlineSeconds := int64(300)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-trace",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ab",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAI,
+			Prompt:                  "hello",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: &startingDeadlineSeconds,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	if _, err := r.handleScheduled(ctx, task); err != nil {
+		t.Fatalf("handleScheduled() error = %v", err)
+	}
+
+	var childList corev1alpha1.TaskList
+	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list child tasks: %v", err)
+	}
+	if len(childList.Items) != 1 {
+		t.Fatalf("expected 1 scheduled child task, got %d", len(childList.Items))
+	}
+	if got := childList.Items[0].Annotations[labels.AnnotationTraceParent]; got == "" {
+		t.Fatalf("scheduled child missing %s annotation", labels.AnnotationTraceParent)
 	}
 }
 

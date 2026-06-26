@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -579,8 +580,10 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	}
 	envVars = b.addTelemetryEnvVars(envVars, task)
 
-	// Add task-level env vars
-	envVars = append(envVars, task.Spec.Env...)
+	// Add task-level env vars. AI worker telemetry env vars are reserved for
+	// controller injection so workload authors cannot bypass default-off telemetry
+	// policy or redirect GenAI metadata to arbitrary collectors.
+	envVars = appendTaskEnvVars(envVars, task)
 	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
@@ -732,6 +735,9 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 	if !b.EnableTelemetry || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
 		return envVars
 	}
+	if !workerReachableOTLPEndpointConfigured(os.Getenv) {
+		return envVars
+	}
 	envVars = setControllerEnv(envVars, workerenv.EnableTelemetry, scheduledRunLabelValue)
 	// Copy only non-secret scalar OTLP settings. Header env vars carry
 	// credentials, and certificate env vars are file paths whose source files are
@@ -752,11 +758,36 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		"OTEL_EXPORTER_OTLP_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
-		"OTEL_RESOURCE_ATTRIBUTES",
 	} {
-		envVars = setControllerEnv(envVars, name, safeWorkerOTLPEnvValue(name, os.Getenv(name)))
+		value := os.Getenv(name)
+		if strings.HasSuffix(name, "_ENDPOINT") && !isWorkerReachableOTLPEndpoint(value) {
+			value = ""
+		}
+		envVars = setControllerEnv(envVars, name, safeWorkerOTLPEnvValue(name, value))
 	}
 	return envVars
+}
+
+func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
+	if task == nil {
+		return envVars
+	}
+	for _, envVar := range task.Spec.Env {
+		if task.Spec.Type == corev1alpha1.TaskTypeAI && isReservedAIWorkerTelemetryEnv(envVar.Name) {
+			continue
+		}
+		envVars = append(envVars, envVar)
+	}
+	return envVars
+}
+
+func isReservedAIWorkerTelemetryEnv(name string) bool {
+	switch name {
+	case workerenv.EnableTelemetry, workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage, "OTEL_RESOURCE_ATTRIBUTES":
+		return true
+	default:
+		return strings.HasPrefix(name, "OTEL_EXPORTER_OTLP")
+	}
 }
 
 func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
@@ -1429,6 +1460,52 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 		job.Spec.Template.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: workerenv.SessionName, Value: sessionName},
 	)
+}
+
+func workerReachableOTLPEndpointConfigured(getenv func(string) string) bool {
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+	} {
+		if isWorkerReachableOTLPEndpoint(getenv(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isWorkerReachableOTLPEndpoint(value string) bool {
+	host := otlpEndpointHost(value)
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return false
+	}
+	hostWithoutZone, _, _ := strings.Cut(host, "%")
+	if ip, err := netip.ParseAddr(hostWithoutZone); err == nil {
+		ip = ip.Unmap()
+		return !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	return true
+}
+
+func otlpEndpointHost(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parseValue := value
+	if !strings.Contains(value, "://") {
+		parseValue = "//" + value
+	}
+	parsed, err := url.Parse(parseValue)
+	if err != nil {
+		return ""
+	}
+	host := parsed.Hostname()
+	return strings.ToLower(strings.Trim(host, "[]"))
 }
 
 func safeWorkerOTLPEnvValue(name, value string) string {
