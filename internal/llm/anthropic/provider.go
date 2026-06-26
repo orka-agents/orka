@@ -67,7 +67,7 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) TelemetryProviderName() string {
-	return "anthropic"
+	return genai.ProviderAnthropic
 }
 
 // Complete sends a completion request
