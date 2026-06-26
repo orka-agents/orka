@@ -632,7 +632,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
-	envVars = setControllerEnv(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
+	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
@@ -1405,6 +1405,25 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 		job.Spec.Template.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: workerenv.SessionName, Value: sessionName},
 	)
+}
+
+func setControllerEnvValue(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	out := make([]corev1.EnvVar, 0, len(envVars)+1)
+	set := false
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+			continue
+		}
+		if !set {
+			out = append(out, corev1.EnvVar{Name: name, Value: value})
+			set = true
+		}
+	}
+	if !set {
+		out = append(out, corev1.EnvVar{Name: name, Value: value})
+	}
+	return out
 }
 
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {

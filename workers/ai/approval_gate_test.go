@@ -175,6 +175,31 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 	}
 }
 
+func TestApprovalGatePrepareApprovedCallSkipsUngatedMalformedArgs(t *testing.T) {
+	args := json.RawMessage(`{"unterminated"`)
+	for _, tt := range []struct {
+		name     string
+		resolved []approvals.ResolvedApproval
+	}{
+		{name: "no resolved approvals"},
+		{
+			name:     "unrelated resolved approval",
+			resolved: []approvals.ResolvedApproval{{ID: "other", Status: approvals.StatusApproved}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := &approvalGate{resolved: tt.resolved}
+			gotArgs, approvalKey, alreadyFired, err := gate.prepareApprovedCall("ungated_tool", args, nil)
+			if err != nil {
+				t.Fatalf("prepareApprovedCall() error = %v", err)
+			}
+			if string(gotArgs) != string(args) || approvalKey != "" || alreadyFired {
+				t.Fatalf("prepareApprovedCall() = args %q key %q fired %t", gotArgs, approvalKey, alreadyFired)
+			}
+		})
+	}
+}
+
 func TestApprovalGateMismatchedCustomToolSpecRequestsNewApproval(t *testing.T) {
 	var executions atomic.Int32
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

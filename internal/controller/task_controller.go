@@ -1371,6 +1371,18 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if elapsed > task.Spec.Timeout.Duration {
+			if r.isAutonomousTask(ctx, task) {
+				if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+					return result, err
+				}
+				resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if resumingAfterApproval {
+					return r.handleAutonomousIteration(ctx, task)
+				}
+			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
 				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")

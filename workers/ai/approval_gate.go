@@ -287,8 +287,14 @@ func (g *approvalGate) prepareApprovedCall(
 	customTool *corev1alpha1.Tool,
 ) (json.RawMessage, string, bool, error) {
 	requiresApproval := g.requiresApproval(toolName)
+	if !requiresApproval && (g == nil || len(g.resolved) == 0) {
+		return args, "", false, nil
+	}
 	target, err := g.targetForCall(toolName, args, customTool)
 	if err != nil {
+		if !requiresApproval {
+			return args, "", false, nil
+		}
 		return nil, "", false, err
 	}
 	decision, found := g.resolvedDecision(target)

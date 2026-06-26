@@ -3335,6 +3335,92 @@ func TestHandleRunning_Timeout(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_AutonomousTaskTimeoutWithPendingApprovalParksBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Second}
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-timeout-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-timeout-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-timeout-approval-agent"},
+			Timeout:     &timeout,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-timeout-approval-job",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-timeout-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-timeout-approval-job" {
+		t.Fatalf("task status = %#v, want parked Running before timeout failure", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousTaskTimeoutWithApprovedApprovalResumesBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Second}
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-timeout-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "run-timeout-approved-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-timeout-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-timeout-approved-agent"},
+			Timeout:  &timeout,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-timeout-approved-job",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-timeout-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-timeout-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-timeout-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", task.Status)
+	}
+}
+
 func TestHandleRunning_JobNotFound(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{

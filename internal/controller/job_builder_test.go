@@ -2485,6 +2485,33 @@ func TestJobBuilder_buildEnvVars_WithResolvedApprovalsOption(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildEnvVars_KeepsEmptyResolvedApprovalsEnvOverride(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "real-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "Coordinate incident",
+		},
+	}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+		Coordination: &corev1alpha1.CoordinationConfig{
+			Enabled:               true,
+			Autonomous:            true,
+			ApprovalRequiredTools: []string{"dispatch_work_order"},
+		},
+	}}
+	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
+	env, ok := findEnvVar(envVars, workerenv.ResolvedApprovals)
+	if !ok {
+		t.Fatalf("missing %s", workerenv.ResolvedApprovals)
+	}
+	if env.Value != "" {
+		t.Fatalf("%s = %q, want explicit empty value", workerenv.ResolvedApprovals, env.Value)
+	}
+}
+
 func TestJobBuilder_buildEnvVars_AutonomousCoordinationIncludesRequestApprovalTool(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2524,8 +2551,8 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 	if env, ok := findEnvVar(envVars, workerenv.TaskUID); !ok || env.Value != "real-uid" {
 		t.Fatalf("%s = %#v, found=%t; want real-uid", workerenv.TaskUID, env, ok)
 	}
-	if _, ok := findEnvVar(envVars, workerenv.ResolvedApprovals); ok {
-		t.Fatalf("%s should be removed when controller has no resolved approvals", workerenv.ResolvedApprovals)
+	if env, ok := findEnvVar(envVars, workerenv.ResolvedApprovals); !ok || env.Value != "" {
+		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.ResolvedApprovals, env, ok)
 	}
 	if _, ok := findEnvVar(envVars, workerenv.ApprovalRequiredTools); ok {
 		t.Fatalf("%s should be removed when controller has no approval-required tools", workerenv.ApprovalRequiredTools)
