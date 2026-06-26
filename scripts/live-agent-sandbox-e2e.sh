@@ -41,16 +41,18 @@ sanitize_image_tag() {
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
-agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.4.6}"
+agent_sandbox_version="${AGENT_SANDBOX_VERSION:-v0.5.0}"
 kind_cluster="${KIND_CLUSTER:-orka-live-agent-sandbox-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
 orka_controller_deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
 orka_api_service="${ORKA_API_SERVICE:-orka-api}"
 orka_api_service_port="${ORKA_API_SERVICE_PORT:-8080}"
 orka_api_local_port="${ORKA_API_LOCAL_PORT:-18084}"
+router_api_local_port="${ORKA_AGENT_SANDBOX_ROUTER_LOCAL_PORT:-18085}"
 e2e_run_id="$(sanitize_image_tag "${ORKA_AGENT_SANDBOX_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 manager_image="${ORKA_MANAGER_IMAGE:-orka-controller:live-agent-sandbox-e2e-${e2e_run_id}}"
 fake_claude_image="${ORKA_FAKE_HARNESS_WRAPPER_IMAGE:-orka-agent-sandbox-fake-claude:live-agent-sandbox-e2e-${e2e_run_id}}"
+harness_wrapper_image="${ORKA_HARNESS_WRAPPER_IMAGE:-orka-agent-harness-wrapper:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_router_image="${ORKA_AGENT_SANDBOX_ROUTER_IMAGE:-orka-agent-sandbox-router:live-agent-sandbox-e2e-${e2e_run_id}}"
 sandbox_template_name="${ORKA_AGENT_SANDBOX_TEMPLATE:-orka-agent-sandbox-e2e-template}"
 agent_name="${ORKA_AGENT_SANDBOX_AGENT:-orka-agent-sandbox-e2e-agent}"
@@ -58,8 +60,10 @@ delete_task_name="${ORKA_AGENT_SANDBOX_DELETE_TASK:-orka-agent-sandbox-delete-sm
 retain_task_one="${ORKA_AGENT_SANDBOX_RETAIN_TASK_ONE:-orka-agent-sandbox-retain-one}"
 retain_task_two="${ORKA_AGENT_SANDBOX_RETAIN_TASK_TWO:-orka-agent-sandbox-retain-two}"
 session_name="${ORKA_AGENT_SANDBOX_SESSION:-orka-agent-sandbox-session}"
+smoke_claim_name="${ORKA_AGENT_SANDBOX_SMOKE_CLAIM:-orka-agent-sandbox-e2e-retained-smoke}"
 wait_timeout="${ORKA_AGENT_SANDBOX_WAIT_TIMEOUT:-8m}"
 api_pf_pid=""
+router_pf_pid=""
 router_namespace=""
 created_kind_cluster="0"
 agent_sandbox_module_cache=""
@@ -67,11 +71,13 @@ work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-agent-sandbox-e2e.XX
 kind_config="${ORKA_AGENT_SANDBOX_KIND_CONFIG:-${work_dir}/kind-config.yaml}"
 fake_dockerfile="${work_dir}/Dockerfile.fake-claude"
 api_pf_log="${work_dir}/api-port-forward.log"
+router_pf_log="${work_dir}/router-port-forward.log"
+smoke_go_dir="${repo_root}/.tmp-live-agent-sandbox-smoke-${e2e_run_id}"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
 manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
 
-if [[ "${agent_sandbox_version}" != "v0.4.6" ]]; then
-  die "this e2e is pinned to agent-sandbox v0.4.6 to match go.mod"
+if [[ "${agent_sandbox_version}" != "v0.5.0" ]]; then
+  die "this e2e is pinned to agent-sandbox v0.5.0 to match go.mod"
 fi
 
 cleanup_one_port_forward() {
@@ -87,6 +93,8 @@ cleanup_one_port_forward() {
 cleanup_port_forward() {
   cleanup_one_port_forward "${api_pf_pid}"
   api_pf_pid=""
+  cleanup_one_port_forward "${router_pf_pid}"
+  router_pf_pid=""
 }
 
 restore_manager_kustomization() {
@@ -103,10 +111,10 @@ dump_diagnostics() {
     kubectl config current-context 2>/dev/null || true
     echo
     echo "=== Orka Namespace Resources ==="
-    kubectl get pods,svc,deploy,jobs,tasks,agents,sandboxclaims,sandboxes,sandboxtemplates -n "${orka_namespace}" -o wide 2>/dev/null || true
+    kubectl get pods,svc,deploy,jobs,tasks,agents,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -n "${orka_namespace}" -o wide 2>/dev/null || true
     echo
     echo "=== Agent Sandbox Resources ==="
-    kubectl get pods,svc,deploy,sandboxclaims,sandboxes,sandboxtemplates -A -o wide 2>/dev/null || true
+    kubectl get pods,svc,deploy,sandboxclaims,sandboxes,sandboxtemplates,sandboxwarmpools -A -o wide 2>/dev/null || true
     echo
     echo "=== Orka Namespace Events ==="
     kubectl get events -n "${orka_namespace}" --sort-by=.lastTimestamp 2>/dev/null || true
@@ -134,6 +142,11 @@ dump_diagnostics() {
     if [[ -f "${api_pf_log}" ]]; then
       cat "${api_pf_log}" 2>/dev/null || true
     fi
+    echo
+    echo "=== Router Port-forward Log ==="
+    if [[ -f "${router_pf_log}" ]]; then
+      cat "${router_pf_log}" 2>/dev/null || true
+    fi
   } >&2
 }
 
@@ -154,6 +167,7 @@ on_exit() {
   if [[ "${created_kind_cluster}" == "1" ]]; then
     kind delete cluster --name "${kind_cluster}" >/dev/null 2>&1 || true
   fi
+  rm -rf "${smoke_go_dir}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
 
   if [[ "${status}" -ne 0 ]]; then
@@ -552,8 +566,17 @@ deploy_sandbox_router() {
 
   router_namespace="${orka_namespace}"
   log "Deploying upstream sandbox router into ${router_namespace}"
-  awk -v image="${sandbox_router_image}" '{ gsub(/\$\{ROUTER_IMAGE\}/, image); print }' "${router_yaml}" |
-    kubectl -n "${router_namespace}" apply -f -
+  awk -v image="${sandbox_router_image}" '
+    {
+      gsub(/\$\{ROUTER_IMAGE\}/, image)
+      if ($0 ~ /name: ALLOW_UNAUTHENTICATED_ROUTER/) { allow = 1 }
+      if (allow == 1 && $0 ~ /value: "false"/) {
+        sub(/value: "false"/, "value: \"true\"")
+        allow = 0
+      }
+      print
+    }
+  ' "${router_yaml}" | kubectl -n "${router_namespace}" apply -f -
   run kubectl -n "${router_namespace}" rollout status deployment/sandbox-router-deployment --timeout=5m
 }
 
@@ -599,9 +622,9 @@ patch_controller_for_agent_sandbox() {
 }
 
 apply_sandbox_template() {
-  log "Creating agent-sandbox template ${sandbox_template_name}"
+  log "Creating agent-sandbox template and warm pool ${sandbox_template_name}"
   kubectl apply -f - <<YAML
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: ${sandbox_template_name}
@@ -644,6 +667,16 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ${sandbox_template_name}
+  namespace: ${orka_namespace}
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: ${sandbox_template_name}
 YAML
 }
 
@@ -817,13 +850,215 @@ verify_retained_claim_reused() {
   log "Verifying retained session SandboxClaim/${claim}"
   kubectl -n "${orka_namespace}" get sandboxclaim "${claim}" -o json |
     jq -e --arg template "${sandbox_template_name}" '
-      .spec.sandboxTemplateRef.name == $template
+      .spec.warmPoolRef.name == $template
       and ((.status.sandbox.name // "") != "")
     ' >/dev/null
 
   local sandbox
   sandbox="$(kubectl -n "${orka_namespace}" get sandboxclaim "${claim}" -o jsonpath='{.status.sandbox.name}')"
   kubectl -n "${orka_namespace}" get sandbox "${sandbox}" >/dev/null
+}
+
+write_workspace_smoke_go() {
+  rm -rf "${smoke_go_dir}"
+  mkdir -p "${smoke_go_dir}"
+  cat >"${smoke_go_dir}/main.go" <<'GO'
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/go-logr/logr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+
+	"github.com/sozercan/orka/internal/workspace"
+)
+
+func main() {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			fmt.Fprintln(os.Stderr, recovered)
+			os.Exit(1)
+		}
+	}()
+
+	namespace := mustEnv("ORKA_NAMESPACE")
+	warmPool := mustEnv("ORKA_AGENT_SANDBOX_TEMPLATE")
+	routerURL := mustEnv("ORKA_AGENT_SANDBOX_ROUTER_URL")
+	retainedClaim := mustEnv("ORKA_AGENT_SANDBOX_SMOKE_CLAIM")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	helper, err := sandbox.NewK8sHelper(nil, logr.Discard())
+	must("create Kubernetes helper", err)
+
+	executor := workspace.NewAgentSandboxExecutor(workspace.WithAgentSandboxAPIURL(routerURL))
+	claim, err := executor.Claim(ctx, workspace.ClaimRequest{
+		Namespace:         namespace,
+		TaskName:          "live-agent-sandbox-delete-smoke",
+		Template:          workspace.TemplateRef{Name: warmPool},
+		Timeout:           3 * time.Minute,
+		MaxRequestTimeout: 5 * time.Minute,
+	})
+	must("claim delete workspace", err)
+	deleteRef := claim.Ref
+	cleanupDelete := true
+	defer func() {
+		if cleanupDelete {
+			cleanupWorkspace(executor, deleteRef)
+		}
+	}()
+	verifyWarmPoolRef(ctx, helper, namespace, deleteRef.ClaimName, warmPool)
+	execContains(ctx, executor, deleteRef, "delete workspace exec", "test \"$ORKA_SMOKE_ENV\" = env-ok && printf delete-smoke-ok", "delete-smoke-ok")
+	_, err = executor.Delete(ctx, workspace.DeleteRequest{Ref: deleteRef, Reason: "live smoke delete cleanup", Timeout: 2 * time.Minute})
+	must("delete delete workspace", err)
+	cleanupDelete = false
+	waitClaimDeleted(ctx, helper, namespace, deleteRef.ClaimName)
+	fmt.Printf("delete workspace claim %s executed and deleted\n", deleteRef.ClaimName)
+
+	retainedExecutor := workspace.NewAgentSandboxExecutor(workspace.WithAgentSandboxAPIURL(routerURL))
+	retained, err := retainedExecutor.Claim(ctx, workspace.ClaimRequest{
+		Namespace:         namespace,
+		TaskName:          "live-agent-sandbox-retain-smoke",
+		ClaimName:         retainedClaim,
+		CreateIfMissing:   true,
+		Template:          workspace.TemplateRef{Name: warmPool},
+		ReuseKey:          "live-smoke-session",
+		Timeout:           3 * time.Minute,
+		MaxRequestTimeout: 5 * time.Minute,
+	})
+	must("claim retained workspace", err)
+	retainedRef := retained.Ref
+	cleanupRetained := true
+	defer func() {
+		if cleanupRetained {
+			cleanupWorkspace(retainedExecutor, retainedRef)
+		}
+	}()
+	verifyWarmPoolRef(ctx, helper, namespace, retainedRef.ClaimName, warmPool)
+	execContains(ctx, retainedExecutor, retainedRef, "retained workspace marker write", "printf retained-smoke-ok > retained-marker.txt && cat retained-marker.txt", "retained-smoke-ok")
+	_, err = retainedExecutor.Release(ctx, workspace.ReleaseRequest{Ref: retainedRef, Retain: true, Reason: "live smoke retain", Timeout: 2 * time.Minute})
+	must("release retained workspace", err)
+	verifyWarmPoolRef(ctx, helper, namespace, retainedRef.ClaimName, warmPool)
+
+	reuseExecutor := workspace.NewAgentSandboxExecutor(workspace.WithAgentSandboxAPIURL(routerURL))
+	reused, err := reuseExecutor.Claim(ctx, workspace.ClaimRequest{
+		Namespace:         namespace,
+		TaskName:          "live-agent-sandbox-reuse-smoke",
+		ClaimName:         retainedClaim,
+		CreateIfMissing:   true,
+		Template:          workspace.TemplateRef{Name: warmPool},
+		ReuseKey:          "live-smoke-session",
+		Timeout:           3 * time.Minute,
+		MaxRequestTimeout: 5 * time.Minute,
+	})
+	must("reattach retained workspace", err)
+	if !reused.Reused {
+		fatalf("reattach retained workspace: Reused=%v, want true", reused.Reused)
+	}
+	retainedExecutor = reuseExecutor
+	retainedRef = reused.Ref
+	verifyWarmPoolRef(ctx, helper, namespace, retainedRef.ClaimName, warmPool)
+	execContains(ctx, reuseExecutor, retainedRef, "retained workspace marker read", "cat retained-marker.txt", "retained-smoke-ok")
+	_, err = reuseExecutor.Delete(ctx, workspace.DeleteRequest{Ref: retainedRef, Reason: "live smoke retained cleanup", Timeout: 2 * time.Minute})
+	must("delete retained workspace", err)
+	cleanupRetained = false
+	waitClaimDeleted(ctx, helper, namespace, retainedRef.ClaimName)
+	fmt.Printf("retained workspace claim %s reused and deleted\n", retainedRef.ClaimName)
+	fmt.Println("agent-sandbox workspace adapter smoke passed")
+}
+
+func mustEnv(name string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		fatalf("%s is required", name)
+	}
+	return value
+}
+
+func execContains(ctx context.Context, executor *workspace.AgentSandboxExecutor, ref workspace.WorkspaceRef, label, command, expected string) {
+	result, err := executor.Exec(ctx, workspace.ExecRequest{
+		Ref:     ref,
+		Command: []string{"sh", "-c", command},
+		Env:     map[string]string{"ORKA_SMOKE_ENV": "env-ok"},
+		WorkDir: "/workspace",
+		Timeout: 90 * time.Second,
+	})
+	must(label, err)
+	if !strings.Contains(result.Stdout, expected) {
+		fatalf("%s stdout = %q, want substring %q (stderr=%q)", label, result.Stdout, expected, result.Stderr)
+	}
+}
+
+func verifyWarmPoolRef(ctx context.Context, helper *sandbox.K8sHelper, namespace, claimName, warmPool string) {
+	// agent-sandbox v0.5 K8sHelper uses the extensions v1beta1 client, where
+	// SandboxClaimSpec requires warmPoolRef. This compile-checks that Orka's
+	// adapter creates the v1beta1 claim shape expected by the upgraded SDK.
+	claim, err := helper.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+	must("get SandboxClaim "+claimName, err)
+	if claim.Spec.WarmPoolRef.Name != warmPool {
+		fatalf("SandboxClaim/%s warmPoolRef.name = %q, want %q", claimName, claim.Spec.WarmPoolRef.Name, warmPool)
+	}
+	if strings.TrimSpace(claim.Status.SandboxStatus.Name) == "" {
+		fatalf("SandboxClaim/%s has empty status.sandbox.name", claimName)
+	}
+}
+
+func waitClaimDeleted(ctx context.Context, helper *sandbox.K8sHelper, namespace, claimName string) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		_, err := helper.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
+		if k8serrors.IsNotFound(err) {
+			return
+		}
+		if err != nil {
+			must("wait for SandboxClaim deletion", err)
+		}
+		if time.Now().After(deadline) {
+			fatalf("SandboxClaim/%s was not deleted within timeout", claimName)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func cleanupWorkspace(executor *workspace.AgentSandboxExecutor, ref workspace.WorkspaceRef) {
+	if executor == nil || ref.IsZero() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	_, _ = executor.Delete(ctx, workspace.DeleteRequest{Ref: ref, Reason: "live smoke deferred cleanup", Timeout: 2 * time.Minute})
+}
+
+func must(label string, err error) {
+	if err != nil {
+		fatalf("%s: %v", label, err)
+	}
+}
+
+func fatalf(format string, args ...any) {
+	panic(fmt.Sprintf(format, args...))
+}
+GO
+}
+
+run_workspace_smoke() {
+  local router_url="$1"
+  log "Running live agent-sandbox workspace adapter smoke"
+  write_workspace_smoke_go
+  (cd "${repo_root}" && \
+    ORKA_NAMESPACE="${orka_namespace}" \
+    ORKA_AGENT_SANDBOX_TEMPLATE="${sandbox_template_name}" \
+    ORKA_AGENT_SANDBOX_ROUTER_URL="${router_url}" \
+    ORKA_AGENT_SANDBOX_SMOKE_CLAIM="${smoke_claim_name}" \
+    go run "./$(basename "${smoke_go_dir}")")
 }
 
 reset_e2e_resources() {
@@ -838,11 +1073,15 @@ reset_e2e_resources() {
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
-  run kubectl -n "${orka_namespace}" delete sandboxclaim "${session_claim}" \
+  run kubectl -n "${orka_namespace}" delete sandboxclaim "${session_claim}" "${smoke_claim_name}" \
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
   run kubectl -n "${orka_namespace}" delete agent "${agent_name}" \
+    --ignore-not-found=true \
+    --wait=true \
+    --timeout=2m
+  run kubectl -n "${orka_namespace}" delete sandboxwarmpool "${sandbox_template_name}" \
     --ignore-not-found=true \
     --wait=true \
     --timeout=2m
@@ -879,15 +1118,18 @@ main() {
   write_fake_claude_dockerfile
   log "Building fake Claude worker/runtime image ${fake_claude_image}"
   run docker build -t "${fake_claude_image}" -f "${fake_dockerfile}" .
+  log "Building harness-wrapper service image ${harness_wrapper_image}"
+  run make docker-build-harness-wrapper HARNESS_WRAPPER_IMG="${harness_wrapper_image}"
   build_sandbox_router_image
 
   log "Loading images into Kind cluster ${kind_cluster}"
   run kind load docker-image "${manager_image}" --name "${kind_cluster}"
   run kind load docker-image "${fake_claude_image}" --name "${kind_cluster}"
+  run kind load docker-image "${harness_wrapper_image}" --name "${kind_cluster}"
   run kind load docker-image "${sandbox_router_image}" --name "${kind_cluster}"
 
   log "Deploying Orka manager"
-  run make deploy IMG="${manager_image}"
+  run make deploy IMG="${manager_image}" HARNESS_WRAPPER_IMG="${harness_wrapper_image}"
   run kubectl wait --for=condition=Established crd/tasks.core.orka.ai --timeout=60s
   deploy_sandbox_router
   patch_controller_for_agent_sandbox
@@ -902,8 +1144,16 @@ main() {
   api_base="http://127.0.0.1:${orka_api_local_port}"
   wait_for_http "${api_base}/readyz" "Orka API /readyz"
 
-  log "Skipping agent-sandbox Task smoke: harness-wrapper runtime is service-backed and no longer runs agent tasks as Job-backed sandbox workspaces"
-  log "Live agent-sandbox installation/configuration e2e passed"
+  log "Port-forwarding sandbox router service"
+  router_pf_pid="$(start_port_forward "${router_namespace}" "svc/sandbox-router-svc" "${router_api_local_port}" "8080" "${router_pf_log}")"
+  local router_base
+  router_base="http://127.0.0.1:${router_api_local_port}"
+  wait_for_http "${router_base}/healthz" "sandbox router /healthz"
+
+  run_workspace_smoke "${router_base}"
+
+  log "Skipping full agent Task workspace smoke: harness-wrapper runtime currently rejects execution workspaces before Job creation"
+  log "Live agent-sandbox installation/configuration/workspace-adapter e2e passed"
 }
 
 main "$@"

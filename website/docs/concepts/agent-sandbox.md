@@ -24,13 +24,12 @@ RuntimeClass and agent sandbox are complementary. `runtimeClassName` applies to 
 ## Current Status and Limitations
 
 - The feature is disabled by default.
-- When enabled, the Task controller validates `Task.spec.execution.workspace` requests for `type: agent` Tasks, resolves/defaults the effective `SandboxTemplate` and workspace settings, and passes those settings to the agent worker Job.
+- When enabled, the Task controller validates `Task.spec.execution.workspace` requests for `type: agent` Tasks, resolves/defaults the effective `SandboxWarmPool` and workspace settings, and passes those settings to the agent worker Job.
 - The agent worker wrapper claims an upstream `agent-sandbox` workspace, waits for it to become ready, and re-executes the same worker binary inside the sandbox with recursive sandboxing disabled.
-- Orka uses the upstream `sigs.k8s.io/agent-sandbox` Go SDK. With the currently pinned SDK, the worker creates or reattaches claims with a template name plus claim namespace; Orka therefore treats `templateRef.namespace` as both the template namespace and claim namespace for explicit cross-namespace workspace requests.
+- Orka uses the upstream `sigs.k8s.io/agent-sandbox` Go SDK. With the currently pinned SDK, the worker creates or reattaches claims through a named `SandboxWarmPool`; Orka's existing `templateRef.name` setting is used as that warm pool name for compatibility.
 - `namespaceStrategy: task` defaults claims to the Task namespace when `templateRef.namespace` is omitted. `namespaceStrategy: controller` defaults claims to the controller namespace when it is discoverable, while an explicit `templateRef.namespace` still wins.
-- The controller-level warm pool policy is translated onto each upstream `SandboxClaim`: Orka `disabled` becomes upstream `warmpool: none`, and Orka `template` becomes upstream `warmpool: default` so the agent-sandbox controller may adopt a matching warm pool.
 - `cleanupPolicy: delete` deletes the workspace after execution. `cleanupPolicy: retain` disconnects from the sandbox and leaves the upstream claim/resource for operator inspection or external reattach.
-- `reusePolicy: session` derives a deterministic claim name from the namespaced session/template inputs, allowing later worker Jobs to reattach when the prior workspace was retained.
+- `reusePolicy: session` derives a deterministic claim name from the namespaced session/warm-pool inputs, allowing later worker Jobs to reattach when the prior workspace was retained.
 - The SDK command API accepts one shell command string. Orka renders argv/workdir into that string and passes environment variables through a temporary sandbox env file that is sourced and removed before the command runs; stdin is not supported. Upstream command responses are capped by the SDK, and Orka applies its own configured output truncation where requested.
 - The SDK file write API accepts plain filenames only. Orka's adapter rejects nested upload paths instead of flattening them; recursive download/list is supported for files visible through the SDK.
 - Orka does not install or manage upstream `agent-sandbox` CRDs, router services, templates, or warm pools. Install and operate those components separately before enabling workspace-backed Tasks.
@@ -39,7 +38,7 @@ RuntimeClass and agent sandbox are complementary. `runtimeClassName` applies to 
 
 ## Execution Flow
 
-1. The Task controller validates the workspace request and resolves/defaults the effective `SandboxTemplate` and workspace settings, including template name/namespace, reuse policy, cleanup policy, claim timeout, and command timeout.
+1. The Task controller validates the workspace request and resolves/defaults the effective `SandboxWarmPool` and workspace settings, including warm pool name/namespace, reuse policy, cleanup policy, claim timeout, and command timeout.
 2. The controller still creates an ordinary Orka worker Job. Any `runtimeClassName`, node selector, tolerations, and affinity settings apply to this outer worker pod.
 3. For `type: agent` Tasks, the Job includes environment variables that describe the resolved sandbox workspace request.
 4. The worker wrapper sees those variables, claims an upstream `agent-sandbox` workspace, waits for it to become ready, and executes the same worker command inside that workspace.
@@ -86,9 +85,9 @@ Notes:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enables workspace-backed execution for this agent Task. When omitted or false, the normal worker path is used without sandbox env propagation. |
-| `templateRef.name` | string | Controller default template, if configured | Workspace template name to instantiate or reuse. Required when `enabled: true` unless the controller has `--agent-sandbox-default-template`. |
-| `templateRef.namespace` | string | Task namespace, or controller namespace with `namespaceStrategy: controller` | Namespace containing the workspace template and claim. Because the current SDK does not accept a separate template namespace, explicit cross-namespace requests create/reattach the `SandboxClaim` in this namespace. |
-| `reusePolicy` | string | `none` | Workspace reuse intent. Supported values: `none`, `session`. Session reuse derives a deterministic claim name from the namespaced session/template inputs so later worker Jobs can reattach when the workspace is retained. |
+| `templateRef.name` | string | Controller default template, if configured | Agent-sandbox `SandboxWarmPool` name to claim. Required when `enabled: true` unless the controller has `--agent-sandbox-default-template`. |
+| `templateRef.namespace` | string | Task namespace, or controller namespace with `namespaceStrategy: controller` | Namespace containing the `SandboxWarmPool` and claim. Explicit cross-namespace requests create/reattach the `SandboxClaim` in this namespace. |
+| `reusePolicy` | string | `none` | Workspace reuse intent. Supported values: `none`, `session`. Session reuse derives a deterministic claim name from the namespaced session/warm-pool inputs so later worker Jobs can reattach when the workspace is retained. |
 | `cleanupPolicy` | string | Controller default cleanup policy, defaulting to `delete` | Cleanup behavior after use. Supported values: `delete`, `retain`. |
 
 ## Validation Rules
@@ -97,7 +96,7 @@ The Task controller validates workspace requests before creating worker Jobs:
 
 - `--agent-sandbox-enabled=true` or `ORKA_AGENT_SANDBOX_ENABLED=true` is required.
 - Workspace requests are only supported for `type: agent` Tasks.
-- `templateRef.name` is required unless `--agent-sandbox-default-template` or `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` is configured.
+- `templateRef.name` is required unless `--agent-sandbox-default-template` or `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` is configured, and the resolved `SandboxWarmPool` must exist.
 - `reusePolicy` must be one of `none` or `session` when set.
 - `cleanupPolicy` must be one of `delete` or `retain` when set.
 - `reusePolicy: session` requires `spec.sessionRef.name`.
@@ -111,8 +110,8 @@ Controller flags can be set directly, through environment variables, or through 
 |------|----------------------|------------|---------|-------------|
 | `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` | `controller.agentSandbox.enabled` | `false` | Enable experimental agent sandbox workspace support for agent Tasks. |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` | `controller.agentSandbox.routerUrl` | empty | Optional upstream agent-sandbox router base URL. |
-| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` | `controller.agentSandbox.defaultTemplate` | empty | Default workspace template name used when a Task omits `templateRef.name`. |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` | `controller.agentSandbox.warmPoolPolicy` | `disabled` | Warm pool policy for workspace claims. Supported values: `disabled` (set upstream `warmpool: none`) and `template` (set upstream `warmpool: default`). |
+| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` | `controller.agentSandbox.defaultTemplate` | empty | Default `SandboxWarmPool` name used when a Task omits `templateRef.name`. |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` | `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting retained in worker env. Supported values: `disabled` and `template`; v0.5 claims use `SandboxWarmPool` references. |
 | `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` | `controller.agentSandbox.namespaceStrategy` | `task` | Namespace strategy for sandbox resources. Supported values: `task`, `controller`. |
 | `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations. |
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox. |
@@ -141,13 +140,13 @@ controller:
 4. Use worker logs and upstream `agent-sandbox` resources to debug claim, readiness, execution, and cleanup because Orka Task status does not expose sandbox lifecycle state.
 5. Choose `cleanupPolicy: delete` for single-use workspaces and `cleanupPolicy: retain` when the upstream sandbox installation should keep/release the workspace for reuse.
 6. For custom manifests, make sure the worker ServiceAccount can create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these rules.
-7. The sandbox template image must contain the agent CLI runtime used by the worker being re-executed, plus a shell, writable workspace/home directories, and network access to Orka API and the configured model/provider endpoint. Provider credentials are forwarded as command environment variables; do not log them.
+7. The warm pool's sandbox template image must contain the agent CLI runtime used by the worker being re-executed, plus a shell, writable workspace/home directories, and network access to Orka API and the configured model/provider endpoint. Provider credentials are forwarded as command environment variables; do not log them.
 8. The outer worker stages its own binary and a ServiceAccount token file into the sandbox before execution. The inner worker runs with recursive sandboxing disabled and uses `ORKA_SA_TOKEN_PATH` to submit results and artifacts back to Orka.
 9. If transaction-token env vars point at mounted files in the outer worker, the wrapper copies trimmed token contents into sandbox-local `0600` files, rewrites `ORKA_TRANSACTION_TOKEN_FILE` and `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` to those paths, deduplicates shared source paths, and removes the staged token files after execution or before retaining a workspace. Raw TxTokens are never written to Task spec/status/logs.
 
 ## Live Smoke Test
 
-After enabling the controller feature and installing a usable sandbox template, validate the path with an actual agent Task rather than only checking manifests. This example assumes a namespace `orka-system`, an agent named `claude-agent`, and a template named `orka-live-template`.
+After enabling the controller feature and installing a usable `SandboxWarmPool`, validate the path with an actual agent Task rather than only checking manifests. This example assumes a namespace `orka-system`, an agent named `claude-agent`, and a warm pool named `orka-live-template`.
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1

@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -61,7 +61,7 @@ func newTestScheme() *runtime.Scheme {
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
-	_ = sandboxextv1alpha1.AddToScheme(s)
+	_ = sandboxextv1beta1.AddToScheme(s)
 	return s
 }
 
@@ -601,7 +601,7 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // validateExecutionWorkspace (pure logic)
 // ---------------------------------------------------------------------------
 
-func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testing.T) {
+func TestResolveExecutionWorkspaceRequestValidatesSandboxWarmPoolExists(t *testing.T) {
 	scheme := newTestScheme()
 
 	executionWorkspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
@@ -629,11 +629,11 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	}
 
-	t.Run("existing template in task namespace is accepted", func(t *testing.T) {
-		template := &sandboxextv1alpha1.SandboxTemplate{
+	t.Run("existing warm pool in task namespace is accepted", func(t *testing.T) {
+		warmPool := &sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
 		}
-		r := newUnitReconciler(scheme, template)
+		r := newUnitReconciler(scheme, warmPool)
 		r.AgentSandboxEnabled = true
 
 		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", executionWorkspace("task-template", "")))
@@ -645,25 +645,25 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	})
 
-	t.Run("missing template fails before job creation", func(t *testing.T) {
+	t.Run("missing warm pool fails before job creation", func(t *testing.T) {
 		r := newUnitReconciler(scheme)
 		r.AgentSandboxEnabled = true
 
 		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", executionWorkspace("missing-template", "")))
 		if err == nil {
-			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing template error")
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing warm pool error")
 		}
-		want := `execution workspace template "missing-template" not found in namespace "default"`
+		want := `execution workspace warm pool "missing-template" not found in namespace "default"`
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}
 	})
 
-	t.Run("explicit template namespace is accepted as claim namespace", func(t *testing.T) {
-		template := &sandboxextv1alpha1.SandboxTemplate{
+	t.Run("explicit warm pool namespace is accepted as claim namespace", func(t *testing.T) {
+		warmPool := &sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
 		}
-		r := newUnitReconciler(scheme, template)
+		r := newUnitReconciler(scheme, warmPool)
 		r.AgentSandboxEnabled = true
 
 		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", executionWorkspace("shared-template", "sandbox-templates")))
@@ -5106,7 +5106,7 @@ func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace template")
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace warm pool")
 	if !strings.Contains(updated.Status.Message, "failed to resolve execution workspace") {
 		t.Fatalf("message = %q, want resolve execution workspace failure", updated.Status.Message)
 	}
