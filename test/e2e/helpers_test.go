@@ -107,10 +107,6 @@ type proxyModelCatalog struct {
 }
 
 var (
-	liveCopilotProxyGPTModelPreferences = []string{
-		"gpt-5.2",
-		"gpt-5.5",
-	}
 	liveCopilotProxyGPTModelPrefixes = []string{
 		"gpt-",
 	}
@@ -836,15 +832,6 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 		return ""
 	}
 	return candidates[0]
-}
-
-func firstPreferredProxyModelSupportingEndpoint(catalog proxyModelCatalog, endpoint string, preferredIDs []string, prefixes ...string) string {
-	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
-		if catalog.modelSupportsEndpoint(modelID, endpoint) {
-			return modelID
-		}
-	}
-	return ""
 }
 
 func preferredProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) []string {

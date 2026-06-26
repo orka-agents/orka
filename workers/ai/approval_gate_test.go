@@ -30,6 +30,7 @@ import (
 const (
 	gatedDispatchTool    = "dispatch_work_order"
 	declineHandledResult = "decline handled"
+	correctedResult      = "corrected"
 )
 
 func TestApprovalGatePrescansBatchBeforeExecutingGatedTool(t *testing.T) {
@@ -198,7 +199,7 @@ func TestApprovalGatePreScanReturnsMalformedGatedArgsToModel(t *testing.T) {
 				},
 				StopReason: "tool_use",
 			},
-			{Content: "corrected", StopReason: "end_turn"},
+			{Content: correctedResult, StopReason: "end_turn"},
 		}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
@@ -212,7 +213,42 @@ func TestApprovalGatePreScanReturnsMalformedGatedArgsToModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
-	if result != "corrected" {
+	if result != correctedResult {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+}
+
+func TestApprovalGatePreScanReturnsNonObjectGatedArgsToModel(t *testing.T) {
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "bad gated args",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-dispatch",
+					Name:      gatedDispatchTool,
+					Arguments: json.RawMessage(`[]`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
 		t.Fatalf("result = %q, want corrected", result)
 	}
 }
@@ -544,7 +580,7 @@ func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T
 				},
 				StopReason: "tool_use",
 			},
-			{Content: "corrected", StopReason: "end_turn"},
+			{Content: correctedResult, StopReason: "end_turn"},
 		}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
@@ -558,7 +594,7 @@ func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
-	if result != "corrected" {
+	if result != correctedResult {
 		t.Fatalf("result = %q, want corrected", result)
 	}
 }

@@ -173,6 +173,9 @@ func (g *approvalGate) targetForCall(
 	args json.RawMessage,
 	customTool *corev1alpha1.Tool,
 ) (approvals.ApprovalTarget, error) {
+	if err := validateApprovalTargetArguments(args); err != nil {
+		return approvals.ApprovalTarget{}, err
+	}
 	targetSpecDigest, err := approvalTargetSpecDigest(customTool)
 	if err != nil {
 		return approvals.ApprovalTarget{}, err
@@ -188,6 +191,17 @@ func (g *approvalGate) targetForCall(
 		"warning",
 		targetSpecDigest,
 	)
+}
+
+func validateApprovalTargetArguments(args json.RawMessage) error {
+	if len(strings.TrimSpace(string(args))) == 0 {
+		return nil
+	}
+	var targetArgsObject map[string]any
+	if err := json.Unmarshal(args, &targetArgsObject); err != nil || targetArgsObject == nil {
+		return fmt.Errorf("target arguments must be a JSON object")
+	}
+	return nil
 }
 
 func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
