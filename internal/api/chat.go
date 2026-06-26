@@ -241,7 +241,11 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			attribute.String("chat.model", model),
 		),
 	)
-	defer span.End()
+	defer func() {
+		if !sseMode {
+			span.End()
+		}
+	}()
 
 	// Build system prompt
 	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
@@ -379,6 +383,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 
 	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		defer span.End()
 		defer func() { <-ch.semaphore }()
 		// SendStreamWriter outlives the handler, so use a background context
 		// seeded with the originating chat span context rather than Fiber's
