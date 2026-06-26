@@ -398,6 +398,16 @@ func bindApprovalAuthRefVersion(
 		)
 		return
 	}
+	if strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])) == "" {
+		clearApprovalAuthRefVersion(tool)
+		fmt.Printf(
+			"Warning: auth secret %q key %q for tool %q is empty; approval binding skipped\n",
+			key.Name,
+			tool.Spec.HTTP.AuthSecretRef.Key,
+			tool.Name,
+		)
+		return
+	}
 	if tool.Annotations == nil {
 		tool.Annotations = map[string]string{}
 	}

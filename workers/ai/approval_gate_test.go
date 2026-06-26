@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/llm"
 	toolspkg "github.com/sozercan/orka/internal/tools"
@@ -384,6 +385,60 @@ func TestApprovalGatePrepareApprovedCallSkipsUngatedMalformedArgs(t *testing.T) 
 	}
 }
 
+func TestApprovalGateResolvedDecisionPrefersExactApprovalID(t *testing.T) {
+	target := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
+	legacy := resolvedApprovalForTarget(target)
+	legacy.ID = "legacy-approval-id"
+	legacy.TaskUID = ""
+	legacy.Status = approvals.StatusApproved
+	exact := resolvedApprovalForTarget(target)
+	exact.Status = approvals.StatusDeclined
+	gate := &approvalGate{resolved: []approvals.ResolvedApproval{legacy, exact}}
+
+	got, found := gate.resolvedDecision(target)
+	if !found {
+		t.Fatal("resolvedDecision() did not match exact decision")
+	}
+	if got.ID != exact.ID || got.Status != approvals.StatusDeclined {
+		t.Fatalf("resolvedDecision() = %#v, want exact declined decision", got)
+	}
+}
+
+func TestApprovalGateResolvedDecisionIgnoresArbitraryUntaggedDigestMatch(t *testing.T) {
+	target := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
+	legacy := resolvedApprovalForTarget(target)
+	legacy.ID = "unrelated-legacy-id"
+	legacy.TaskUID = ""
+	gate := &approvalGate{namespace: "default", taskName: "incident-task", resolved: []approvals.ResolvedApproval{legacy}}
+
+	if got, found := gate.resolvedDecision(target); found {
+		t.Fatalf("resolvedDecision() matched arbitrary legacy decision: %#v", got)
+	}
+}
+
+func TestApprovalGateResolvedDecisionMatchesLegacyUntaggedApproval(t *testing.T) {
+	target := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
+	legacy := resolvedApprovalForTarget(target)
+	legacy.ID = approvals.ApprovalID(
+		"default",
+		"incident-task",
+		"",
+		target.TargetTool,
+		target.TargetArgsDigest,
+		target.TargetSpecDigest,
+	)
+	legacy.TaskUID = ""
+	gate := &approvalGate{namespace: "default", taskName: "incident-task", resolved: []approvals.ResolvedApproval{legacy}}
+
+	got, found := gate.resolvedDecision(target)
+	if !found {
+		t.Fatal("resolvedDecision() did not match legacy untagged decision")
+	}
+	if got.ID != legacy.ID {
+		t.Fatalf("resolvedDecision() ID = %q, want legacy ID %q", got.ID, legacy.ID)
+	}
+}
+
 func TestApprovalGateMismatchedCustomToolSpecRequestsNewApproval(t *testing.T) {
 	var executions atomic.Int32
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -682,6 +737,15 @@ func TestApprovalTargetArgumentsHashesURLInterpolationAsExecuted(t *testing.T) {
 	}
 }
 
+func TestFormatResolvedApprovalsContextSkipsBlockingOverflowSentinel(t *testing.T) {
+	got := formatResolvedApprovalsContext([]approvals.ResolvedApproval{
+		approvals.BlockingOverflowResolvedApproval(),
+	})
+	if got != "" {
+		t.Fatalf("formatResolvedApprovalsContext() = %q, want sentinel omitted", got)
+	}
+}
+
 func TestBindApprovalAuthRefVersionClearsStaleAnnotationsWhenUnavailable(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -755,6 +819,43 @@ func TestApprovalTargetSpecDigestRejectsBodyAuthKeyURLInterpolation(t *testing.T
 	_, err := approvalTargetSpecDigest(tool)
 	if err == nil || !strings.Contains(err.Error(), "body auth key") {
 		t.Fatalf("approvalTargetSpecDigest() error = %v, want body auth URL interpolation rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestRejectsTransactionTokenHeader(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.Headers = map[string]string{contexttoken.HeaderName: "static"}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "reserved header") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want reserved transaction-token header rejection", err)
+	}
+}
+
+func TestBindApprovalAuthRefVersionSkipsEmptyAuthRefValue(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "dispatch-auth", Namespace: "default", UID: "uid-1", ResourceVersion: "10"},
+		Data:       map[string][]byte{"authref": []byte("  ")},
+	}
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "stale-uid",
+		approvalAuthRefResourceVersionAnnotation: "9",
+	}
+
+	bindApprovalAuthRefVersion(
+		context.Background(),
+		ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
+		"default",
+		tool,
+	)
+
+	if got := tool.Annotations[approvalAuthRefUIDAnnotation]; got != "" {
+		t.Fatalf("auth ref UID annotation = %q, want unset for empty auth ref value", got)
 	}
 }
 

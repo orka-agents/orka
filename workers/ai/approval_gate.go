@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
+	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/tools"
@@ -424,6 +425,13 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 		}
 	}
 	for header := range customTool.Spec.HTTP.Headers {
+		if strings.EqualFold(strings.TrimSpace(header), contexttoken.HeaderName) {
+			return fmt.Errorf(
+				"approval-gated tool %q must not set reserved header %q",
+				customTool.Name,
+				contexttoken.HeaderName,
+			)
+		}
 		if strings.EqualFold(strings.TrimSpace(header), approvalIdempotencyHeader) {
 			return fmt.Errorf(
 				"approval-gated tool %q must not set reserved header %q",
@@ -507,17 +515,36 @@ func (g *approvalGate) resolvedDecision(target approvals.ApprovalTarget) (approv
 		if decision.ID != target.ApprovalID {
 			continue
 		}
-		if decision.TaskUID != "" && decision.TaskUID != target.TaskUID {
+		if resolvedDecisionMatchesTarget(decision, target) {
+			return decision, true
+		}
+	}
+	legacyID := approvals.ApprovalID(
+		g.namespace,
+		g.taskName,
+		"",
+		target.TargetTool,
+		target.TargetArgsDigest,
+		target.TargetSpecDigest,
+	)
+	for _, decision := range g.resolved {
+		if decision.TaskUID != "" || decision.ID != legacyID {
 			continue
 		}
-		if decision.TargetTool != target.TargetTool ||
-			decision.TargetArgsDigest != target.TargetArgsDigest ||
-			decision.TargetSpecDigest != target.TargetSpecDigest {
-			continue
+		if resolvedDecisionMatchesTarget(decision, target) {
+			return decision, true
 		}
-		return decision, true
 	}
 	return approvals.ResolvedApproval{}, false
+}
+
+func resolvedDecisionMatchesTarget(decision approvals.ResolvedApproval, target approvals.ApprovalTarget) bool {
+	if decision.TaskUID != "" && decision.TaskUID != target.TaskUID {
+		return false
+	}
+	return decision.TargetTool == target.TargetTool &&
+		decision.TargetArgsDigest == target.TargetArgsDigest &&
+		decision.TargetSpecDigest == target.TargetSpecDigest
 }
 
 func (g *approvalGate) staleDecisionForTarget(target approvals.ApprovalTarget) (approvals.ResolvedApproval, bool) {
@@ -689,6 +716,10 @@ func injectIdempotencyKey(args json.RawMessage, key string) (json.RawMessage, er
 }
 
 func formatResolvedApprovalsContext(resolved []approvals.ResolvedApproval) string {
+	if len(resolved) == 0 {
+		return ""
+	}
+	resolved, _ = splitBlockingApprovalOverflow(resolved)
 	if len(resolved) == 0 {
 		return ""
 	}

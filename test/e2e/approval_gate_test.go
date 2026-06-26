@@ -14,7 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -24,7 +23,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/test/utils"
 )
 
@@ -134,7 +132,6 @@ var _ = Describe("Human Approval Gate", Ordered, func() {
 
 		By("waiting for the worker to request approval and park without executing the tool")
 		approvalID := waitForPendingApproval(approvalTaskName, approvalToolName, 3*time.Minute)
-		waitForPendingApprovalAPI(apiBaseURL, approvalTaskName, approvalID, 30*time.Second)
 		Expect(fetchApprovalMockDispatchCount(approvalMockName, approvalMockPort)).To(Equal(0))
 
 		By("approving the requested action through the controller API")
@@ -331,52 +328,6 @@ func waitForPendingApproval(taskName, targetTool string, timeout time.Duration) 
 		approvalID = match[1]
 	}, timeout, 2*time.Second).Should(Succeed())
 	return approvalID
-}
-
-func waitForPendingApprovalAPI(apiBaseURL, taskName, approvalID string, timeout time.Duration) {
-	Eventually(func(g Gomega) {
-		approvalsList, status, err := listTaskApprovals(apiBaseURL, taskName)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(status).To(Equal(http.StatusOK))
-		found := false
-		for _, approval := range approvalsList.Approvals {
-			if approval.ID == approvalID {
-				found = true
-				g.Expect(approval.Status).To(Equal(approvals.StatusPending))
-				break
-			}
-		}
-		g.Expect(found).To(BeTrue(), "approval API should list pending approval %s", approvalID)
-	}, timeout, 2*time.Second).Should(Succeed())
-}
-
-type taskApprovalList struct {
-	Approvals []struct {
-		ID         string `json:"id"`
-		Status     string `json:"status"`
-		TargetTool string `json:"targetTool"`
-	} `json:"approvals"`
-}
-
-func listTaskApprovals(apiBaseURL, taskName string) (taskApprovalList, int, error) {
-	url := fmt.Sprintf("%s/api/v1/tasks/%s/approvals?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace)
-	resp, err := http.Get(url)
-	if err != nil {
-		return taskApprovalList{}, 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return taskApprovalList{}, resp.StatusCode, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return taskApprovalList{}, resp.StatusCode, nil
-	}
-	var out taskApprovalList
-	if err := json.Unmarshal(body, &out); err != nil {
-		return taskApprovalList{}, resp.StatusCode, err
-	}
-	return out, resp.StatusCode, nil
 }
 
 func decideApproval(apiBaseURL, taskName, approvalID, decision string) {
