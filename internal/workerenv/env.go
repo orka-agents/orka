@@ -486,7 +486,7 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		AzureAPIVersion: getenv(AIAzureAPIVersion),
 		Tools:           SplitCSV(getenv(AITools)),
 		Fallbacks:       ParseFallbacks(getenv),
-		EnableTelemetry: IsTrue(getenv(EnableTelemetry)) || strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "",
+		EnableTelemetry: IsTrue(getenv(EnableTelemetry)),
 		TraceParent:     getenv(TraceParent),
 		TraceState:      getenv(TraceState),
 		TraceBaggage:    getenv(TraceBaggage),

@@ -33,4 +33,5 @@ environment into worker Jobs so worker model calls can emit the same signals.
   Collector configuration.
 - Prometheus scrape behavior is unchanged for existing dashboards.
 - Worker telemetry remains opt-in unless the worker sees
-  `ORKA_ENABLE_TELEMETRY=true` or `OTEL_EXPORTER_OTLP_ENDPOINT`.
+  `ORKA_ENABLE_TELEMETRY=true`; OTLP endpoint variables alone do not enable
+  Kubernetes task workload telemetry.

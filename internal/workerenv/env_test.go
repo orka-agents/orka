@@ -377,7 +377,7 @@ func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
 	}
 }
 
-func TestAIWorkerEnvTelemetryAutoEnablesFromOTLPEndpoint(t *testing.T) {
+func TestAIWorkerEnvTelemetryDoesNotAutoEnableFromOTLPEndpoint(t *testing.T) {
 	env := map[string]string{
 		AIProvider:                    "openai",
 		AIModel:                       "gpt-4o",
@@ -385,7 +385,7 @@ func TestAIWorkerEnvTelemetryAutoEnablesFromOTLPEndpoint(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "otel-collector:4317",
 	}
 	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
-	if !got.EnableTelemetry {
-		t.Fatal("EnableTelemetry = false, want true from OTEL_EXPORTER_OTLP_ENDPOINT")
+	if got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = true, want false without ORKA_ENABLE_TELEMETRY")
 	}
 }

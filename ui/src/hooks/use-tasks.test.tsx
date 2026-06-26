@@ -150,6 +150,80 @@ describe('useTaskEvents', () => {
     ])
     expect(result.current.data?.events.map((event) => event.seq)).toEqual([1000, 1001])
   })
+
+  it('does not advance cursor past retained events when latest grows mid-fetch', async () => {
+    const requests: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/events', ({ request, params }) => {
+        const url = new URL(request.url)
+        requests.push(url.search)
+        const after = url.searchParams.get('after')
+        if (!after) {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 0,
+            latestSeq: 2000,
+            events: [{
+              id: 'default/task/my-task/1999',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1999,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              createdAt: '2026-01-01T00:00:00Z',
+            }],
+          })
+        }
+        if (after === '1999') {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 1999,
+            latestSeq: 2500,
+            events: [{
+              id: 'default/task/my-task/2000',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 2000,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              createdAt: '2026-01-01T00:00:01Z',
+            }],
+          })
+        }
+        expect(after).toBe('2000')
+        return HttpResponse.json({
+          namespace: 'default',
+          streamType: 'task',
+          streamID: params.id,
+          afterSeq: 2000,
+          latestSeq: 2500,
+          events: [],
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useTaskEvents('my-task'), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(result.current.data?.latestSeq).toBe(2000)
+    expect(result.current.data?.events.map((event) => event.seq)).toEqual([1999, 2000])
+
+    await act(async () => {
+      await result.current.refetch()
+    })
+    await waitFor(() => expect(result.current.data?.latestSeq).toBe(2500))
+    expect(requests).toEqual([
+      '?namespace=default&limit=1000',
+      '?namespace=default&limit=1000&after=1999',
+      '?namespace=default&limit=1000&after=2000',
+    ])
+  })
 })
 
 

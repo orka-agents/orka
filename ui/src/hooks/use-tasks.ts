@@ -114,12 +114,18 @@ export async function fetchTaskEvents(
     streamRestarted ? 0 : (previous?.latestSeq ?? 0),
   )
 
+  const fetchedThroughServerLatest = response
+    ? response.events.length === 0 || latestFetchedSeq >= response.latestSeq
+    : false
+
   return {
     namespace: response?.namespace ?? previous?.namespace ?? namespace,
     streamType: response?.streamType ?? previous?.streamType ?? 'task',
     streamID: response?.streamID ?? previous?.streamID ?? id,
     afterSeq: previous?.afterSeq ?? 0,
-    latestSeq: Math.max(targetLatestSeq ?? 0, response?.latestSeq ?? 0, latestFetchedSeq),
+    latestSeq: fetchedThroughServerLatest
+      ? Math.max(response?.latestSeq ?? 0, latestFetchedSeq)
+      : latestFetchedSeq,
     events,
   }
 }

@@ -1249,6 +1249,9 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 				},
 			},
 		)
+		if task.Spec.Type == corev1alpha1.TaskTypeAI {
+			job.Spec.Template.Spec.Containers[0].Env = reserveAIWorkerTelemetryEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
+		}
 		// Also mount as files for tools that read from filesystem
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "agent-secrets",
@@ -1269,6 +1272,40 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	return nil
+}
+
+func reserveAIWorkerTelemetryEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
+	for _, name := range reservedAIWorkerTelemetryEnvNames() {
+		if !envVarExists(envVars, name) {
+			envVars = append(envVars, corev1.EnvVar{Name: name})
+		}
+	}
+	return envVars
+}
+
+func reservedAIWorkerTelemetryEnvNames() []string {
+	return []string{
+		workerenv.EnableTelemetry,
+		workerenv.TraceParent,
+		workerenv.TraceState,
+		workerenv.TraceBaggage,
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_INSECURE",
+		"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+		"OTEL_EXPORTER_OTLP_METRICS_INSECURE",
+		"OTEL_EXPORTER_OTLP_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	}
 }
 
 func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {

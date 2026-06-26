@@ -1822,6 +1822,36 @@ func TestAddSecretVolumes_AgentSecret(t *testing.T) {
 	}
 }
 
+func TestAddSecretVolumes_AIAgentEnvFromReservesTelemetryEnv(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			SecretRef: &corev1.LocalObjectReference{Name: testAgentSecretName},
+		},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	if err := jb.addSecretVolumes(context.Background(), job, task, agent, nil); err != nil {
+		t.Fatalf("addSecretVolumes() error = %v", err)
+	}
+
+	for _, name := range []string{
+		workerenv.EnableTelemetry,
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	} {
+		got, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, name)
+		if !ok || got.Value != "" || got.ValueFrom != nil {
+			t.Fatalf("reserved env %s = %#v, found=%v", name, got, ok)
+		}
+	}
+}
+
 func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -2458,8 +2488,10 @@ func TestSafeWorkerOTLPEnvValueStripsUserinfoFromEndpoints(t *testing.T) {
 
 func TestJobBuilder_buildEnvVars_TelemetryRequiresWorkerReachableEndpoint(t *testing.T) {
 	tests := []struct {
-		name     string
-		endpoint string
+		name            string
+		endpoint        string
+		tracesEndpoint  string
+		metricsEndpoint string
 	}{
 		{name: "empty endpoint", endpoint: ""},
 		{name: "localhost endpoint", endpoint: "http://localhost:4317"},
@@ -2471,8 +2503,8 @@ func TestJobBuilder_buildEnvVars_TelemetryRequiresWorkerReachableEndpoint(t *tes
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tt.endpoint)
-			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tt.tracesEndpoint)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tt.metricsEndpoint)
 			builder := setupJobBuilder()
 			builder.EnableTelemetry = true
 			task := &corev1alpha1.Task{
@@ -2486,6 +2518,45 @@ func TestJobBuilder_buildEnvVars_TelemetryRequiresWorkerReachableEndpoint(t *tes
 			}
 			if _, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
 				t.Fatal("loopback or empty OTLP endpoint should not be copied into task workloads")
+			}
+		})
+	}
+}
+
+func TestJobBuilder_buildEnvVars_TelemetryAllowsSignalSpecificEndpoints(t *testing.T) {
+	tests := []struct {
+		name      string
+		traces    string
+		metrics   string
+		wantNames map[string]string
+	}{
+		{name: "traces only", traces: "otel-traces:4317", wantNames: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "otel-traces:4317"}},
+		{name: "metrics only", metrics: "otel-metrics:4317", wantNames: map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "otel-metrics:4317"}},
+		{name: "both signals", traces: "otel-traces:4317", metrics: "otel-metrics:4317", wantNames: map[string]string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "otel-traces:4317",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "otel-metrics:4317",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tt.traces)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tt.metrics)
+			builder := setupJobBuilder()
+			builder.EnableTelemetry = true
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+			}
+
+			envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+			if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
+				t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
+			}
+			for name, want := range tt.wantNames {
+				if got, ok := findEnvVar(envVars, name); !ok || got.Value != want {
+					t.Fatalf("%s = %#v, found=%v, want %q", name, got, ok, want)
+				}
 			}
 		})
 	}

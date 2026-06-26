@@ -54,28 +54,47 @@ func Init(serviceName string, enabled bool) (shutdown func(ctx context.Context) 
 		return noop, err
 	}
 
-	traceExporter, err := newTraceExporter(ctx)
-	if err != nil {
-		return noop, err
+	tracesEnabled := otlpSignalEnabled("TRACES")
+	metricsEnabled := otlpSignalEnabled("METRICS")
+
+	var traceExporter sdktrace.SpanExporter
+	if tracesEnabled {
+		traceExporter, err = newTraceExporter(ctx)
+		if err != nil {
+			return noop, err
+		}
 	}
-	metricExporter, err := newMetricExporter(ctx)
-	if err != nil {
-		return noop, err
+	var metricExporter sdkmetric.Exporter
+	if metricsEnabled {
+		metricExporter, err = newMetricExporter(ctx)
+		if err != nil {
+			if traceExporter != nil {
+				_ = traceExporter.Shutdown(ctx)
+			}
+			return noop, err
+		}
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExporter),
-		sdktrace.WithResource(res),
-	)
-	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
-	)
-	otel.SetTracerProvider(tp)
-	otel.SetMeterProvider(mp)
+	var shutdowns []func(context.Context) error
+	if traceExporter != nil {
+		tp := sdktrace.NewTracerProvider(
+			sdktrace.WithBatcher(traceExporter),
+			sdktrace.WithResource(res),
+		)
+		otel.SetTracerProvider(tp)
+		shutdowns = append(shutdowns, tp.Shutdown)
+	}
+	if metricExporter != nil {
+		mp := sdkmetric.NewMeterProvider(
+			sdkmetric.WithResource(res),
+			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+		)
+		otel.SetMeterProvider(mp)
+		shutdowns = append(shutdowns, mp.Shutdown)
+	}
 
 	return func(ctx context.Context) error {
-		return suppressExporterShutdownError(shutdownAll(ctx, mp.Shutdown, tp.Shutdown))
+		return suppressExporterShutdownError(shutdownAll(ctx, shutdowns...))
 	}, nil
 }
 
@@ -126,6 +145,17 @@ func newMetricExporter(ctx context.Context) (sdkmetric.Exporter, error) {
 		return otlpmetrichttp.New(ctx)
 	}
 	return otlpmetricgrpc.New(ctx)
+}
+
+func otlpSignalEnabled(signal string) bool {
+	if strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "" {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) == "" &&
+		strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")) == "" {
+		return true
+	}
+	return strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT")) != ""
 }
 
 func otlpProtocolUsesHTTP(signal string) bool {

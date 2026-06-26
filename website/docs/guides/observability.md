@@ -34,8 +34,8 @@ Credential-bearing OTLP header environment variables are not copied from the
 controller into task workloads. Use an in-cluster collector endpoint or a
 worker-scoped credential mechanism if your collector requires authentication.
 
-The AI worker also auto-enables telemetry when `OTEL_EXPORTER_OTLP_ENDPOINT` is
-present, which is useful for direct/local worker runs.
+AI workers require `ORKA_ENABLE_TELEMETRY=true`; OTLP endpoint variables alone
+do not enable telemetry for Kubernetes task workloads.
 
 ## GenAI traces
 

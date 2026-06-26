@@ -77,6 +77,36 @@ func TestResourceIncludesEnvironmentAttributes(t *testing.T) {
 	}
 }
 
+func TestOTLPSignalEnabled(t *testing.T) {
+	t.Run("default endpoint enables both signals", func(t *testing.T) {
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4317")
+		if !otlpSignalEnabled("TRACES") || !otlpSignalEnabled("METRICS") {
+			t.Fatal("generic endpoint should enable both signals")
+		}
+	})
+
+	t.Run("trace specific endpoint enables traces only", func(t *testing.T) {
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "collector:4317")
+		t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+		if !otlpSignalEnabled("TRACES") {
+			t.Fatal("traces endpoint should enable traces")
+		}
+		if otlpSignalEnabled("METRICS") {
+			t.Fatal("traces-only endpoint should not enable metrics")
+		}
+	})
+
+	t.Run("no endpoints keeps localhost default behavior", func(t *testing.T) {
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+		t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+		if !otlpSignalEnabled("TRACES") || !otlpSignalEnabled("METRICS") {
+			t.Fatal("no endpoint override should keep both default exporters enabled")
+		}
+	})
+}
+
 func TestOTLPProtocolSelectsHTTPExporter(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "http/protobuf")
