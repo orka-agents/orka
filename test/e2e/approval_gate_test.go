@@ -189,13 +189,47 @@ data:
             if self.path == "/v1/chat/completions":
                 request = json.loads(raw.decode("utf-8") or "{}")
                 messages = request.get("messages") or []
-                if any(message.get("role") == "tool" for message in messages):
+                tool_messages = [message for message in messages if message.get("role") == "tool"]
+                if any(
+                    message.get("name") == "update_plan" or message.get("tool_call_id") == "call-update-plan-1"
+                    for message in tool_messages
+                ):
                     write_json(self, 200, {
                         "id": "chatcmpl-approval-final",
                         "object": "chat.completion",
                         "created": 1,
                         "model": request.get("model", "e2e-approval-model"),
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": "approval e2e complete"}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    })
+                    return
+                if tool_messages:
+                    write_json(self, 200, {
+                        "id": "chatcmpl-approval-plan",
+                        "object": "chat.completion",
+                        "created": 1,
+                        "model": request.get("model", "e2e-approval-model"),
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "id": "call-update-plan-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "update_plan",
+                                        "arguments": json.dumps({
+                                            "summary": "approved dispatch completed",
+                                            "progress_pct": 100,
+                                            "goal_complete": True,
+                                            "plan_document": "# Done",
+                                        }),
+                                    },
+                                }],
+                            },
+                            "finish_reason": "tool_calls",
+                        }],
                         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                     })
                     return
