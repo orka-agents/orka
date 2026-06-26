@@ -1937,3 +1937,10 @@ func TestNewProvider_AdditionalConfigs(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderTelemetryProviderNameNormalizesAzure(t *testing.T) {
+	p := &Provider{providerType: "azure-openai"}
+	if got := p.TelemetryProviderName(); got != "azure.ai.openai" {
+		t.Fatalf("TelemetryProviderName() = %q, want azure.ai.openai", got)
+	}
+}

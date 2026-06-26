@@ -75,11 +75,11 @@ func NewTracingMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		tracer := tracing.Tracer("orka.api")
 		ctx := otel.GetTextMapPropagator().Extract(c.Context(), fiberHeaderCarrier{c: c})
-		ctx, span := tracer.Start(ctx, fmt.Sprintf("%s %s", c.Method(), c.Route().Path),
+		method := c.Method()
+		ctx, span := tracer.Start(ctx, method,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
-				attribute.String("http.method", c.Method()),
-				attribute.String("http.route", c.Route().Path),
+				attribute.String("http.method", method),
 				attribute.String("http.url", c.OriginalURL()),
 			),
 		)
@@ -93,6 +93,11 @@ func NewTracingMiddleware() fiber.Handler {
 		}
 
 		err := c.Next()
+
+		if route := c.Route().Path; route != "" {
+			span.SetName(fmt.Sprintf("%s %s", method, route))
+			span.SetAttributes(attribute.String("http.route", route))
+		}
 
 		status := c.Response().StatusCode()
 		span.SetAttributes(attribute.Int("http.status_code", status))

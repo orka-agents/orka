@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	tracingpkg "github.com/sozercan/orka/internal/tracing"
@@ -167,6 +168,7 @@ func TestNewMetricsMiddleware_WithError(t *testing.T) {
 }
 
 func TestNewTracingMiddleware(t *testing.T) {
+	h := tracingtest.NewSpanHarness(t)
 	app := fiber.New()
 	app.Use(requestid.New())
 	app.Use(NewTracingMiddleware())
@@ -181,6 +183,16 @@ func TestNewTracingMiddleware(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Name() != "GET /test" {
+		t.Fatalf("span name = %q, want GET /test", spans[0].Name())
+	}
+	if got := spanAttributeString(spans[0].Attributes(), "http.route"); got != "/test" {
+		t.Fatalf("http.route = %q, want /test", got)
 	}
 }
 
@@ -298,4 +310,13 @@ func TestNewTracingMiddleware_PropagatesSpanContextToHandlers(t *testing.T) {
 	if childParentID != serverID {
 		t.Fatalf("handler child parent = %s, want server span %s", childParentID, serverID)
 	}
+}
+
+func spanAttributeString(attrs []attribute.KeyValue, key string) string {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsString()
+		}
+	}
+	return ""
 }

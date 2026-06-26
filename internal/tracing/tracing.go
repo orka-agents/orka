@@ -9,12 +9,15 @@ package tracing
 import (
 	"context"
 	"errors"
+	"os"
 	"runtime/debug"
 	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -51,11 +54,11 @@ func Init(serviceName string, enabled bool) (shutdown func(ctx context.Context) 
 		return noop, err
 	}
 
-	traceExporter, err := otlptracegrpc.New(ctx)
+	traceExporter, err := newTraceExporter(ctx)
 	if err != nil {
 		return noop, err
 	}
-	metricExporter, err := otlpmetricgrpc.New(ctx)
+	metricExporter, err := newMetricExporter(ctx)
 	if err != nil {
 		return noop, err
 	}
@@ -109,6 +112,28 @@ func Meter(name string, opts ...metric.MeterOption) metric.Meter {
 // GenAIMeter returns a meter with the GenAI development schema URL.
 func GenAIMeter(name string) metric.Meter {
 	return Meter(name, metric.WithSchemaURL(genai.SchemaURL))
+}
+
+func newTraceExporter(ctx context.Context) (sdktrace.SpanExporter, error) {
+	if otlpProtocolUsesHTTP("TRACES") {
+		return otlptracehttp.New(ctx)
+	}
+	return otlptracegrpc.New(ctx)
+}
+
+func newMetricExporter(ctx context.Context) (sdkmetric.Exporter, error) {
+	if otlpProtocolUsesHTTP("METRICS") {
+		return otlpmetrichttp.New(ctx)
+	}
+	return otlpmetricgrpc.New(ctx)
+}
+
+func otlpProtocolUsesHTTP(signal string) bool {
+	protocol := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_" + signal + "_PROTOCOL"))
+	if protocol == "" {
+		protocol = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"))
+	}
+	return strings.HasPrefix(strings.ToLower(protocol), "http/")
 }
 
 func suppressExporterShutdownError(err error) error {

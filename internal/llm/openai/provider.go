@@ -22,6 +22,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing/genai"
 )
 
 // apiMode tracks which API surface to use.
@@ -104,9 +105,9 @@ func (p *Provider) Name() string {
 
 func (p *Provider) TelemetryProviderName() string {
 	if p.providerType == "" {
-		return providerTypeOpenAI
+		return genai.ProviderOpenAI
 	}
-	return p.providerType
+	return genai.NormalizeProviderName(p.providerType)
 }
 
 // isUnsupportedAPIError returns true when the error indicates the endpoint

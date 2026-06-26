@@ -76,3 +76,26 @@ func TestResourceIncludesEnvironmentAttributes(t *testing.T) {
 		t.Fatalf("orka.cluster = %q, want kind", got)
 	}
 }
+
+func TestOTLPProtocolSelectsHTTPExporter(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "http/protobuf")
+
+	if !otlpProtocolUsesHTTP("TRACES") {
+		t.Fatal("traces protocol should select HTTP exporter")
+	}
+	if !otlpProtocolUsesHTTP("METRICS") {
+		t.Fatal("metrics protocol should select HTTP exporter")
+	}
+	traceExporter, err := newTraceExporter(context.Background())
+	if err != nil {
+		t.Fatalf("newTraceExporter() error = %v", err)
+	}
+	defer func() { _ = traceExporter.Shutdown(context.Background()) }()
+
+	metricExporter, err := newMetricExporter(context.Background())
+	if err != nil {
+		t.Fatalf("newMetricExporter() error = %v", err)
+	}
+	defer func() { _ = metricExporter.Shutdown(context.Background()) }()
+}
