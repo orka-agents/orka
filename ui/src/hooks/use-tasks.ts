@@ -69,6 +69,7 @@ export async function fetchTaskEvents(
   let targetLatestSeq: number | undefined
   let response: TaskEventsResponse | undefined
   let events: ExecutionEvent[] = [...(previous?.events ?? [])]
+  let streamRestarted = false
 
   let keepFetching = true
   while (keepFetching) {
@@ -89,6 +90,7 @@ export async function fetchTaskEvents(
       afterSeq = 0
       targetLatestSeq = undefined
       response = undefined
+      streamRestarted = true
       continue
     }
     response = pageResponse
@@ -109,7 +111,7 @@ export async function fetchTaskEvents(
 
   const latestFetchedSeq = events.reduce(
     (latest, event) => Math.max(latest, event.seq),
-    previous?.latestSeq ?? 0,
+    streamRestarted ? 0 : (previous?.latestSeq ?? 0),
   )
 
   return {
