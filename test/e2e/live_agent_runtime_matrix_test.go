@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -85,12 +86,11 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServicePort(),
 		)
 		Expect(err).NotTo(HaveOccurred())
-		gptModel = firstPreferredProxyModelSupportingEndpoint(
-			runtimeCatalog,
-			"/responses",
-			liveCopilotProxyGPTModelPreferences,
-			liveCopilotProxyGPTModelPrefixes...,
-		)
+		// Codex CLI model compatibility is stricter than generic OpenAI provider model
+		// compatibility and the live Copilot proxy catalog can include GPT models that
+		// the Codex runtime cannot use. Keep this runtime check opt-in until the live
+		// proxy exposes a stable Codex-compatible model contract.
+		gptModel = strings.TrimSpace(os.Getenv("E2E_LIVE_COPILOT_PROXY_CODEX_MODEL"))
 		claudeModel = firstPreferredProxyModel(
 			runtimeCatalog,
 			liveCopilotProxyClaudeModelPreferences,

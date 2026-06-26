@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -969,6 +970,286 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_DoesNotForwardTransactionTokenOnRedirect(t *testing.T) {
+	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
+	if err := os.WriteFile(txnTokenPath, []byte("tx-token"), 0600); err != nil {
+		t.Fatalf("write transaction token: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnTokenPath)
+
+	var redirectedTxnHeader string
+	redirectedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedTxnHeader = r.Header.Get(contexttoken.HeaderName)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":"redirected"}`))
+	}))
+	defer redirectedServer.Close()
+
+	redirectLocation := strings.Replace(redirectedServer.URL, "127.0.0.1", "localhost", 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", redirectLocation)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	timeout := metav1.Duration{Duration: 5 * time.Second}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:     server.URL,
+				Timeout: &timeout,
+			},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"key":"value"}`))
+	if err == nil {
+		t.Fatal("Execute() error = nil, want redirect response error")
+	}
+	if redirectedTxnHeader != "" {
+		t.Fatalf("redirected %s = %q, want empty", contexttoken.HeaderName, redirectedTxnHeader)
+	}
+}
+
+func TestToolExecutor_Execute_StripsTransactionTokenOnSameOriginRedirect(t *testing.T) {
+	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
+	if err := os.WriteFile(txnTokenPath, []byte("tx-token"), 0600); err != nil {
+		t.Fatalf("write transaction token: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnTokenPath)
+
+	var redirectedTxnHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/final", http.StatusFound)
+		case "/final":
+			redirectedTxnHeader = r.Header.Get(contexttoken.HeaderName)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"result":"redirected"}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL + "/redirect"},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"key":"value"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != `{"result":"redirected"}` {
+		t.Fatalf("Execute() = %q, want redirected response", result)
+	}
+	if redirectedTxnHeader != "" {
+		t.Fatalf("redirected %s = %q, want empty", contexttoken.HeaderName, redirectedTxnHeader)
+	}
+}
+
+func TestToolHTTPClient_PreservesDefaultRedirectLimitWithTransactionToken(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	defer server.Close()
+
+	client := toolHTTPClient(server.Client(), nil, "tx-token")
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/loop", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set(contexttoken.HeaderName, "tx-token")
+
+	_, err = client.Do(req)
+	if err == nil {
+		t.Fatal("Do() error = nil, want redirect limit error")
+	}
+	if !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("Do() error = %v, want default redirect limit", err)
+	}
+	if calls != 10 {
+		t.Fatalf("calls = %d, want default redirect limit after 10 requests", calls)
+	}
+}
+
+func TestToolHTTPClient_PreservesRedirectLimitAfterBaseRedirectHook(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	defer server.Close()
+
+	base := server.Client()
+	base.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		req.Header.Set(contexttoken.HeaderName, "readded-token")
+		return nil
+	}
+	client := toolHTTPClient(base, nil, "tx-token")
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/loop", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set(contexttoken.HeaderName, "tx-token")
+
+	_, err = client.Do(req)
+	if err == nil {
+		t.Fatal("Do() error = nil, want redirect limit error")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("stopped after %d redirects", maxToolHTTPRedirects)) {
+		t.Fatalf("Do() error = %v, want redirect limit", err)
+	}
+	if calls != maxToolHTTPRedirects {
+		t.Fatalf("calls = %d, want redirect limit after %d requests", calls, maxToolHTTPRedirects)
+	}
+}
+
+func TestToolHTTPClient_StripsTransactionTokenAfterBaseRedirectHook(t *testing.T) {
+	var gotHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/final", http.StatusFound)
+		case "/final":
+			gotHeader = r.Header.Get(contexttoken.HeaderName)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	base := server.Client()
+	base.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		req.Header.Set(contexttoken.HeaderName, "readded-token")
+		return nil
+	}
+	client := toolHTTPClient(base, nil, "tx-token")
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/redirect", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set(contexttoken.HeaderName, "tx-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if gotHeader != "" {
+		t.Fatalf("redirected %s = %q, want empty", contexttoken.HeaderName, gotHeader)
+	}
+}
+
+func TestToolHTTPClient_RejectsCrossOriginRewriteAfterBaseRedirectHook(t *testing.T) {
+	evilCalled := false
+	evilServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer evilServer.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusFound)
+	}))
+	defer server.Close()
+
+	redirectTarget, err := neturl.Parse(evilServer.URL)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	base := server.Client()
+	base.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		req.URL = redirectTarget
+		req.Header.Set(contexttoken.HeaderName, "readded-token")
+		return nil
+	}
+	client := toolHTTPClient(base, nil, "tx-token")
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/redirect", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set(contexttoken.HeaderName, "tx-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want original redirect response", resp.StatusCode)
+	}
+	if evilCalled {
+		t.Fatal("cross-origin redirect target was called")
+	}
+}
+
+func TestSameHTTPOriginNormalizesHostCaseAndDefaultPort(t *testing.T) {
+	tests := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{
+			name: "https default port and host case",
+			a:    "https://API.Example.com:443/path",
+			b:    "https://api.example.com/other",
+			want: true,
+		},
+		{
+			name: "http default port and host case",
+			a:    "http://example.com:80/path",
+			b:    "http://EXAMPLE.com/other",
+			want: true,
+		},
+		{
+			name: "different scheme",
+			a:    "https://example.com/path",
+			b:    "http://example.com/path",
+			want: false,
+		},
+		{
+			name: "different explicit port",
+			a:    "https://example.com:444/path",
+			b:    "https://example.com/path",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, err := neturl.Parse(tt.a)
+			if err != nil {
+				t.Fatalf("Parse(a) error = %v", err)
+			}
+			b, err := neturl.Parse(tt.b)
+			if err != nil {
+				t.Fatalf("Parse(b) error = %v", err)
+			}
+			if got := sameHTTPOrigin(a, b); got != tt.want {
+				t.Fatalf("sameHTTPOrigin() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *testing.T) {
 	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
 	if err := os.WriteFile(txnTokenPath, []byte("tx-token"), 0600); err != nil {
@@ -1005,6 +1286,42 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 	}
 	if !strings.Contains(err.Error(), "reserved header") || !strings.Contains(err.Error(), kontxttoken.HeaderName) {
 		t.Fatalf("Execute() error = %q, want reserved %s header conflict", err, kontxttoken.HeaderName)
+	}
+	if called {
+		t.Fatal("server was called despite reserved TxToken header conflict")
+	}
+}
+
+func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeaderWithoutPropagation(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL: server.URL,
+				Headers: map[string]string{
+					contexttoken.HeaderName: "user-configured-token",
+				},
+			},
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want reserved header conflict")
+	}
+	if !strings.Contains(err.Error(), "reserved header") || !strings.Contains(err.Error(), contexttoken.HeaderName) {
+		t.Fatalf("Execute() error = %q, want reserved %s header conflict", err, contexttoken.HeaderName)
 	}
 	if called {
 		t.Fatal("server was called despite reserved TxToken header conflict")

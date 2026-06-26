@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -38,6 +39,7 @@ const (
 	mcpToolCallRequestID             = "1"
 	mcpInitializeRequestID           = "initialize"
 	mcpSessionTerminateTimeout       = 10 * time.Second
+	maxToolHTTPRedirects             = 10
 	mcpToolsCallMethod               = "tools/call"
 	mcpInitializeMethod              = "initialize"
 	mcpInitializedNotificationMethod = "notifications/initialized"
@@ -85,11 +87,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 		return "", err
 	}
 
-	// Configure timeout
-	httpClient := e.client
-	if prepared.httpConfig.Timeout != nil {
-		httpClient = &http.Client{Timeout: prepared.httpConfig.Timeout.Duration}
-	}
+	httpClient := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.transactionToken)
 
 	if prepared.mcp {
 		return e.executeMCPToolCall(ctx, httpClient, prepared)
@@ -101,6 +99,73 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	}
 
 	return string(respBody), nil
+}
+
+// toolHTTPClient clones the base client for per-tool timeout and TxToken redirect
+// hardening. When propagating a TxToken, redirects never carry the reserved
+// header: it is stripped before invoking any existing redirect hook and again
+// afterwards because hooks can mutate the outgoing request. Cross-origin
+// redirects are not followed, and all redirect chains keep Go's default bound.
+func toolHTTPClient(base *http.Client, timeout *metav1.Duration, transactionToken string) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	if timeout == nil && transactionToken == "" {
+		return base
+	}
+
+	client := *base
+	if timeout != nil {
+		client.Timeout = timeout.Duration
+	}
+	if transactionToken != "" {
+		previousCheckRedirect := base.CheckRedirect
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			req.Header.Del(contexttoken.HeaderName)
+			if previousCheckRedirect != nil {
+				if err := previousCheckRedirect(req, via); err != nil {
+					return err
+				}
+				req.Header.Del(contexttoken.HeaderName)
+			}
+			if len(via) == 0 {
+				return nil
+			}
+			previous := via[len(via)-1]
+			if !sameHTTPOrigin(previous.URL, req.URL) {
+				return http.ErrUseLastResponse
+			}
+			if len(via) >= maxToolHTTPRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxToolHTTPRedirects)
+			}
+			return nil
+		}
+	}
+	return &client
+}
+
+func sameHTTPOrigin(a, b *neturl.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && normalizedHTTPHost(a) == normalizedHTTPHost(b)
+}
+
+func normalizedHTTPHost(u *neturl.URL) string {
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	if port == "" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets ...string) ([]byte, error) {
@@ -201,15 +266,15 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
+	if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
+		return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q", contexttoken.HeaderName)
+	}
 
 	transactionToken, err := e.outboundTransactionToken(ctx, tool)
 	if err != nil {
 		return preparedToolRequest{}, err
 	}
 	if transactionToken != "" {
-		if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
-			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", contexttoken.HeaderName)
-		}
 		req.Header.Set(contexttoken.HeaderName, transactionToken)
 	}
 
