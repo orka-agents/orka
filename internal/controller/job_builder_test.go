@@ -2444,6 +2444,18 @@ func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
 	}
 }
 
+func TestSafeWorkerOTLPEnvValueStripsUserinfoFromEndpoints(t *testing.T) {
+	got := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "https://user:pass@collector:4318")
+	if got != "https://collector:4318" {
+		t.Fatalf("sanitized endpoint = %q, want %q", got, "https://collector:4318")
+	}
+
+	unchanged := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
+	if unchanged != "authorization=secret" {
+		t.Fatalf("non-endpoint value = %q, want unchanged", unchanged)
+	}
+}
+
 func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_INSECURE", "true")
