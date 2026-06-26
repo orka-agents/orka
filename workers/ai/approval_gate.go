@@ -223,6 +223,23 @@ func (g *approvalGate) resolvedDecision(target approvals.ApprovalTarget) (approv
 	return approvals.ResolvedApproval{}, false
 }
 
+func (g *approvalGate) staleDecisionForTarget(target approvals.ApprovalTarget) (approvals.ResolvedApproval, bool) {
+	for _, decision := range g.resolved {
+		if decision.TaskUID != "" && decision.TaskUID != target.TaskUID {
+			continue
+		}
+		if decision.TargetTool != target.TargetTool || decision.TargetArgsDigest != target.TargetArgsDigest {
+			continue
+		}
+		if decision.TargetSpecDigest != "" &&
+			target.TargetSpecDigest != "" &&
+			decision.TargetSpecDigest != target.TargetSpecDigest {
+			return decision, true
+		}
+	}
+	return approvals.ResolvedApproval{}, false
+}
+
 func deniedBatchToolResults(
 	calls []llm.ToolCall,
 	deniedToolCallID string,
@@ -303,6 +320,13 @@ func (g *approvalGate) prepareApprovedCall(
 	}
 	decision, found := g.resolvedDecision(target)
 	if !requiresApproval && !found {
+		if decision, stale := g.staleDecisionForTarget(target); stale {
+			return nil, "", false, fmt.Errorf(
+				"approval %s for %s no longer matches the current tool spec; request approval again",
+				decision.ID,
+				decision.TargetTool,
+			)
+		}
 		return args, "", false, nil
 	}
 	if !found {

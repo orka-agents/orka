@@ -709,6 +709,71 @@ func TestApprovalGateDeclinedDecisionDoesNotExecuteAndContinues(t *testing.T) {
 	}
 }
 
+func TestApprovalGateStaleExplicitCustomToolSpecDoesNotExecuteWithoutRequiredTools(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	oldTool := approvalTestCustomTool(toolServer.URL + "/old")
+	oldSpecDigest, err := approvals.TargetSpecDigest(oldTool.Spec)
+	if err != nil {
+		t.Fatalf("old target spec digest: %v", err)
+	}
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		oldSpecDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{resolvedApprovalForTarget(target)})
+	t.Setenv(workerenv.AutonomousMode, "true")
+	currentTool := approvalTestCustomTool(toolServer.URL + "/new")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-1",
+					Name:      gatedDispatchTool,
+					Arguments: args,
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: "spec change handled", StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: currentTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "spec change handled" {
+		t.Fatalf("result = %q, want spec change handled", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("stale explicit custom approval target executed custom tool")
+	}
+}
+
 func TestApprovalGateDeclinedExplicitCustomToolTargetDoesNotExecuteWithoutRequiredTools(t *testing.T) {
 	var executions atomic.Int32
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sozercan/orka/internal/approvals"
@@ -127,6 +128,26 @@ func TestRequestApprovalToolRequiresConcreteTarget(t *testing.T) {
 	_, err := NewRequestApprovalTool().Execute(ctx, json.RawMessage(`{"action":"dispatch team"}`))
 	if err == nil || err.Error() != "targetTool is required" {
 		t.Fatalf("Execute() error = %v, want targetTool required", err)
+	}
+}
+
+func TestRequestApprovalToolRequiresObjectTargetArguments(t *testing.T) {
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Namespace: "default",
+		TaskID:    "task-1",
+		TaskUID:   "task-uid-1",
+		ApprovalEmitter: func(context.Context, approvals.ApprovalTarget) error {
+			t.Fatal("approval should not be emitted for non-object targetArguments")
+			return nil
+		},
+	})
+	_, err := NewRequestApprovalTool().Execute(ctx, json.RawMessage(`{
+		"action":"approve dispatch",
+		"targetTool":"dispatch_work_order",
+		"targetArguments":"{\"incident\":\"inc-1\"}"
+	}`))
+	if err == nil || !strings.Contains(err.Error(), "targetArguments must be a JSON object") {
+		t.Fatalf("Execute() error = %v, want targetArguments object error", err)
 	}
 }
 

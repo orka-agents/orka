@@ -90,6 +90,10 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 	if len(req.TargetArguments) == 0 {
 		return "", requestApprovalValidationError("targetArguments is required")
 	}
+	var targetArgsObject map[string]any
+	if err := json.Unmarshal(req.TargetArguments, &targetArgsObject); err != nil || targetArgsObject == nil {
+		return "", requestApprovalValidationError("targetArguments must be a JSON object")
+	}
 	if _, ok := DefaultRegistry.Get(targetTool); ok {
 		return "", requestApprovalValidationError("targetTool %q is a built-in tool and cannot be approved with request_approval", targetTool)
 	}
