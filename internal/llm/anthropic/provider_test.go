@@ -673,7 +673,7 @@ func TestHandleStreamEvent_ContentBlockStop_NoToolCall(t *testing.T) {
 
 func TestHandleStreamEvent_MessageDelta_EndTurn(t *testing.T) {
 	event := unmarshalStreamEvent(t,
-		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":""},"usage":{"output_tokens":10}}`)
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":""},"usage":{"input_tokens":12,"output_tokens":10}}`)
 
 	var chunks []llm.StreamChunk
 	send := func(chunk llm.StreamChunk) bool { chunks = append(chunks, chunk); return true }
@@ -692,6 +692,9 @@ func TestHandleStreamEvent_MessageDelta_EndTurn(t *testing.T) {
 	}
 	if chunk.StopReason != "end_turn" {
 		t.Errorf("StopReason = %q, want end_turn", chunk.StopReason)
+	}
+	if chunk.InputTokens != 12 || chunk.OutputTokens != 10 {
+		t.Fatalf("usage = input:%d output:%d, want input:12 output:10", chunk.InputTokens, chunk.OutputTokens)
 	}
 }
 

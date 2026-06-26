@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing/genai"
 )
 
 func init() {
@@ -242,7 +243,13 @@ func handleStreamEvent(
 		if *hasToolCalls && stopReason == "" {
 			stopReason = "tool_use"
 		}
-		if !send(llm.StreamChunk{Done: true, StopReason: stopReason}) {
+		if !send(llm.StreamChunk{
+			Done:         true,
+			StopReason:   stopReason,
+			InputTokens:  int(e.Usage.InputTokens),
+			OutputTokens: int(e.Usage.OutputTokens),
+			Provider:     genai.ProviderAnthropic,
+		}) {
 			return false
 		}
 	case anthropic.MessageStopEvent:
