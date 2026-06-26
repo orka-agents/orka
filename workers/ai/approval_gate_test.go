@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -35,6 +37,7 @@ const (
 	declineHandledResult = "decline handled"
 	correctedResult      = "corrected"
 	doneResult           = "done"
+	approvalTestAuthKey  = "api_key"
 )
 
 func TestApprovalGatePrescansBatchBeforeExecutingGatedTool(t *testing.T) {
@@ -606,13 +609,67 @@ func TestApprovalTargetSpecDigestKeepsHTTPToolSpecDigest(t *testing.T) {
 	}
 }
 
+func TestApprovalTargetArgumentsKeepsBodyAuthKeyWithoutAuthRef(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	customTool.Spec.HTTP.AuthInject = approvalAuthInjectBody
+	customTool.Spec.HTTP.AuthBodyKey = approvalTestAuthKey
+
+	got, err := approvalTargetArguments(
+		json.RawMessage(fmt.Sprintf(`{"incident":"inc-1",%q:"model-supplied"}`, approvalTestAuthKey)),
+		customTool,
+	)
+	if err != nil {
+		t.Fatalf("approvalTargetArguments() error = %v", err)
+	}
+	if !strings.Contains(string(got), approvalTestAuthKey) {
+		t.Fatalf("approvalTargetArguments() = %s, want body auth key retained without auth ref", got)
+	}
+}
+
+func TestApprovalTargetArgumentsRejectsReservedURLField(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/items/{{id}}")
+	_, err := approvalTargetArguments(
+		json.RawMessage(`{"id":1,"__orkaApprovalURL":"user-value"}`),
+		customTool,
+	)
+	if err == nil || !strings.Contains(err.Error(), approvalTargetURLField) {
+		t.Fatalf("approvalTargetArguments() error = %v, want reserved URL field rejection", err)
+	}
+}
+
+func TestApprovalTargetArgumentsHashesURLInterpolationAsExecuted(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/items/{{id}}")
+	numeric, err := approvalTargetArguments(json.RawMessage(`{"id":1,"op":"delete"}`), customTool)
+	if err != nil {
+		t.Fatalf("approvalTargetArguments(numeric) error = %v", err)
+	}
+	stringID, err := approvalTargetArguments(json.RawMessage(`{"id":"1","op":"delete"}`), customTool)
+	if err != nil {
+		t.Fatalf("approvalTargetArguments(string) error = %v", err)
+	}
+	numericDigest, err := approvals.TargetArgsDigest(numeric)
+	if err != nil {
+		t.Fatalf("numeric digest: %v", err)
+	}
+	stringDigest, err := approvals.TargetArgsDigest(stringID)
+	if err != nil {
+		t.Fatalf("string digest: %v", err)
+	}
+	if numericDigest != stringDigest {
+		t.Fatalf("URL-interpolated numeric/string target digests differ: %s != %s", numericDigest, stringDigest)
+	}
+	if strings.Contains(string(numeric), `"id"`) || !strings.Contains(string(numeric), approvalTargetURLField) {
+		t.Fatalf("URL-interpolated target args = %s, want id removed and URL field added", numeric)
+	}
+}
+
 func TestBindApprovalAuthRefVersionClearsStaleAnnotationsWhenUnavailable(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
 	}
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "missing-auth", Key: "credential"}
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "missing-auth", Key: "authref"}
 	tool.Annotations = map[string]string{
 		approvalAuthRefUIDAnnotation:             "stale-uid",
 		approvalAuthRefResourceVersionAnnotation: "9",
@@ -633,6 +690,26 @@ func TestBindApprovalAuthRefVersionClearsStaleAnnotationsWhenUnavailable(t *test
 	}
 }
 
+func TestApprovalTargetSpecDigestRejectsMountedCredentialSource(t *testing.T) {
+	root := t.TempDir()
+	oldRoots := approvalMountRoots
+	approvalMountRoots = []string{root}
+	t.Cleanup(func() { approvalMountRoots = oldRoots })
+	if err := os.WriteFile(filepath.Join(root, "authref"), []byte("test"), 0o600); err != nil {
+		t.Fatalf("write mounted auth ref marker: %v", err)
+	}
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "mounted credential source") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want mounted credential source rejection", err)
+	}
+}
+
 func TestApprovalTargetSpecDigestRejectsStaticIdempotencyHeader(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	tool.Spec.HTTP.Headers = map[string]string{"idempotency-key": "static"}
@@ -644,7 +721,7 @@ func TestApprovalTargetSpecDigestRejectsStaticIdempotencyHeader(t *testing.T) {
 
 func TestApprovalTargetSpecDigestRequiresAuthSecretVersion(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "credential"}
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
 	_, err := approvalTargetSpecDigest(tool)
 	if err == nil || !strings.Contains(err.Error(), "auth secret version is not available") {
 		t.Fatalf("approvalTargetSpecDigest() error = %v, want auth secret version rejection", err)
@@ -653,7 +730,7 @@ func TestApprovalTargetSpecDigestRequiresAuthSecretVersion(t *testing.T) {
 
 func TestApprovalTargetSpecDigestIncludesAuthSecretVersion(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "credential"}
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
 	tool.Annotations = map[string]string{
 		approvalAuthRefUIDAnnotation:             "uid-1",
 		approvalAuthRefResourceVersionAnnotation: "10",
@@ -1328,6 +1405,121 @@ func TestApprovalGateDeclinedExplicitCustomToolTargetDoesNotExecuteWithoutRequir
 	}
 }
 
+func TestApprovalGateBlockingOverflowFailsClosedOnTargetBuildError(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL)
+	customTool.Spec.HTTP.Headers = map[string]string{"idempotency-key": "static"}
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{approvals.BlockingOverflowResolvedApproval()})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-dispatch",
+					Name:      gatedDispatchTool,
+					Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("custom tool executed despite overflow and target build error")
+	}
+}
+
+func TestApprovalGateDeclinedURLInterpolatedCustomToolTargetDoesNotExecuteWithoutRequiredTools(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL + "/items/{{id}}")
+	specDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+	targetArgs, err := approvalTargetArguments(json.RawMessage(`{"id":1,"op":"delete"}`), customTool)
+	if err != nil {
+		t.Fatalf("target args: %v", err)
+	}
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		targetArgs,
+		"delete item",
+		"",
+		"",
+		specDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	declined := resolvedApprovalForTarget(target)
+	declined.Status = approvals.StatusDeclined
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{declined})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "deleting item",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-delete",
+					Name:      gatedDispatchTool,
+					Arguments: json.RawMessage(`{"id":"1","op":"delete"}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: declineHandledResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "delete item"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != declineHandledResult {
+		t.Fatalf("result = %q, want decline handled", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("declined URL-interpolated approval target executed custom tool")
+	}
+}
+
 func TestRequestApprovalBodyAuthTargetMatchesSanitizedDecline(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()
@@ -1340,7 +1532,12 @@ func TestRequestApprovalBodyAuthTargetMatchesSanitizedDecline(t *testing.T) {
 	defer toolServer.Close()
 	customTool := approvalTestCustomTool(toolServer.URL)
 	customTool.Spec.HTTP.AuthInject = approvalAuthInjectBody
-	customTool.Spec.HTTP.AuthBodyKey = "api_key"
+	customTool.Spec.HTTP.AuthBodyKey = approvalTestAuthKey
+	customTool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	customTool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
 	specDigest, err := approvalTargetSpecDigest(customTool)
 	if err != nil {
 		t.Fatalf("target spec digest: %v", err)
@@ -1373,15 +1570,16 @@ func TestRequestApprovalBodyAuthTargetMatchesSanitizedDecline(t *testing.T) {
 					{
 						ID:   "call-approval",
 						Name: "request_approval",
-						Arguments: json.RawMessage(
-							`{"action":"dispatch","targetTool":"dispatch_work_order",` +
-								`"targetArguments":{"incident":"inc-1","api_key":"model-supplied"}}`,
-						),
+						Arguments: json.RawMessage(fmt.Sprintf(
+							`{"action":"dispatch","targetTool":"dispatch_work_order",`+
+								`"targetArguments":{"incident":"inc-1",%q:"model-supplied"}}`,
+							approvalTestAuthKey,
+						)),
 					},
 					{
 						ID:        "call-dispatch",
 						Name:      gatedDispatchTool,
-						Arguments: json.RawMessage(`{"incident":"inc-1","api_key":"model-supplied"}`),
+						Arguments: json.RawMessage(fmt.Sprintf(`{"incident":"inc-1",%q:"model-supplied"}`, approvalTestAuthKey)),
 					},
 				},
 				StopReason: "tool_use",
@@ -1417,13 +1615,18 @@ func TestApprovalGateDeclinedExplicitCustomToolBodyAuthTargetDoesNotExecuteWitho
 	defer toolServer.Close()
 	customTool := approvalTestCustomTool(toolServer.URL)
 	customTool.Spec.HTTP.AuthInject = approvalAuthInjectBody
-	customTool.Spec.HTTP.AuthBodyKey = "api_key"
+	customTool.Spec.HTTP.AuthBodyKey = approvalTestAuthKey
+	customTool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	customTool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
 	specDigest, err := approvalTargetSpecDigest(customTool)
 	if err != nil {
 		t.Fatalf("target spec digest: %v", err)
 	}
 	approvedArgs := json.RawMessage(`{"incident":"inc-1"}`)
-	retryArgs := json.RawMessage(`{"incident":"inc-1","api_key":"model-supplied"}`)
+	retryArgs := json.RawMessage(fmt.Sprintf(`{"incident":"inc-1",%q:"model-supplied"}`, approvalTestAuthKey))
 	target, err := approvals.NewApprovalTarget(
 		"default",
 		"incident-task",

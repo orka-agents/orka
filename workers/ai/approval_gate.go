@@ -7,11 +7,15 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -28,7 +32,10 @@ const (
 	approvalIdempotencyHeader                = "Idempotency-Key"
 	approvalAuthRefUIDAnnotation             = "orka.fibey.io/approval-auth-ref-uid"
 	approvalAuthRefResourceVersionAnnotation = "orka.fibey.io/approval-auth-ref-resource-version"
+	approvalTargetURLField                   = "__orkaApprovalURL"
 )
+
+var approvalMountRoots = []string{"/secrets/task", "/secrets/agent"}
 
 type approvalGate struct {
 	namespace        string
@@ -169,6 +176,12 @@ func (g *approvalGate) preScan(
 		target, err := g.targetForCall(toolName, call.Arguments, customTools[toolName])
 		if err != nil {
 			if !requiresApproval {
+				if g.blockingOverflow && customTools[toolName] != nil {
+					return &approvalBatchDecision{
+						continueLLM: true,
+						toolResults: blockingApprovalOverflowBatchToolResults(calls, call.ID, toolName),
+					}, nil
+				}
 				continue
 			}
 			return &approvalBatchDecision{
@@ -249,21 +262,71 @@ func approvalTargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool
 	if err := json.Unmarshal(args, &targetArgsObject); err != nil || targetArgsObject == nil {
 		return nil, fmt.Errorf("target arguments must be a JSON object")
 	}
+	if _, ok := targetArgsObject[approvalTargetURLField]; ok {
+		return nil, fmt.Errorf("target arguments contain reserved %s field", approvalTargetURLField)
+	}
 	if authBodyKey := approvalAuthBodyKey(customTool); authBodyKey != "" {
-		if _, ok := targetArgsObject[authBodyKey]; ok {
-			delete(targetArgsObject, authBodyKey)
-			out, err := json.Marshal(targetArgsObject)
-			if err != nil {
-				return nil, fmt.Errorf("sanitize target arguments: %w", err)
-			}
-			return json.RawMessage(out), nil
+		delete(targetArgsObject, authBodyKey)
+	}
+	if err := approvalApplyURLInterpolationTarget(args, targetArgsObject, customTool); err != nil {
+		return nil, err
+	}
+	out, err := json.Marshal(targetArgsObject)
+	if err != nil {
+		return nil, fmt.Errorf("sanitize target arguments: %w", err)
+	}
+	return json.RawMessage(out), nil
+}
+
+func approvalApplyURLInterpolationTarget(
+	args json.RawMessage,
+	targetArgsObject map[string]json.RawMessage,
+	customTool *corev1alpha1.Tool,
+) error {
+	if customTool == nil || customTool.Spec.HTTP == nil || strings.TrimSpace(customTool.Spec.HTTP.URL) == "" {
+		return nil
+	}
+	params, err := approvalDecodeTargetArgumentValues(args)
+	if err != nil {
+		return err
+	}
+	interpolatedURL := customTool.Spec.HTTP.URL
+	interpolated := false
+	for key, val := range params {
+		placeholder := "{{" + key + "}}"
+		if strings.Contains(interpolatedURL, placeholder) {
+			interpolatedURL = strings.ReplaceAll(interpolatedURL, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
+			delete(targetArgsObject, key)
+			interpolated = true
 		}
 	}
-	return args, nil
+	if !interpolated {
+		return nil
+	}
+	encoded, err := json.Marshal(interpolatedURL)
+	if err != nil {
+		return fmt.Errorf("sanitize target URL: %w", err)
+	}
+	targetArgsObject[approvalTargetURLField] = encoded
+	return nil
+}
+
+func approvalDecodeTargetArgumentValues(args json.RawMessage) (map[string]any, error) {
+	var params map[string]any
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
+	if err := dec.Decode(&params); err != nil || params == nil {
+		return nil, fmt.Errorf("target arguments must be a JSON object")
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("target arguments must be a JSON object")
+	}
+	return params, nil
 }
 
 func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
-	if customTool == nil || customTool.Spec.HTTP == nil {
+	if customTool == nil || customTool.Spec.HTTP == nil || customTool.Spec.HTTP.AuthSecretRef == nil {
 		return ""
 	}
 	if strings.TrimSpace(customTool.Spec.HTTP.AuthInject) != approvalAuthInjectBody {
@@ -339,12 +402,31 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 		}
 	}
 	if customTool.Spec.HTTP.AuthSecretRef != nil {
+		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Key) {
+			return fmt.Errorf(
+				"approval-gated tool %q mounted credential source cannot be approval-bound",
+				customTool.Name,
+			)
+		}
 		uid, resourceVersion := approvalAuthRefVersion(customTool)
 		if uid == "" || resourceVersion == "" {
 			return fmt.Errorf("approval-gated tool %q auth secret version is not available", customTool.Name)
 		}
 	}
 	return nil
+}
+
+func approvalMountedCredentialExists(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	for _, root := range approvalMountRoots {
+		if _, err := os.Stat(filepath.Join(root, key)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func approvalAuthRefVersion(customTool *corev1alpha1.Tool) (string, string) {
@@ -488,6 +570,12 @@ func (g *approvalGate) prepareApprovedCall(
 	target, err := g.targetForCall(toolName, args, customTool)
 	if err != nil {
 		if !requiresApproval {
+			if g.blockingOverflow && customTool != nil {
+				return nil, "", false, fmt.Errorf(
+					"approval history omitted blocking decisions; request approval again before executing %s",
+					strings.TrimSpace(toolName),
+				)
+			}
 			return args, "", false, nil
 		}
 		return nil, "", false, err
