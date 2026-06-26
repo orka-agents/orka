@@ -800,6 +800,30 @@ func approvalTargetForTest(t *testing.T, args json.RawMessage) approvals.Approva
 	return target
 }
 
+func TestApprovalTargetSpecDigestIncludesTransactionAuthorityDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tx-authority")
+	if err := os.WriteFile(path, []byte("first-authority"), 0o600); err != nil {
+		t.Fatalf("write authority file: %v", err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, path)
+	t.Setenv(workerenv.TransactionID, "txn-1")
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	first, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("second-authority"), 0o600); err != nil {
+		t.Fatalf("rewrite authority file: %v", err)
+	}
+	second, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() second error = %v", err)
+	}
+	if first == second {
+		t.Fatalf("transaction authority change did not affect approval target digest")
+	}
+}
+
 func TestApprovalTargetSpecDigestKeepsHTTPToolSpecDigest(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	got, err := approvalTargetSpecDigest(tool)

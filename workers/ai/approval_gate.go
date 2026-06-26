@@ -9,6 +9,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -389,8 +391,12 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		return "", err
 	}
 	uid, resourceVersion := approvalAuthRefVersion(customTool)
+	txAuthority, err := approvalTransactionAuthorityIdentity()
+	if err != nil {
+		return "", err
+	}
 	if customTool.Spec.MCP == nil || customTool.Spec.MCP.SubstrateActor == nil {
-		if uid == "" && resourceVersion == "" {
+		if uid == "" && resourceVersion == "" && txAuthority == nil {
 			digest, err := approvals.TargetSpecDigest(customTool.Spec)
 			if err != nil {
 				return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
@@ -398,13 +404,15 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 			return digest, nil
 		}
 		targetIdentity := struct {
-			Spec                   corev1alpha1.ToolSpec `json:"spec"`
-			AuthRefUID             string                `json:"authRefUID,omitempty"`
-			AuthRefResourceVersion string                `json:"authRefResourceVersion,omitempty"`
+			Spec                   corev1alpha1.ToolSpec              `json:"spec"`
+			AuthRefUID             string                             `json:"authRefUID,omitempty"`
+			AuthRefResourceVersion string                             `json:"authRefResourceVersion,omitempty"`
+			TxAuthority            *approvalTransactionAuthorityShape `json:"txAuthority,omitempty"`
 		}{
 			Spec:                   customTool.Spec,
 			AuthRefUID:             uid,
 			AuthRefResourceVersion: resourceVersion,
+			TxAuthority:            txAuthority,
 		}
 		digest, err := approvals.TargetSpecDigest(targetIdentity)
 		if err != nil {
@@ -413,16 +421,18 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		return digest, nil
 	}
 	targetIdentity := struct {
-		Spec                   corev1alpha1.ToolSpec `json:"spec"`
-		StatusEndpoint         string                `json:"statusEndpoint,omitempty"`
-		StatusRouteHost        string                `json:"statusRouteHost,omitempty"`
-		AuthRefUID             string                `json:"authRefUID,omitempty"`
-		AuthRefResourceVersion string                `json:"authRefResourceVersion,omitempty"`
+		Spec                   corev1alpha1.ToolSpec              `json:"spec"`
+		StatusEndpoint         string                             `json:"statusEndpoint,omitempty"`
+		StatusRouteHost        string                             `json:"statusRouteHost,omitempty"`
+		AuthRefUID             string                             `json:"authRefUID,omitempty"`
+		AuthRefResourceVersion string                             `json:"authRefResourceVersion,omitempty"`
+		TxAuthority            *approvalTransactionAuthorityShape `json:"txAuthority,omitempty"`
 	}{
 		Spec:                   customTool.Spec,
 		StatusEndpoint:         strings.TrimSpace(customTool.Status.Endpoint),
 		AuthRefUID:             uid,
 		AuthRefResourceVersion: resourceVersion,
+		TxAuthority:            txAuthority,
 	}
 	if customTool.Status.Actor != nil {
 		targetIdentity.StatusRouteHost = strings.TrimSpace(customTool.Status.Actor.RouteHost)
@@ -432,6 +442,43 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
 	}
 	return digest, nil
+}
+
+type approvalTransactionAuthorityShape struct {
+	TransactionID              string `json:"transactionID,omitempty"`
+	TransactionScope           string `json:"transactionScope,omitempty"`
+	TransactionScopes          string `json:"transactionScopes,omitempty"`
+	TransactionContextDigest   string `json:"transactionContextDigest,omitempty"`
+	TransactionRequesterDigest string `json:"transactionRequesterDigest,omitempty"`
+	KontxtOutboundScope        string `json:"kontxtOutboundScope,omitempty"`
+	KontxtTTSAudience          string `json:"kontxtTTSAudience,omitempty"`
+	KontxtToolTTL              string `json:"kontxtToolTTL,omitempty"`
+	MountedAuthoritySHA256     string `json:"mountedAuthoritySHA256,omitempty"`
+}
+
+func approvalTransactionAuthorityIdentity() (*approvalTransactionAuthorityShape, error) {
+	identity := &approvalTransactionAuthorityShape{
+		TransactionID:              strings.TrimSpace(os.Getenv(workerenv.TransactionID)),
+		TransactionScope:           strings.TrimSpace(os.Getenv(workerenv.TransactionScope)),
+		TransactionScopes:          strings.TrimSpace(os.Getenv(workerenv.TransactionScopes)),
+		TransactionContextDigest:   strings.TrimSpace(os.Getenv(workerenv.TransactionContextDigest)),
+		TransactionRequesterDigest: strings.TrimSpace(os.Getenv(workerenv.TransactionRequesterContextDigest)),
+		KontxtOutboundScope:        strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope)),
+		KontxtTTSAudience:          strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSAudience)),
+		KontxtToolTTL:              strings.TrimSpace(os.Getenv(workerenv.ContextTokenToolTokenTTL)),
+	}
+	if path := strings.TrimSpace(os.Getenv(workerenv.TransactionTokenFile)); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read mounted transaction authority: %w", err)
+		}
+		sum := sha256.Sum256(bytes.TrimSpace(data))
+		identity.MountedAuthoritySHA256 = hex.EncodeToString(sum[:])
+	}
+	if *identity == (approvalTransactionAuthorityShape{}) {
+		return nil, nil
+	}
+	return identity, nil
 }
 
 func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) error {
