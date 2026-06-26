@@ -80,7 +80,7 @@ func NewTracingMiddleware() fiber.Handler {
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				attribute.String("http.method", method),
-				attribute.String("http.url", c.OriginalURL()),
+				attribute.String("http.url", c.BaseURL()+c.Path()),
 			),
 		)
 		defer span.End()

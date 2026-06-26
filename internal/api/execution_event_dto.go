@@ -224,7 +224,7 @@ func executionEventTelemetryFields(content json.RawMessage) (provider, model, st
 	model = stringField(body, "model", "gen_ai.request.model", "gen_ai.response.model")
 	stopReason = stringField(body, "stopReason", "stop_reason", "finishReason")
 	inTok = intField(body, "inputTokens", "input_tokens", "promptTokens", "gen_ai.usage.input_tokens")
-	outTok = intField(body, "outputTokens", "output_tokens", "completionTokens", "gen_ai.usage.output_tokens")
+	outTok = intField(body, "outputTokens", "output_tokens", "completionTokens", "completion_tokens", "gen_ai.usage.output_tokens")
 	return provider, model, stopReason, inTok, outTok
 }
 

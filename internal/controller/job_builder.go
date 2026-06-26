@@ -731,6 +731,9 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		return envVars
 	}
 	envVars = setControllerEnv(envVars, workerenv.EnableTelemetry, scheduledRunLabelValue)
+	// Copy only non-secret scalar OTLP settings. Header env vars carry
+	// credentials, and certificate env vars are file paths whose source files are
+	// not mounted into worker Pods by the controller.
 	for _, name := range []string{
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -747,9 +750,6 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		"OTEL_EXPORTER_OTLP_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
-		"OTEL_EXPORTER_OTLP_CERTIFICATE",
-		"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
-		"OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE",
 		"OTEL_RESOURCE_ATTRIBUTES",
 	} {
 		envVars = setControllerEnv(envVars, name, os.Getenv(name))

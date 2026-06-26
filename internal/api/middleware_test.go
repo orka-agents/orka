@@ -9,6 +9,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
@@ -28,7 +29,7 @@ func TestNewLoggingMiddleware(t *testing.T) {
 		return c.SendString("OK")
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test?query=secret", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -193,6 +194,9 @@ func TestNewTracingMiddleware(t *testing.T) {
 	}
 	if got := spanAttributeString(spans[0].Attributes(), "http.route"); got != "/test" {
 		t.Fatalf("http.route = %q, want /test", got)
+	}
+	if got := spanAttributeString(spans[0].Attributes(), "http.url"); strings.Contains(got, "query=secret") {
+		t.Fatalf("http.url includes query string: %q", got)
 	}
 }
 

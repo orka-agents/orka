@@ -24,6 +24,7 @@ import (
 // The full Anthropic SSE envelope (message_start → ... → message_stop) spans all iterations.
 func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 	c fiber.Ctx,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	model string,
@@ -37,11 +38,12 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		msgID := "msg_" + uuid.New().String()
 
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		// Emit message_start once for the entire tool loop
@@ -325,6 +327,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 // It streams the LLM response directly to the client without executing tools server-side.
 func (h *AnthropicCompatHandler) handleStreamingProxy(
 	c fiber.Ctx,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	model string,
@@ -336,11 +339,12 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		msgID := "msg_" + uuid.New().String()
 
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		if err := writeMessageStart(w, msgID, model, 0); err != nil {

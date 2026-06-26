@@ -1076,7 +1076,7 @@ func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *tes
 	handler, app := setupTestAnthropicHandler()
 	app.Post("/test", func(c fiber.Ctx) error {
 		return handler.handleStreamingMessages(
-			c, mock,
+			c, context.Background(), mock,
 			&llm.CompletionRequest{
 				Model:    "claude-sonnet-4-20250514",
 				Messages: []llm.Message{{Role: testRoleUser, Content: "read then report"}},
@@ -1134,7 +1134,7 @@ func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testin
 	handler.config.MaxPrematureEndRetries = 1
 	app.Post("/test", func(c fiber.Ctx) error {
 		return handler.handleStreamingMessages(
-			c, mock,
+			c, context.Background(), mock,
 			&llm.CompletionRequest{
 				Model:    "claude-sonnet-4-20250514",
 				Messages: []llm.Message{{Role: testRoleUser, Content: "ship"}},

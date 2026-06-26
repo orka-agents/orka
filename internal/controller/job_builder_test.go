@@ -2449,7 +2449,6 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_INSECURE", "true")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "3s")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
-	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE", "/var/run/otel/metrics-ca.pem")
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=secret")
 	builder := setupJobBuilder()
@@ -2472,11 +2471,10 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
 	}
 	for name, want := range map[string]string{
-		"OTEL_EXPORTER_OTLP_ENDPOINT":            "otel-collector:4317",
-		"OTEL_EXPORTER_OTLP_TRACES_INSECURE":     "true",
-		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT":     "3s",
-		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION":  "gzip",
-		"OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE": "/var/run/otel/metrics-ca.pem",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":           "otel-collector:4317",
+		"OTEL_EXPORTER_OTLP_TRACES_INSECURE":    "true",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT":    "3s",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION": "gzip",
 	} {
 		if got, ok := findEnvVar(envVars, name); !ok || got.Value != want {
 			t.Fatalf("%s = %#v, found=%v, want %q", name, got, ok, want)
