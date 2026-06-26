@@ -1016,10 +1016,12 @@ func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T
 // --- Mock provider for tool loop tests ---
 
 type mockAnthropicProvider struct {
-	responses []*llm.CompletionResponse
-	errors    []error
-	requests  []*llm.CompletionRequest
-	callIdx   int
+	responses    []*llm.CompletionResponse
+	errors       []error
+	streamChunks []llm.StreamChunk
+	streamErr    error
+	requests     []*llm.CompletionRequest
+	callIdx      int
 }
 
 func (m *mockAnthropicProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
@@ -1041,7 +1043,18 @@ func (m *mockAnthropicProvider) Complete(_ context.Context, req *llm.CompletionR
 }
 
 func (m *mockAnthropicProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
-	return nil, fmt.Errorf("streaming not supported by mock")
+	if m.streamErr != nil {
+		return nil, m.streamErr
+	}
+	if m.streamChunks == nil {
+		return nil, fmt.Errorf("streaming not supported by mock")
+	}
+	ch := make(chan llm.StreamChunk, len(m.streamChunks))
+	for _, chunk := range m.streamChunks {
+		ch <- chunk
+	}
+	close(ch)
+	return ch, nil
 }
 
 func (m *mockAnthropicProvider) Name() string {
@@ -1119,6 +1132,35 @@ func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *tes
 	}
 	if mock.callIdx != 2 {
 		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
+func TestHandleStreamingProxy_EstimatesOutputTokens(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{
+			{Content: "hello "},
+			{Content: "from stream"},
+			{Done: true, StopReason: oaiStopReasonEndTurn},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(c, mock, &llm.CompletionRequest{Model: "claude-sonnet-4-20250514"}, "claude-sonnet-4-20250514")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "hello ") || !strings.Contains(bodyStr, "from stream") {
+		t.Fatalf("expected streamed text in body, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"output_tokens":4`) {
+		t.Fatalf("expected estimated output_tokens in message_delta, got: %s", bodyStr)
 	}
 }
 

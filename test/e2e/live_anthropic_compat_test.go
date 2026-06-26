@@ -123,6 +123,19 @@ var _ = Describe("Live Anthropic Compat API", Ordered, func() {
 		Expect(flattenAnthropicText(resp.Content)).To(ContainSubstring(liveAnthropicExpectedText))
 	})
 
+	It("should run the opt-in Orka tool loop for non-streaming anthropic messages", func() {
+		resp := postLiveAnthropicJSONWithOrkaTools(apiBaseURL, token, liveAnthropicProviderName, liveClaudeModel, liveAnthropicExpectedText, true)
+
+		Expect(resp.Type).To(Equal("message"))
+		Expect(resp.Role).To(Equal("assistant"))
+		Expect(resp.Model).To(Equal(liveClaudeModel))
+		Expect(resp.StopReason).NotTo(BeNil())
+		Expect(*resp.StopReason).To(Equal("end_turn"))
+		text := flattenAnthropicText(resp.Content)
+		Expect(text).To(ContainSubstring(liveAnthropicExpectedText))
+		Expect(text).NotTo(ContainSubstring(liveAnthropicGoalStateSentinel))
+	})
+
 	It("should stream anthropic messages via SSE", func() {
 		stream := postLiveAnthropicSSE(apiBaseURL, token, liveAnthropicProviderName, liveClaudeModel, liveAnthropicExpectedText)
 
@@ -222,6 +235,10 @@ func fetchLiveAnthropicModels(apiBaseURL, token string) liveAnthropicModelList {
 }
 
 func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText string) liveAnthropicResponse {
+	return postLiveAnthropicJSONWithOrkaTools(apiBaseURL, token, providerName, model, expectedText, false)
+}
+
+func postLiveAnthropicJSONWithOrkaTools(apiBaseURL, token, providerName, model, expectedText string, orkaToolsEnabled bool) liveAnthropicResponse {
 	body := fmt.Sprintf(`{
 		"model": "%s/%s",
 		"max_tokens": 32,
@@ -236,6 +253,9 @@ func postLiveAnthropicJSON(apiBaseURL, token, providerName, model, expectedText 
 	req.Header.Set("x-api-key", token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
+	if orkaToolsEnabled {
+		req.Header.Set("X-Orka-Tools", "enabled")
+	}
 
 	client := &http.Client{Timeout: 3 * time.Minute}
 	resp, err := client.Do(req)

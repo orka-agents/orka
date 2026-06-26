@@ -291,11 +291,11 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		compReq.Temperature = *req.Temperature
 	}
 
-	// Inject Orka tools and run the server-side agentic loop by default.
-	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
+	// Use a transparent proxy by default. Server-side Orka tool execution is
+	// available only when explicitly requested with X-Orka-Tools: enabled.
+	orkaToolsEnabled := compatOrkaToolsEnabled(c.Get("X-Orka-Tools"))
 
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		// Replace client-provided tools with Orka's tools — the server-side tool loop
 		// executes tools itself, so client tools (e.g. Claude Code's Bash, Task) must
 		// not be visible to the LLM or it will call them and get "tool not found" errors.
@@ -316,7 +316,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	// Build ToolContext for coordinator tools (create_agent_task, wait_for_task, etc.)
 	var proxyToolCtx *tools.ToolContext
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		tasksCreated := 0
 		proxyToolCtx = &tools.ToolContext{
 			Client:                    h.client,
@@ -372,14 +372,14 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	}
 
 	if req.Stream {
-		if !orkaToolsDisabled {
+		if orkaToolsEnabled {
 			return h.handleStreamingMessages(c, provider, compReq, model, 0, proxyToolCtx)
 		}
 		return h.handleStreamingProxy(c, provider, compReq, model)
 	}
 
 	var resp *llm.CompletionResponse
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		// Run the agentic tool loop (executes tools server-side until final text response)
 		resp, err = runNonStreamingToolLoop(ctx, provider, compReq, model, h.config, proxyToolCtx)
 		if err != nil {
@@ -388,8 +388,9 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		}
 		resp = stripGoalStateSentinelFromResponse(resp)
 	} else {
-		// Transparent proxy: single LLM call, return response directly
-		resp, err = provider.Complete(ctx, compReq)
+		// Transparent proxy: single LLM call, preserving the streaming fallback
+		// used by tool-loop requests for upstreams that require streaming.
+		resp, err = completeWithStreamingFallback(ctx, anthropicLog, provider, compReq)
 		if err != nil {
 			anthropicLog.Error(err, "completion failed")
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())

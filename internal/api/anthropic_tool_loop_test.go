@@ -7,9 +7,13 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sozercan/orka/internal/llm"
 )
 
 func TestCoordinatorSystemPrompt_PRReviewCIRepairLoop(t *testing.T) {
@@ -411,5 +415,76 @@ func TestCoordinatorSystemPrompt_Demo10ContainerCacheAndReviewerTypeGuardrails(t
 		if strings.Contains(prompt, banned) {
 			t.Fatalf("coordinator prompt still contains old vague guidance:\n%s", banned)
 		}
+	}
+}
+
+type streamingFallbackProvider struct {
+	completeErr   error
+	streamChunks  []llm.StreamChunk
+	completeCalls int
+	streamCalls   int
+}
+
+func (p *streamingFallbackProvider) Complete(_ context.Context, _ *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	p.completeCalls++
+	return nil, p.completeErr
+}
+
+func (p *streamingFallbackProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+	p.streamCalls++
+	ch := make(chan llm.StreamChunk, len(p.streamChunks))
+	for _, chunk := range p.streamChunks {
+		ch <- chunk
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (p *streamingFallbackProvider) Name() string { return "streaming-fallback" }
+
+func TestCompleteWithStreamingFallback(t *testing.T) {
+	provider := &streamingFallbackProvider{
+		completeErr: fmt.Errorf("streaming is required for operations that may take longer than 10 minutes"),
+		streamChunks: []llm.StreamChunk{
+			{Content: "fallback "},
+			{Content: "content"},
+			{Done: true, StopReason: "end_turn"},
+		},
+	}
+
+	resp, err := completeWithStreamingFallback(context.Background(), anthropicLog, provider, &llm.CompletionRequest{Model: "test-model"})
+	if err != nil {
+		t.Fatalf("completeWithStreamingFallback returned error: %v", err)
+	}
+	if resp.Content != "fallback content" {
+		t.Fatalf("content = %q, want fallback content", resp.Content)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn", resp.StopReason)
+	}
+	if provider.completeCalls != 1 || provider.streamCalls != 1 {
+		t.Fatalf("calls complete=%d stream=%d, want 1/1", provider.completeCalls, provider.streamCalls)
+	}
+}
+
+func TestCompatOrkaToolsEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		headerValue string
+		want        bool
+	}{
+		{name: "default transparent", want: false},
+		{name: "legacy disabled remains transparent", headerValue: "disabled", want: false},
+		{name: "explicit enabled", headerValue: "enabled", want: true},
+		{name: "enabled trims whitespace", headerValue: " enabled ", want: true},
+		{name: "enabled case insensitive", headerValue: "ENABLED", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := compatOrkaToolsEnabled(tt.headerValue); got != tt.want {
+				t.Fatalf("compatOrkaToolsEnabled(%q) = %v, want %v", tt.headerValue, got, tt.want)
+			}
+		})
 	}
 }
