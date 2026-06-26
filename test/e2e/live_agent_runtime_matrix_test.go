@@ -170,7 +170,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		)
 
 		By("waiting for the prior task to succeed and emit a structured diff result")
-		Expect(waitForTaskCompletion(codexTaskWriteName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, codexTaskWriteName, liveRuntimeTimeout)
 		verifyResultAvailable(codexTaskWriteName)
 		firstResult := workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, codexTaskWriteName))
 		Expect(strings.TrimSpace(firstResult.Summary)).To(ContainSubstring("CREATED"))
@@ -204,7 +204,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("waiting for the Codex task to return the exact marker from the prior diff")
-		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, codexTaskReadName, liveRuntimeTimeout)
 		verifyResultAvailable(codexTaskReadName)
 		// Harness-wrapper-backed agent tasks do not create a worker Job. The result
 		// assertion below verifies the priorTaskRef workspace diff was consumed.
@@ -304,6 +304,24 @@ func shellSingleQuote(value string) string {
 type runtimeWorkspaceConfig struct {
 	GitRepo string
 	Ref     string
+}
+
+func waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, taskName string, timeout time.Duration) {
+	phase := waitForTaskCompletion(taskName, timeout)
+	if phase == "Succeeded" {
+		return
+	}
+	result := fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName)
+	if isLiveCopilotCodexModelUnavailable(result) {
+		Skip("Skipping Codex runtime live proxy check: selected model is unavailable for copilot-language-server integrator")
+	}
+	Expect(phase).To(Equal("Succeeded"), "Codex runtime task failed: %s", result)
+}
+
+func isLiveCopilotCodexModelUnavailable(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "model_not_available_for_integrator") ||
+		(strings.Contains(lower, "requested model is not available") && strings.Contains(lower, "copilot-language-server"))
 }
 
 func runtimeAgentManifest(name, runtimeType, secretName, modelName string, defaultMaxTurns int, defaultAllowBash bool) map[string]any {
