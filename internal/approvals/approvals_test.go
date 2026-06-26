@@ -2,6 +2,7 @@ package approvals
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,5 +68,24 @@ func TestFilterEventsForTaskUIDScopesRequestAndDecisionEvents(t *testing.T) {
 	}, "new-uid")
 	if len(filtered) != 2 || filtered[0].Seq != 3 || filtered[1].Seq != 4 {
 		t.Fatalf("filtered = %#v, want current task UID plus legacy untagged events", filtered)
+	}
+}
+
+func TestResolvedBoundsDecisionReason(t *testing.T) {
+	longReason := strings.Repeat("because ", maxApprovalTargetTextChars)
+	resolved := Resolved([]Approval{{
+		ID:             "approval-1",
+		TargetTool:     "dispatch_work_order",
+		Status:         StatusApproved,
+		DecisionReason: longReason,
+	}})
+	if len(resolved) != 1 {
+		t.Fatalf("resolved length = %d, want 1", len(resolved))
+	}
+	if len([]rune(resolved[0].Reason)) > maxApprovalTargetTextChars {
+		t.Fatalf("Reason length = %d, want <= %d", len([]rune(resolved[0].Reason)), maxApprovalTargetTextChars)
+	}
+	if resolved[0].Reason == longReason {
+		t.Fatalf("Reason was not bounded")
 	}
 }

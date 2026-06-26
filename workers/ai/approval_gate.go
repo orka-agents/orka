@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/llm"
@@ -112,14 +113,18 @@ func (g *approvalGate) requiresApproval(toolName string) bool {
 	return ok
 }
 
-func (g *approvalGate) preScan(ctx context.Context, calls []llm.ToolCall) (*approvalBatchDecision, error) {
+func (g *approvalGate) preScan(
+	ctx context.Context,
+	calls []llm.ToolCall,
+	customTools map[string]*corev1alpha1.Tool,
+) (*approvalBatchDecision, error) {
 	if g == nil || (!g.enabled() && len(g.resolved) == 0) {
 		return nil, nil
 	}
 	for _, call := range calls {
 		toolName := strings.TrimSpace(call.Name)
 		requiresApproval := g.requiresApproval(toolName)
-		target, err := g.targetForCall(toolName, call.Arguments)
+		target, err := g.targetForCall(toolName, call.Arguments, customTools[toolName])
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +152,15 @@ func (g *approvalGate) preScan(ctx context.Context, calls []llm.ToolCall) (*appr
 	return nil, nil
 }
 
-func (g *approvalGate) targetForCall(toolName string, args json.RawMessage) (approvals.ApprovalTarget, error) {
+func (g *approvalGate) targetForCall(
+	toolName string,
+	args json.RawMessage,
+	customTool *corev1alpha1.Tool,
+) (approvals.ApprovalTarget, error) {
+	targetSpecDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		return approvals.ApprovalTarget{}, err
+	}
 	return approvals.NewApprovalTarget(
 		g.namespace,
 		g.taskName,
@@ -157,7 +170,19 @@ func (g *approvalGate) targetForCall(toolName string, args json.RawMessage) (app
 		fmt.Sprintf("Execute %s", toolName),
 		fmt.Sprintf("Human approval is required before executing %s", toolName),
 		"warning",
+		targetSpecDigest,
 	)
+}
+
+func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
+	if customTool == nil {
+		return "", nil
+	}
+	digest, err := approvals.TargetSpecDigest(customTool.Spec)
+	if err != nil {
+		return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
+	}
+	return digest, nil
 }
 
 func (g *approvalGate) resolvedDecision(target approvals.ApprovalTarget) (approvals.ResolvedApproval, bool) {
@@ -169,7 +194,8 @@ func (g *approvalGate) resolvedDecision(target approvals.ApprovalTarget) (approv
 			continue
 		}
 		if decision.TargetTool != target.TargetTool ||
-			decision.TargetArgsDigest != target.TargetArgsDigest {
+			decision.TargetArgsDigest != target.TargetArgsDigest ||
+			decision.TargetSpecDigest != target.TargetSpecDigest {
 			continue
 		}
 		return decision, true
@@ -242,9 +268,10 @@ func approvalEmitterFromRecorder(recorder common.EventRecorder) func(context.Con
 func (g *approvalGate) prepareApprovedCall(
 	toolName string,
 	args json.RawMessage,
+	customTool *corev1alpha1.Tool,
 ) (json.RawMessage, string, bool, error) {
 	requiresApproval := g.requiresApproval(toolName)
-	target, err := g.targetForCall(toolName, args)
+	target, err := g.targetForCall(toolName, args, customTool)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -437,10 +464,11 @@ func processApprovalBatch(
 	calls []llm.ToolCall,
 	gate *approvalGate,
 	allowedToolCalls map[string]struct{},
+	customTools map[string]*corev1alpha1.Tool,
 	eventRecorder common.EventRecorder,
 	baseToolCtx *tools.ToolContext,
 ) ([]llm.Message, string, bool, bool, error) {
-	if decision, err := gate.preScan(ctx, calls); err != nil {
+	if decision, err := gate.preScan(ctx, calls, customTools); err != nil {
 		return messages, "", false, false, err
 	} else if decision != nil {
 		return applyApprovalBatchDecision(messages, decision)

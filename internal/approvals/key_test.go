@@ -49,6 +49,40 @@ func TestApprovalIDChangesByTaskToolOrArgs(t *testing.T) {
 	}
 }
 
+func TestApprovalIDChangesByTargetSpecDigest(t *testing.T) {
+	argsDigest, err := TargetArgsDigest(json.RawMessage(`{"incident":"inc-1"}`))
+	if err != nil {
+		t.Fatalf("digest args: %v", err)
+	}
+	base := ApprovalID("default", "incident-task", "task-uid-1", "dispatch_work_order", argsDigest, "spec-a")
+	if got := ApprovalID("default", "incident-task", "task-uid-1", "dispatch_work_order", argsDigest, "spec-b"); got == base {
+		t.Fatalf("ApprovalID did not change when target spec digest changed")
+	}
+}
+
+func TestNewApprovalTargetCarriesTargetSpecDigest(t *testing.T) {
+	target, err := NewApprovalTarget(
+		"default",
+		"task-1",
+		"task-uid-1",
+		"dispatch_work_order",
+		json.RawMessage(`{"safe":"ok"}`),
+		"dispatch",
+		"",
+		"",
+		"spec-digest",
+	)
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	if target.TargetSpecDigest != "spec-digest" {
+		t.Fatalf("TargetSpecDigest = %q, want spec-digest", target.TargetSpecDigest)
+	}
+	if target.ApprovalID != ApprovalID("default", "task-1", "task-uid-1", "dispatch_work_order", target.TargetArgsDigest, "spec-digest") {
+		t.Fatalf("ApprovalID was not bound to spec digest")
+	}
+}
+
 func TestApprovalTargetPayloadDoesNotPersistRawSensitiveArgs(t *testing.T) {
 	sensitiveKey := "api" + "Token"
 	sensitiveValue := "sensitive" + "-value"

@@ -26,6 +26,7 @@ type Approval struct {
 	TaskUID           string          `json:"taskUID,omitempty"`
 	TargetTool        string          `json:"targetTool,omitempty"`
 	TargetArgsDigest  string          `json:"targetArgsDigest,omitempty"`
+	TargetSpecDigest  string          `json:"targetSpecDigest,omitempty"`
 	TargetArgsPreview json.RawMessage `json:"targetArgsPreview,omitempty"`
 	Severity          string          `json:"severity,omitempty"`
 	ToolCallID        string          `json:"toolCallID,omitempty"`
@@ -69,6 +70,7 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 				TaskUID:           payload.TaskUID,
 				TargetTool:        payload.TargetTool,
 				TargetArgsDigest:  payload.TargetArgsDigest,
+				TargetSpecDigest:  payload.TargetSpecDigest,
 				TargetArgsPreview: payload.TargetArgsPreview,
 				Severity:          payload.Severity,
 				ToolCallID:        firstNonEmpty(payload.ToolCallID, event.ToolCallID),
@@ -157,6 +159,7 @@ type payload struct {
 	TaskUID           string          `json:"taskUID"`
 	TargetTool        string          `json:"targetTool"`
 	TargetArgsDigest  string          `json:"targetArgsDigest"`
+	TargetSpecDigest  string          `json:"targetSpecDigest"`
 	TargetArgsPreview json.RawMessage `json:"targetArgsPreview"`
 	Severity          string          `json:"severity"`
 	ToolCallID        string          `json:"toolCallID"`
@@ -242,10 +245,11 @@ func Resolved(values []Approval) []ResolvedApproval {
 				TaskUID:          approval.TaskUID,
 				TargetTool:       approval.TargetTool,
 				TargetArgsDigest: approval.TargetArgsDigest,
+				TargetSpecDigest: approval.TargetSpecDigest,
 				Status:           approval.Status,
 				Actor:            approval.DecisionActor,
 				DecisionTime:     decisionTime,
-				Reason:           approval.DecisionReason,
+				Reason:           boundApprovalTargetText(approval.DecisionReason),
 				Action:           approval.Action,
 				RiskSummary:      approval.RiskSummary,
 				Severity:         approval.Severity,

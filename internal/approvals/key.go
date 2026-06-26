@@ -31,6 +31,7 @@ type ApprovalTarget struct {
 	TaskUID           string          `json:"taskUID,omitempty"`
 	TargetTool        string          `json:"targetTool"`
 	TargetArgsDigest  string          `json:"targetArgsDigest"`
+	TargetSpecDigest  string          `json:"targetSpecDigest,omitempty"`
 	TargetArgsPreview json.RawMessage `json:"targetArgsPreview,omitempty"`
 	Action            string          `json:"action"`
 	RiskSummary       string          `json:"riskSummary,omitempty"`
@@ -44,6 +45,7 @@ type ResolvedApproval struct {
 	TaskUID          string `json:"taskUID,omitempty"`
 	TargetTool       string `json:"targetTool,omitempty"`
 	TargetArgsDigest string `json:"targetArgsDigest,omitempty"`
+	TargetSpecDigest string `json:"targetSpecDigest,omitempty"`
 	Status           string `json:"status"`
 	Actor            string `json:"actor,omitempty"`
 	DecisionTime     string `json:"decisionTime,omitempty"`
@@ -66,13 +68,18 @@ func TargetArgsDigest(args json.RawMessage) (string, error) {
 
 // ApprovalID returns a deterministic approval/idempotency key for a concrete
 // side-effect target within a task.
-func ApprovalID(namespace, taskName, taskUID, targetTool, targetArgsDigest string) string {
+func ApprovalID(namespace, taskName, taskUID, targetTool, targetArgsDigest string, targetSpecDigests ...string) string {
 	parts := []string{
 		strings.TrimSpace(namespace),
 		strings.TrimSpace(taskName),
 		strings.TrimSpace(taskUID),
 		strings.TrimSpace(targetTool),
 		strings.TrimSpace(targetArgsDigest),
+	}
+	if len(targetSpecDigests) > 0 {
+		if targetSpecDigest := strings.TrimSpace(targetSpecDigests[0]); targetSpecDigest != "" {
+			parts = append(parts, targetSpecDigest)
+		}
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
@@ -88,6 +95,7 @@ func NewApprovalTarget(
 	action string,
 	riskSummary string,
 	severity string,
+	targetSpecDigests ...string,
 ) (ApprovalTarget, error) {
 	targetTool = strings.TrimSpace(targetTool)
 	if targetTool == "" {
@@ -105,6 +113,10 @@ func NewApprovalTarget(
 	if err != nil {
 		return ApprovalTarget{}, err
 	}
+	targetSpecDigest := ""
+	if len(targetSpecDigests) > 0 {
+		targetSpecDigest = strings.TrimSpace(targetSpecDigests[0])
+	}
 	if strings.TrimSpace(action) == "" {
 		action = fmt.Sprintf("Execute %s", targetTool)
 	}
@@ -112,15 +124,33 @@ func NewApprovalTarget(
 	riskSummary = boundApprovalTargetText(riskSummary)
 	severity = boundApprovalTargetText(severity)
 	return ApprovalTarget{
-		ApprovalID:        ApprovalID(namespace, taskName, taskUID, targetTool, digest),
+		ApprovalID:        ApprovalID(namespace, taskName, taskUID, targetTool, digest, targetSpecDigest),
 		TaskUID:           strings.TrimSpace(taskUID),
 		TargetTool:        targetTool,
 		TargetArgsDigest:  digest,
+		TargetSpecDigest:  targetSpecDigest,
 		TargetArgsPreview: preview,
 		Action:            action,
 		RiskSummary:       riskSummary,
 		Severity:          severity,
 	}, nil
+}
+
+// TargetSpecDigest returns a sha256 digest of a sanitized tool specification.
+func TargetSpecDigest(spec any) (string, error) {
+	if spec == nil {
+		return "", nil
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return "", fmt.Errorf("marshal target spec: %w", err)
+	}
+	canonical, err := canonicalJSON(raw)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize target spec: %w", err)
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func boundApprovalTargetText(value string) string {

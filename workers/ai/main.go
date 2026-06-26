@@ -954,6 +954,7 @@ func executeAgentLoopWithEvents(
 			resp.ToolCalls,
 			approvalGate,
 			allowedToolCalls,
+			customTools,
 			eventRecorder,
 			baseToolCtx,
 		)
@@ -994,6 +995,7 @@ func executeAgentLoopWithEvents(
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
 					toolName,
 					tc.Arguments,
+					customTools[toolName],
 				)
 			}
 			if execErr != nil {

@@ -9,16 +9,22 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/llm"
 	toolspkg "github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/worker"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const gatedDispatchTool = "dispatch_work_order"
@@ -166,6 +172,72 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 	}
 }
 
+func TestApprovalGateMismatchedCustomToolSpecRequestsNewApproval(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	oldTool := approvalTestCustomTool("dispatch_work_order", toolServer.URL+"/old")
+	oldSpecDigest, err := approvals.TargetSpecDigest(oldTool.Spec)
+	if err != nil {
+		t.Fatalf("old spec digest: %v", err)
+	}
+	oldTarget, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		oldSpecDigest,
+	)
+	if err != nil {
+		t.Fatalf("old approval target: %v", err)
+	}
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{resolvedApprovalForTarget(oldTarget)})
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+	recorder := common.NewFakeEventRecorder()
+	currentTool := approvalTestCustomTool("dispatch_work_order", toolServer.URL+"/new")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{response: &llm.CompletionResponse{
+			Content: "dispatching",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call-dispatch",
+				Name:      gatedDispatchTool,
+				Arguments: args,
+			}},
+			StopReason: "tool_use",
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: currentTool},
+		worker.NewToolExecutor(),
+		recorder,
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("mismatched custom tool spec executed gated tool")
+	}
+	if !strings.Contains(result, "approval requested") {
+		t.Fatalf("result = %q, want new approval requested", result)
+	}
+	assertRecordedEventTypesEventually(t, recorder, []string{events.ExecutionEventTypeApprovalRequested})
+}
+
 func TestApprovalGateMismatchedResolvedApprovalRequestsNewApproval(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()
@@ -308,12 +380,26 @@ func approvalTargetForTest(t *testing.T, args json.RawMessage) approvals.Approva
 	return target
 }
 
+func approvalTestCustomTool(name, url string) *corev1alpha1.Tool {
+	return &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "approval-gated custom tool",
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:    url,
+				Method: http.MethodPost,
+			},
+		},
+	}
+}
+
 func resolvedApprovalForTarget(target approvals.ApprovalTarget) approvals.ResolvedApproval {
 	return approvals.ResolvedApproval{
 		ID:               target.ApprovalID,
 		TaskUID:          target.TaskUID,
 		TargetTool:       target.TargetTool,
 		TargetArgsDigest: target.TargetArgsDigest,
+		TargetSpecDigest: target.TargetSpecDigest,
 		Status:           approvals.StatusApproved,
 	}
 }

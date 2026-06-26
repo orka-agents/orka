@@ -3548,6 +3548,109 @@ func TestHandleRunning_AutonomousJobFailedWithPendingApprovalParksBeforeRetry(t 
 	}
 }
 
+func TestHandleRunning_AutonomousDeadlineFailedWithPendingApprovalParksBeforeTimeout(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Minute}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-deadline-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-deadline-approval", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Failed: 1,
+			Conditions: []batchv1.JobCondition{{
+				Type:   batchv1.JobFailed,
+				Status: corev1.ConditionTrue,
+				Reason: batchv1.JobReasonDeadlineExceeded,
+			}},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-deadline-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-deadline-approval-agent"},
+			Timeout:     &timeout,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-deadline-approval",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-deadline-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-job-deadline-approval" {
+		t.Fatalf("task status = %#v, want parked Running before timeout", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousDeadlineFailedWithApprovedApprovalResumesBeforeTimeout(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Minute}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-deadline-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-deadline-approved", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Failed: 1,
+			Conditions: []batchv1.JobCondition{{
+				Type:   batchv1.JobFailed,
+				Status: corev1.ConditionTrue,
+				Reason: batchv1.JobReasonDeadlineExceeded,
+			}},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-deadline-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-deadline-approved-agent"},
+			Timeout:  &timeout,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-deadline-approved",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-deadline-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-deadline-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-deadline-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", task.Status)
+	}
+}
+
 func TestHandleRunning_AutonomousJobNotFoundWithPendingApprovalParksBeforeRetry(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{

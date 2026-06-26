@@ -1506,9 +1506,6 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if job.Status.Failed > 0 {
-		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
-			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
-		}
 		if r.isAutonomousTask(ctx, task) {
 			if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
 				return result, err
@@ -1520,6 +1517,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			if resumingAfterApproval {
 				return r.handleAutonomousIteration(ctx, task)
 			}
+		}
+		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
