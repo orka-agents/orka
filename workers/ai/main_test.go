@@ -663,7 +663,10 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 		if err := json.Unmarshal(event.Content, &content); err != nil {
 			t.Fatalf("unmarshal model event content: %v", err)
 		}
-		sawTelemetryProvider = content["provider"] == "azure.ai.openai"
+		if content["provider"] == "azure.ai.openai" {
+			sawTelemetryProvider = true
+			break
+		}
 	}
 	if !sawTelemetryProvider {
 		t.Fatalf("model completion event did not preserve response provider: %#v", recorder.Events())
