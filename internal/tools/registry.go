@@ -56,6 +56,7 @@ type ToolContext struct {
 	IncrementTasks                 func()
 	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
 	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
+	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 type toolContextKey struct{}

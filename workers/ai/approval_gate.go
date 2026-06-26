@@ -23,6 +23,8 @@ import (
 	"github.com/sozercan/orka/workers/common"
 )
 
+const approvalAuthInjectBody = "body"
+
 type approvalGate struct {
 	namespace string
 	taskName  string
@@ -232,7 +234,7 @@ func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
 	if customTool == nil || customTool.Spec.HTTP == nil {
 		return ""
 	}
-	if strings.TrimSpace(customTool.Spec.HTTP.AuthInject) != "body" {
+	if strings.TrimSpace(customTool.Spec.HTTP.AuthInject) != approvalAuthInjectBody {
 		return ""
 	}
 	return strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey)
@@ -277,6 +279,14 @@ func approvalTargetSpecDigestFromCustomTools(
 			return "", fmt.Errorf("targetTool %q is not an enabled custom tool", targetTool)
 		}
 		return approvalTargetSpecDigest(customTool)
+	}
+}
+
+func approvalTargetArgumentsFromCustomTools(
+	customTools map[string]*corev1alpha1.Tool,
+) func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	return func(_ context.Context, targetTool string, args json.RawMessage) (json.RawMessage, error) {
+		return approvalTargetArguments(args, customTools[strings.TrimSpace(targetTool)])
 	}
 }
 
@@ -630,12 +640,16 @@ func explicitApprovalTargetForCall(
 	if err != nil {
 		return approvals.ApprovalTarget{}, err
 	}
+	targetArguments, err := approvalTargetArgumentsFromCustomTools(customTools)(ctx, targetTool, req.TargetArguments)
+	if err != nil {
+		return approvals.ApprovalTarget{}, err
+	}
 	return approvals.NewApprovalTarget(
 		baseToolCtx.Namespace,
 		baseToolCtx.TaskID,
 		baseToolCtx.TaskUID,
 		targetTool,
-		req.TargetArguments,
+		targetArguments,
 		req.Action,
 		req.RiskSummary,
 		req.Severity,
@@ -695,6 +709,9 @@ func executeRequestApprovalToolCall(
 		}
 		if toolCtxCopy.ApprovalTargetSpecDigest == nil {
 			toolCtxCopy.ApprovalTargetSpecDigest = approvalTargetSpecDigestFromCustomTools(customTools)
+		}
+		if toolCtxCopy.ApprovalTargetArguments == nil {
+			toolCtxCopy.ApprovalTargetArguments = approvalTargetArgumentsFromCustomTools(customTools)
 		}
 		execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 	}

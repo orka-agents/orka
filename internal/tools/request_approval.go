@@ -105,12 +105,20 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 			return "", requestApprovalValidationError("resolve target tool spec digest: %w", err)
 		}
 	}
+	targetArguments := req.TargetArguments
+	if toolCtx.ApprovalTargetArguments != nil {
+		var err error
+		targetArguments, err = toolCtx.ApprovalTargetArguments(ctx, targetTool, targetArguments)
+		if err != nil {
+			return "", requestApprovalValidationError("sanitize target arguments: %w", err)
+		}
+	}
 	target, err := approvals.NewApprovalTarget(
 		toolCtx.Namespace,
 		toolCtx.TaskID,
 		toolCtx.TaskUID,
 		targetTool,
-		req.TargetArguments,
+		targetArguments,
 		req.Action,
 		req.RiskSummary,
 		req.Severity,

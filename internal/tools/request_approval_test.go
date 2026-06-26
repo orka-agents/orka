@@ -16,6 +16,8 @@ import (
 	"github.com/sozercan/orka/internal/approvals"
 )
 
+const requestApprovalDispatchTool = "dispatch_work_order"
+
 func TestRequestApprovalToolEmitsTargetApproval(t *testing.T) {
 	var got approvals.ApprovalTarget
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -38,7 +40,7 @@ func TestRequestApprovalToolEmitsTargetApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got.ApprovalID == "" || got.TargetTool != "dispatch_work_order" || got.TargetArgsDigest == "" {
+	if got.ApprovalID == "" || got.TargetTool != requestApprovalDispatchTool || got.TargetArgsDigest == "" {
 		t.Fatalf("emitted target = %#v", got)
 	}
 	if got.Action != "Dispatch a technician" || got.RiskSummary == "" || got.Severity != "critical" {
@@ -53,6 +55,49 @@ func TestRequestApprovalToolEmitsTargetApproval(t *testing.T) {
 	}
 }
 
+func TestRequestApprovalToolSanitizesTargetArguments(t *testing.T) {
+	var got approvals.ApprovalTarget
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Namespace: "default",
+		TaskID:    "task-1",
+		TaskUID:   "task-uid-1",
+		ApprovalEmitter: func(_ context.Context, target approvals.ApprovalTarget) error {
+			got = target
+			return nil
+		},
+		ApprovalTargetArguments: func(_ context.Context, targetTool string, args json.RawMessage) (json.RawMessage, error) {
+			if targetTool != requestApprovalDispatchTool {
+				t.Fatalf("targetTool = %q, want dispatch_work_order", targetTool)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(args, &raw); err != nil {
+				return nil, err
+			}
+			delete(raw, "api_key")
+			return json.Marshal(raw)
+		},
+	})
+
+	_, err := NewRequestApprovalTool().Execute(ctx, json.RawMessage(`{
+		"action":"Dispatch a technician",
+		"targetTool":"dispatch_work_order",
+		"targetArguments":{"incident":"inc-1","api_key":"model-supplied"}
+	}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	wantDigest, err := approvals.TargetArgsDigest(json.RawMessage(`{"incident":"inc-1"}`))
+	if err != nil {
+		t.Fatalf("target args digest: %v", err)
+	}
+	if got.TargetArgsDigest != wantDigest {
+		t.Fatalf("TargetArgsDigest = %q, want sanitized digest %q", got.TargetArgsDigest, wantDigest)
+	}
+	if strings.Contains(string(got.TargetArgsPreview), "api_key") {
+		t.Fatalf("TargetArgsPreview = %s, want auth body key stripped", got.TargetArgsPreview)
+	}
+}
+
 func TestRequestApprovalToolIncludesTargetSpecDigest(t *testing.T) {
 	var got approvals.ApprovalTarget
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -64,7 +109,7 @@ func TestRequestApprovalToolIncludesTargetSpecDigest(t *testing.T) {
 			return nil
 		},
 		ApprovalTargetSpecDigest: func(_ context.Context, targetTool string) (string, error) {
-			if targetTool != "dispatch_work_order" {
+			if targetTool != requestApprovalDispatchTool {
 				t.Fatalf("targetTool = %q, want dispatch_work_order", targetTool)
 			}
 			return "spec-digest", nil
