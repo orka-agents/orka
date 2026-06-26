@@ -94,9 +94,11 @@ type UserInfo struct {
 
 // OIDCConfig holds OpenID Connect JWT validation settings.
 type OIDCConfig struct {
-	Issuer   string
-	Audience string
-	JWKSURL  string
+	Issuer          string
+	Audience        string
+	JWKSURL         string
+	AllowedSubjects []string
+	Namespace       string
 }
 
 // Enabled reports whether OIDC authentication is configured.
@@ -198,16 +200,7 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 			return userInfo, nil
 		}
 
-		if c == nil {
-			return nil, oidcErr
-		}
-
-		userInfo, tokenReviewErr := validateToken(ctx, c, token)
-		if tokenReviewErr == nil {
-			return userInfo, nil
-		}
-
-		return nil, fmt.Errorf("OIDC validation failed: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
+		return nil, oidcErr
 	}
 
 	if c == nil {

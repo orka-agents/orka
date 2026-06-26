@@ -172,37 +172,13 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 }
 
 func (h *Handlers) listTaskApprovalEvents(ctx context.Context, namespace, taskName string) ([]store.ExecutionEvent, error) {
-	approvalEventTypes := []string{
+	return newTaskTimelineReader(h.executionEventStore, namespace, taskName).listMatching(ctx, []string{
 		events.ExecutionEventTypeApprovalRequested,
 		events.ExecutionEventTypeApprovalApproved,
 		events.ExecutionEventTypeApprovalDeclined,
 		events.ExecutionEventTypeApprovalExpired,
 		events.ExecutionEventTypeApprovalCancelled,
-	}
-	out := []store.ExecutionEvent{}
-	after := int64(0)
-	for {
-		batch, err := h.executionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  namespace,
-			StreamType: events.ExecutionEventStreamTypeTask,
-			StreamID:   taskName,
-			EventTypes: approvalEventTypes,
-			AfterSeq:   after,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		out = append(out, batch...)
-		after = batch[len(batch)-1].Seq
-		if len(batch) < store.MaxExecutionEventLimit {
-			break
-		}
-	}
-	return out, nil
+	})
 }
 
 func approvalDecisionActor(userInfo *UserInfo) string {

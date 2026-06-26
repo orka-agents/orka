@@ -45,6 +45,7 @@ import (
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
+	"github.com/sozercan/orka/internal/workspace/statusrules"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -78,13 +79,6 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
-
-	substratePoolActorLeasePurpose        = "substrate-actor-pool-lease"
-	substratePoolActorLeaseActorIDLabel   = "orka.ai/substrate-pool-actor-id"
-	substratePoolActorLeaseHolderUIDLabel = "orka.ai/substrate-pool-holder-uid"
-	substratePoolActorLeaseTaskNSAnno     = "orka.ai/substrate-pool-task-namespace"
-	substratePoolActorLeaseTaskNameAnno   = "orka.ai/substrate-pool-task-name"
-	substratePoolActorLeaseTaskUIDAnno    = "orka.ai/substrate-pool-task-uid"
 )
 
 // TaskReconciler reconciles a Task object
@@ -128,7 +122,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
@@ -144,7 +138,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
@@ -1160,61 +1156,6 @@ func (r *TaskReconciler) tryReserveSubstratePoolActor(
 	return true, nil
 }
 
-func substratePoolActorLeaseHasActiveHolder(ctx context.Context, reader client.Reader, lease *coordinationv1.Lease) (bool, error) {
-	if lease == nil || lease.Annotations == nil {
-		return true, nil
-	}
-	taskNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskNSAnno])
-	taskName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskNameAnno])
-	taskUID := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskUIDAnno])
-	if taskNamespace == "" || taskName == "" || taskUID == "" {
-		toolNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNSAnno])
-		toolName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNameAnno])
-		if toolNamespace != "" && toolName != "" {
-			return substratePoolActorLeaseHasActiveToolHolder(ctx, reader, toolNamespace, toolName, lease.Annotations[substratePoolActorLeaseToolUIDAnno])
-		}
-		return true, nil
-	}
-	task := &corev1alpha1.Task{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: taskNamespace, Name: taskName}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return true, err
-	}
-	if string(task.UID) != taskUID {
-		return true, nil
-	}
-	if !task.DeletionTimestamp.IsZero() {
-		return true, nil
-	}
-	if substratePoolActorLeaseActiveTaskPhase(task.Status.Phase) {
-		return true, nil
-	}
-	return taskSubstratePoolActorCleanupRequired(task), nil
-}
-
-func substratePoolActorLeaseHasActiveToolHolder(
-	ctx context.Context,
-	reader client.Reader,
-	toolNamespace string,
-	toolName string,
-	toolUID string,
-) (bool, error) {
-	tool := &corev1alpha1.Tool{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: toolNamespace, Name: toolName}, tool); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return true, err
-	}
-	toolUID = strings.TrimSpace(toolUID)
-	if toolUID != "" && string(tool.UID) != toolUID {
-		return true, nil
-	}
-	return true, nil
-}
-
 func (r *TaskReconciler) releaseSubstratePoolActorLeases(ctx context.Context, task *corev1alpha1.Task) error {
 	leases, err := r.substratePoolActorLeasesForTask(ctx, task)
 	if err != nil {
@@ -1252,44 +1193,6 @@ func (r *TaskReconciler) deleteSubstratePoolActorLeasesForTask(ctx context.Conte
 		}
 	}
 	return nil
-}
-
-func deleteCurrentObjectPreconditions(obj client.Object) []client.DeleteOption {
-	if obj == nil {
-		return nil
-	}
-	preconditions := &metav1.Preconditions{}
-	if obj.GetUID() != "" {
-		uid := obj.GetUID()
-		preconditions.UID = &uid
-	}
-	if obj.GetResourceVersion() != "" {
-		resourceVersion := obj.GetResourceVersion()
-		preconditions.ResourceVersion = &resourceVersion
-	}
-	if preconditions.UID == nil && preconditions.ResourceVersion == nil {
-		return nil
-	}
-	return []client.DeleteOption{&client.DeleteOptions{Preconditions: preconditions}}
-}
-
-func substrateLeaseStillMatchesAfterDeleteConflict(
-	ctx context.Context,
-	reader client.Reader,
-	lease *coordinationv1.Lease,
-	matches func(*coordinationv1.Lease) bool,
-) (bool, error) {
-	if lease == nil || matches == nil {
-		return false, nil
-	}
-	latest := &coordinationv1.Lease{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, latest); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return matches(latest), nil
 }
 
 func (r *TaskReconciler) releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -1395,98 +1298,6 @@ func (r *TaskReconciler) taskHasSubstratePoolActorLeases(ctx context.Context, ta
 	return len(leases) > 0, nil
 }
 
-func newSubstratePoolActorLease(
-	task *corev1alpha1.Task,
-	namespace string,
-	name string,
-	actorID string,
-) *coordinationv1.Lease {
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-		},
-	}
-	setSubstratePoolActorLeaseHolder(lease, task, actorID)
-	return lease
-}
-
-func setSubstratePoolActorLeaseHolder(lease *coordinationv1.Lease, task *corev1alpha1.Task, actorID string) {
-	if lease.Labels == nil {
-		lease.Labels = map[string]string{}
-	}
-	lease.Labels[labels.LabelManaged] = managedLabelValue
-	lease.Labels[labels.LabelPurpose] = substratePoolActorLeasePurpose
-	lease.Labels[substratePoolActorLeaseActorIDLabel] = labels.SelectorValue(actorID)
-	lease.Labels[substratePoolActorLeaseHolderUIDLabel] = labels.SelectorValue(string(task.UID))
-	if lease.Annotations == nil {
-		lease.Annotations = map[string]string{}
-	}
-	lease.Annotations[substratePoolActorLeaseTaskNSAnno] = task.Namespace
-	lease.Annotations[substratePoolActorLeaseTaskNameAnno] = task.Name
-	lease.Annotations[substratePoolActorLeaseTaskUIDAnno] = string(task.UID)
-	now := metav1.NewMicroTime(time.Now())
-	holder := fmt.Sprintf("%s/%s/%s", task.Namespace, task.Name, task.UID)
-	lease.Spec.HolderIdentity = &holder
-	lease.Spec.AcquireTime = &now
-	lease.Spec.RenewTime = &now
-}
-
-func substratePoolActorLeaseHeldByTask(lease *coordinationv1.Lease, task *corev1alpha1.Task) bool {
-	if lease == nil || task == nil || task.UID == "" || lease.Annotations == nil {
-		return false
-	}
-	return lease.Annotations[substratePoolActorLeaseTaskNSAnno] == task.Namespace &&
-		lease.Annotations[substratePoolActorLeaseTaskNameAnno] == task.Name &&
-		lease.Annotations[substratePoolActorLeaseTaskUIDAnno] == string(task.UID)
-}
-
-func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
-	if lease == nil {
-		return ""
-	}
-	if lease.Labels != nil {
-		if actorID := strings.TrimSpace(lease.Labels[substratePoolActorLeaseActorIDLabel]); actorID != "" {
-			return actorID
-		}
-	}
-	return strings.TrimSpace(lease.Name)
-}
-
-func substratePoolActorLeaseName(actorID string) string {
-	return strings.TrimSpace(actorID)
-}
-
-func substratePoolActorLeaseActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseScheduled, corev1alpha1.TaskPhaseRunning:
-		return true
-	default:
-		return false
-	}
-}
-
-func taskExecutionWorkspaceCleanupSucceeded(task *corev1alpha1.Task) bool {
-	if task == nil || task.Status.ExecutionWorkspace == nil {
-		return false
-	}
-	status := task.Status.ExecutionWorkspace
-	switch status.Reason {
-	case corev1alpha1.ExecutionWorkspaceReasonRetained:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseRetained
-	case corev1alpha1.ExecutionWorkspaceReasonDeleted:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseDeleted
-	case corev1alpha1.ExecutionWorkspaceReasonReleased:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseReleased
-	default:
-		return false
-	}
-}
-
-func taskSubstratePoolActorCleanupRequired(task *corev1alpha1.Task) bool {
-	return task != nil && !taskExecutionWorkspaceCleanupSucceeded(task)
-}
-
 func taskExecutionWorkspacePhase(task *corev1alpha1.Task) corev1alpha1.ExecutionWorkspacePhase {
 	if task == nil || task.Status.ExecutionWorkspace == nil {
 		return ""
@@ -1499,23 +1310,6 @@ func taskExecutionWorkspaceReason(task *corev1alpha1.Task) corev1alpha1.Executio
 		return ""
 	}
 	return task.Status.ExecutionWorkspace.Reason
-}
-
-func substratePoolActorOrdinalFromID(actorID string, prefix string) (int, bool) {
-	actorID = strings.TrimSpace(actorID)
-	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
-	suffix, ok := strings.CutPrefix(actorID, prefix+"-")
-	if !ok || len(suffix) != 5 {
-		return 0, false
-	}
-	ordinal := 0
-	for _, ch := range suffix {
-		if ch < '0' || ch > '9' {
-			return 0, false
-		}
-		ordinal = ordinal*10 + int(ch-'0')
-	}
-	return ordinal, true
 }
 
 // handleRunning handles Tasks in Running phase
@@ -2587,15 +2381,11 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 }
 
 func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
-	switch ws.ReusePolicy {
-	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
-	default:
+	if !statusrules.IsOptionalReusePolicy(ws.ReusePolicy) {
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
 
-	switch ws.CleanupPolicy {
-	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-	default:
+	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
 		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
 	}
 	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
@@ -2617,26 +2407,25 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 	now := metav1.Now()
 	message := ""
 	if validationErr != nil {
-		message = strings.TrimSpace(validationErr.Error())
-	}
-	status := &corev1alpha1.ExecutionWorkspaceStatus{
-		Phase:          corev1alpha1.ExecutionWorkspacePhaseFailed,
-		Reason:         corev1alpha1.ExecutionWorkspaceReasonValidationFailed,
-		Message:        message,
-		LastUpdateTime: &now,
+		message = validationErr.Error()
 	}
 	ws := task.Spec.Execution.Workspace
 	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
+	failure := statusrules.ValidationFailure{
+		Message:    message,
+		ObservedAt: &now,
+	}
 	if supportedWorkspaceProvider(provider) {
-		status.Provider = provider
-		status.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
+		failure.Provider = provider
+		failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
 	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
-		status.ReusePolicy = reusePolicy
+		failure.ReusePolicy = reusePolicy
 	}
 	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
-		status.CleanupPolicy = cleanupPolicy
+		failure.CleanupPolicy = cleanupPolicy
 	}
+	status := statusrules.ValidationFailedStatus(failure)
 
 	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.ExecutionWorkspace = status
@@ -2701,12 +2490,7 @@ func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.
 }
 
 func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	switch cleanupPolicy {
-	case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-		return cleanupPolicy, true
-	default:
-		return "", false
-	}
+	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
@@ -3058,13 +2842,23 @@ func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 	return fmt.Sprintf("%s-%s", name[:prefixLength], suffix)
 }
 
-// ensureWorkerRBAC ensures each worker ServiceAccount and ClusterRoleBinding
+// ensureWorkerRBAC ensures each worker ServiceAccount and worker role binding
 // exists in the given namespace so that task jobs have trust-tiered permissions.
 func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
 		}
+		if r.EnforceNamespaceIsolation {
+			if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
+				return err
+			}
+			if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+				return err
+			}
+			continue
+		}
+
 		if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 			return err
 		}
@@ -3114,6 +2908,135 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 		log.Info("Updated worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	}
 
+	return nil
+}
+
+func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+	desired := workerRoleBinding(namespace, spec)
+
+	rb := &rbacv1.RoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb)
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, desired); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+			}
+			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb); err != nil {
+				return fmt.Errorf("getting worker RoleBinding %s/%s after create conflict: %w", namespace, spec.clusterRoleBindingName, err)
+			}
+		} else {
+			log.Info("Created worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+			return nil
+		}
+	} else if err != nil {
+		return fmt.Errorf("getting worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+	}
+
+	if rb.RoleRef != desired.RoleRef {
+		recreated, err := r.recreateWorkerRoleBinding(ctx, namespace, spec, rb, desired)
+		if err != nil {
+			return err
+		}
+		rb = recreated
+	}
+
+	changed := false
+	if rb.Labels == nil {
+		rb.Labels = map[string]string{}
+	}
+	if rb.Labels[managedByLabelKey] != managedByLabelValue {
+		rb.Labels[managedByLabelKey] = managedByLabelValue
+		changed = true
+	}
+	if !subjectsEqual(rb.Subjects, desired.Subjects) {
+		rb.Subjects = desired.Subjects
+		changed = true
+	}
+
+	if changed {
+		if err := r.Update(ctx, rb); err != nil {
+			return fmt.Errorf("updating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+		}
+		log.Info("Updated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+	}
+
+	return nil
+}
+
+func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
+	log := logf.FromContext(ctx)
+	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
+
+	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+	}
+
+	var recreated *rbacv1.RoleBinding
+	err := wait.PollUntilContextTimeout(ctx, workerClusterRoleBindingRecreateInterval, workerClusterRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
+		latest := &rbacv1.RoleBinding{}
+		err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, latest)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("getting worker RoleBinding %s/%s while waiting for stale RoleRef deletion: %w", namespace, spec.clusterRoleBindingName, err)
+		}
+
+		if err == nil {
+			if latest.RoleRef == desired.RoleRef {
+				recreated = latest
+				return true, nil
+			}
+
+			// The API server may still be serving the stale object while deletion is
+			// propagating, or another actor may have recreated it with the stale
+			// immutable RoleRef. Keep deleting/retrying until the name is available.
+			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.clusterRoleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
+			}
+			return false, nil
+		}
+
+		create := desired.DeepCopy()
+		if err := r.Create(ctx, create); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("recreating worker RoleBinding %s/%s with RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
+		}
+
+		recreated = create
+		return true, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recreating worker RoleBinding %s/%s after stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+	}
+
+	log.Info("Recreated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+	return recreated, nil
+}
+
+func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+	legacy := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, legacy)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
+	}
+
+	desiredLegacy := workerClusterRoleBinding(namespace, spec)
+	managed := legacy.Labels[managedByLabelKey] == managedByLabelValue
+	bindsWorkerServiceAccount := len(desiredLegacy.Subjects) == 1 && subjectsContain(legacy.Subjects, desiredLegacy.Subjects[0])
+	if !managed && !bindsWorkerServiceAccount {
+		log.Info("Skipping unmanaged legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName)
+		return nil
+	}
+
+	if err := r.Delete(ctx, legacy); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
+	}
+	log.Info("Deleted legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 	return nil
 }
 
@@ -3220,6 +3143,30 @@ func (r *TaskReconciler) recreateWorkerClusterRoleBinding(ctx context.Context, n
 	return recreated, nil
 }
 
+func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBinding {
+	return &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      spec.clusterRoleBindingName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				managedByLabelKey: managedByLabelValue,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     spec.clusterRoleName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      spec.serviceAccountName,
+				Namespace: namespace,
+			},
+		},
+	}
+}
+
 func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3241,6 +3188,10 @@ func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.Clu
 			},
 		},
 	}
+}
+
+func subjectsContain(subjects []rbacv1.Subject, want rbacv1.Subject) bool {
+	return slices.Contains(subjects, want)
 }
 
 // subjectsEqual is intentionally order-sensitive; desired worker bindings

@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -61,7 +61,7 @@ func newTestScheme() *runtime.Scheme {
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
-	_ = sandboxextv1alpha1.AddToScheme(s)
+	_ = sandboxextv1beta1.AddToScheme(s)
 	return s
 }
 
@@ -601,7 +601,7 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // validateExecutionWorkspace (pure logic)
 // ---------------------------------------------------------------------------
 
-func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testing.T) {
+func TestResolveExecutionWorkspaceRequestValidatesSandboxWarmPoolExists(t *testing.T) {
 	scheme := newTestScheme()
 
 	executionWorkspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
@@ -629,11 +629,11 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	}
 
-	t.Run("existing template in task namespace is accepted", func(t *testing.T) {
-		template := &sandboxextv1alpha1.SandboxTemplate{
+	t.Run("existing warm pool in task namespace is accepted", func(t *testing.T) {
+		warmPool := &sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
 		}
-		r := newUnitReconciler(scheme, template)
+		r := newUnitReconciler(scheme, warmPool)
 		r.AgentSandboxEnabled = true
 
 		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", executionWorkspace("task-template", "")))
@@ -645,25 +645,25 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	})
 
-	t.Run("missing template fails before job creation", func(t *testing.T) {
+	t.Run("missing warm pool fails before job creation", func(t *testing.T) {
 		r := newUnitReconciler(scheme)
 		r.AgentSandboxEnabled = true
 
 		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", executionWorkspace("missing-template", "")))
 		if err == nil {
-			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing template error")
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing warm pool error")
 		}
-		want := `execution workspace template "missing-template" not found in namespace "default"`
+		want := `execution workspace warm pool "missing-template" not found in namespace "default"`
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}
 	})
 
-	t.Run("explicit template namespace is accepted as claim namespace", func(t *testing.T) {
-		template := &sandboxextv1alpha1.SandboxTemplate{
+	t.Run("explicit warm pool namespace is accepted as claim namespace", func(t *testing.T) {
+		warmPool := &sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
 		}
-		r := newUnitReconciler(scheme, template)
+		r := newUnitReconciler(scheme, warmPool)
 		r.AgentSandboxEnabled = true
 
 		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", executionWorkspace("shared-template", "sandbox-templates")))
@@ -1955,6 +1955,76 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 				t.Errorf("unexpected subject: %#v", subject)
 			}
 		})
+	}
+}
+
+func TestEnsureWorkerRBAC_UsesNamespacedRoleBindingsWhenIsolationEnforced(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.EnforceNamespaceIsolation = true
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount string
+		binding        string
+		clusterRole    string
+	}{
+		{AIWorkerServiceAccount, "orka-ai-worker-test-ns", DefaultAIWorkerClusterRoleName},
+		{VendorWorkerServiceAccount, "orka-vendor-worker-test-ns", DefaultVendorWorkerClusterRoleName},
+		{ContainerWorkerServiceAccount, "orka-container-worker-test-ns", DefaultContainerWorkerClusterRoleName},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			rb := &rbacv1.RoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.binding, Namespace: testNS}, rb); err != nil {
+				t.Fatalf("expected RoleBinding %s/%s to exist: %v", testNS, tt.binding, err)
+			}
+			if rb.RoleRef.Kind != "ClusterRole" || rb.RoleRef.Name != tt.clusterRole {
+				t.Fatalf("unexpected roleRef: %#v", rb.RoleRef)
+			}
+			if len(rb.Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %d", len(rb.Subjects))
+			}
+			subject := rb.Subjects[0]
+			if subject.Kind != rbacv1.ServiceAccountKind || subject.Name != tt.serviceAccount || subject.Namespace != testNS {
+				t.Fatalf("unexpected subject: %#v", subject)
+			}
+
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.binding}, crb); !apierrors.IsNotFound(err) {
+				t.Fatalf("expected no ClusterRoleBinding %s, got err %v and object %#v", tt.binding, err, crb)
+			}
+		})
+	}
+}
+
+func TestEnsureWorkerRBAC_IsolationDeletesManagedLegacyClusterRoleBindings(t *testing.T) {
+	scheme := newTestScheme()
+	legacy := workerClusterRoleBinding(testNS, workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        "old-ai-worker-role",
+		clusterRoleBindingName: "orka-ai-worker-test-ns",
+	})
+	legacy.Subjects = append(legacy.Subjects, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: "extra-worker", Namespace: testNS})
+	r := newUnitReconciler(scheme, legacy)
+	r.EnforceNamespaceIsolation = true
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "orka-ai-worker-test-ns"}, crb); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected managed legacy ClusterRoleBinding to be deleted, got err %v", err)
+	}
+
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "orka-ai-worker-test-ns", Namespace: testNS}, rb); err != nil {
+		t.Fatalf("expected replacement RoleBinding to exist: %v", err)
 	}
 }
 
@@ -4936,6 +5006,59 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 	assertNoJobsForTask(t, r, task)
 }
 
+func TestHandlePending_ExecutionWorkspaceUnsupportedProviderStatusOmitsProviderDetails(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-unsupported-provider", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProvider("provider-native"),
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	status := updated.Status.ExecutionWorkspace
+	if status == nil {
+		t.Fatal("ExecutionWorkspace status is nil")
+	}
+	if status.Provider != "" || status.TemplateRef != nil {
+		t.Fatalf("unsupported provider status provider=%q template=%#v, want provider-neutral empty details", status.Provider, status.TemplateRef)
+	}
+	if status.Phase != corev1alpha1.ExecutionWorkspacePhaseFailed || status.Reason != corev1alpha1.ExecutionWorkspaceReasonValidationFailed {
+		t.Fatalf("workspace status phase/reason = %q/%q, want Failed/WorkspaceValidationFailed", status.Phase, status.Reason)
+	}
+	if !strings.Contains(status.Message, "unsupported execution workspace provider") {
+		t.Fatalf("workspace status message = %q, want unsupported provider", status.Message)
+	}
+	assertNoJobsForTask(t, r, task)
+}
+
 func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
@@ -4983,7 +5106,7 @@ func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace template")
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace warm pool")
 	if !strings.Contains(updated.Status.Message, "failed to resolve execution workspace") {
 		t.Fatalf("message = %q, want resolve execution workspace failure", updated.Status.Message)
 	}

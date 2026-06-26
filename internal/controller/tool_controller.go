@@ -58,12 +58,6 @@ const (
 	substrateMCPToolCleanupPoolNameAnno       = "orka.ai/substrate-mcp-tool-cleanup-pool-name"
 	substrateMCPToolCleanupPoolNamespaceAnno  = "orka.ai/substrate-mcp-tool-cleanup-pool-namespace"
 	substrateMCPToolCleanupNonPooledValueAnno = "non-pooled"
-
-	substrateMCPToolActorLeasePurpose = "substrate-mcp-tool-actor-lease"
-
-	substratePoolActorLeaseToolNSAnno   = "orka.ai/substrate-pool-tool-namespace"
-	substratePoolActorLeaseToolNameAnno = "orka.ai/substrate-pool-tool-name"
-	substratePoolActorLeaseToolUIDAnno  = "orka.ai/substrate-pool-tool-uid"
 )
 
 // ToolReconciler reconciles a Tool object
@@ -1137,151 +1131,9 @@ func assignedSubstrateMCPPoolActorID(tool *corev1alpha1.Tool, poolName string, p
 	return ""
 }
 
-func substratePoolActorPrefixAndOrdinal(actorID string) (string, int, bool) {
-	actorID = strings.TrimSpace(actorID)
-	if len(actorID) < 7 {
-		return "", 0, false
-	}
-	separator := len(actorID) - 6
-	if actorID[separator] != '-' {
-		return "", 0, false
-	}
-	prefix := strings.TrimSpace(actorID[:separator])
-	if prefix == "" {
-		return "", 0, false
-	}
-	ordinal := 0
-	for _, ch := range actorID[separator+1:] {
-		if ch < '0' || ch > '9' {
-			return "", 0, false
-		}
-		ordinal = ordinal*10 + int(ch-'0')
-	}
-	return prefix, ordinal, true
-}
-
 type substrateMCPPoolActorLeaseRef struct {
 	poolNamespace string
 	actorID       string
-}
-
-func newSubstrateMCPPoolActorLease(
-	tool *corev1alpha1.Tool,
-	namespace string,
-	name string,
-	actorID string,
-) *coordinationv1.Lease {
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-		},
-	}
-	setSubstrateMCPPoolActorLeaseHolder(lease, tool, actorID)
-	return lease
-}
-
-func setSubstrateMCPPoolActorLeaseHolder(lease *coordinationv1.Lease, tool *corev1alpha1.Tool, actorID string) {
-	if lease.Labels == nil {
-		lease.Labels = map[string]string{}
-	}
-	lease.Labels[labels.LabelManaged] = managedLabelValue
-	lease.Labels[labels.LabelPurpose] = substratePoolActorLeasePurpose
-	lease.Labels[substratePoolActorLeaseActorIDLabel] = labels.SelectorValue(actorID)
-	lease.Labels[substratePoolActorLeaseHolderUIDLabel] = labels.SelectorValue(string(tool.UID))
-	if lease.Annotations == nil {
-		lease.Annotations = map[string]string{}
-	}
-	delete(lease.Annotations, substratePoolActorLeaseTaskNSAnno)
-	delete(lease.Annotations, substratePoolActorLeaseTaskNameAnno)
-	delete(lease.Annotations, substratePoolActorLeaseTaskUIDAnno)
-	lease.Annotations[substratePoolActorLeaseToolNSAnno] = tool.Namespace
-	lease.Annotations[substratePoolActorLeaseToolNameAnno] = tool.Name
-	lease.Annotations[substratePoolActorLeaseToolUIDAnno] = string(tool.UID)
-	now := metav1.NewMicroTime(time.Now())
-	holder := fmt.Sprintf("tool/%s/%s/%s", tool.Namespace, tool.Name, tool.UID)
-	lease.Spec.HolderIdentity = &holder
-	lease.Spec.AcquireTime = &now
-	lease.Spec.RenewTime = &now
-}
-
-func substrateMCPToolActorLeaseName(actorID string) string {
-	return strings.TrimSpace(actorID)
-}
-
-func newSubstrateMCPToolActorLease(
-	tool *corev1alpha1.Tool,
-	namespace string,
-	actorID string,
-) *coordinationv1.Lease {
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      substrateMCPToolActorLeaseName(actorID),
-		},
-	}
-	setSubstrateMCPToolActorLeaseHolder(lease, tool, actorID)
-	return lease
-}
-
-func setSubstrateMCPToolActorLeaseHolder(lease *coordinationv1.Lease, tool *corev1alpha1.Tool, actorID string) {
-	if lease.Labels == nil {
-		lease.Labels = map[string]string{}
-	}
-	lease.Labels[labels.LabelManaged] = managedLabelValue
-	lease.Labels[labels.LabelPurpose] = substrateMCPToolActorLeasePurpose
-	lease.Labels[substratePoolActorLeaseActorIDLabel] = labels.SelectorValue(actorID)
-	lease.Labels[substratePoolActorLeaseHolderUIDLabel] = labels.SelectorValue(string(tool.UID))
-	if lease.Annotations == nil {
-		lease.Annotations = map[string]string{}
-	}
-	delete(lease.Annotations, substratePoolActorLeaseTaskNSAnno)
-	delete(lease.Annotations, substratePoolActorLeaseTaskNameAnno)
-	delete(lease.Annotations, substratePoolActorLeaseTaskUIDAnno)
-	lease.Annotations[substratePoolActorLeaseToolNSAnno] = tool.Namespace
-	lease.Annotations[substratePoolActorLeaseToolNameAnno] = tool.Name
-	lease.Annotations[substratePoolActorLeaseToolUIDAnno] = string(tool.UID)
-	now := metav1.NewMicroTime(time.Now())
-	holder := fmt.Sprintf("tool/%s/%s/%s", tool.Namespace, tool.Name, tool.UID)
-	lease.Spec.HolderIdentity = &holder
-	lease.Spec.AcquireTime = &now
-	lease.Spec.RenewTime = &now
-}
-
-func substratePoolActorLeaseHeldByTool(lease *coordinationv1.Lease, tool *corev1alpha1.Tool) bool {
-	if lease == nil || tool == nil || lease.Annotations == nil {
-		return false
-	}
-	if lease.Annotations[substratePoolActorLeaseToolNSAnno] != tool.Namespace ||
-		lease.Annotations[substratePoolActorLeaseToolNameAnno] != tool.Name {
-		return false
-	}
-	leaseUID := lease.Annotations[substratePoolActorLeaseToolUIDAnno]
-	return leaseUID == "" || string(tool.UID) == "" || leaseUID == string(tool.UID)
-}
-
-func substrateMCPToolActorLeaseHeldByTool(lease *coordinationv1.Lease, tool *corev1alpha1.Tool) bool {
-	if lease == nil || tool == nil || lease.Annotations == nil {
-		return false
-	}
-	if lease.Annotations[substratePoolActorLeaseToolNSAnno] != tool.Namespace ||
-		lease.Annotations[substratePoolActorLeaseToolNameAnno] != tool.Name {
-		return false
-	}
-	leaseUID := lease.Annotations[substratePoolActorLeaseToolUIDAnno]
-	return leaseUID == "" || string(tool.UID) == "" || leaseUID == string(tool.UID)
-}
-
-func substrateMCPToolActorLeaseActorID(lease *coordinationv1.Lease) string {
-	if lease == nil {
-		return ""
-	}
-	if lease.Labels != nil {
-		if actorID := strings.TrimSpace(lease.Labels[substratePoolActorLeaseActorIDLabel]); actorID != "" {
-			return actorID
-		}
-	}
-	return strings.TrimSpace(lease.Name)
 }
 
 func pendingSubstrateMCPActorCleanupRef(tool *corev1alpha1.Tool) *substrateMCPActorCleanupRef {

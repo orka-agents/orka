@@ -308,7 +308,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
 			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-					return authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
+					return authorizeAndStampToolTaskCreate(ctx, h.client, h.kubeClient, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
 				}
 				return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
 			},

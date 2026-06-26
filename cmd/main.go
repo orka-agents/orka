@@ -43,7 +43,7 @@ import (
 	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -56,8 +56,23 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
-	utilruntime.Must(sandboxextv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+func splitCommaList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // nolint:gocyclo
@@ -100,6 +115,8 @@ func main() {
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
+	var oidcAllowedSubjects string
+	var oidcNamespace string
 	var contextTokenProfile string
 	var contextTokenIssuer string
 	var contextTokenAudience string
@@ -226,7 +243,7 @@ func main() {
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
 		agentSandboxConfig.DefaultTemplate,
-		"Default execution workspace template name used when a Task omits execution.workspace.templateRef.name.")
+		"Default agent-sandbox SandboxWarmPool name used when a Task omits execution.workspace.templateRef.name.")
 	flag.StringVar(&agentSandboxConfig.WarmPoolPolicy, "agent-sandbox-warm-pool-policy",
 		agentSandboxConfig.WarmPoolPolicy,
 		"Agent sandbox warm pool policy (disabled, template).")
@@ -298,6 +315,10 @@ func main() {
 		"OIDC audience expected in external API bearer tokens. Requires --oidc-issuer when set.")
 	flag.StringVar(&oidcJWKSURL, "oidc-jwks-url", os.Getenv("ORKA_OIDC_JWKS_URL"),
 		"Optional OIDC JWKS URL. When empty, it is discovered from the issuer metadata.")
+	flag.StringVar(&oidcAllowedSubjects, "oidc-allowed-subjects", os.Getenv("ORKA_OIDC_ALLOWED_SUBJECTS"),
+		"Comma-separated OIDC subject allowlist patterns. Required when OIDC is enabled; supports shell-style wildcards.")
+	flag.StringVar(&oidcNamespace, "oidc-namespace", os.Getenv("ORKA_OIDC_NAMESPACE"),
+		"Namespace assigned to authorized OIDC callers for namespace isolation. Defaults to default.")
 	flag.StringVar(&contextTokenProfile, "context-token-profile", os.Getenv("ORKA_CONTEXT_TOKEN_PROFILE"),
 		"Context-token profile for external API requests (supported: kontxt).")
 	flag.StringVar(&contextTokenIssuer, "context-token-issuer", os.Getenv("ORKA_CONTEXT_TOKEN_ISSUER"),
@@ -799,9 +820,11 @@ func main() {
 		WatchNamespace:            watchNamespace,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		OIDC: api.OIDCConfig{
-			Issuer:   oidcIssuer,
-			Audience: oidcAudience,
-			JWKSURL:  oidcJWKSURL,
+			Issuer:          oidcIssuer,
+			Audience:        oidcAudience,
+			JWKSURL:         oidcJWKSURL,
+			AllowedSubjects: splitCommaList(oidcAllowedSubjects),
+			Namespace:       oidcNamespace,
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,

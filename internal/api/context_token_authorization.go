@@ -24,6 +24,7 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -307,8 +308,11 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
+func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Client, kubeClient kubernetes.Interface, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
 	if err := authorizeContextTokenTaskCreateObject(ctx, k8sClient, token, cfg, action, task); err != nil {
+		return err
+	}
+	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
@@ -316,8 +320,11 @@ func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Clien
 	return nil
 }
 
-func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
+func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, kubeClient kubernetes.Interface, token *ContextToken, cfg ContextTokenAuthorizationConfig, action string, ui *UserInfo, task *corev1alpha1.Task) error {
 	if err := authorizeContextTokenTaskContextObject(ctx, k8sClient, token, cfg, action, task); err != nil {
+		return err
+	}
+	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)

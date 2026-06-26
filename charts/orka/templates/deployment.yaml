@@ -54,6 +54,12 @@ spec:
             {{- if .jwksUrl }}
             - {{ printf "--oidc-jwks-url=%s" .jwksUrl | quote }}
             {{- end }}
+            {{- if .allowedSubjects }}
+            - {{ printf "--oidc-allowed-subjects=%s" .allowedSubjects | quote }}
+            {{- end }}
+            {{- if .namespace }}
+            - {{ printf "--oidc-namespace=%s" .namespace | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.controller.contextToken }}
             {{- if .profile }}
