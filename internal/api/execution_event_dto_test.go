@@ -94,6 +94,36 @@ func TestExecutionEventResponsePromotesModelTelemetryFields(t *testing.T) {
 	}
 }
 
+func TestExecutionEventResponsePromotesGenAISemConvTerminalFields(t *testing.T) {
+	content := mustRawJSON(t, map[string]any{
+		"gen_ai.provider.name":           "openai",
+		"gen_ai.request.model":           "requested-model",
+		"gen_ai.response.model":          "served-model",
+		"gen_ai.response.finish_reasons": []string{"stop"},
+		"gen_ai.usage.input_tokens":      7,
+		"gen_ai.usage.output_tokens":     11,
+	})
+
+	completed := NewExecutionEventResponse(store.ExecutionEvent{
+		Type:    events.ExecutionEventTypeModelRequestCompleted,
+		Content: content,
+	})
+	if completed.Provider != "openai" || completed.Model != "served-model" || completed.StopReason != "stop" {
+		t.Fatalf("completed telemetry = provider:%q model:%q stop:%q", completed.Provider, completed.Model, completed.StopReason)
+	}
+	if completed.InputTokens != 7 || completed.OutputTokens != 11 {
+		t.Fatalf("completed tokens = %d/%d, want 7/11", completed.InputTokens, completed.OutputTokens)
+	}
+
+	started := NewExecutionEventResponse(store.ExecutionEvent{
+		Type:    events.ExecutionEventTypeModelRequestStarted,
+		Content: content,
+	})
+	if started.Model != "requested-model" {
+		t.Fatalf("started model = %q, want requested-model", started.Model)
+	}
+}
+
 func TestSubmitExecutionEventRequestJSONFieldNames(t *testing.T) {
 	request := SubmitExecutionEventRequest{
 		Type:        events.ExecutionEventTypeToolCallStarted,

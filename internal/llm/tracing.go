@@ -83,7 +83,12 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 	providerName = responseProviderName(resp, tp.inner)
 	setResponseAttributes(span, resp, providerName)
 	modelName := responseModel(resp, req)
-	tp.recordOperationDuration(ctx, durationSeconds, providerName, modelName, "")
+	errType := stopReasonErrorType(resp.StopReason)
+	if errType != "" {
+		span.SetStatus(codes.Error, resp.StopReason)
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+	}
+	tp.recordOperationDuration(ctx, durationSeconds, providerName, modelName, errType)
 	tp.recordTokenUsage(ctx, resp, providerName, modelName)
 	return resp, nil
 }
@@ -141,8 +146,8 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			}
 			if chunk.StopReason != "" {
 				finishReasons = []string{chunk.StopReason}
-				if streamStopReasonIsError(chunk.StopReason) && chunk.Error == nil {
-					errType = chunk.StopReason
+				if stopErrType := stopReasonErrorType(chunk.StopReason); stopErrType != "" && chunk.Error == nil {
+					errType = stopErrType
 					span.SetStatus(codes.Error, chunk.StopReason)
 					span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 				}
@@ -171,12 +176,13 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	return out, nil
 }
 
-func streamStopReasonIsError(reason string) bool {
-	switch strings.TrimSpace(reason) {
-	case "response.failed", "response.incomplete":
-		return true
+func stopReasonErrorType(reason string) string {
+	trimmed := strings.TrimSpace(reason)
+	switch strings.ToLower(trimmed) {
+	case "failed", "incomplete", "cancelled", "canceled", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+		return trimmed
 	default:
-		return false
+		return ""
 	}
 }
 

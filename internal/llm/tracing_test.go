@@ -215,6 +215,35 @@ func TestTracingProviderCompleteErrorSetsErrorType(t *testing.T) {
 	}
 }
 
+func TestTracingProviderCompleteFailureStopReasonSetsError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{
+		name:          "openai",
+		telemetryName: "openai",
+		resp: &CompletionResponse{
+			Content:      "failed",
+			Model:        "gpt-4o",
+			StopReason:   "failed",
+			InputTokens:  3,
+			OutputTokens: 1,
+		},
+	})
+
+	resp, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"})
+	if err != nil || resp == nil {
+		t.Fatalf("Complete() resp=%#v err=%v", resp, err)
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error {
+		t.Fatalf("status = %v, want error", spans[0].Status())
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, "failed")
+}
+
 func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *testing.T) {
 	h := testutil.NewSpanHarness(t)
 	inner := &telemetryProvider{

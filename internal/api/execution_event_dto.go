@@ -128,7 +128,7 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 	var provider, model, stopReason string
 	var inTok, outTok int
 	if executionEventTypeCarriesModelTelemetry(event.Type) {
-		provider, model, stopReason, inTok, outTok = executionEventTelemetryFields(event.Content)
+		provider, model, stopReason, inTok, outTok = executionEventTelemetryFields(event.Type, event.Content)
 	}
 	return ExecutionEventResponse{
 		ID:           event.ID,
@@ -227,7 +227,7 @@ func executionEventTypeCarriesModelTelemetry(typ string) bool {
 	}
 }
 
-func executionEventTelemetryFields(content json.RawMessage) (provider, model, stopReason string, inTok, outTok int) {
+func executionEventTelemetryFields(typ string, content json.RawMessage) (provider, model, stopReason string, inTok, outTok int) {
 	if len(content) == 0 {
 		return "", "", "", 0, 0
 	}
@@ -236,8 +236,12 @@ func executionEventTelemetryFields(content json.RawMessage) (provider, model, st
 		return "", "", "", 0, 0
 	}
 	provider = stringField(body, "provider", "gen_ai.provider.name")
-	model = stringField(body, "model", "gen_ai.request.model", "gen_ai.response.model")
-	stopReason = stringField(body, "stopReason", "stop_reason", "finishReason")
+	modelKeys := []string{"model", "gen_ai.request.model", "gen_ai.response.model"}
+	if typ == events.ExecutionEventTypeModelRequestCompleted || typ == events.ExecutionEventTypeModelRequestFailed {
+		modelKeys = []string{"model", "gen_ai.response.model", "gen_ai.request.model"}
+	}
+	model = stringField(body, modelKeys...)
+	stopReason = stringField(body, "stopReason", "stop_reason", "finishReason", "gen_ai.response.finish_reasons")
 	inTok = intField(body, "inputTokens", "input_tokens", "promptTokens", "prompt_tokens", "gen_ai.usage.input_tokens")
 	outTok = intField(body, "outputTokens", "output_tokens", "completionTokens", "completion_tokens", "gen_ai.usage.output_tokens")
 	return provider, model, stopReason, inTok, outTok
@@ -249,6 +253,18 @@ func stringField(body map[string]any, keys ...string) string {
 			switch typed := value.(type) {
 			case string:
 				return typed
+			case []string:
+				for _, item := range typed {
+					if item != "" {
+						return item
+					}
+				}
+			case []any:
+				for _, item := range typed {
+					if s, ok := item.(string); ok && s != "" {
+						return s
+					}
+				}
 			}
 		}
 	}
