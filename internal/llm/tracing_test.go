@@ -95,6 +95,34 @@ func TestTracingProviderCompleteStreamingRequiredDoesNotRecordErrorMetric(t *tes
 	}
 }
 
+func TestTracingProviderCompleteContextTooLongDoesNotRecordErrorMetric(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	mh := testutil.NewMetricHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{
+		name:          "openai",
+		telemetryName: "openai",
+		err:           &ProviderError{Provider: "openai", StatusCode: 400, Message: "context length exceeded"},
+	})
+
+	_, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err == nil {
+		t.Fatal("expected context-too-long error")
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code == codes.Error {
+		t.Fatalf("status = %v, want non-error control-flow span", spans[0].Status())
+	}
+	attrs := spanAttrs(spans[0])
+	assertBoolAttr(t, attrs, "orka.llm.context_truncation_retry_required", true)
+	rm := mh.Collect(t)
+	if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 0 {
+		t.Fatalf("operation duration datapoints = %d, want 0", got)
+	}
+}
+
 func TestTracingProviderCompleteError(t *testing.T) {
 	tp := NewTracingProvider(&errorProvider{mockProvider: mockProvider{name: "err"}})
 	_, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4"})

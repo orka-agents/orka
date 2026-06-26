@@ -74,6 +74,10 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 			span.SetAttributes(attribute.Bool("orka.llm.streaming_fallback_required", true))
 			return nil, err
 		}
+		if IsContextTooLongErr(err) {
+			span.SetAttributes(attribute.Bool("orka.llm.context_truncation_retry_required", true))
+			return nil, err
+		}
 		errType := errorType(err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
