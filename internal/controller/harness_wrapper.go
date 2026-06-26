@@ -560,6 +560,20 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 	if latest.Annotations == nil {
 		latest.Annotations = map[string]string{}
 	}
+	for _, key := range []string{
+		harnessWrapperTurnIDAnnotation,
+		harnessWrapperRuntimeAnnotation,
+		harnessWrapperCorrelationIDAnno,
+		harnessWrapperLastFrameSeqAnno,
+		harnessWrapperPlannedAtAnno,
+		harnessWrapperMetadataAnno,
+	} {
+		if strings.TrimSpace(latest.Annotations[key]) == "" && task != nil && task.Annotations != nil {
+			if value := strings.TrimSpace(task.Annotations[key]); value != "" {
+				latest.Annotations[key] = value
+			}
+		}
+	}
 	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
 	if err := r.Patch(ctx, latest, patch); err != nil {
 		return err
