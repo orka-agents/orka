@@ -127,10 +127,11 @@ export async function fetchTaskEvents(
 export function useTaskEvents(
   id: string,
   refetchInterval: number | false = 5000,
+  taskUID?: string,
 ) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
-  const queryKey = ['taskEvents', id, namespace] as const
+  const queryKey = ['taskEvents', id, namespace, taskUID ?? ''] as const
   return useQuery({
     queryKey,
     queryFn: () =>

@@ -63,8 +63,12 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 }
 
 func findToolSpan(spans []sdktrace.ReadOnlySpan) sdktrace.ReadOnlySpan {
+	return findSpanByName(spans, "execute_tool test_tool")
+}
+
+func findSpanByName(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
 	for _, span := range spans {
-		if span.Name() == "execute_tool test_tool" {
+		if span.Name() == name {
 			return span
 		}
 	}
@@ -127,4 +131,34 @@ func TestRegistryExecuteDoesNotFailPlainJSONSuccess(t *testing.T) {
 		}
 	}
 	t.Fatal("missing plain JSON tool span")
+}
+
+func TestRegistryExecuteMissingToolEmitsFailedSpanAndMetric(t *testing.T) {
+	spans := testutil.NewSpanHarness(t)
+	metrics := testutil.NewMetricHarness(t)
+	registry := NewRegistry()
+
+	_, err := registry.Execute(context.Background(), "missing_tool", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("expected missing tool error")
+	}
+
+	span := findSpanByName(spans.Recorder.Ended(), genai.OperationExecuteTool+" missing_tool")
+	if span == nil {
+		t.Fatal("missing execute_tool span for missing tool")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status = %v, want error", span.Status())
+	}
+	attrs := map[string]attribute.Value{}
+	for _, kv := range span.Attributes() {
+		attrs[string(kv.Key)] = kv.Value
+	}
+	if got := attrs[genai.AttrToolName].AsString(); got != "missing_tool" {
+		t.Fatalf("tool name attr = %q, want missing_tool", got)
+	}
+	rm := metrics.Collect(t)
+	if countMetricDataPoints(rm, genai.MetricExecuteToolDuration) != 1 {
+		t.Fatalf("missing %s datapoint", genai.MetricExecuteToolDuration)
+	}
 }

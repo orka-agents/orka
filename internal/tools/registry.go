@@ -179,34 +179,42 @@ func (r *Registry) List() []Tool {
 // Execute executes a tool by name. It is the DRY instrumentation point for
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	tool, ok := r.Get(name)
-	if !ok {
-		return "", fmt.Errorf("tool %q not found", name)
-	}
-
 	start := time.Now()
+	tool, ok := r.Get(name)
+	toolTypeValue := toolType(ctx, tool)
 	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, name),
-		attribute.String(genai.AttrToolType, toolType(ctx, tool)),
+		attribute.String(genai.AttrToolType, toolTypeValue),
 	}
 	if tc := GetToolContext(ctx); tc != nil && tc.ToolCallID != "" {
 		attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
 	}
-	if description := tool.Description(); description != "" {
-		attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
+	if ok {
+		if description := tool.Description(); description != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
+		}
 	}
 	tracer := tracing.GenAITracer(genai.InstrumentationName)
 	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+name, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
 	defer span.End()
 
-	result, err := tool.Execute(ctx, args)
-	duration := time.Since(start).Seconds()
 	metricAttrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, name),
-		attribute.String(genai.AttrToolType, toolType(ctx, tool)),
+		attribute.String(genai.AttrToolType, toolTypeValue),
 	}
+	if !ok {
+		err := fmt.Errorf("tool %q not found", name)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, "tool_not_found"))
+		recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+		return "", err
+	}
+
+	result, err := tool.Execute(ctx, args)
+	duration := time.Since(start).Seconds()
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

@@ -125,7 +125,11 @@ type ListSessionExecutionEventsResponse struct {
 // NewExecutionEventResponse converts a store event to an API DTO and intentionally
 // omits store-only fields such as ExecutionEvent.Internal.
 func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventResponse {
-	provider, model, stopReason, inTok, outTok := executionEventTelemetryFields(event.Content)
+	var provider, model, stopReason string
+	var inTok, outTok int
+	if executionEventTypeCarriesModelTelemetry(event.Type) {
+		provider, model, stopReason, inTok, outTok = executionEventTelemetryFields(event.Content)
+	}
 	return ExecutionEventResponse{
 		ID:           event.ID,
 		Namespace:    event.Namespace,
@@ -210,6 +214,17 @@ func cloneExecutionEventTruncation(value *events.ExecutionEventTruncation) *even
 	}
 	truncationCopy := *value
 	return &truncationCopy
+}
+
+func executionEventTypeCarriesModelTelemetry(typ string) bool {
+	switch typ {
+	case events.ExecutionEventTypeModelRequestStarted,
+		events.ExecutionEventTypeModelRequestCompleted,
+		events.ExecutionEventTypeModelRequestFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func executionEventTelemetryFields(content json.RawMessage) (provider, model, stopReason string, inTok, outTok int) {

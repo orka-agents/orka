@@ -29,7 +29,11 @@ function timeAgo(ts?: string): string {
 
 export function TaskDetail({ taskId }: { taskId: string }) {
   const { data: task, isLoading } = useTask(taskId)
-  const { data: taskEventsResponse } = useTaskEvents(taskId)
+  const { data: taskEventsResponse } = useTaskEvents(
+    taskId,
+    5000,
+    task?.metadata.uid,
+  )
   const taskEvents = taskEventsResponse?.events ?? []
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
