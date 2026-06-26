@@ -311,11 +311,12 @@ func waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, taskName string, timeout t
 	if phase == "Succeeded" {
 		return
 	}
-	result := fetchTaskResultSummaryViaAPI(apiBaseURL, token, taskName)
-	if isLiveCopilotCodexModelUnavailable(result) {
+	result := fetchTaskResultViaAPI(apiBaseURL, token, taskName)
+	summary := workercommon.ParseStructuredResult(result).Summary
+	if isLiveCopilotCodexModelUnavailable(result) || isLiveCopilotCodexModelUnavailable(summary) {
 		Skip("Skipping Codex runtime live proxy check: selected model is unavailable for copilot-language-server integrator")
 	}
-	Expect(phase).To(Equal("Succeeded"), "Codex runtime task failed: %s", result)
+	Expect(phase).To(Equal("Succeeded"), "Codex runtime task failed: %s", summary)
 }
 
 func isLiveCopilotCodexModelUnavailable(text string) bool {
