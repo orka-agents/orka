@@ -601,10 +601,10 @@ func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSen
 	return true
 }
 
-func streamResponsesEvents(stream responseStream, send streamSender) {
+func streamResponsesEvents(stream responseStream, providerName string, send streamSender) {
 	tracker := newResponseFuncCallTracker()
 	for stream.Next() {
-		if !handleResponsesStreamEvent(stream.Current(), tracker, send) {
+		if !handleResponsesStreamEvent(stream.Current(), tracker, providerName, send) {
 			return
 		}
 	}
@@ -615,7 +615,7 @@ func streamResponsesEvents(stream responseStream, send streamSender) {
 	send(llm.StreamChunk{Done: true})
 }
 
-func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	switch evt.Type {
 	case "response.output_text.delta":
 		return handleResponseTextDelta(evt, send)
@@ -628,7 +628,7 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 	case "response.output_item.done":
 		return handleResponseOutputItem(evt, tracker, send, true)
 	case "response.completed":
-		return handleResponseCompleted(evt, tracker, send)
+		return handleResponseCompleted(evt, tracker, providerName, send)
 	case "response.failed", "response.incomplete":
 		send(llm.StreamChunk{Done: true, StopReason: evt.Type})
 		return false
@@ -679,7 +679,7 @@ func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *r
 	return tracker.emit(fc, send)
 }
 
-func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	stopReason := "stop"
 	for i, item := range evt.Response.Output {
 		if item.Type != eventTypeFunctionCall {
@@ -698,7 +698,7 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 		InputTokens:  int(evt.Response.Usage.InputTokens),
 		OutputTokens: int(evt.Response.Usage.OutputTokens),
 		Model:        evt.Response.Model,
-		Provider:     genai.ProviderOpenAI,
+		Provider:     providerName,
 	})
 	return false
 }
@@ -709,7 +709,7 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		defer close(ch)
 
 		send := newStreamSender(ctx, ch)
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), send)
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), p.TelemetryProviderName(), send)
 	}()
 	return ch
 }
@@ -905,7 +905,9 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
-		doneSent := false
+		finishReason := ""
+		var inputTokens, outputTokens int
+		streamModel := req.Model
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -933,22 +935,16 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 				}
 			}
 
+			if strings.TrimSpace(chunk.Model) != "" {
+				streamModel = chunk.Model
+			}
 			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
-				if !send(llm.StreamChunk{
-					InputTokens:  int(chunk.Usage.PromptTokens),
-					OutputTokens: int(chunk.Usage.CompletionTokens),
-					Model:        chunk.Model,
-					Provider:     genai.ProviderOpenAI,
-				}) {
-					return
-				}
+				inputTokens = int(chunk.Usage.PromptTokens)
+				outputTokens = int(chunk.Usage.CompletionTokens)
 			}
 
 			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
-				if !send(llm.StreamChunk{Done: true, StopReason: chunk.Choices[0].FinishReason}) {
-					return
-				}
-				doneSent = true
+				finishReason = chunk.Choices[0].FinishReason
 			}
 		}
 
@@ -956,9 +952,14 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
 			return
 		}
-		if !doneSent {
-			send(llm.StreamChunk{Done: true})
-		}
+		send(llm.StreamChunk{
+			Done:         true,
+			StopReason:   finishReason,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			Model:        streamModel,
+			Provider:     p.TelemetryProviderName(),
+		})
 	}()
 	return ch
 }

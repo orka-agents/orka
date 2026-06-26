@@ -1561,6 +1561,7 @@ func safeWorkerOTLPEnvValue(name, value string) string {
 	if !strings.HasSuffix(name, "_ENDPOINT") {
 		return value
 	}
+	value = strings.TrimSpace(value)
 	parseValue := value
 	schemeLess := !strings.Contains(value, "://")
 	if schemeLess {

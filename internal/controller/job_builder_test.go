@@ -2485,6 +2485,10 @@ func TestSafeWorkerOTLPEnvValueStripsUserinfoFromEndpoints(t *testing.T) {
 	if got != "collector:4317" {
 		t.Fatalf("scheme-less sanitized endpoint = %q, want %q", got, "collector:4317")
 	}
+	got = safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", " https://user:pass@collector:4318 ")
+	if got != "https://collector:4318" {
+		t.Fatalf("trimmed sanitized endpoint = %q, want %q", got, "https://collector:4318")
+	}
 
 	unchanged := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
 	if unchanged != "authorization=secret" {
