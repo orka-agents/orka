@@ -142,7 +142,16 @@ func (g *approvalGate) preScan(
 				toolResults: deniedBatchToolResults(calls, call.ID, decision),
 			}, nil
 		}
-		if !requiresApproval || found {
+		if !requiresApproval && !found {
+			if staleDecision, stale := g.staleDecisionForTarget(target); stale {
+				return &approvalBatchDecision{
+					continueLLM: true,
+					toolResults: staleApprovalBatchToolResults(calls, call.ID, staleDecision),
+				}, nil
+			}
+			continue
+		}
+		if found {
 			continue
 		}
 		if err := g.emitApprovalRequest(ctx, target, call.ID); err != nil {
@@ -463,6 +472,30 @@ func handleExplicitRequestApprovalBatch(
 		return &approvalBatchDecision{result: result}, nil
 	}
 	return nil, nil
+}
+
+func staleApprovalBatchToolResults(
+	calls []llm.ToolCall,
+	staleToolCallID string,
+	decision approvals.ResolvedApproval,
+) []llm.Message {
+	results := make([]llm.Message, 0, len(calls))
+	for _, call := range calls {
+		content := fmt.Sprintf(
+			"Not executed because approval %s for %s no longer matches the current tool spec; request approval again",
+			decision.ID,
+			decision.TargetTool,
+		)
+		if call.ID != staleToolCallID {
+			content = fmt.Sprintf(
+				"Not executed because the same tool-call batch contained stale approval %s for %s",
+				decision.ID,
+				decision.TargetTool,
+			)
+		}
+		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+	}
+	return results
 }
 
 func approvalValidationBatchToolResults(
