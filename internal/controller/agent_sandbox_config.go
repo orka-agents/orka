@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -55,6 +56,8 @@ const (
 	substrateWorkspaceDaemonListenEnv = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
 	substrateWorkspaceDaemonListen    = ":8080"
 )
+
+var errSubstrateUnsafeLiteralBootstrap = errors.New("unsafe literal substrate bootstrap token")
 
 // AgentSandboxConfig holds disabled-by-default alpha configuration for agent sandbox workspace integration.
 // The controller validates workspace requests and propagates resolved settings to agent worker Jobs;
@@ -531,10 +534,13 @@ func validateSubstrateActorTemplateResource(ctx context.Context, reader client.R
 		return err
 	}
 	if err := validateSubstrateWorkspaceTemplateDaemonPort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+		return substrateActorTemplateRequestError(request, err)
 	}
 	if err := validateSubstrateWorkspaceTemplateBootstrapEnv(template, request); err != nil {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+		return substrateActorTemplateRequestError(request, err)
+	}
+	if err := unsafeLiteralSubstrateBootstrapEnv(template, request); err != nil {
+		return substrateActorTemplateRequestError(request, err)
 	}
 	return nil
 }
@@ -551,12 +557,61 @@ func validateSubstrateRoutableActorTemplateResource(ctx context.Context, reader 
 	if template == nil {
 		return nil
 	}
+	unsafeLiteralBootstrapErr := unsafeLiteralDurableSubstrateBootstrapEnv(template)
+	if err := validateSubstrateRoutableActorTemplate(request, template); err != nil {
+		if unsafeLiteralBootstrapErr != nil {
+			return substrateActorTemplateRequestError(request, unsafeLiteralBootstrapErr)
+		}
+		return err
+	}
+	if err := validateSubstrateRoutableActorTemplateBootstrapEnv(template); err != nil {
+		return substrateActorTemplateRequestError(request, err)
+	}
+	return nil
+}
+
+func validateSubstratePrecreatedPoolActorTemplateResource(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	template, err := validateSubstrateActorTemplateMetadata(ctx, reader, request)
+	if err != nil {
+		return err
+	}
+	if template == nil {
+		return nil
+	}
+	unsafeLiteralBootstrapErr := unsafeLiteralSubstrateBootstrapEnv(template, request)
+	if err := validateSubstrateRoutableActorTemplate(request, template); err != nil {
+		if unsafeLiteralBootstrapErr != nil {
+			return substrateActorTemplateRequestError(request, unsafeLiteralBootstrapErr)
+		}
+		return err
+	}
+	if err := validateSubstratePoolPrecreateWorkspaceDaemonBootstrapEnv(template, request); err != nil {
+		if unsafeLiteralBootstrapErr != nil {
+			return substrateActorTemplateRequestError(request, unsafeLiteralBootstrapErr)
+		}
+		return substrateActorTemplateRequestError(request, err)
+	}
+	if unsafeLiteralBootstrapErr != nil {
+		return substrateActorTemplateRequestError(request, unsafeLiteralBootstrapErr)
+	}
+	return nil
+}
+
+func substrateActorTemplateRequestError(request *ExecutionWorkspaceRequest, err error) error {
+	return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+}
+
+func validateSubstrateRoutableActorTemplateBootstrapEnv(template *unstructured.Unstructured) error {
+	return unsafeLiteralDurableSubstrateBootstrapEnv(template)
+}
+
+func validateSubstrateRoutableActorTemplate(request *ExecutionWorkspaceRequest, template *unstructured.Unstructured) error {
 	annotations := template.GetAnnotations()
 	if err := validateSubstrateActorTemplateReady(request, template); err != nil {
 		return err
 	}
 	if err := validateSubstrateMCPActorTemplateRoutePort(template, annotations["orka.ai/workspace-daemon-port"]); err != nil {
-		return fmt.Errorf("substrate ActorTemplate %q in namespace %q %w", request.TemplateName, request.TemplateNamespace, err)
+		return substrateActorTemplateRequestError(request, err)
 	}
 	return nil
 }
@@ -1004,9 +1059,12 @@ func validateSubstrateWorkspaceDaemonBootstrapEnv(container map[string]any, requ
 		if name != workerenv.WorkspaceBootstrapToken {
 			continue
 		}
-		value, _, _ := unstructured.NestedString(envVar, "value")
-		if strings.TrimSpace(value) != "" {
-			return nil
+		value, valueFound, valueErr := unstructured.NestedString(envVar, "value")
+		if valueErr != nil {
+			return fmt.Errorf("%s has invalid value", workerenv.WorkspaceBootstrapToken)
+		}
+		if valueFound && strings.TrimSpace(value) != "" {
+			return validateSubstrateLiteralBootstrapEnvAllowed(request)
 		}
 		if ok, err := substrateBootstrapEnvUsesConfiguredSecret(envVar, request); err != nil {
 			return err
@@ -1014,12 +1072,181 @@ func validateSubstrateWorkspaceDaemonBootstrapEnv(container map[string]any, requ
 			return nil
 		}
 		return fmt.Errorf(
-			"%s must set a non-empty value or valueFrom.secretKeyRef",
+			"%s must set valueFrom.secretKeyRef",
 			workerenv.WorkspaceBootstrapToken,
 		)
 	}
 
 	return fmt.Errorf("missing required env %s", workerenv.WorkspaceBootstrapToken)
+}
+
+func substrateActorTemplateUnsafeLiteralDurableBootstrapEnv(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	template, ok := getSubstrateActorTemplateForUnsafeBootstrapCheck(ctx, reader, request)
+	if !ok {
+		return nil
+	}
+	return unsafeLiteralDurableSubstrateBootstrapEnv(template)
+}
+
+func getSubstrateActorTemplateForUnsafeBootstrapCheck(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) (*unstructured.Unstructured, bool) {
+	if reader == nil || request == nil || request.TemplateName == "" {
+		return nil, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	template := &unstructured.Unstructured{}
+	template.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "ate.dev",
+		Version: "v1alpha1",
+		Kind:    "ActorTemplate",
+	})
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: request.TemplateNamespace, Name: request.TemplateName}, template); err != nil {
+		return nil, false
+	}
+	return template, true
+}
+
+func unsafeLiteralDurableSubstrateBootstrapEnv(template *unstructured.Unstructured) error {
+	if literalSubstrateBootstrapEnvPresent(template) {
+		return fmt.Errorf("%w: %s literal value is not allowed for durable substrate actors", errSubstrateUnsafeLiteralBootstrap, workerenv.WorkspaceBootstrapToken)
+	}
+	return nil
+}
+
+func substrateActorTemplateUnsafeLiteralBootstrapEnv(ctx context.Context, reader client.Reader, request *ExecutionWorkspaceRequest) error {
+	template, ok := getSubstrateActorTemplateForUnsafeBootstrapCheck(ctx, reader, request)
+	if !ok {
+		return nil
+	}
+	return unsafeLiteralSubstrateBootstrapEnv(template, request)
+}
+
+func literalSubstrateBootstrapEnvPresent(template *unstructured.Unstructured) bool {
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil || !found {
+		return false
+	}
+	for _, item := range containers {
+		container, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		env, found, err := substrateContainerEnv(container)
+		if err != nil || !found {
+			continue
+		}
+		for _, envItem := range env {
+			envVar, ok := envItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _, _ := unstructured.NestedString(envVar, "name")
+			if name != workerenv.WorkspaceBootstrapToken {
+				continue
+			}
+			value, valueFound, valueErr := unstructured.NestedString(envVar, "value")
+			if valueErr == nil && valueFound && strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func unsafeLiteralSubstrateBootstrapEnv(template *unstructured.Unstructured, request *ExecutionWorkspaceRequest) error {
+	if literalSubstrateBootstrapEnvPresent(template) {
+		return validateSubstrateLiteralBootstrapEnvAllowed(request)
+	}
+	return nil
+}
+
+func validateSubstratePoolPrecreateWorkspaceDaemonBootstrapEnv(template *unstructured.Unstructured, request *ExecutionWorkspaceRequest) error {
+	containers, found, err := unstructured.NestedSlice(template.Object, "spec", "containers")
+	if err != nil {
+		return fmt.Errorf("has invalid spec.containers: %w", err)
+	}
+	if !found || len(containers) == 0 {
+		return nil
+	}
+	parsed := make([]map[string]any, 0, len(containers))
+	foundExplicitDaemon := false
+	for _, item := range containers {
+		container, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("has invalid spec.containers entry")
+		}
+		parsed = append(parsed, container)
+		runsDaemon, err := substrateContainerRunsWorkspaceDaemon(container)
+		if err != nil {
+			return err
+		}
+		if !runsDaemon {
+			continue
+		}
+		foundExplicitDaemon = true
+		if err := validateSubstrateWorkspaceDaemonBootstrapEnv(container, request); err != nil {
+			return substrateWorkspaceDaemonContainerError(container, err)
+		}
+	}
+	if foundExplicitDaemon || len(parsed) != 1 {
+		return nil
+	}
+	hasBootstrapEnv, err := substrateContainerHasEnvName(parsed[0], workerenv.WorkspaceBootstrapToken)
+	if err != nil {
+		return err
+	}
+	if !hasBootstrapEnv {
+		return nil
+	}
+	if err := validateSubstrateWorkspaceDaemonBootstrapEnv(parsed[0], request); err != nil {
+		return substrateWorkspaceDaemonContainerError(parsed[0], err)
+	}
+	return nil
+}
+
+func substrateContainerHasEnvName(container map[string]any, name string) (bool, error) {
+	env, found, err := substrateContainerEnv(container)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	for _, envItem := range env {
+		envVar, ok := envItem.(map[string]any)
+		if !ok {
+			return false, fmt.Errorf("has invalid container env entry")
+		}
+		envName, _, _ := unstructured.NestedString(envVar, "name")
+		if envName == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func validateSubstrateLiteralBootstrapEnvAllowed(request *ExecutionWorkspaceRequest) error {
+	if request == nil {
+		return nil
+	}
+	if request.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
+		return fmt.Errorf("%w: %s literal value is not allowed with substrate cleanupPolicy=retain", errSubstrateUnsafeLiteralBootstrap, workerenv.WorkspaceBootstrapToken)
+	}
+	if request.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession || strings.TrimSpace(request.ReuseKey) != "" {
+		return fmt.Errorf("%w: %s literal value is not allowed with substrate session reuse", errSubstrateUnsafeLiteralBootstrap, workerenv.WorkspaceBootstrapToken)
+	}
+	if request.ProcessMode == corev1alpha1.ExecutionWorkspaceProcessModeResident || strings.TrimSpace(request.ResidentKey) != "" {
+		return fmt.Errorf("%w: %s literal value is not allowed with substrate resident workspaces", errSubstrateUnsafeLiteralBootstrap, workerenv.WorkspaceBootstrapToken)
+	}
+	if strings.TrimSpace(request.PoolName) != "" {
+		return fmt.Errorf("%w: %s literal value is not allowed with substrate actor pools", errSubstrateUnsafeLiteralBootstrap, workerenv.WorkspaceBootstrapToken)
+	}
+	return nil
+}
+
+func isSubstrateUnsafeLiteralBootstrapError(err error) bool {
+	return errors.Is(err, errSubstrateUnsafeLiteralBootstrap)
 }
 
 func substrateBootstrapEnvUsesConfiguredSecret(envVar map[string]any, request *ExecutionWorkspaceRequest) (bool, error) {

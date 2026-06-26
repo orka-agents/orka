@@ -821,6 +821,29 @@ func liveCopilotProxyTaskFailedWithForbidden(taskName string) bool {
 	return isLiveCopilotProxyForbiddenText(output)
 }
 
+func liveCopilotProxyTaskFailedWithUnsupportedCodexResponsesParameter(taskName string) bool {
+	task := fetchTaskSnapshot(taskName)
+	if task.Status.Phase != "Failed" {
+		return false
+	}
+	if isUnsupportedCodexResponsesParameterText(task.Status.Message) {
+		return true
+	}
+	for _, condition := range task.Status.Conditions {
+		if isUnsupportedCodexResponsesParameterText(condition.Message) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUnsupportedCodexResponsesParameterText(value string) bool {
+	// Codex CLI 0.142.x can send this Responses input metadata field; the
+	// live Copilot proxy rejected it with HTTP 400 during PR CI, so live tests
+	// skip that external incompatibility instead of failing unrelated coverage.
+	return strings.Contains(value, "internal_chat_message_metadata_passthrough")
+}
+
 func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {
 	for _, modelID := range catalog.AllModelIDs {
 		if modelMatchesAnyPrefix(modelID, prefixes...) {

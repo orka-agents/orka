@@ -54,10 +54,7 @@ func TestSubstrateActorPoolReconcilerPrecreatesActorsAndUpdatesDensity(t *testin
 		},
 	}
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  "ORKA_WORKSPACE_BOOTSTRAP_TOKEN",
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapSecretEnvForTest(),
 	})
 	template.SetName("codex")
 	template.SetNamespace("ate-demo")
@@ -164,6 +161,366 @@ func TestSubstrateActorPoolReconcilerAcceptsMCPOnlyTemplate(t *testing.T) {
 	}
 }
 
+func TestSubstrateActorPoolReconcilerRejectsPrecreatedWorkspaceDaemonWithLiteralBootstrapToken(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: "default"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors:    3,
+			PrecreateActors: true,
+		},
+	}
+	template := readySubstrateActorTemplateForTest([]any{
+		substrateBootstrapLiteralEnvForTest(),
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhaseFailed {
+		t.Fatalf("phase = %q, want Failed; status=%#v", got.Status.Phase, got.Status)
+	}
+	if !strings.Contains(got.Status.Message, "literal value is not allowed with substrate actor pools") {
+		t.Fatalf("status message = %q, want literal bootstrap rejection", got.Status.Message)
+	}
+	if executor.convergeCalled {
+		t.Fatal("ConvergeSubstrateActors was called despite unsafe literal bootstrap token")
+	}
+	if controllerutil.ContainsFinalizer(&got, substrateActorPoolFinalizer) {
+		t.Fatal("pool finalizer was added despite unsafe literal bootstrap token")
+	}
+}
+
+func TestSubstrateActorPoolReconcilerDeletesExistingActorsForUnsafeLiteralBootstrapTemplate(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "codex-pool",
+			Namespace:  "default",
+			Finalizers: []string{substrateActorPoolFinalizer},
+		},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors:    3,
+			PrecreateActors: true,
+		},
+	}
+	template := readySubstrateActorTemplateForTest([]any{
+		substrateBootstrapLiteralEnvForTest(),
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if !executor.convergeCalled || executor.convergeTarget != 0 {
+		t.Fatalf("converge called=%t target=%d, want delete unsafe actors with target 0", executor.convergeCalled, executor.convergeTarget)
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhaseFailed {
+		t.Fatalf("phase = %q, want Failed; status=%#v", got.Status.Phase, got.Status)
+	}
+	if !strings.Contains(got.Status.Message, "literal value is not allowed with substrate actor pools") {
+		t.Fatalf("status message = %q, want literal bootstrap rejection", got.Status.Message)
+	}
+}
+
+func TestSubstrateActorPoolReconcilerUnsafeBootstrapCleanupPrecedesLaterContainerErrors(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "codex-pool",
+			Namespace:  "default",
+			Finalizers: []string{substrateActorPoolFinalizer},
+		},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors:    3,
+			PrecreateActors: true,
+		},
+	}
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name":    "broken-sidecar",
+			"command": "not-a-list",
+		},
+		map[string]any{
+			"name":    "workspace",
+			"command": []any{"/orka-workspace-agent"},
+			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
+				substrateBootstrapLiteralEnvForTest(),
+			},
+		},
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if !executor.convergeCalled || executor.convergeTarget != 0 {
+		t.Fatalf("converge called=%t target=%d, want unsafe cleanup target 0", executor.convergeCalled, executor.convergeTarget)
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if !strings.Contains(got.Status.Message, "literal value is not allowed with substrate actor pools") {
+		t.Fatalf("status message = %q, want unsafe literal bootstrap error", got.Status.Message)
+	}
+}
+
+func TestSubstrateActorPoolReconcilerWaitsForActiveLeaseBeforeDeletingUnsafeActors(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "codex-pool",
+			Namespace:  "default",
+			Finalizers: []string{substrateActorPoolFinalizer},
+		},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors:    3,
+			PrecreateActors: true,
+		},
+	}
+	template := readySubstrateActorTemplateForTest([]any{
+		substrateBootstrapLiteralEnvForTest(),
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	prefix := deterministicSubstratePoolActorPrefix(pool.Namespace, pool.Name)
+	holder := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "running-task", Namespace: "default", UID: "running-task-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	lease := newSubstratePoolActorLease(holder, pool.Namespace, deterministicSubstratePoolActorID(prefix, 0), deterministicSubstratePoolActorID(prefix, 0))
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template, holder, lease).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("RequeueAfter = 0, want retry after active lease drains")
+	}
+	if executor.convergeCalled {
+		t.Fatal("ConvergeSubstrateActors was called while unsafe actor lease is active")
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhasePending {
+		t.Fatalf("phase = %q, want Pending; status=%#v", got.Status.Phase, got.Status)
+	}
+	if !strings.Contains(got.Status.Message, "waiting for 1 active actor lease") {
+		t.Fatalf("status message = %q, want active lease context", got.Status.Message)
+	}
+}
+
+func TestSubstrateActorPoolReconcilerRejectsSingleContainerLiteralBootstrapFallback(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-pool", Namespace: "default"},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors:    3,
+			PrecreateActors: true,
+		},
+	}
+	template := readySubstrateActorTemplateWithContainersForTest([]any{
+		map[string]any{
+			"name": "workspace",
+			"env": []any{
+				substrateWorkspaceDaemonListenEnvForTest(),
+				substrateBootstrapLiteralEnvForTest(),
+			},
+		},
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if executor.convergeCalled {
+		t.Fatal("ConvergeSubstrateActors was called for unsafe single-container fallback")
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhaseFailed {
+		t.Fatalf("phase = %q, want Failed; status=%#v", got.Status.Phase, got.Status)
+	}
+	if !strings.Contains(got.Status.Message, "literal value is not allowed with substrate actor pools") {
+		t.Fatalf("status message = %q, want literal bootstrap rejection", got.Status.Message)
+	}
+}
+
+func TestSubstrateActorPoolReconcilerDoesNotDeleteActorsForNonBootstrapValidationError(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "codex-pool",
+			Namespace:  "default",
+			Finalizers: []string{substrateActorPoolFinalizer},
+		},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:     corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors:    3,
+			PrecreateActors: true,
+		},
+	}
+	template := readySubstrateActorTemplateForTest([]any{
+		substrateBootstrapSecretEnvForTest(),
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	if err := unstructured.SetNestedField(template.Object, "Pending", "status", "phase"); err != nil {
+		t.Fatalf("set template phase: %v", err)
+	}
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if executor.convergeCalled {
+		t.Fatal("ConvergeSubstrateActors was called for non-bootstrap validation failure")
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhaseFailed {
+		t.Fatalf("phase = %q, want Failed; status=%#v", got.Status.Phase, got.Status)
+	}
+	if !strings.Contains(got.Status.Message, "is not Ready") {
+		t.Fatalf("status message = %q, want readiness failure", got.Status.Message)
+	}
+}
+
+func TestSubstrateActorPoolReconcilerDeletesExistingUnsafeActorsWhenPrecreateDisabled(t *testing.T) {
+	scheme := newSubstrateActorPoolTestScheme(t)
+	pool := &corev1alpha1.SubstrateActorPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "codex-pool",
+			Namespace:  "default",
+			Finalizers: []string{substrateActorPoolFinalizer},
+		},
+		Spec: corev1alpha1.SubstrateActorPoolSpec{
+			TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "codex", Namespace: "ate-demo"},
+			TargetActors: 3,
+		},
+	}
+	template := readySubstrateActorTemplateForTest([]any{
+		substrateBootstrapLiteralEnvForTest(),
+	})
+	template.SetName("codex")
+	template.SetNamespace("ate-demo")
+	executor := &recordingSubstratePoolExecutor{}
+	reconciler := &SubstrateActorPoolReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.SubstrateActorPool{}).WithObjects(pool, template).Build(),
+		Scheme:           scheme,
+		SubstrateEnabled: true,
+		SubstrateExecutorFactory: func(SubstrateConfig) (SubstratePoolExecutor, error) {
+			return executor, nil
+		},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "codex-pool", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !executor.convergeCalled || executor.convergeTarget != 0 {
+		t.Fatalf("converge called=%t target=%d, want delete unsafe actors with target 0", executor.convergeCalled, executor.convergeTarget)
+	}
+	if executor.pruneCalled {
+		t.Fatal("PruneSubstrateActors was called instead of unsafe actor deletion")
+	}
+	var got corev1alpha1.SubstrateActorPool
+	if err := reconciler.Get(context.Background(), req.NamespacedName, &got); err != nil {
+		t.Fatalf("Get pool: %v", err)
+	}
+	if got.Status.Phase != corev1alpha1.SubstrateActorPoolPhaseFailed {
+		t.Fatalf("phase = %q, want Failed; status=%#v", got.Status.Phase, got.Status)
+	}
+}
+
 func TestSubstrateActorPoolReconcilerPrecreatesZeroTarget(t *testing.T) {
 	scheme := newSubstrateActorPoolTestScheme(t)
 	pool := &corev1alpha1.SubstrateActorPool{
@@ -175,10 +532,7 @@ func TestSubstrateActorPoolReconcilerPrecreatesZeroTarget(t *testing.T) {
 		},
 	}
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  "ORKA_WORKSPACE_BOOTSTRAP_TOKEN",
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapSecretEnvForTest(),
 	})
 	template.SetName("codex")
 	template.SetNamespace("ate-demo")
@@ -259,10 +613,7 @@ func TestSubstrateActorPoolReconcilerPrunesActorsWithoutPrecreate(t *testing.T) 
 		},
 	}
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  "ORKA_WORKSPACE_BOOTSTRAP_TOKEN",
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapSecretEnvForTest(),
 	})
 	template.SetName("codex")
 	template.SetNamespace("ate-demo")
@@ -359,10 +710,7 @@ func TestSubstrateActorPoolReconcilerDefersScaleDownWithActiveLease(t *testing.T
 		},
 	}
 	template := readySubstrateActorTemplateForTest([]any{
-		map[string]any{
-			"name":  "ORKA_WORKSPACE_BOOTSTRAP_TOKEN",
-			"value": "bootstrap-token",
-		},
+		substrateBootstrapSecretEnvForTest(),
 	})
 	template.SetName("codex")
 	template.SetNamespace("ate-demo")

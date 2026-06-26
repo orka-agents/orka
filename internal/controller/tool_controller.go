@@ -109,9 +109,20 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.finalizeSubstrateMCPTool(ctx, tool)
 	}
 
+	if err := r.precheckUnsafeSubstrateMCPToolBootstrap(ctx, tool); err != nil {
+		logger.Error(err, "MCP substrateActor bootstrap validation failed")
+		if isSubstrateUnsafeLiteralBootstrapError(err) {
+			return r.failUnsafeSubstrateMCPTool(ctx, tool, err)
+		}
+		return r.updateStatus(ctx, tool, false, err.Error())
+	}
+
 	// Validate the tool configuration
 	if err := r.validateTool(ctx, tool); err != nil {
 		logger.Error(err, "Tool validation failed")
+		if isSubstrateUnsafeLiteralBootstrapError(err) {
+			return r.failUnsafeSubstrateMCPTool(ctx, tool, err)
+		}
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
@@ -126,6 +137,33 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// Tool is valid and reachable
 	return r.updateStatus(ctx, tool, true, "")
+}
+
+// precheckUnsafeSubstrateMCPToolBootstrap detects durable literal bootstrap-token templates before other validation can mask them.
+func (r *ToolReconciler) precheckUnsafeSubstrateMCPToolBootstrap(ctx context.Context, tool *corev1alpha1.Tool) error {
+	if tool == nil || tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil || !r.SubstrateEnabled {
+		return nil
+	}
+	actor := tool.Spec.MCP.SubstrateActor
+	if strings.TrimSpace(actor.TemplateRef.Name) == "" {
+		return nil
+	}
+	return substrateActorTemplateUnsafeLiteralDurableBootstrapEnv(ctx, r.Client, r.substrateMCPTemplateRequest(tool))
+}
+
+func (r *ToolReconciler) failUnsafeSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool, cause error) (ctrl.Result, error) {
+	cleanupResult, cleanupErr := r.cleanupUnsafeSubstrateMCPToolActor(ctx, tool)
+	if cleanupErr != nil || !cleanupResult.IsZero() {
+		statusResult, statusErr := r.updateStatus(ctx, tool, false, cause.Error())
+		if cleanupErr != nil {
+			return cleanupResult, cleanupErr
+		}
+		if statusErr != nil {
+			return statusResult, statusErr
+		}
+		return cleanupResult, nil
+	}
+	return r.updateStatusClearingActor(ctx, tool, false, cause.Error())
 }
 
 // validateTool validates the Tool spec.
@@ -526,6 +564,13 @@ func (r *ToolReconciler) resolveSubstrateMCPActorPool(
 		return "", "", nil, err
 	}
 	return poolName, poolNamespace, pool, nil
+}
+
+func (r *ToolReconciler) cleanupUnsafeSubstrateMCPToolActor(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	return r.finalizeSubstrateMCPTool(ctx, tool)
 }
 
 func (r *ToolReconciler) finalizeSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) (ctrl.Result, error) {
@@ -1484,6 +1529,11 @@ func (r *ToolReconciler) getHTTPClient() *http.Client {
 
 // updateStatus updates the Tool status and conditions.
 func (r *ToolReconciler) updateStatus(ctx context.Context, tool *corev1alpha1.Tool, available bool, errMsg string) (ctrl.Result, error) {
+	return r.updateStatusWithActor(ctx, tool, available, errMsg, "", nil)
+}
+
+func (r *ToolReconciler) updateStatusClearingActor(ctx context.Context, tool *corev1alpha1.Tool, available bool, errMsg string) (ctrl.Result, error) {
+	tool.Status.Actor = nil
 	return r.updateStatusWithActor(ctx, tool, available, errMsg, "", nil)
 }
 
