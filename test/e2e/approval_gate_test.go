@@ -317,7 +317,9 @@ func applyManifest(manifest string) {
 func waitForPendingApproval(apiBaseURL, taskName, targetTool string, timeout time.Duration) string {
 	var approvalID string
 	Eventually(func(g Gomega) {
-		approvalsList := listTaskApprovals(apiBaseURL, taskName)
+		approvalsList, status, err := listTaskApprovals(apiBaseURL, taskName)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(status).To(Equal(http.StatusOK))
 		for _, approval := range approvalsList.Approvals {
 			if approval.TargetTool == targetTool && approval.Status == approvals.StatusPending {
 				approvalID = approval.ID
@@ -337,17 +339,25 @@ type taskApprovalList struct {
 	} `json:"approvals"`
 }
 
-func listTaskApprovals(apiBaseURL, taskName string) taskApprovalList {
+func listTaskApprovals(apiBaseURL, taskName string) (taskApprovalList, int, error) {
 	url := fmt.Sprintf("%s/api/v1/tasks/%s/approvals?namespace=%s", strings.TrimRight(apiBaseURL, "/"), taskName, namespace)
 	resp, err := http.Get(url)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return taskApprovalList{}, 0, err
+	}
 	defer resp.Body.Close()
-	Expect(resp.StatusCode).To(Equal(http.StatusOK))
 	body, err := io.ReadAll(resp.Body)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return taskApprovalList{}, resp.StatusCode, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return taskApprovalList{}, resp.StatusCode, nil
+	}
 	var out taskApprovalList
-	Expect(json.Unmarshal(body, &out)).To(Succeed())
-	return out
+	if err := json.Unmarshal(body, &out); err != nil {
+		return taskApprovalList{}, resp.StatusCode, err
+	}
+	return out, resp.StatusCode, nil
 }
 
 func decideApproval(apiBaseURL, taskName, approvalID, decision string) {
