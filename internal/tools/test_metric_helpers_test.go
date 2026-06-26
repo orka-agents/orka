@@ -1,3 +1,9 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
 package tools
 
 import "go.opentelemetry.io/otel/sdk/metric/metricdata"
