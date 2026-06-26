@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -173,6 +174,18 @@ func (r *Registry) List() []Tool {
 	return tools
 }
 
+// Names returns all registered tool names in stable order.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Execute executes a tool by name
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	tool, ok := r.Get(name)
@@ -282,6 +295,28 @@ func RegisterProxyPRTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
 }
 
+// KnownBuiltInToolNames returns every built-in tool name known to Orka, including
+// tools registered in the default proxy registry and coordination tools that are
+// registered in worker processes. Controller-side validation uses this to reject
+// approvalRequiredTools entries that would be handled as built-ins rather than
+// Tool CRDs.
+func KnownBuiltInToolNames() []string {
+	seen := map[string]bool{}
+	for _, group := range [][]string{DefaultRegistry.Names(), ChatToolNames(), CoordinationToolNames()} {
+		for _, name := range group {
+			if name != "" {
+				seen[name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ChatToolNames returns the names of all chat tools in registration order.
 func ChatToolNames() []string {
 	return []string{
@@ -293,6 +328,38 @@ func ChatToolNames() []string {
 		createToolCRDToolName,
 		deleteToolToolName,
 		deleteSessionToolName,
+	}
+}
+
+// CoordinationToolNames returns the names of all coordination tools registered by
+// RegisterCoordinationTools in worker processes.
+func CoordinationToolNames() []string {
+	return []string{
+		delegateTaskToolName,
+		waitForTasksToolName,
+		createContainerTaskToolName,
+		cancelTaskToolName,
+		sendMessageToolName,
+		checkMessagesToolName,
+		createPullRequestToolName,
+		checkPullRequestCIToolName,
+		mergePullRequestToolName,
+		autoMergePullRequestToolName,
+		reviewPullRequestToolName,
+		postReviewCommentToolName,
+		checkPRReviewMarkerToolName,
+		listIssuesToolName,
+		listPullRequestsToolName,
+		getIssueToolName,
+		commentOnIssueToolName,
+		createAgentToolName,
+		updateAgentToolName,
+		deleteAgentToolName,
+		updatePlanToolName,
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
 	}
 }
 

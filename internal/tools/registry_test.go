@@ -9,6 +9,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -255,6 +257,39 @@ func TestRegistry_ToLLMTools(t *testing.T) {
 				t.Errorf("ToLLMTools() len = %d, want %d", len(llmTools), tt.wantLen)
 			}
 		})
+	}
+}
+
+func TestRegistryNamesSorted(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&mockTool{name: "zeta", description: "z"})
+	r.Register(&mockTool{name: "alpha", description: "a"})
+	r.Register(&mockTool{name: "middle", description: "m"})
+
+	got := r.Names()
+	want := []string{"alpha", "middle", "zeta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Names() = %#v, want %#v", got, want)
+	}
+}
+
+func TestKnownBuiltInToolNamesIncludesRegisteredChatAndCoordinationTools(t *testing.T) {
+	wantNames := []string{
+		requestApprovalToolName,
+		webSearchToolName,
+		createAITaskToolName,
+		createToolCRDToolName,
+		delegateTaskToolName,
+		sendMessageToolName,
+		checkPRReviewMarkerToolName,
+		commentOnIssueToolName,
+		updateAgentToolName,
+	}
+	got := KnownBuiltInToolNames()
+	for _, want := range wantNames {
+		if !slices.Contains(got, want) {
+			t.Fatalf("KnownBuiltInToolNames() missing %q from %#v", want, got)
+		}
 	}
 }
 

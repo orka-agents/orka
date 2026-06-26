@@ -18,6 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const commentOnIssueToolName = "comment_on_issue"
+
 // CommentOnIssueTool posts a comment on a GitHub issue.
 type CommentOnIssueTool struct {
 	k8sClient  client.Client
@@ -52,7 +54,7 @@ func NewCommentOnIssueTool(k8sClient client.Client) *CommentOnIssueTool {
 
 // Name returns the tool name.
 func (t *CommentOnIssueTool) Name() string {
-	return "comment_on_issue"
+	return commentOnIssueToolName
 }
 
 // Description returns the tool description.

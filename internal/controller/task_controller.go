@@ -44,6 +44,7 @@ import (
 	execevents "github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
@@ -58,6 +59,7 @@ const (
 	failedMountEventStaleAfter         = 2 * time.Minute
 	podLogLimitBytes                   = int64(5 << 20)
 	stdoutResultLogLimitBytes          = int64(15 << 20)
+	maxResolvedApprovalsForWorkerEnv   = 32
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -924,6 +926,7 @@ func (r *TaskReconciler) resolvedApprovalsJSONForTask(ctx context.Context, task 
 		approvals.FilterEventsForTaskUID(listed, string(task.UID)),
 		time.Time{},
 	))
+	resolved = latestResolvedApprovalsForWorkerEnv(resolved)
 	if len(resolved) == 0 {
 		return "", nil
 	}
@@ -932,6 +935,13 @@ func (r *TaskReconciler) resolvedApprovalsJSONForTask(ctx context.Context, task 
 		return "", err
 	}
 	return string(data), nil
+}
+
+func latestResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) []approvals.ResolvedApproval {
+	if len(values) <= maxResolvedApprovalsForWorkerEnv {
+		return values
+	}
+	return values[len(values)-maxResolvedApprovalsForWorkerEnv:]
 }
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
@@ -2669,59 +2679,24 @@ func agentHasAutonomousCoordination(agent *corev1alpha1.Agent) bool {
 }
 
 func invalidApprovalRequiredBuiltInTool(values []string) string {
+	builtIns := approvalRequiredBuiltInToolSet()
 	for _, value := range values {
 		toolName := strings.TrimSpace(value)
-		if approvalRequiredBuiltInTools[toolName] {
+		if builtIns[toolName] {
 			return toolName
 		}
 	}
 	return ""
 }
 
-var approvalRequiredBuiltInTools = map[string]bool{
-	"auto_merge_pull_request": true,
-	"cancel_task":             true,
-	"check_messages":          true,
-	"check_pr_review_marker":  true,
-	"check_task_progress":     true,
-	"create_agent_task":       true,
-	"create_pr_monitor":       true,
-	"check_pull_request_ci":   true,
-	"code_exec":               true,
-	"comment_on_issue":        true,
-	"create_agent":            true,
-	"create_ai_task":          true,
-	"create_container_task":   true,
-	"create_pull_request":     true,
-	"create_tool":             true,
-	"delegate_task":           true,
-	"delete_agent":            true,
-	"delete_tool":             true,
-	"delete_session":          true,
-	"file_read":               true,
-	"file_write":              true,
-	"fetch_task_output":       true,
-	"get_issue":               true,
-	"list_agents":             true,
-	"list_issues":             true,
-	"list_tasks":              true,
-	"list_tools":              true,
-	"list_pull_requests":      true,
-	"merge_pull_request":      true,
-	"post_review_comment":     true,
-	"propose_memory":          true,
-	"recall_memory":           true,
-	"remember":                true,
-	"request_approval":        true,
-	"review_pull_request":     true,
-	"search_transcript":       true,
-	"send_message":            true,
-	"update_agent":            true,
-	"update_plan":             true,
-	"wait_for_task":           true,
-	"wait_for_tasks":          true,
-	"web_fetch":               true,
-	"web_search":              true,
+func approvalRequiredBuiltInToolSet() map[string]bool {
+	builtIns := map[string]bool{}
+	for _, name := range tools.KnownBuiltInToolNames() {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			builtIns[trimmed] = true
+		}
+	}
+	return builtIns
 }
 
 // handleScheduled manages the scheduling loop for recurring tasks.

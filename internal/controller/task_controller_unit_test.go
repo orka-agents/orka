@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
@@ -703,7 +704,7 @@ func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordination
 }
 
 func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRejectBuiltIns(t *testing.T) {
-	for _, toolName := range []string{"request_approval", "create_container_task", "web_search", "file_read", "web_fetch", "list_issues", "get_issue", "list_pull_requests", "recall_memory", "search_transcript"} {
+	for _, toolName := range []string{"request_approval", "create_container_task", "web_search", "file_read", "web_fetch", "list_issues", "get_issue", "list_pull_requests", "recall_memory", "search_transcript", "delegate_task", "send_message", "check_messages", "post_review_comment", "check_pr_review_marker", "comment_on_issue", "update_agent"} {
 		t.Run(toolName, func(t *testing.T) {
 			r := &TaskReconciler{}
 			task := &corev1alpha1.Task{
@@ -7316,6 +7317,40 @@ func appendApprovalRequestedForControllerTest(t *testing.T, r *TaskReconciler, t
 	})
 	if err != nil {
 		t.Fatalf("append approval: %v", err)
+	}
+}
+
+func TestResolvedApprovalsJSONForTaskCapsWorkerEnvWindow(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name:      "auto-approval-window",
+		Namespace: "default",
+		UID:       types.UID("task-uid"),
+	}}
+	r := newUnitReconciler(scheme, task)
+	total := maxResolvedApprovalsForWorkerEnv + 5
+	for i := range total {
+		approvalID := fmt.Sprintf("approval-%02d", i)
+		appendApprovalRequestedForControllerTest(t, r, task, approvalID)
+		appendApprovalDecisionForControllerTest(t, r, task, approvalID)
+	}
+
+	got, err := r.resolvedApprovalsJSONForTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForTask() error = %v", err)
+	}
+	var resolved []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &resolved); err != nil {
+		t.Fatalf("unmarshal resolved approvals: %v", err)
+	}
+	if len(resolved) != maxResolvedApprovalsForWorkerEnv {
+		t.Fatalf("resolved approvals length = %d, want %d", len(resolved), maxResolvedApprovalsForWorkerEnv)
+	}
+	if resolved[0].ID != "approval-05" {
+		t.Fatalf("first retained approval = %q, want approval-05", resolved[0].ID)
+	}
+	if resolved[len(resolved)-1].ID != "approval-36" {
+		t.Fatalf("last retained approval = %q, want approval-36", resolved[len(resolved)-1].ID)
 	}
 }
 
