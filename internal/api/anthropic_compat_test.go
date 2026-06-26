@@ -1061,6 +1061,35 @@ func (m *mockAnthropicProvider) Name() string {
 	return "mock-anthropic"
 }
 
+func TestHandleStreamingMessages_ForwardsTerminalUsage(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{
+			{Content: "hello"},
+			{Done: true, StopReason: oaiStopReasonEndTurn, OutputTokens: 11},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514", nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"usage":{"input_tokens":0,"output_tokens":11`) {
+		t.Fatalf("expected streamed tool-loop usage in body, got: %s", bodyStr)
+	}
+}
+
 func TestHandleStreamingRawMessages_ForwardsTerminalUsage(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		streamChunks: []llm.StreamChunk{
@@ -1124,7 +1153,7 @@ func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *tes
 				Messages: []llm.Message{{Role: testRoleUser, Content: "read then report"}},
 				Tools:    []llm.Tool{{Name: "file_read"}},
 			},
-			"claude-sonnet-4-20250514", 0, nil,
+			"claude-sonnet-4-20250514", nil,
 		)
 	})
 
@@ -1181,7 +1210,7 @@ func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testin
 				Model:    "claude-sonnet-4-20250514",
 				Messages: []llm.Message{{Role: testRoleUser, Content: "ship"}},
 			},
-			"claude-sonnet-4-20250514", 0, nil,
+			"claude-sonnet-4-20250514", nil,
 		)
 	})
 

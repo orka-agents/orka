@@ -374,7 +374,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	if req.Stream {
 		if !orkaToolsDisabled {
-			return h.handleStreamingMessages(c, ctx, provider, compReq, model, 0, proxyToolCtx)
+			return h.handleStreamingMessages(c, ctx, provider, compReq, model, proxyToolCtx)
 		}
 		return h.handleStreamingProxy(c, ctx, provider, compReq, model)
 	}

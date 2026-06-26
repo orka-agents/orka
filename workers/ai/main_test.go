@@ -675,6 +675,31 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	}
 }
 
+func TestExecuteCustomToolWithTelemetryRecordsSpan(t *testing.T) {
+	spans := testutil.NewSpanHarness(t)
+	execute := func(context.Context) (string, error) {
+		return "custom result", nil
+	}
+	result, err := executeCustomToolWithTelemetry(context.Background(), "custom_http_tool", "call-custom", execute)
+	if err != nil || result != "custom result" {
+		t.Fatalf("executeCustomToolWithTelemetry() result=%q err=%v", result, err)
+	}
+	for _, span := range spans.Recorder.Ended() {
+		if span.Name() != "execute_tool custom_http_tool" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, kv := range span.Attributes() {
+			attrs[string(kv.Key)] = kv.Value.AsString()
+		}
+		if attrs[genai.AttrToolType] != genai.ToolTypeExtension || attrs[genai.AttrToolCallID] != "call-custom" {
+			t.Fatalf("custom tool span attrs = %#v", attrs)
+		}
+		return
+	}
+	t.Fatalf("missing custom tool span, got %#v", spans.Recorder.Ended())
+}
+
 func TestAIWorkerRecordsRejectedToolTelemetry(t *testing.T) {
 	spans := testutil.NewSpanHarness(t)
 	provider := &mockProvider{responses: []*llm.CompletionResponse{

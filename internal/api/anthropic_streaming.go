@@ -28,7 +28,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	model string,
-	inputTokens int,
 	toolCtx *tools.ToolContext,
 ) error {
 	c.Set("Content-Type", "text/event-stream")
@@ -47,7 +46,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		defer streamCancel()
 
 		// Emit message_start once for the entire tool loop
-		if err := writeMessageStart(w, msgID, model, inputTokens); err != nil {
+		if err := writeMessageStart(w, msgID, model, 0); err != nil {
 			anthropicLog.Error(err, "failed to write message_start")
 			return
 		}
@@ -145,7 +144,11 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					}
 
 					if chunk.Done {
-						totalOutputTokens += estimateTokens(textContent)
+						if chunk.OutputTokens > 0 {
+							totalOutputTokens += chunk.OutputTokens
+						} else {
+							totalOutputTokens += estimateTokens(textContent)
+						}
 						break
 					}
 				}
