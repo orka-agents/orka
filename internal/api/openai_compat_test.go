@@ -804,6 +804,35 @@ func TestHandleStreamingCompletion_StreamIncludesUsageChunk(t *testing.T) {
 	}
 }
 
+func TestHandleStreamingCompletion_StreamOmitsUsageChunkWithoutCounts(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 2)
+	ch <- llm.StreamChunk{Content: "Hello"}
+	ch <- llm.StreamChunk{Done: true, StopReason: "end_turn"}
+	close(ch)
+	mock := &oaiMockProvider{streamCh: ch}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-stream-no-usage", "gpt-4", 1234567890,
+			&StreamOptions{IncludeUsage: true},
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "prompt_tokens") || strings.Contains(bodyStr, "completion_tokens") {
+		t.Fatalf("unexpected zero usage chunk in stream: %s", bodyStr)
+	}
+}
+
 func TestHandleStreamingCompletion_WithUsage(t *testing.T) {
 	mock := &oaiMockProvider{
 		streamErr: fmt.Errorf("stream not supported"),
