@@ -71,7 +71,25 @@ func (t *RequestApprovalTool) Execute(ctx context.Context, args json.RawMessage)
 	if _, ok := DefaultRegistry.Get(targetTool); ok {
 		return "", fmt.Errorf("targetTool %q is a built-in tool and cannot be approved with request_approval", targetTool)
 	}
-	target, err := approvals.NewApprovalTarget(toolCtx.Namespace, toolCtx.TaskID, toolCtx.TaskUID, targetTool, req.TargetArguments, req.Action, req.RiskSummary, req.Severity)
+	targetSpecDigest := ""
+	if toolCtx.ApprovalTargetSpecDigest != nil {
+		var err error
+		targetSpecDigest, err = toolCtx.ApprovalTargetSpecDigest(ctx, targetTool)
+		if err != nil {
+			return "", err
+		}
+	}
+	target, err := approvals.NewApprovalTarget(
+		toolCtx.Namespace,
+		toolCtx.TaskID,
+		toolCtx.TaskUID,
+		targetTool,
+		req.TargetArguments,
+		req.Action,
+		req.RiskSummary,
+		req.Severity,
+		targetSpecDigest,
+	)
 	if err != nil {
 		return "", err
 	}

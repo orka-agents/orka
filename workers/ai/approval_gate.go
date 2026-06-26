@@ -185,6 +185,22 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	return digest, nil
 }
 
+func approvalTargetSpecDigestFromCustomTools(
+	customTools map[string]*corev1alpha1.Tool,
+) func(context.Context, string) (string, error) {
+	if len(customTools) == 0 {
+		return nil
+	}
+	return func(_ context.Context, targetTool string) (string, error) {
+		targetTool = strings.TrimSpace(targetTool)
+		customTool := customTools[targetTool]
+		if customTool == nil {
+			return "", fmt.Errorf("targetTool %q is not an enabled custom tool", targetTool)
+		}
+		return approvalTargetSpecDigest(customTool)
+	}
+}
+
 func (g *approvalGate) resolvedDecision(target approvals.ApprovalTarget) (approvals.ResolvedApproval, bool) {
 	for _, decision := range g.resolved {
 		if decision.ID != target.ApprovalID {
@@ -388,6 +404,7 @@ func handleExplicitRequestApprovalBatch(
 	ctx context.Context,
 	calls []llm.ToolCall,
 	allowedToolCalls map[string]struct{},
+	customTools map[string]*corev1alpha1.Tool,
 	eventRecorder common.EventRecorder,
 	baseToolCtx *tools.ToolContext,
 ) (*approvalBatchDecision, error) {
@@ -398,7 +415,7 @@ func handleExplicitRequestApprovalBatch(
 		if _, ok := allowedToolCalls["request_approval"]; !ok {
 			return nil, nil
 		}
-		result, err := executeRequestApprovalToolCall(ctx, call, eventRecorder, baseToolCtx)
+		result, err := executeRequestApprovalToolCall(ctx, call, customTools, eventRecorder, baseToolCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -410,6 +427,7 @@ func handleExplicitRequestApprovalBatch(
 func executeRequestApprovalToolCall(
 	ctx context.Context,
 	call llm.ToolCall,
+	customTools map[string]*corev1alpha1.Tool,
 	eventRecorder common.EventRecorder,
 	baseToolCtx *tools.ToolContext,
 ) (string, error) {
@@ -432,6 +450,9 @@ func executeRequestApprovalToolCall(
 		toolCtxCopy.ToolCallID = call.ID
 		if toolCtxCopy.Tenant == "" {
 			toolCtxCopy.Tenant = toolCtxCopy.Namespace
+		}
+		if toolCtxCopy.ApprovalTargetSpecDigest == nil {
+			toolCtxCopy.ApprovalTargetSpecDigest = approvalTargetSpecDigestFromCustomTools(customTools)
 		}
 		execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 	}
@@ -477,6 +498,7 @@ func processApprovalBatch(
 		ctx,
 		calls,
 		allowedToolCalls,
+		customTools,
 		eventRecorder,
 		baseToolCtx,
 	); err != nil {

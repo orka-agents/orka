@@ -27,7 +27,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const gatedDispatchTool = "dispatch_work_order"
+const (
+	gatedDispatchTool    = "dispatch_work_order"
+	declineHandledResult = "decline handled"
+)
 
 func TestApprovalGatePrescansBatchBeforeExecutingGatedTool(t *testing.T) {
 	for _, tt := range []struct {
@@ -181,7 +184,7 @@ func TestApprovalGateMismatchedCustomToolSpecRequestsNewApproval(t *testing.T) {
 	defer toolServer.Close()
 
 	args := json.RawMessage(`{"incident":"inc-1"}`)
-	oldTool := approvalTestCustomTool("dispatch_work_order", toolServer.URL+"/old")
+	oldTool := approvalTestCustomTool(toolServer.URL + "/old")
 	oldSpecDigest, err := approvals.TargetSpecDigest(oldTool.Spec)
 	if err != nil {
 		t.Fatalf("old spec digest: %v", err)
@@ -204,7 +207,7 @@ func TestApprovalGateMismatchedCustomToolSpecRequestsNewApproval(t *testing.T) {
 	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
 	t.Setenv(workerenv.AutonomousMode, "true")
 	recorder := common.NewFakeEventRecorder()
-	currentTool := approvalTestCustomTool("dispatch_work_order", toolServer.URL+"/new")
+	currentTool := approvalTestCustomTool(toolServer.URL + "/new")
 
 	result, err := executeAgentLoopWithEvents(
 		context.Background(),
@@ -380,9 +383,9 @@ func approvalTargetForTest(t *testing.T, args json.RawMessage) approvals.Approva
 	return target
 }
 
-func approvalTestCustomTool(name, url string) *corev1alpha1.Tool {
+func approvalTestCustomTool(url string) *corev1alpha1.Tool {
 	return &corev1alpha1.Tool{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: gatedDispatchTool},
 		Spec: corev1alpha1.ToolSpec{
 			Description: "approval-gated custom tool",
 			HTTP: &corev1alpha1.HTTPExecution{
@@ -446,6 +449,61 @@ func TestApprovalToolingRequiresAutonomousMode(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "autonomous coordination mode") {
 		t.Fatalf("error = %v, want autonomous-mode configuration error", err)
+	}
+}
+
+func TestRequestApprovalToolCallEmitsCustomToolSpecDigest(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	t.Setenv(workerenv.AutonomousMode, "true")
+	recorder := common.NewFakeEventRecorder()
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	wantDigest, err := approvals.TargetSpecDigest(customTool.Spec)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{response: &llm.CompletionResponse{
+			Content: "requesting approval",
+			ToolCalls: []llm.ToolCall{{
+				ID:   "call-approval",
+				Name: "request_approval",
+				Arguments: json.RawMessage(
+					`{"action":"dispatch team","targetTool":"dispatch_work_order","targetArguments":{"incident":"inc-1"}}`,
+				),
+			}},
+			StopReason: "tool_use",
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		nil,
+		recorder,
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if !strings.Contains(result, "approval requested") {
+		t.Fatalf("result = %q, want approval requested", result)
+	}
+	assertRecordedEventTypesEventually(t, recorder, []string{events.ExecutionEventTypeApprovalRequested})
+	var target approvals.ApprovalTarget
+	for _, event := range recorder.Events() {
+		if event.Type != events.ExecutionEventTypeApprovalRequested {
+			continue
+		}
+		if err := json.Unmarshal(event.Content, &target); err != nil {
+			t.Fatalf("approval content JSON: %v", err)
+		}
+	}
+	if target.TargetSpecDigest != wantDigest {
+		t.Fatalf("TargetSpecDigest = %q, want %q", target.TargetSpecDigest, wantDigest)
 	}
 }
 
@@ -517,7 +575,7 @@ func TestApprovalGateDeclinedDecisionDoesNotExecuteAndContinues(t *testing.T) {
 				}},
 				StopReason: "tool_use",
 			},
-			{Content: "decline handled", StopReason: "end_turn"},
+			{Content: declineHandledResult, StopReason: "end_turn"},
 		}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
@@ -531,11 +589,77 @@ func TestApprovalGateDeclinedDecisionDoesNotExecuteAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
-	if result != "decline handled" {
+	if result != declineHandledResult {
 		t.Fatalf("result = %q, want decline handled", result)
 	}
 	if executions.Load() != 0 {
 		t.Fatalf("declined approval executed gated tool")
+	}
+}
+
+func TestApprovalGateDeclinedExplicitCustomToolTargetDoesNotExecuteWithoutRequiredTools(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL)
+	specDigest, err := approvals.TargetSpecDigest(customTool.Spec)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		specDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	declined := resolvedApprovalForTarget(target)
+	declined.Status = approvals.StatusDeclined
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{declined})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-1",
+					Name:      gatedDispatchTool,
+					Arguments: args,
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: declineHandledResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != declineHandledResult {
+		t.Fatalf("result = %q, want decline handled", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("declined explicit custom approval target executed custom tool")
 	}
 }
 
@@ -568,7 +692,7 @@ func TestApprovalGateDeclinedExplicitApprovalTargetDoesNotExecuteWithoutRequired
 				}},
 				StopReason: "tool_use",
 			},
-			{Content: "decline handled", StopReason: "end_turn"},
+			{Content: declineHandledResult, StopReason: "end_turn"},
 		}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
@@ -582,7 +706,7 @@ func TestApprovalGateDeclinedExplicitApprovalTargetDoesNotExecuteWithoutRequired
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
-	if result != "decline handled" {
+	if result != declineHandledResult {
 		t.Fatalf("result = %q, want decline handled", result)
 	}
 	if executions.Load() != 0 {

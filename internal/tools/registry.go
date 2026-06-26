@@ -54,6 +54,7 @@ type ToolContext struct {
 	RequireSecretReadAuthorization bool
 	IncrementTasks                 func()
 	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
 }
 
 type toolContextKey struct{}
