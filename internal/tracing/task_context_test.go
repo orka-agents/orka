@@ -36,13 +36,13 @@ func TestTaskTraceContextRoundTrip(t *testing.T) {
 	if task.Annotations[labels.AnnotationTraceParent] == "" {
 		t.Fatalf("missing %s annotation", labels.AnnotationTraceParent)
 	}
-	if task.Annotations[labels.AnnotationTraceBaggage] != "tenant=acme" {
-		t.Fatalf("%s = %q, want tenant=acme", labels.AnnotationTraceBaggage, task.Annotations[labels.AnnotationTraceBaggage])
+	if got := task.Annotations[labels.AnnotationTraceBaggage]; got != "" {
+		t.Fatalf("%s = %q, want omitted", labels.AnnotationTraceBaggage, got)
 	}
 
 	extracted := ExtractTaskTraceContext(context.Background(), task)
-	if got := baggage.FromContext(extracted).String(); got != "tenant=acme" {
-		t.Fatalf("extracted baggage = %q, want tenant=acme", got)
+	if got := baggage.FromContext(extracted).String(); got != "" {
+		t.Fatalf("extracted baggage = %q, want omitted", got)
 	}
 	_, child := Tracer("test").Start(extracted, "controller")
 	child.End()

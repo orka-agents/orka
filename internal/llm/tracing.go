@@ -265,11 +265,19 @@ func setResponseAttributes(span trace.Span, resp *CompletionResponse, providerNa
 	}
 	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrProviderName, providerName),
-		attribute.Int(genai.AttrUsageInputTokens, resp.InputTokens),
-		attribute.Int(genai.AttrUsageOutputTokens, resp.OutputTokens),
-		attribute.Int("llm.input_tokens", resp.InputTokens),
-		attribute.Int("llm.output_tokens", resp.OutputTokens),
 		attribute.Int("llm.tool_calls", len(resp.ToolCalls)),
+	}
+	if resp.InputTokens > 0 {
+		attrs = append(attrs,
+			attribute.Int(genai.AttrUsageInputTokens, resp.InputTokens),
+			attribute.Int("llm.input_tokens", resp.InputTokens),
+		)
+	}
+	if resp.OutputTokens > 0 {
+		attrs = append(attrs,
+			attribute.Int(genai.AttrUsageOutputTokens, resp.OutputTokens),
+			attribute.Int("llm.output_tokens", resp.OutputTokens),
+		)
 	}
 	if resp.Model != "" {
 		attrs = append(attrs, attribute.String(genai.AttrResponseModel, resp.Model))
@@ -310,10 +318,14 @@ func (tp *TracingProvider) recordTimeToFirstChunk(ctx context.Context, seconds f
 }
 
 func (tp *TracingProvider) recordTokenUsage(ctx context.Context, resp *CompletionResponse, providerName, model string) {
-	if tp.usage == nil || resp == nil {
+	if tp.usage == nil || resp == nil || (resp.InputTokens == 0 && resp.OutputTokens == 0) {
 		return
 	}
 	base := metricAttributes(providerName, model, "")
-	tp.usage.Record(ctx, int64(resp.InputTokens), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeInput))...))
-	tp.usage.Record(ctx, int64(resp.OutputTokens), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeOutput))...))
+	if resp.InputTokens > 0 {
+		tp.usage.Record(ctx, int64(resp.InputTokens), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeInput))...))
+	}
+	if resp.OutputTokens > 0 {
+		tp.usage.Record(ctx, int64(resp.OutputTokens), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeOutput))...))
+	}
 }

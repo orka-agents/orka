@@ -226,6 +226,27 @@ func TestTracingProviderCompleteEmitsGenAISpan(t *testing.T) {
 	}
 }
 
+func TestTracingProviderCompleteSkipsTokenUsageWhenCountsMissing(t *testing.T) {
+	mh := testutil.NewMetricHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{
+		name:          "openai",
+		telemetryName: "openai",
+		resp: &CompletionResponse{
+			Content:    "ok",
+			Model:      "gpt-4o",
+			StopReason: "stop",
+		},
+	})
+
+	if _, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"}); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	rm := mh.Collect(t)
+	if got := histogramPointCount(rm, genai.MetricClientTokenUsage); got != 0 {
+		t.Fatalf("token usage datapoints = %d, want 0", got)
+	}
+}
+
 func TestTracingProviderCompleteErrorSetsErrorType(t *testing.T) {
 	h := testutil.NewSpanHarness(t)
 	tp := NewTracingProvider(&telemetryProvider{

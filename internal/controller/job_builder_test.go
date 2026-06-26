@@ -2646,7 +2646,6 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	builder.EnableTelemetry = true
 	traceparent := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
 	tracestate := "vendor=value"
-	baggage := "tenant=acme"
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
@@ -2654,7 +2653,7 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 			Annotations: map[string]string{
 				labels.AnnotationTraceParent:  traceparent,
 				labels.AnnotationTraceState:   tracestate,
-				labels.AnnotationTraceBaggage: baggage,
+				labels.AnnotationTraceBaggage: "tenant=acme",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
@@ -2684,8 +2683,8 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	if got, ok := findEnvVar(envVars, workerenv.TraceState); !ok || got.Value != tracestate {
 		t.Fatalf("%s = %#v, found=%v", workerenv.TraceState, got, ok)
 	}
-	if got, ok := findEnvVar(envVars, workerenv.TraceBaggage); !ok || got.Value != baggage {
-		t.Fatalf("%s = %#v, found=%v", workerenv.TraceBaggage, got, ok)
+	if got, ok := findEnvVar(envVars, workerenv.TraceBaggage); ok {
+		t.Fatalf("%s must not be copied into task workloads, got %#v", workerenv.TraceBaggage, got)
 	}
 
 	agentTask := task.DeepCopy()

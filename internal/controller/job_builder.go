@@ -730,7 +730,6 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 	if task != nil && task.Annotations != nil {
 		envVars = setControllerEnv(envVars, workerenv.TraceParent, task.Annotations[labels.AnnotationTraceParent])
 		envVars = setControllerEnv(envVars, workerenv.TraceState, task.Annotations[labels.AnnotationTraceState])
-		envVars = setControllerEnv(envVars, workerenv.TraceBaggage, task.Annotations[labels.AnnotationTraceBaggage])
 	}
 	if !b.EnableTelemetry || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
 		return envVars
