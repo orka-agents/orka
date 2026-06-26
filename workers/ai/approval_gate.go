@@ -182,7 +182,7 @@ func (g *approvalGate) preScan(
 				}, nil
 			}
 		}
-		target, err := g.targetForCall(toolName, call.Arguments, customTools[toolName])
+		target, err := g.targetForCall(ctx, toolName, call.Arguments, customTools[toolName])
 		if err != nil {
 			if !requiresApproval {
 				if g.blockingOverflow && customTools[toolName] != nil {
@@ -244,10 +244,14 @@ func (g *approvalGate) preScan(
 }
 
 func (g *approvalGate) targetForCall(
+	ctx context.Context,
 	toolName string,
 	args json.RawMessage,
 	customTool *corev1alpha1.Tool,
 ) (approvals.ApprovalTarget, error) {
+	if customTool != nil && g.refreshTarget != nil {
+		g.refreshTarget(ctx, toolName, customTool)
+	}
 	targetArgs, err := approvalTargetArguments(args, customTool)
 	if err != nil {
 		return approvals.ApprovalTarget{}, err
@@ -314,20 +318,22 @@ func approvalApplyURLInterpolationTarget(
 	if err != nil {
 		return err
 	}
-	interpolatedURL := customTool.Spec.HTTP.URL
-	interpolated := false
+	interpolatedParams := map[string]string{}
 	for key, val := range params {
 		placeholder := "{{" + key + "}}"
-		if strings.Contains(interpolatedURL, placeholder) {
-			interpolatedURL = strings.ReplaceAll(interpolatedURL, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
+		if strings.Contains(customTool.Spec.HTTP.URL, placeholder) {
+			interpolatedParams[key] = neturl.PathEscape(fmt.Sprintf("%v", val))
 			delete(targetArgsObject, key)
-			interpolated = true
 		}
 	}
-	if !interpolated {
+	if len(interpolatedParams) == 0 {
 		return nil
 	}
-	encoded, err := json.Marshal(interpolatedURL)
+	targetURL := map[string]any{
+		"template": customTool.Spec.HTTP.URL,
+		"params":   interpolatedParams,
+	}
+	encoded, err := json.Marshal(targetURL)
 	if err != nil {
 		return fmt.Errorf("sanitize target URL: %w", err)
 	}
@@ -643,10 +649,7 @@ func (g *approvalGate) prepareApprovedCall(
 	if !requiresApproval && len(g.resolved) == 0 && !g.blockingOverflow {
 		return args, "", false, nil
 	}
-	if customTool != nil && g.refreshTarget != nil {
-		g.refreshTarget(ctx, toolName, customTool)
-	}
-	target, err := g.targetForCall(toolName, args, customTool)
+	target, err := g.targetForCall(ctx, toolName, args, customTool)
 	if err != nil {
 		if !requiresApproval {
 			if g.blockingOverflow && customTool != nil {

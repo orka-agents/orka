@@ -355,7 +355,6 @@ func CoordinationToolNames() []string {
 		getIssueToolName,
 		commentOnIssueToolName,
 		createAgentToolName,
-		updateAgentToolName,
 		deleteAgentToolName,
 		updatePlanToolName,
 		"recall_memory",

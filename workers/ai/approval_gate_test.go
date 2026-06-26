@@ -360,6 +360,42 @@ func TestApprovalGatePreScanReturnsNonObjectGatedArgsToModel(t *testing.T) {
 	}
 }
 
+func TestApprovalGateTargetForCallRefreshesAuthRefBeforeRequestingApproval(t *testing.T) {
+	customTool := approvalAuthRefToolForTest()
+	customTool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	gate := &approvalGate{
+		namespace: "default",
+		taskName:  "incident-task",
+		taskUID:   "task-uid-1",
+		refreshTarget: func(_ context.Context, _ string, tool *corev1alpha1.Tool) {
+			tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+		},
+	}
+
+	target, err := gate.targetForCall(
+		context.Background(),
+		gatedDispatchTool,
+		json.RawMessage(`{"incident":"inc-1"}`),
+		customTool,
+	)
+	if err != nil {
+		t.Fatalf("targetForCall() error = %v", err)
+	}
+	if target.TargetSpecDigest == "" {
+		t.Fatalf("TargetSpecDigest is empty")
+	}
+	refreshedDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("refreshed spec digest: %v", err)
+	}
+	if target.TargetSpecDigest != refreshedDigest {
+		t.Fatalf("TargetSpecDigest = %q, want refreshed digest %q", target.TargetSpecDigest, refreshedDigest)
+	}
+}
+
 func TestApprovalGatePrepareApprovedCallRefreshesAuthRefBeforeConsumingApproval(t *testing.T) {
 	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	customTool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
@@ -802,6 +838,36 @@ func TestApprovalTargetArgumentsRejectsReservedURLField(t *testing.T) {
 	}
 }
 
+func TestApprovalTargetArgumentsPreservesPlaceholderRedactionContext(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/items/{{password}}")
+	targetArgs, err := approvalTargetArguments(
+		json.RawMessage(`{"password":"dont-show-me","op":"delete"}`),
+		customTool,
+	)
+	if err != nil {
+		t.Fatalf("approvalTargetArguments() error = %v", err)
+	}
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		targetArgs,
+		"delete item",
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	if strings.Contains(string(target.TargetArgsPreview), "dont-show-me") {
+		t.Fatalf("TargetArgsPreview leaked URL placeholder value: %s", target.TargetArgsPreview)
+	}
+	if !strings.Contains(string(target.TargetArgsPreview), events.ExecutionEventRedactedValue) {
+		t.Fatalf("TargetArgsPreview = %s, want redaction marker", target.TargetArgsPreview)
+	}
+}
+
 func TestApprovalTargetArgumentsHashesURLInterpolationAsExecuted(t *testing.T) {
 	customTool := approvalTestCustomTool("https://tools.example.test/items/{{id}}")
 	numeric, err := approvalTargetArguments(json.RawMessage(`{"id":1,"op":"delete"}`), customTool)
@@ -823,8 +889,15 @@ func TestApprovalTargetArgumentsHashesURLInterpolationAsExecuted(t *testing.T) {
 	if numericDigest != stringDigest {
 		t.Fatalf("URL-interpolated numeric/string target digests differ: %s != %s", numericDigest, stringDigest)
 	}
-	if strings.Contains(string(numeric), `"id"`) || !strings.Contains(string(numeric), approvalTargetURLField) {
-		t.Fatalf("URL-interpolated target args = %s, want id removed and URL field added", numeric)
+	var targetBody map[string]json.RawMessage
+	if err := json.Unmarshal(numeric, &targetBody); err != nil {
+		t.Fatalf("unmarshal URL-interpolated target args: %v", err)
+	}
+	if _, ok := targetBody["id"]; ok {
+		t.Fatalf("URL-interpolated target args = %s, want top-level id removed", numeric)
+	}
+	if _, ok := targetBody[approvalTargetURLField]; !ok {
+		t.Fatalf("URL-interpolated target args = %s, want URL field added", numeric)
 	}
 }
 
