@@ -70,6 +70,10 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 	resp, err := tp.inner.Complete(ctx, req)
 	durationSeconds := time.Since(start).Seconds()
 	if err != nil {
+		if isStreamingRequiredErr(err) {
+			span.SetAttributes(attribute.Bool("orka.llm.streaming_fallback_required", true))
+			return nil, err
+		}
 		errType := errorType(err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -186,6 +190,13 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		}
 	}()
 	return out, nil
+}
+
+func isStreamingRequiredErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "streaming is required")
 }
 
 func stopReasonErrorType(reason string) string {

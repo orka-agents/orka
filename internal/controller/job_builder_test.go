@@ -2489,6 +2489,10 @@ func TestSafeWorkerOTLPEnvValueStripsUserinfoFromEndpoints(t *testing.T) {
 	if got != "https://collector:4318" {
 		t.Fatalf("trimmed sanitized endpoint = %q, want %q", got, "https://collector:4318")
 	}
+	got = safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example/v1/traces?token=secret#frag")
+	if got != "https://collector.example/v1/traces" {
+		t.Fatalf("query sanitized endpoint = %q, want %q", got, "https://collector.example/v1/traces")
+	}
 
 	unchanged := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
 	if unchanged != "authorization=secret" {

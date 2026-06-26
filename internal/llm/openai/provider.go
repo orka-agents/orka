@@ -870,6 +870,10 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 }
 
 func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.CompletionRequest) <-chan llm.StreamChunk {
+	return p.streamChatCompletionsWithUsage(ctx, req, true)
+}
+
+func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.CompletionRequest, includeUsage bool) <-chan llm.StreamChunk {
 	ch := make(chan llm.StreamChunk)
 	go func() {
 		defer close(ch)
@@ -886,9 +890,11 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		params := openai.ChatCompletionNewParams{
 			Model:    req.Model,
 			Messages: convertMessages(req.Messages, req.SystemPrompt),
-			StreamOptions: openai.ChatCompletionStreamOptionsParam{
+		}
+		if includeUsage {
+			params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
 				IncludeUsage: openai.Bool(true),
-			},
+			}
 		}
 		if req.MaxTokens > 0 {
 			params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
@@ -949,7 +955,16 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		}
 
 		if err := stream.Err(); err != nil {
-			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
+			providerErr := toProviderError(err)
+			if includeUsage && isUnsupportedStreamOptionsError(providerErr) {
+				for chunk := range p.streamChatCompletionsWithUsage(ctx, req, false) {
+					if !send(chunk) {
+						return
+					}
+				}
+				return
+			}
+			send(llm.StreamChunk{Error: providerErr, Done: true})
 			return
 		}
 		send(llm.StreamChunk{
@@ -962,6 +977,20 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		})
 	}()
 	return ch
+}
+
+func isUnsupportedStreamOptionsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "stream_options") && !strings.Contains(msg, "include_usage") {
+		return false
+	}
+	return strings.Contains(msg, "unsupported") ||
+		strings.Contains(msg, "unknown") ||
+		strings.Contains(msg, "unrecognized") ||
+		strings.Contains(msg, "invalid")
 }
 
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status

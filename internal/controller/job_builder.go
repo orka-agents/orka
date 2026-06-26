@@ -1592,10 +1592,15 @@ func safeWorkerOTLPEnvValue(name, value string) string {
 		parseValue = "//" + value
 	}
 	parsed, err := url.Parse(parseValue)
-	if err != nil || parsed.User == nil {
+	if err != nil {
+		return value
+	}
+	if parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" {
 		return value
 	}
 	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
 	sanitized := parsed.String()
 	if schemeLess {
 		return strings.TrimPrefix(sanitized, "//")

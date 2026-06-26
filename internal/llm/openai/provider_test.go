@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,7 @@ const (
 	testStopReasonStop      = "stop"
 	testStopReasonToolCalls = "tool_calls"
 	testFallbackWorks       = "Fallback works!"
+	testFallbackStream      = "Fallback"
 	testCopilotBaseURL      = "https://api.githubcopilot.com"
 )
 
@@ -1628,7 +1630,7 @@ func TestStream_AutoDetect_FallbackToChatCompletions(t *testing.T) {
 		}
 		content.WriteString(chunk.Content) //nolint:errcheck
 	}
-	if got := content.String(); got != "Fallback" {
+	if got := content.String(); got != testFallbackStream {
 		t.Errorf("expected 'Fallback', got %q", got)
 	}
 	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
@@ -1675,7 +1677,7 @@ func TestStream_AutoDetect_FallbackToChatCompletions_OnCustomBare403(t *testing.
 		}
 		content.WriteString(chunk.Content) //nolint:errcheck
 	}
-	if got := content.String(); got != "Fallback" {
+	if got := content.String(); got != testFallbackStream {
 		t.Errorf("expected 'Fallback', got %q", got)
 	}
 	if apiMode(provider.mode.Load()) != apiModeChatCompletions {
@@ -1864,6 +1866,56 @@ func TestStream_ChatCompletions_WithToolCalls(t *testing.T) {
 	}
 	if stopReason != testStopReasonToolCalls {
 		t.Errorf("expected stop reason 'tool_calls', got %q", stopReason)
+	}
+}
+
+func TestStream_ChatCompletions_RetriesWithoutUnsupportedStreamOptions(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "text/event-stream")
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "stream_options") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"unsupported parameter: stream_options","type":"invalid_request_error"}}`) //nolint:errcheck
+			return
+		}
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-retry\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fallback\"},\"finish_reason\":null}]}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-retry\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n") //nolint:errcheck
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	provider.mode.Store(int32(apiModeChatCompletions))
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	var content strings.Builder
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		content.WriteString(chunk.Content) //nolint:errcheck
+	}
+	if callCount != 2 {
+		t.Fatalf("call count = %d, want retry without stream_options", callCount)
+	}
+	if got := content.String(); got != testFallbackStream {
+		t.Fatalf("content = %q, want Fallback", got)
 	}
 }
 
