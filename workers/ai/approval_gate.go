@@ -318,6 +318,9 @@ func approvalApplyURLInterpolationTarget(
 	if customTool == nil || customTool.Spec.HTTP == nil || strings.TrimSpace(customTool.Spec.HTTP.URL) == "" {
 		return nil
 	}
+	if customTool.Spec.MCP != nil && customTool.Spec.MCP.SubstrateActor != nil {
+		return nil
+	}
 	if authBodyKey := approvalAuthBodyKey(customTool); authBodyKey != "" {
 		if approvalURLUsesPlaceholder(customTool, authBodyKey) {
 			return fmt.Errorf(
@@ -441,8 +444,13 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 		if customTool.Spec.MCP != nil && customTool.Spec.MCP.SubstrateActor != nil {
 			return fmt.Errorf("approval-gated MCP tool %q does not support body auth", customTool.Name)
 		}
-		if strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey) == "" {
+		authBodyKey := customTool.Spec.HTTP.AuthBodyKey
+		trimmedAuthBodyKey := strings.TrimSpace(authBodyKey)
+		if trimmedAuthBodyKey == "" {
 			return fmt.Errorf("approval-gated tool %q authBodyKey is required for body auth", customTool.Name)
+		}
+		if authBodyKey != trimmedAuthBodyKey {
+			return fmt.Errorf("approval-gated tool %q authBodyKey must not contain surrounding whitespace", customTool.Name)
 		}
 		if approvalURLUsesPlaceholder(customTool, customTool.Spec.HTTP.AuthBodyKey) {
 			return fmt.Errorf(

@@ -892,6 +892,37 @@ func TestApprovalTargetArgumentsPreservesPlaceholderRedactionContext(t *testing.
 	}
 }
 
+func TestApprovalTargetArgumentsSkipsURLInterpolationForMCPTools(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/items/{{id}}")
+	customTool.Spec.MCP = &corev1alpha1.MCPToolServer{
+		SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "template-a"},
+		},
+	}
+	numeric, err := approvalTargetArguments(json.RawMessage(`{"id":1,"op":"delete"}`), customTool)
+	if err != nil {
+		t.Fatalf("approvalTargetArguments(numeric) error = %v", err)
+	}
+	stringID, err := approvalTargetArguments(json.RawMessage(`{"id":"1","op":"delete"}`), customTool)
+	if err != nil {
+		t.Fatalf("approvalTargetArguments(string) error = %v", err)
+	}
+	numericDigest, err := approvals.TargetArgsDigest(numeric)
+	if err != nil {
+		t.Fatalf("numeric digest: %v", err)
+	}
+	stringDigest, err := approvals.TargetArgsDigest(stringID)
+	if err != nil {
+		t.Fatalf("string digest: %v", err)
+	}
+	if numericDigest == stringDigest {
+		t.Fatalf("MCP numeric/string target digests unexpectedly matched: %s", numericDigest)
+	}
+	if !strings.Contains(string(numeric), `"id"`) || strings.Contains(string(numeric), approvalTargetURLField) {
+		t.Fatalf("MCP target args = %s, want original id retained and no URL field", numeric)
+	}
+}
+
 func TestApprovalTargetArgumentsHashesURLInterpolationAsExecuted(t *testing.T) {
 	customTool := approvalTestCustomTool("https://tools.example.test/items/{{id}}")
 	numeric, err := approvalTargetArguments(json.RawMessage(`{"id":1,"op":"delete"}`), customTool)
@@ -998,6 +1029,21 @@ func TestApprovalTargetSpecDigestRejectsMCPBodyAuth(t *testing.T) {
 	_, err := approvalTargetSpecDigest(tool)
 	if err == nil || !strings.Contains(err.Error(), "MCP") {
 		t.Fatalf("approvalTargetSpecDigest() error = %v, want MCP body auth rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestRejectsPaddedBodyAuthKey(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Spec.HTTP.AuthInject = approvalAuthInjectBody
+	tool.Spec.HTTP.AuthBodyKey = " " + approvalTestAuthKey + " "
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "surrounding whitespace") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want padded authBodyKey rejection", err)
 	}
 }
 
