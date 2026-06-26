@@ -176,6 +176,41 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 	}
 }
 
+func TestApprovalGatePreScanRejectsRequiredToolThatIsNotEnabled(t *testing.T) {
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "hallucinated tool",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-dispatch",
+					Name:      gatedDispatchTool,
+					Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{},
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want %s", result, correctedResult)
+	}
+}
+
 func TestApprovalGatePreScanReturnsMalformedGatedArgsToModel(t *testing.T) {
 	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
 	t.Setenv(workerenv.AutonomousMode, "true")
@@ -596,6 +631,69 @@ func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T
 	}
 	if result != correctedResult {
 		t.Fatalf("result = %q, want corrected", result)
+	}
+}
+
+func TestRequestApprovalToolDuplicateTerminalDecisionReturnsWholeBatchToModel(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	toolspkg.DefaultRegistry.Register(toolspkg.NewRequestApprovalTool())
+	t.Setenv(workerenv.AutonomousMode, "true")
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	specDigest, err := approvals.TargetSpecDigest(customTool.Spec)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		specDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{resolvedApprovalForTarget(target)})
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "duplicate approval",
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:   "call-approval",
+						Name: "request_approval",
+						Arguments: json.RawMessage(
+							`{"action":"dispatch","targetTool":"dispatch_work_order","targetArguments":{"incident":"inc-1"}}`,
+						),
+					},
+					{ID: "call-other", Name: "other_tool", Arguments: json.RawMessage(`{"ok":true}`)},
+				},
+				StopReason: "tool_use",
+			},
+			{Content: correctedResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		toolspkg.DefaultRegistry.ToLLMTools([]string{"request_approval"}),
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != correctedResult {
+		t.Fatalf("result = %q, want %s", result, correctedResult)
 	}
 }
 

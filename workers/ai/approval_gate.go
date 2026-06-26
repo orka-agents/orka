@@ -117,6 +117,7 @@ func (g *approvalGate) requiresApproval(toolName string) bool {
 func (g *approvalGate) preScan(
 	ctx context.Context,
 	calls []llm.ToolCall,
+	allowedToolCalls map[string]struct{},
 	customTools map[string]*corev1alpha1.Tool,
 ) (*approvalBatchDecision, error) {
 	if g == nil || (!g.enabled() && len(g.resolved) == 0) {
@@ -125,6 +126,18 @@ func (g *approvalGate) preScan(
 	for _, call := range calls {
 		toolName := strings.TrimSpace(call.Name)
 		requiresApproval := g.requiresApproval(toolName)
+		if requiresApproval {
+			if _, ok := allowedToolCalls[toolName]; !ok {
+				return &approvalBatchDecision{
+					continueLLM: true,
+					toolResults: approvalValidationBatchToolResults(
+						calls,
+						call.ID,
+						fmt.Errorf("approval-required tool %q is not enabled for this task", toolName),
+					),
+				}, nil
+			}
+		}
 		target, err := g.targetForCall(toolName, call.Arguments, customTools[toolName])
 		if err != nil {
 			if !requiresApproval {
@@ -460,6 +473,7 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 func handleExplicitRequestApprovalBatch(
 	ctx context.Context,
 	calls []llm.ToolCall,
+	gate *approvalGate,
 	allowedToolCalls map[string]struct{},
 	customTools map[string]*corev1alpha1.Tool,
 	eventRecorder common.EventRecorder,
@@ -471,6 +485,16 @@ func handleExplicitRequestApprovalBatch(
 		}
 		if _, ok := allowedToolCalls["request_approval"]; !ok {
 			return nil, nil
+		}
+		if gate != nil && len(gate.resolved) > 0 {
+			if target, err := explicitApprovalTargetForCall(ctx, call, customTools, baseToolCtx); err == nil {
+				if decision, found := gate.resolvedDecision(target); found {
+					return &approvalBatchDecision{
+						continueLLM: true,
+						toolResults: terminalApprovalBatchToolResults(calls, call.ID, decision),
+					}, nil
+				}
+			}
 		}
 		result, err := executeRequestApprovalToolCall(ctx, call, customTools, eventRecorder, baseToolCtx)
 		if err != nil {
@@ -524,6 +548,74 @@ func approvalValidationBatchToolResults(
 			content = fmt.Sprintf(
 				"Not executed because the same tool-call batch contained invalid request_approval call %s",
 				invalidToolCallID,
+			)
+		}
+		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
+	}
+	return results
+}
+
+type requestApprovalCallArgs struct {
+	Action          string          `json:"action"`
+	RiskSummary     string          `json:"riskSummary"`
+	Severity        string          `json:"severity"`
+	TargetTool      string          `json:"targetTool"`
+	TargetArguments json.RawMessage `json:"targetArguments"`
+}
+
+func explicitApprovalTargetForCall(
+	ctx context.Context,
+	call llm.ToolCall,
+	customTools map[string]*corev1alpha1.Tool,
+	baseToolCtx *tools.ToolContext,
+) (approvals.ApprovalTarget, error) {
+	var req requestApprovalCallArgs
+	if len(call.Arguments) > 0 {
+		if err := json.Unmarshal(call.Arguments, &req); err != nil {
+			return approvals.ApprovalTarget{}, err
+		}
+	}
+	baseToolCtx = prepareApprovalToolContext(baseToolCtx, nil)
+	if baseToolCtx == nil {
+		baseToolCtx = tools.GetToolContext(ctx)
+	}
+	if baseToolCtx == nil {
+		return approvals.ApprovalTarget{}, fmt.Errorf("tool context is not configured")
+	}
+	targetTool := strings.TrimSpace(req.TargetTool)
+	targetSpecDigest, err := approvalTargetSpecDigestFromCustomTools(customTools)(ctx, targetTool)
+	if err != nil {
+		return approvals.ApprovalTarget{}, err
+	}
+	return approvals.NewApprovalTarget(
+		baseToolCtx.Namespace,
+		baseToolCtx.TaskID,
+		baseToolCtx.TaskUID,
+		targetTool,
+		req.TargetArguments,
+		req.Action,
+		req.RiskSummary,
+		req.Severity,
+		targetSpecDigest,
+	)
+}
+
+func terminalApprovalBatchToolResults(
+	calls []llm.ToolCall,
+	terminalToolCallID string,
+	decision approvals.ResolvedApproval,
+) []llm.Message {
+	if decision.Status != approvals.StatusApproved {
+		return deniedBatchToolResults(calls, terminalToolCallID, decision)
+	}
+	results := make([]llm.Message, 0, len(calls))
+	for _, call := range calls {
+		content := fmt.Sprintf("approval %s for %s is already approved", decision.ID, decision.TargetTool)
+		if call.ID != terminalToolCallID {
+			content = fmt.Sprintf(
+				"Not executed because the same tool-call batch contained terminal approval %s for %s",
+				decision.ID,
+				decision.TargetTool,
 			)
 		}
 		results = append(results, llm.Message{Role: "tool", Content: content, ToolCallID: call.ID, Name: call.Name})
@@ -596,7 +688,7 @@ func processApprovalBatch(
 	eventRecorder common.EventRecorder,
 	baseToolCtx *tools.ToolContext,
 ) ([]llm.Message, string, bool, bool, error) {
-	if decision, err := gate.preScan(ctx, calls, customTools); err != nil {
+	if decision, err := gate.preScan(ctx, calls, allowedToolCalls, customTools); err != nil {
 		return messages, "", false, false, err
 	} else if decision != nil {
 		return applyApprovalBatchDecision(messages, decision)
@@ -604,6 +696,7 @@ func processApprovalBatch(
 	if decision, err := handleExplicitRequestApprovalBatch(
 		ctx,
 		calls,
+		gate,
 		allowedToolCalls,
 		customTools,
 		eventRecorder,
