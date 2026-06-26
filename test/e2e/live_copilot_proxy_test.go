@@ -195,8 +195,8 @@ var _ = Describe("Live Copilot Proxy Provider", Ordered, func() {
 
 		By("waiting for the AI task to complete")
 		phase := waitForTaskCompletion(liveProxyTaskName, 5*time.Minute)
-		if phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyTaskName) {
-			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + model)
+		if phase == "Failed" && liveCopilotProxyTaskFailedWithExternalProviderIssue(liveProxyTaskName) {
+			Skip("Skipping: live Copilot proxy upstream rejected chat completions for model " + model)
 		}
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy AI task should succeed")
 
@@ -386,8 +386,8 @@ After the tools have been called, reply with exactly %[3]s and nothing else.`, p
 
 		By("waiting for the coordination AI task to complete")
 		phase := waitForTaskCompletion(liveProxyCoordTask, 8*time.Minute)
-		if phase == "Failed" && liveCopilotProxyTaskFailedWithForbidden(liveProxyCoordTask) {
-			Skip("Skipping: live Copilot proxy chat completions returned 403 for model " + model)
+		if phase == "Failed" && liveCopilotProxyTaskFailedWithExternalProviderIssue(liveProxyCoordTask) {
+			Skip("Skipping: live Copilot proxy upstream rejected chat completions for model " + model)
 		}
 		Expect(phase).To(Equal("Succeeded"), "Live copilot proxy coordination AI task should succeed")
 

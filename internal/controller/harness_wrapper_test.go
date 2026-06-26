@@ -14,6 +14,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -124,6 +125,99 @@ func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	}
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+}
+
+func TestPatchHarnessWrapperStartedPersistsTurnIdentityFromStaleRead(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	r := newUnitReconciler(newTestScheme(), task, agent)
+
+	request := harness.StartTurnRequest{
+		TurnID:           "turn-1",
+		RuntimeSessionID: "runtime-session-1",
+		CorrelationID:    "corr-1",
+		Metadata: map[string]string{
+			"runtime":      "claude",
+			"wrapper":      "cli",
+			"systemPrompt": "redacted-from-metadata",
+		},
+	}
+
+	// Simulate a stale cache read after planning: the stored object has no planned
+	// turn annotations yet. Starting must still persist the full deterministic
+	// identity, not just harness-wrapper-started=true.
+	if err := r.patchHarnessWrapperStarted(context.Background(), task, request); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted: %v", err)
+	}
+
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	annotations := updated.Annotations
+	if annotations[harnessWrapperStartedAnno] != scheduledRunLabelValue {
+		t.Fatalf("started annotation = %q, want %q", annotations[harnessWrapperStartedAnno], scheduledRunLabelValue)
+	}
+	for key, want := range map[string]string{
+		harnessWrapperTurnIDAnnotation:  "turn-1",
+		harnessWrapperRuntimeAnnotation: "runtime-session-1",
+		harnessWrapperCorrelationIDAnno: "corr-1",
+		harnessWrapperLastFrameSeqAnno:  "0",
+	} {
+		if got := annotations[key]; got != want {
+			t.Fatalf("annotation %s = %q, want %q", key, got, want)
+		}
+	}
+	if !taskHasHarnessWrapperTurn(&updated) {
+		t.Fatalf("updated task should have a started harness turn: %#v", annotations)
+	}
+	metadata := harnessWrapperPlannedMetadata(&updated, "")
+	if metadata["runtime"] != "claude" || metadata["wrapper"] != "cli" {
+		t.Fatalf("metadata = %#v, want runtime/wrapper", metadata)
+	}
+	if _, ok := metadata["systemPrompt"]; ok {
+		t.Fatalf("metadata should omit systemPrompt: %#v", metadata)
+	}
+
+	updated.Annotations[harnessWrapperLastFrameSeqAnno] = "7"
+	updated.Annotations[harnessWrapperPlannedAtAnno] = "2026-01-02T03:04:05Z"
+	if err := r.Update(context.Background(), &updated); err != nil {
+		t.Fatalf("seed progress annotations: %v", err)
+	}
+	if err := r.patchHarnessWrapperStarted(context.Background(), &updated, request); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted again: %v", err)
+	}
+	var preserved corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &preserved); err != nil {
+		t.Fatalf("get preserved task: %v", err)
+	}
+	if got := preserved.Annotations[harnessWrapperLastFrameSeqAnno]; got != "7" {
+		t.Fatalf("last frame seq after restart patch = %q, want 7", got)
+	}
+	if got := preserved.Annotations[harnessWrapperPlannedAtAnno]; got != "2026-01-02T03:04:05Z" {
+		t.Fatalf("planned-at after restart patch = %q, want preserved timestamp", got)
+	}
+
+	preserved.Annotations[harnessWrapperTurnIDAnnotation] = "old-turn"
+	preserved.Annotations[harnessWrapperRuntimeAnnotation] = "old-runtime"
+	preserved.Annotations[harnessWrapperCorrelationIDAnno] = "old-correlation"
+	preserved.Annotations[harnessWrapperLastFrameSeqAnno] = "9"
+	preserved.Annotations[harnessWrapperPlannedAtAnno] = "2026-09-08T07:06:05Z"
+	if err := r.Update(context.Background(), &preserved); err != nil {
+		t.Fatalf("seed stale turn annotations: %v", err)
+	}
+	if err := r.patchHarnessWrapperStarted(context.Background(), &preserved, request); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted with stale turn: %v", err)
+	}
+	var reset corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &reset); err != nil {
+		t.Fatalf("get reset task: %v", err)
+	}
+	if got := reset.Annotations[harnessWrapperLastFrameSeqAnno]; got != "0" {
+		t.Fatalf("last frame seq for new turn = %q, want reset to 0", got)
+	}
+	if got := reset.Annotations[harnessWrapperPlannedAtAnno]; got == "" || got == "2026-09-08T07:06:05Z" {
+		t.Fatalf("planned-at for new turn = %q, want refreshed timestamp", got)
 	}
 }
 

@@ -207,6 +207,9 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 		return nil, oidcErr
 	}
 
+	// Tokens that are not candidates for the configured OIDC issuer remain
+	// eligible for Kubernetes TokenReview. Once a token claims the configured
+	// issuer, validation and authorization failures are terminal above.
 	userInfo, tokenReviewErr := validateToken(ctx, c, token)
 	if tokenReviewErr == nil {
 		return userInfo, nil
