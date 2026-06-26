@@ -41,6 +41,7 @@ const (
 	mcpToolsCallMethod               = "tools/call"
 	mcpInitializeMethod              = "initialize"
 	mcpInitializedNotificationMethod = "notifications/initialized"
+	toolIdempotencyKeyHeader         = "Idempotency-Key"
 )
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
@@ -217,11 +218,16 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
 	}
-	if idempotencyKey := toolIdempotencyKeyFromContext(ctx); idempotencyKey != "" {
-		if existing := strings.TrimSpace(req.Header.Get("Idempotency-Key")); existing != "" && existing != idempotencyKey {
-			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", "Idempotency-Key")
+	approvalIdempotencyKey := toolIdempotencyKeyFromContext(ctx)
+	if approvalIdempotencyKey != "" {
+		if existing := strings.TrimSpace(req.Header.Get(toolIdempotencyKeyHeader)); existing != "" && existing != approvalIdempotencyKey {
+			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", toolIdempotencyKeyHeader)
 		}
-		req.Header.Set("Idempotency-Key", idempotencyKey)
+		if isMCP {
+			req.Header.Del(toolIdempotencyKeyHeader)
+		} else {
+			req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
+		}
 	}
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -406,6 +412,9 @@ func (e *ToolExecutor) executeMCPToolCall(ctx context.Context, httpClient *http.
 	if err := e.sendMCPInitializedNotification(ctx, httpClient, prepared, sessionID, protocolVersion); err != nil {
 		return "", err
 	}
+	if key := toolIdempotencyKeyFromContext(prepared.request.Context()); key != "" {
+		prepared.request.Header.Set(toolIdempotencyKeyHeader, key)
+	}
 	respBody, err := executeMCPHTTPRequest(httpClient, prepared.request, mcpToolCallRequestID, prepared.authToken, prepared.transactionToken, sessionID)
 	if err != nil {
 		return "", err
@@ -472,6 +481,9 @@ func (e *ToolExecutor) terminateMCPSession(ctx context.Context, httpClient *http
 	}
 	req.Host = prepared.request.Host
 	req.Header = prepared.request.Header.Clone()
+	if toolIdempotencyKeyFromContext(prepared.request.Context()) != "" {
+		req.Header.Del(toolIdempotencyKeyHeader)
+	}
 	req.Header.Del("Content-Type")
 	req.Header.Set(mcpSessionIDHeader, sessionID)
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolHeaderValue(protocolVersion))
@@ -503,6 +515,9 @@ func newMCPRequest(ctx context.Context, prepared preparedToolRequest, body []byt
 	}
 	req.Host = prepared.request.Host
 	req.Header = prepared.request.Header.Clone()
+	if toolIdempotencyKeyFromContext(prepared.request.Context()) != "" {
+		req.Header.Del(toolIdempotencyKeyHeader)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolHeaderValue(protocolVersion))

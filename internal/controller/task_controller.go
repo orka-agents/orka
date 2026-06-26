@@ -1465,6 +1465,17 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 						"latestPhase", latest.Status.Phase)
 					return ctrl.Result{RequeueAfter: time.Second}, nil
 				}
+				task = latest
+				if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+					return result, err
+				}
+				resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if resumingAfterApproval {
+					return r.handleAutonomousIteration(ctx, task)
+				}
 			}
 			if r.isWithinJobCreationVisibilityGracePeriod(task) {
 				log.Info("job not found shortly after creation, waiting for cache visibility",

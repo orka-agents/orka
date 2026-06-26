@@ -3548,6 +3548,91 @@ func TestHandleRunning_AutonomousJobFailedWithPendingApprovalParksBeforeRetry(t 
 	}
 }
 
+func TestHandleRunning_AutonomousJobNotFoundWithPendingApprovalParksBeforeRetry(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-missing-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-missing-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-missing-approval-agent"},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "missing-approval-job",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-missing-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning || updated.Status.JobName != "missing-approval-job" {
+		t.Fatalf("task status = %#v, want parked Running without retry", updated.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousJobNotFoundWithApprovedApprovalResumesBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-missing-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-missing-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-missing-approved-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "missing-approved-job",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-missing-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-missing-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-missing-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending || updated.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", updated.Status)
+	}
+}
+
 func TestHandleRunning_AutonomousJobFailedWithApprovedApprovalResumesBeforeFail(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{

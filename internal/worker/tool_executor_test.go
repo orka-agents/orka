@@ -280,6 +280,93 @@ func TestToolExecutor_Execute_MCPSubstrateActorInitializesSession(t *testing.T) 
 	}
 }
 
+func TestToolExecutor_Execute_MCPSubstrateActorSendsApprovalIdempotencyOnlyOnToolsCall(t *testing.T) {
+	const sessionID = "session-approval-1"
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "" {
+				t.Fatalf("delete %s = %q, want empty", toolIdempotencyKeyHeader, got)
+			}
+			if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+				t.Fatalf("delete %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			calls++
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "" {
+				t.Fatalf("initialize %s = %q, want empty", toolIdempotencyKeyHeader, got)
+			}
+			if got := body["method"]; got != mcpInitializeMethod {
+				t.Fatalf("first MCP method = %v, want %s", got, mcpInitializeMethod)
+			}
+			w.Header().Set(mcpSessionIDHeader, sessionID)
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case 1:
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "" {
+				t.Fatalf("initialized %s = %q, want empty", toolIdempotencyKeyHeader, got)
+			}
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "approval-marker-1" {
+				t.Fatalf("tools/call %s = %q, want approval-marker-1", toolIdempotencyKeyHeader, got)
+			}
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"approved-call-ok"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+	ctx := WithToolIdempotencyKey(context.Background(), "approval-marker-1")
+
+	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "approved-call-ok" {
+		t.Fatalf("Execute() = %q, want approved-call-ok", result)
+	}
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
+	}
+}
+
 func TestToolExecutor_Execute_MCPSubstrateActorAllowsUnsupportedSessionTermination(t *testing.T) {
 	const sessionID = "session-1"
 	var calls int
