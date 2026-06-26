@@ -29,6 +29,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 const queryTrue = "true"
@@ -481,6 +482,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 
 	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))
+	tracing.StampTaskTraceContext(c.Context(), task)
 
 	// Parse timeout if provided
 	if req.Timeout != "" {

@@ -9,6 +9,7 @@ package admission
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -70,6 +71,12 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			user:     untrustedUsername,
 			task:     withTransactionTokenPending(newAdmissionTestTask()),
 			contains: labels.AnnotationTransactionTokenPending,
+		},
+		{
+			name:     "untrusted create with trace annotation denied",
+			user:     untrustedUsername,
+			task:     withTraceAnnotation(newAdmissionTestTask(), "00-"+strings.Repeat("1", 32)+"-"+strings.Repeat("2", 16)+"-01"),
+			contains: labels.AnnotationTraceParent,
 		},
 		{
 			name:    "trusted controller can create with provenance",
@@ -145,6 +152,13 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			oldTask:  oldTask,
 			newTask:  withTransactionTokenPending(oldTask.DeepCopy()),
 			contains: labels.AnnotationTransactionTokenPending,
+		},
+		{
+			name:     "untrusted update adding trace annotation denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withTraceAnnotation(oldTask.DeepCopy(), "00-"+strings.Repeat("3", 32)+"-"+strings.Repeat("4", 16)+"-01"),
+			contains: labels.AnnotationTraceParent,
 		},
 		{
 			name:    "trusted controller can update provenance",
@@ -271,6 +285,15 @@ func withTransactionTokenPending(task *corev1alpha1.Task) *corev1alpha1.Task {
 	}
 	task.Annotations[labels.AnnotationTransactionTokenPending] = "true"
 	task.Annotations[labels.AnnotationTransactionTokenPendingSince] = "2026-01-01T00:00:00Z"
+	return task
+}
+
+func withTraceAnnotation(task *corev1alpha1.Task, traceparent string) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationTraceParent] = traceparent
+	task.Annotations[labels.AnnotationTraceBaggage] = "tenant=untrusted"
 	return task
 }
 

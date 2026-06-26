@@ -1822,6 +1822,38 @@ func TestAddSecretVolumes_AgentSecret(t *testing.T) {
 	}
 }
 
+func TestAddSecretVolumes_AIAgentEnvFromReservesTelemetryEnv(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			SecretRef: &corev1.LocalObjectReference{Name: testAgentSecretName},
+		},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	if err := jb.addSecretVolumes(context.Background(), job, task, agent, nil); err != nil {
+		t.Fatalf("addSecretVolumes() error = %v", err)
+	}
+
+	for _, name := range []string{
+		workerenv.EnableTelemetry,
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	} {
+		got, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, name)
+		if !ok || got.Value != "" || got.ValueFrom != nil {
+			t.Fatalf("reserved env %s = %#v, found=%v", name, got, ok)
+		}
+	}
+}
+
 func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -2441,5 +2473,231 @@ func TestJobBuilderBuildLoadsConfigMapSkills(t *testing.T) {
 	}
 	if got := strings.TrimSpace(cm.Data["system-prompt"]); got != "You are a careful reviewer." {
 		t.Fatalf("system-prompt = %q, want %q", got, "You are a careful reviewer.")
+	}
+}
+
+func TestSafeWorkerOTLPEnvValueStripsUserinfoFromEndpoints(t *testing.T) {
+	got := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "https://user:pass@collector:4318")
+	if got != "https://collector:4318" {
+		t.Fatalf("sanitized endpoint = %q, want %q", got, "https://collector:4318")
+	}
+	got = safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "user:pass@collector:4317")
+	if got != "collector:4317" {
+		t.Fatalf("scheme-less sanitized endpoint = %q, want %q", got, "collector:4317")
+	}
+	got = safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", " https://user:pass@collector:4318 ")
+	if got != "https://collector:4318" {
+		t.Fatalf("trimmed sanitized endpoint = %q, want %q", got, "https://collector:4318")
+	}
+	got = safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example/v1/traces?token=secret#frag")
+	if got != "https://collector.example/v1/traces" {
+		t.Fatalf("query sanitized endpoint = %q, want %q", got, "https://collector.example/v1/traces")
+	}
+
+	unchanged := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
+	if unchanged != "authorization=secret" {
+		t.Fatalf("non-endpoint value = %q, want unchanged", unchanged)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_TelemetryRequiresWorkerReachableEndpoint(t *testing.T) {
+	tests := []struct {
+		name            string
+		endpoint        string
+		tracesEndpoint  string
+		metricsEndpoint string
+	}{
+		{name: "empty endpoint", endpoint: ""},
+		{name: "localhost endpoint", endpoint: "http://localhost:4317"},
+		{name: "IPv4 loopback endpoint", endpoint: "127.0.0.1:4317"},
+		{name: "IPv6 loopback endpoint", endpoint: "http://[0:0:0:0:0:0:0:1]:4317"},
+		{name: "zoned IPv6 loopback endpoint", endpoint: "http://[::1%25lo]:4317"},
+		{name: "IPv6 unspecified endpoint", endpoint: "http://[::]:4317"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tt.endpoint)
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tt.tracesEndpoint)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tt.metricsEndpoint)
+			builder := setupJobBuilder()
+			builder.EnableTelemetry = true
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+			}
+
+			envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+			if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); ok {
+				t.Fatalf("%s should not be set without a worker-reachable OTLP endpoint", workerenv.EnableTelemetry)
+			}
+			if _, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); ok {
+				t.Fatal("loopback or empty OTLP endpoint should not be copied into task workloads")
+			}
+		})
+	}
+}
+
+func TestJobBuilder_buildEnvVars_TelemetryDropsUnreachableSignalOverrides(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "1s")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "grpc")
+	builder := setupJobBuilder()
+	builder.EnableTelemetry = true
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); !ok || got.Value != "otel-collector:4317" {
+		t.Fatalf("generic endpoint = %#v, found=%v", got, ok)
+	}
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+	} {
+		if got, ok := findEnvVar(envVars, name); ok {
+			t.Fatalf("%s should not be copied with unreachable traces endpoint, got %#v", name, got)
+		}
+	}
+	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"); !ok || got.Value != "grpc" {
+		t.Fatalf("metrics protocol = %#v, found=%v", got, ok)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_TelemetryAllowsSignalSpecificEndpoints(t *testing.T) {
+	tests := []struct {
+		name      string
+		traces    string
+		metrics   string
+		wantNames map[string]string
+	}{
+		{name: "traces only", traces: "otel-traces:4317", wantNames: map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "otel-traces:4317"}},
+		{name: "metrics only", metrics: "otel-metrics:4317", wantNames: map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "otel-metrics:4317"}},
+		{name: "both signals", traces: "otel-traces:4317", metrics: "otel-metrics:4317", wantNames: map[string]string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "otel-traces:4317",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "otel-metrics:4317",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tt.traces)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tt.metrics)
+			builder := setupJobBuilder()
+			builder.EnableTelemetry = true
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+			}
+
+			envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+			if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
+				t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
+			}
+			for name, want := range tt.wantNames {
+				if got, ok := findEnvVar(envVars, name); !ok || got.Value != want {
+					t.Fatalf("%s = %#v, found=%v, want %q", name, got, ok, want)
+				}
+			}
+		})
+	}
+}
+
+func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAITelemetryEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAI,
+			Prompt: "p",
+			Env: []corev1.EnvVar{
+				{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "https://example.invalid:4317"},
+				{Name: workerenv.EnableTelemetry, Value: scheduledRunLabelValue},
+				{Name: workerenv.TraceParent, Value: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"},
+				{Name: "CUSTOM_ENV", Value: "kept"},
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	for _, name := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT", workerenv.EnableTelemetry, workerenv.TraceParent} {
+		if _, ok := findEnvVar(envVars, name); ok {
+			t.Fatalf("task-supplied %s should be ignored for AI workers", name)
+		}
+	}
+	if got, ok := findEnvVar(envVars, "CUSTOM_ENV"); !ok || got.Value != "kept" {
+		t.Fatalf("CUSTOM_ENV = %#v, found=%v", got, ok)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_INSECURE", "true")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "3s")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip")
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.pod.name=controller")
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=secret")
+	builder := setupJobBuilder()
+	builder.EnableTelemetry = true
+	traceparent := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
+	tracestate := "vendor=value"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: defaultNS,
+			Annotations: map[string]string{
+				labels.AnnotationTraceParent:  traceparent,
+				labels.AnnotationTraceState:   tracestate,
+				labels.AnnotationTraceBaggage: "tenant=acme",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+	}
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
+		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
+	}
+	for name, want := range map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":           "otel-collector:4317",
+		"OTEL_EXPORTER_OTLP_TRACES_INSECURE":    "true",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT":    "3s",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION": "gzip",
+	} {
+		if got, ok := findEnvVar(envVars, name); !ok || got.Value != want {
+			t.Fatalf("%s = %#v, found=%v, want %q", name, got, ok, want)
+		}
+	}
+	for _, name := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_RESOURCE_ATTRIBUTES"} {
+		if _, ok := findEnvVar(envVars, name); ok {
+			t.Fatalf("%s must not be copied into task workloads", name)
+		}
+	}
+	if got, ok := findEnvVar(envVars, workerenv.TraceParent); !ok || got.Value != traceparent {
+		t.Fatalf("%s = %#v, found=%v", workerenv.TraceParent, got, ok)
+	}
+	if got, ok := findEnvVar(envVars, workerenv.TraceState); !ok || got.Value != tracestate {
+		t.Fatalf("%s = %#v, found=%v", workerenv.TraceState, got, ok)
+	}
+	if got, ok := findEnvVar(envVars, workerenv.TraceBaggage); ok {
+		t.Fatalf("%s must not be copied into task workloads, got %#v", workerenv.TraceBaggage, got)
+	}
+
+	agentTask := task.DeepCopy()
+	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
+	envVars = builder.buildEnvVars(context.Background(), agentTask, nil, nil)
+	if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); ok {
+		t.Fatal("agent runtime tasks should not receive AI-worker telemetry enablement until the harness path consumes it")
+	}
+
+	containerTask := task.DeepCopy()
+	containerTask.Spec.Type = corev1alpha1.TaskTypeContainer
+	envVars = builder.buildEnvVars(context.Background(), containerTask, nil, nil)
+	if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); ok {
+		t.Fatal("generic container tasks must not receive telemetry enablement")
 	}
 }

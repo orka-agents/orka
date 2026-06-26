@@ -10,10 +10,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -115,6 +123,11 @@ const trueStr = "true"
 
 const defaultMergeMethod = "squash"
 
+const (
+	unknownToolTelemetryName  = "unknown_tool"
+	rejectedToolTelemetryName = "rejected_tool"
+)
+
 // Tool is the interface for built-in tools
 type Tool interface {
 	// Name returns the tool name
@@ -169,13 +182,147 @@ func (r *Registry) List() []Tool {
 	return tools
 }
 
-// Execute executes a tool by name
+// Execute executes a tool by name. It is the DRY instrumentation point for
+// built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	start := time.Now()
 	tool, ok := r.Get(name)
+	toolTelemetryName := name
 	if !ok {
-		return "", fmt.Errorf("tool %q not found", name)
+		toolTelemetryName = unknownToolTelemetryName
 	}
-	return tool.Execute(ctx, args)
+	toolTypeValue := toolType(ctx, tool)
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
+		attribute.String(genai.AttrToolType, toolTypeValue),
+	}
+	if tc := GetToolContext(ctx); tc != nil && tc.ToolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+	}
+	if ok {
+		if description := tool.Description(); description != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
+		}
+	}
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+toolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	defer span.End()
+
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
+		attribute.String(genai.AttrToolType, toolTypeValue),
+	}
+	if !ok {
+		err := fmt.Errorf("tool %q not found", name)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(genai.AttrErrorType, "tool_not_found"))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, "tool_not_found"))
+		recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+		return "", err
+	}
+
+	result, err := tool.Execute(ctx, args)
+	duration := time.Since(start).Seconds()
+	if err != nil {
+		errType := fmt.Sprintf("%T", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	} else if failed, errType, message := failedToolResult(result); failed {
+		span.SetStatus(codes.Error, message)
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	}
+	recordToolDuration(ctx, duration, metricAttrs...)
+	return result, err
+}
+
+// RecordRejectedToolCall records a failed tool invocation that is rejected before
+// dispatch, for example by request-level allowlists or invalid arguments. It
+// intentionally does not execute the tool.
+func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, message string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	start := time.Now()
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
+	}
+	if toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	if errType == "" {
+		errType = "tool_rejected"
+	}
+	if message == "" {
+		message = errType
+	}
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+rejectedToolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	span.SetStatus(codes.Error, message)
+	span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+	span.End()
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
+		attribute.String(genai.AttrErrorType, errType),
+	}
+	recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+}
+
+// FailedToolResultForTelemetry detects structured tool failures for callers
+// that reject tool calls before dispatch but still need telemetry.
+func FailedToolResultForTelemetry(result string) (bool, string, string) {
+	return failedToolResult(result)
+}
+
+func failedToolResult(result string) (bool, string, string) {
+	var body map[string]any
+	if json.Unmarshal([]byte(result), &body) != nil {
+		return false, "", ""
+	}
+	success, ok := body["success"].(bool)
+	if !ok || success {
+		return false, "", ""
+	}
+
+	var tr ChatToolResult
+	_ = json.Unmarshal([]byte(result), &tr)
+	errType := tr.ErrorType
+	if errType == "" {
+		errType = "tool_error"
+	}
+	message := tr.Error
+	if message == "" {
+		message = errType
+	}
+	return true, errType, message
+}
+
+func toolType(ctx context.Context, _ Tool) string {
+	// Registry tools are in-process functions. External Tool CRD/MCP execution is
+	// handled by worker.ToolExecutor and can be modeled as extension later.
+	return genai.ToolTypeFunction
+}
+
+func recordToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
+	meter := tracing.GenAIMeter(genai.InstrumentationName)
+	histogram, err := meter.Float64Histogram(
+		genai.MetricExecuteToolDuration,
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	)
+	if err != nil {
+		return
+	}
+	histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
 }
 
 // ToLLMTools converts the registry to LLM tool definitions

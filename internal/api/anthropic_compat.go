@@ -245,7 +245,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+	ctx, cancel := context.WithTimeout(c.Context(), h.config.MaxDuration)
 	defer cancel()
 
 	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
@@ -266,6 +266,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, providerInfo, model); err != nil {
 		return anthropicContextTokenAuthorizationError(c, err)
 	}
+	provider = llm.NewTracingProvider(provider)
 
 	messages, err := convertAnthropicMessages(req.Messages)
 	if err != nil {
@@ -373,9 +374,9 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	if req.Stream {
 		if !orkaToolsDisabled {
-			return h.handleStreamingMessages(c, provider, compReq, model, 0, proxyToolCtx)
+			return h.handleStreamingMessages(c, ctx, provider, compReq, model, proxyToolCtx)
 		}
-		return h.handleStreamingProxy(c, provider, compReq, model)
+		return h.handleStreamingProxy(c, ctx, provider, compReq, model)
 	}
 
 	var resp *llm.CompletionResponse

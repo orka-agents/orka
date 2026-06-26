@@ -24,6 +24,8 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/store"
 	toolspkg "github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
 )
@@ -615,6 +617,7 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 			InputTokens:  12,
 			OutputTokens: 8,
 			Model:        "test-model",
+			Provider:     "azure.ai.openai",
 		},
 	}
 	recorder := common.NewFakeEventRecorder()
@@ -653,6 +656,88 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	if strings.Contains(string(data), "sk-test12345678901234567890") {
 		t.Fatalf("AI worker events leaked fake API key: %s", data)
 	}
+	var sawTelemetryProvider bool
+	for _, event := range recorder.Events() {
+		if event.Type != events.ExecutionEventTypeModelRequestCompleted {
+			continue
+		}
+		var content map[string]any
+		if err := json.Unmarshal(event.Content, &content); err != nil {
+			t.Fatalf("unmarshal model event content: %v", err)
+		}
+		if content["provider"] == "azure.ai.openai" {
+			sawTelemetryProvider = true
+			break
+		}
+	}
+	if !sawTelemetryProvider {
+		t.Fatalf("model completion event did not preserve response provider: %#v", recorder.Events())
+	}
+}
+
+func TestExecuteCustomToolWithTelemetryRecordsSpan(t *testing.T) {
+	spans := testutil.NewSpanHarness(t)
+	execute := func(context.Context) (string, error) {
+		return "custom result", nil
+	}
+	result, err := executeCustomToolWithTelemetry(context.Background(), "custom_http_tool", "call-custom", execute)
+	if err != nil || result != "custom result" {
+		t.Fatalf("executeCustomToolWithTelemetry() result=%q err=%v", result, err)
+	}
+	for _, span := range spans.Recorder.Ended() {
+		if span.Name() != "execute_tool custom_http_tool" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, kv := range span.Attributes() {
+			attrs[string(kv.Key)] = kv.Value.AsString()
+		}
+		if attrs[genai.AttrToolType] != genai.ToolTypeExtension || attrs[genai.AttrToolCallID] != "call-custom" {
+			t.Fatalf("custom tool span attrs = %#v", attrs)
+		}
+		return
+	}
+	t.Fatalf("missing custom tool span, got %#v", spans.Recorder.Ended())
+}
+
+func TestAIWorkerRecordsRejectedToolTelemetry(t *testing.T) {
+	spans := testutil.NewSpanHarness(t)
+	provider := &mockProvider{responses: []*llm.CompletionResponse{
+		{
+			Content: "calling disabled tool",
+			ToolCalls: []llm.ToolCall{{
+				ID:        "call-disabled",
+				Name:      "disabled_tool",
+				Arguments: json.RawMessage(`{}`),
+			}},
+			StopReason: "tool_use",
+			Model:      "test-model",
+		},
+		{Content: "done", StopReason: "end_turn", Model: "test-model"},
+	}}
+	recorder := common.NewFakeEventRecorder()
+
+	if _, err := executeAgentLoopWithEvents(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "use disabled tool"}}, "", "test-model",
+		nil, nil, nil, recorder,
+	); err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+
+	for _, span := range spans.Recorder.Ended() {
+		if span.Name() != "execute_tool rejected_tool" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, kv := range span.Attributes() {
+			attrs[string(kv.Key)] = kv.Value.AsString()
+		}
+		if attrs[genai.AttrToolCallID] != "call-disabled" || attrs[genai.AttrErrorType] != "tool_not_enabled" {
+			t.Fatalf("rejected span attrs = %#v", attrs)
+		}
+		return
+	}
+	t.Fatalf("missing rejected tool span, got %#v", spans.Recorder.Ended())
 }
 
 func TestAIWorkerEventToolCallCompleteness(t *testing.T) {

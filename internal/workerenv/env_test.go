@@ -31,6 +31,10 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		BaseURL:         "https://example.test/v1",
 		AzureAPIVersion: "2024-10-21",
 		Tools:           []string{"delegate_task", "wait_for_tasks"},
+		EnableTelemetry: true,
+		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:      "vendor=value",
+		TraceBaggage:    "tenant=acme",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -57,6 +61,9 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
+	}
+	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
+		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)
 	}
 	if len(parsed.Fallbacks) != 1 {
 		t.Fatalf("fallback count = %d, want 1", len(parsed.Fallbacks))
@@ -343,5 +350,42 @@ func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
 	}
 	if strings.Contains(got, "\n") {
 		t.Fatalf("TransactionLogFields() contains a literal newline: %q", got)
+	}
+}
+
+func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
+	env := map[string]string{
+		AIProvider:      "openai",
+		AIModel:         "gpt-4o",
+		AIPrompt:        "hello",
+		EnableTelemetry: "true",
+		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:      "vendor=value",
+	}
+	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
+	if !got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = false, want true")
+	}
+	if got.TraceParent != env[TraceParent] {
+		t.Fatalf("TraceParent = %q, want %q", got.TraceParent, env[TraceParent])
+	}
+	if got.TraceState != env[TraceState] {
+		t.Fatalf("TraceState = %q, want %q", got.TraceState, env[TraceState])
+	}
+	if got.TraceBaggage != env[TraceBaggage] {
+		t.Fatalf("TraceBaggage = %q, want %q", got.TraceBaggage, env[TraceBaggage])
+	}
+}
+
+func TestAIWorkerEnvTelemetryDoesNotAutoEnableFromOTLPEndpoint(t *testing.T) {
+	env := map[string]string{
+		AIProvider:                    "openai",
+		AIModel:                       "gpt-4o",
+		AIPrompt:                      "hello",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "otel-collector:4317",
+	}
+	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
+	if got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = true, want false without ORKA_ENABLE_TELEMETRY")
 	}
 }

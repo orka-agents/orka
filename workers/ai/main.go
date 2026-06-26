@@ -21,6 +21,10 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -36,6 +40,8 @@ import (
 	_ "github.com/sozercan/orka/internal/llm/openai"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
 	"github.com/sozercan/orka/internal/worker"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
@@ -98,6 +104,24 @@ func run() (err error) {
 	}()
 	if err := workerEnv.ValidateRequired(); err != nil {
 		return err
+	}
+	tracingShutdown, err := tracing.Init("orka-ai-worker", workerEnv.EnableTelemetry)
+	if err != nil {
+		return fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := tracingShutdown(shutdownCtx); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to shutdown telemetry: %v\n", shutdownErr)
+		}
+	}()
+	if workerEnv.TraceParent != "" {
+		ctx = tracing.ExtractContext(ctx, tracing.MapCarrier{
+			"traceparent": workerEnv.TraceParent,
+			"tracestate":  workerEnv.TraceState,
+			"baggage":     workerEnv.TraceBaggage,
+		})
 	}
 
 	transactionLogFields := workerenv.TransactionLogFields(
@@ -170,6 +194,10 @@ func run() (err error) {
 			llmProvider = fp
 		}
 	}
+
+	// Wrap with GenAI tracing after retry/fallback composition so spans report the
+	// concrete serving provider while still covering the whole logical model call.
+	llmProvider = llm.NewTracingProvider(llmProvider)
 
 	// Parse enabled tools
 	enabledTools := normalizeEnabledTools(workerEnv.Tools)
@@ -854,7 +882,7 @@ func executeAgentLoopWithEvents(
 			common.WithEventContent(eventContent(map[string]any{
 				"iteration":    iteration + 1,
 				"model":        model,
-				"provider":     provider.Name(),
+				"provider":     llm.ProviderTelemetryName(provider),
 				"messageCount": len(messages),
 				"toolCount":    len(llmTools),
 			})),
@@ -887,7 +915,7 @@ func executeAgentLoopWithEvents(
 				common.WithEventContent(eventContent(map[string]any{
 					"iteration": iteration + 1,
 					"model":     model,
-					"provider":  provider.Name(),
+					"provider":  llm.ProviderTelemetryName(provider),
 				})),
 			)
 			return "", fmt.Errorf("completion failed: %w", err)
@@ -897,7 +925,7 @@ func executeAgentLoopWithEvents(
 			common.WithEventContent(eventContent(map[string]any{
 				"iteration":    iteration + 1,
 				"model":        firstNonBlankOriginal(resp.Model, model),
-				"provider":     provider.Name(),
+				"provider":     firstNonBlankOriginal(resp.Provider, llm.ProviderTelemetryName(provider)),
 				"inputTokens":  resp.InputTokens,
 				"outputTokens": resp.OutputTokens,
 				"stopReason":   resp.StopReason,
@@ -947,8 +975,12 @@ func executeAgentLoopWithEvents(
 
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
+				tools.RecordRejectedToolCall(ctx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
 			} else if customTool, ok := customTools[toolName]; ok {
-				result, execErr = toolExecutor.Execute(ctx, customTool, tc.Arguments)
+				executeCustomTool := func(execCtx context.Context) (string, error) {
+					return toolExecutor.Execute(execCtx, customTool, tc.Arguments)
+				}
+				result, execErr = executeCustomToolWithTelemetry(ctx, toolName, tc.ID, executeCustomTool)
 			} else {
 				// Fall back to built-in tools
 				execCtx := ctx
@@ -995,6 +1027,51 @@ func executeAgentLoopWithEvents(
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+func executeCustomToolWithTelemetry(
+	ctx context.Context,
+	toolName string,
+	toolCallID string,
+	execute func(context.Context) (string, error),
+) (string, error) {
+	start := time.Now()
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+	}
+	if toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	ctx, span := tracing.GenAITracer(genai.InstrumentationName).Start(
+		ctx,
+		genai.OperationExecuteTool+" "+toolName,
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attrs...),
+	)
+	defer span.End()
+	result, err := execute(ctx)
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+	}
+	if err != nil {
+		errType := fmt.Sprintf("%T", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	}
+	if histogram, histErr := tracing.GenAIMeter(genai.InstrumentationName).Float64Histogram(
+		genai.MetricExecuteToolDuration,
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	); histErr == nil {
+		histogram.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(metricAttrs...))
+	}
+	return result, err
 }
 
 func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {

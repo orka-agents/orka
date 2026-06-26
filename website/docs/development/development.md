@@ -84,6 +84,23 @@ SUBSTRATE_E2E_EXTENDED=1 \
 bash scripts/agent-substrate-e2e.sh
 ```
 
+
+## OpenTelemetry development
+
+Telemetry is enabled with `--enable-telemetry` (or the legacy alias
+`--enable-tracing`) and exported through `OTEL_EXPORTER_OTLP_ENDPOINT`. When the
+controller flag is enabled, AI worker Jobs receive `ORKA_ENABLE_TELEMETRY=true`
+and the non-secret standard OTLP environment. OTLP endpoint variables alone do
+not enable Kubernetes worker telemetry.
+
+GenAI semantic-convention constants live in `internal/tracing/genai` rather than
+upstream `semconv` because the GenAI conventions are still Development-stage.
+Run focused telemetry tests with:
+
+```bash
+go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ -run 'Tracing|Telemetry|GenAI|ExecuteTool|TraceContext' -v
+```
+
 ## UI Development
 
 ```bash

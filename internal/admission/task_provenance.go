@@ -59,6 +59,9 @@ var (
 		labels.AnnotationTransactionTokenSecret,
 		labels.AnnotationTransactionTokenPending,
 		labels.AnnotationTransactionTokenPendingSince,
+		labels.AnnotationTraceParent,
+		labels.AnnotationTraceState,
+		labels.AnnotationTraceBaggage,
 	}
 )
 

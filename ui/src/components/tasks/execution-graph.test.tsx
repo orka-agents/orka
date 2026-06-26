@@ -12,7 +12,7 @@ vi.mock('@tanstack/react-router', async () => {
 })
 
 import { ExecutionGraph } from './execution-graph'
-import type { Task } from '@/schemas/task'
+import type { ExecutionEvent, Task } from '@/schemas/task'
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -43,6 +43,27 @@ describe('ExecutionGraph', () => {
     expect(screen.getByText('child-a')).toBeInTheDocument()
     expect(screen.getByText('child-b')).toBeInTheDocument()
     expect(screen.getByText('reviewer')).toBeInTheDocument()
+  })
+
+
+  it('renders GenAI telemetry from model events', () => {
+    const task = makeTask()
+    const events: ExecutionEvent[] = [{
+      id: 'event-1',
+      namespace: 'default',
+      streamType: 'task',
+      streamID: 'parent-task',
+      seq: 1,
+      type: 'ModelRequestCompleted',
+      severity: 'info',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4',
+      createdAt: '2026-01-01T00:00:00Z',
+    }]
+
+    render(<ExecutionGraph task={task} events={events} />)
+
+    expect(screen.getByText('claude-sonnet-4 · anthropic')).toBeInTheDocument()
   })
 
   it('each node shows a phase dot sourced from the shared status module', () => {

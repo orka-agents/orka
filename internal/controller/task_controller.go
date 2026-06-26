@@ -231,6 +231,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
+	if task.Spec.Schedule == "" {
+		ctx = tracing.ExtractTaskTraceContext(ctx, task)
+	}
 	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
 		trace.WithAttributes(spanAttributes...),
@@ -2666,6 +2669,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	child.Spec.SuccessfulRunsHistoryLimit = nil
 	child.Spec.FailedRunsHistoryLimit = nil
 	child.Spec.Suspend = nil
+	tracing.StampTaskTraceContext(ctx, child)
 
 	// Set owner reference
 	if err := ctrl.SetControllerReference(task, child, r.Scheme); err != nil {
