@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -83,16 +84,18 @@ func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
 
 func TestPatchHarnessWrapperStartedPreservesPlannedTurnAnnotationsFromLocalTask(t *testing.T) {
 	task, _ := harnessWrapperTaskAndAgent()
-	local := task.DeepCopy()
-	local.Annotations = map[string]string{
-		harnessWrapperTurnIDAnnotation:       "turn-1",
-		harnessWrapperRuntimeAnnotation:      "runtime-1",
-		harnessWrapperCorrelationIDAnno:      "correlation-1",
-		harnessWrapperLastFrameSeqAnno:       "0",
-		harnessWrapperPlannedAtAnno:          time.Now().UTC().Format(time.RFC3339Nano),
-		harnessWrapperMetadataAnno:           `{"runtime":"claude","wrapper":"cli"}`,
-		harnessWrapperOutputFetchRetriesAnno: "1",
+	expected := map[string]string{
+		harnessWrapperTurnIDAnnotation:  "turn-1",
+		harnessWrapperRuntimeAnnotation: "runtime-1",
+		harnessWrapperCorrelationIDAnno: "correlation-1",
+		harnessWrapperLastFrameSeqAnno:  "0",
+		harnessWrapperPlannedAtAnno:     time.Now().UTC().Format(time.RFC3339Nano),
+		harnessWrapperMetadataAnno:      ` {"runtime":"claude","wrapper":"cli"} `,
 	}
+	local := task.DeepCopy()
+	local.Annotations = map[string]string{}
+	maps.Copy(local.Annotations, expected)
+	local.Annotations[harnessWrapperOutputFetchRetriesAnno] = "1"
 	r := newUnitReconciler(newTestScheme(), task)
 
 	if err := r.patchHarnessWrapperStarted(context.Background(), local); err != nil {
@@ -111,8 +114,8 @@ func TestPatchHarnessWrapperStartedPreservesPlannedTurnAnnotationsFromLocalTask(
 		harnessWrapperPlannedAtAnno,
 		harnessWrapperMetadataAnno,
 	} {
-		if updated.Annotations[key] != local.Annotations[key] {
-			t.Fatalf("annotation %s = %q, want %q", key, updated.Annotations[key], local.Annotations[key])
+		if updated.Annotations[key] != expected[key] {
+			t.Fatalf("annotation %s = %q, want %q", key, updated.Annotations[key], expected[key])
 		}
 	}
 	if updated.Annotations[harnessWrapperStartedAnno] != scheduledRunLabelValue {
