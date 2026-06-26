@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path"
 	"reflect"
@@ -752,7 +753,7 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
 		"OTEL_RESOURCE_ATTRIBUTES",
 	} {
-		envVars = setControllerEnv(envVars, name, os.Getenv(name))
+		envVars = setControllerEnv(envVars, name, safeWorkerOTLPEnvValue(name, os.Getenv(name)))
 	}
 	return envVars
 }
@@ -1427,6 +1428,18 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 		job.Spec.Template.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: workerenv.SessionName, Value: sessionName},
 	)
+}
+
+func safeWorkerOTLPEnvValue(name, value string) string {
+	if !strings.HasSuffix(name, "_ENDPOINT") {
+		return value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {

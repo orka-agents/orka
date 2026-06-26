@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { ApiError, api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import type { ExecutionEvent, Task, TaskEventsResponse } from '@/schemas/task'
 
@@ -68,7 +68,7 @@ export async function fetchTaskEvents(
   let afterSeq = previous?.latestSeq ?? 0
   let targetLatestSeq: number | undefined
   let response: TaskEventsResponse | undefined
-  const events: ExecutionEvent[] = [...(previous?.events ?? [])]
+  let events: ExecutionEvent[] = [...(previous?.events ?? [])]
 
   let keepFetching = true
   while (keepFetching) {
@@ -84,6 +84,13 @@ export async function fetchTaskEvents(
       `/tasks/${id}/events`,
       params,
     )
+    if (previous && pageResponse.latestSeq < afterSeq) {
+      events = []
+      afterSeq = 0
+      targetLatestSeq = undefined
+      response = undefined
+      continue
+    }
     response = pageResponse
     targetLatestSeq ??= pageResponse.latestSeq
     events.push(...pageResponse.events)
@@ -131,6 +138,11 @@ export function useTaskEvents(
         queryClient.getQueryData<TaskEventsResponse>(queryKey),
       ),
     enabled: Boolean(id),
-    refetchInterval,
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 501) && failureCount < 3,
+    refetchInterval: (query) =>
+      query.state.error instanceof ApiError && query.state.error.status === 501
+        ? false
+        : refetchInterval,
   })
 }
