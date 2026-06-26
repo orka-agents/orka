@@ -877,7 +877,7 @@ func executeAgentLoopWithEvents(
 			common.WithEventContent(eventContent(map[string]any{
 				"iteration":    iteration + 1,
 				"model":        model,
-				"provider":     provider.Name(),
+				"provider":     llm.ProviderTelemetryName(provider),
 				"messageCount": len(messages),
 				"toolCount":    len(llmTools),
 			})),
