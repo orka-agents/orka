@@ -362,6 +362,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		blockIndex := 0
 		inTextBlock := false
 		hasToolCalls := false
+		outputTokens := 0
 
 		for chunk := range streamCh {
 			if chunk.Error != nil {
@@ -405,6 +406,10 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 				}
 			}
 
+			if chunk.OutputTokens > 0 {
+				outputTokens = chunk.OutputTokens
+			}
+
 			if chunk.Done {
 				if inTextBlock {
 					_ = writeContentBlockStop(w, blockIndex)
@@ -423,7 +428,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		if hasToolCalls {
 			stopReason = oaiStopReasonToolUse
 		}
-		_ = writeMessageDelta(w, stopReason, 0)
+		_ = writeMessageDelta(w, stopReason, outputTokens)
 		_ = writeMessageStop(w)
 	})
 }

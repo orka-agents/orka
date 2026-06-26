@@ -970,6 +970,7 @@ func executeAgentLoopWithEvents(
 
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
+				tools.RecordRejectedToolCall(ctx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
 			} else if customTool, ok := customTools[toolName]; ok {
 				result, execErr = toolExecutor.Execute(ctx, customTool, tc.Arguments)
 			} else {
