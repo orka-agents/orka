@@ -273,6 +273,16 @@ func TestRegistryNamesSorted(t *testing.T) {
 	}
 }
 
+func TestCoordinationToolNamesReflectRegisteredCoordinationTools(t *testing.T) {
+	got := CoordinationToolNames()
+	if slices.Contains(got, updateAgentToolName) {
+		t.Fatalf("CoordinationToolNames() contains chat-only tool %q: %#v", updateAgentToolName, got)
+	}
+	if !slices.Contains(ChatToolNames(), updateAgentToolName) {
+		t.Fatalf("ChatToolNames() missing %q", updateAgentToolName)
+	}
+}
+
 func TestKnownBuiltInToolNamesIncludesRegisteredChatAndCoordinationTools(t *testing.T) {
 	wantNames := []string{
 		requestApprovalToolName,
