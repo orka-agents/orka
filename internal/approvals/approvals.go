@@ -241,18 +241,19 @@ func Resolved(values []Approval) []ResolvedApproval {
 				decisionTime = approval.DecisionTime.UTC().Format(time.RFC3339)
 			}
 			out = append(out, ResolvedApproval{
-				ID:               approval.ID,
-				TaskUID:          approval.TaskUID,
-				TargetTool:       approval.TargetTool,
-				TargetArgsDigest: approval.TargetArgsDigest,
-				TargetSpecDigest: approval.TargetSpecDigest,
-				Status:           approval.Status,
-				Actor:            approval.DecisionActor,
-				DecisionTime:     decisionTime,
-				Reason:           boundApprovalTargetText(approval.DecisionReason),
-				Action:           approval.Action,
-				RiskSummary:      approval.RiskSummary,
-				Severity:         approval.Severity,
+				ID:                approval.ID,
+				TaskUID:           approval.TaskUID,
+				TargetTool:        approval.TargetTool,
+				TargetArgsDigest:  approval.TargetArgsDigest,
+				TargetSpecDigest:  approval.TargetSpecDigest,
+				TargetArgsPreview: approval.TargetArgsPreview,
+				Status:            approval.Status,
+				Actor:             approval.DecisionActor,
+				DecisionTime:      decisionTime,
+				Reason:            boundApprovalTargetText(approval.DecisionReason),
+				Action:            approval.Action,
+				RiskSummary:       approval.RiskSummary,
+				Severity:          approval.Severity,
 			})
 		}
 	}

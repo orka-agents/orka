@@ -221,7 +221,25 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	if customTool == nil {
 		return "", nil
 	}
-	digest, err := approvals.TargetSpecDigest(customTool.Spec)
+	if customTool.Spec.MCP == nil || customTool.Spec.MCP.SubstrateActor == nil {
+		digest, err := approvals.TargetSpecDigest(customTool.Spec)
+		if err != nil {
+			return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
+		}
+		return digest, nil
+	}
+	targetIdentity := struct {
+		Spec            corev1alpha1.ToolSpec `json:"spec"`
+		StatusEndpoint  string                `json:"statusEndpoint,omitempty"`
+		StatusRouteHost string                `json:"statusRouteHost,omitempty"`
+	}{
+		Spec:           customTool.Spec,
+		StatusEndpoint: strings.TrimSpace(customTool.Status.Endpoint),
+	}
+	if customTool.Status.Actor != nil {
+		targetIdentity.StatusRouteHost = strings.TrimSpace(customTool.Status.Actor.RouteHost)
+	}
+	digest, err := approvals.TargetSpecDigest(targetIdentity)
 	if err != nil {
 		return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
 	}
@@ -435,6 +453,10 @@ func formatResolvedApprovalsContext(resolved []approvals.ResolvedApproval) strin
 		if approval.DecisionTime != "" {
 			sb.WriteString(" at ")
 			sb.WriteString(approval.DecisionTime)
+		}
+		if len(approval.TargetArgsPreview) > 0 {
+			sb.WriteString(" args=")
+			sb.WriteString(strings.TrimSpace(string(approval.TargetArgsPreview)))
 		}
 		if approval.Reason != "" {
 			sb.WriteString(": ")

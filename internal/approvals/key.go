@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/sozercan/orka/internal/events"
@@ -21,6 +22,7 @@ import (
 const (
 	maxApprovalTargetArgsPreviewBytes = 8 * 1024
 	maxApprovalTargetTextChars        = 1024
+	maxApprovalNumberCanonicalChars   = 8 * 1024
 )
 
 // ApprovalTarget is the stable, sanitized contract for a human approval request.
@@ -41,18 +43,19 @@ type ApprovalTarget struct {
 // ResolvedApproval is the compact controller-to-worker approval decision
 // payload injected into resumed worker Pods.
 type ResolvedApproval struct {
-	ID               string `json:"id"`
-	TaskUID          string `json:"taskUID,omitempty"`
-	TargetTool       string `json:"targetTool,omitempty"`
-	TargetArgsDigest string `json:"targetArgsDigest,omitempty"`
-	TargetSpecDigest string `json:"targetSpecDigest,omitempty"`
-	Status           string `json:"status"`
-	Actor            string `json:"actor,omitempty"`
-	DecisionTime     string `json:"decisionTime,omitempty"`
-	Reason           string `json:"reason,omitempty"`
-	Action           string `json:"action,omitempty"`
-	RiskSummary      string `json:"riskSummary,omitempty"`
-	Severity         string `json:"severity,omitempty"`
+	ID                string          `json:"id"`
+	TaskUID           string          `json:"taskUID,omitempty"`
+	TargetTool        string          `json:"targetTool,omitempty"`
+	TargetArgsDigest  string          `json:"targetArgsDigest,omitempty"`
+	TargetSpecDigest  string          `json:"targetSpecDigest,omitempty"`
+	TargetArgsPreview json.RawMessage `json:"targetArgsPreview,omitempty"`
+	Status            string          `json:"status"`
+	Actor             string          `json:"actor,omitempty"`
+	DecisionTime      string          `json:"decisionTime,omitempty"`
+	Reason            string          `json:"reason,omitempty"`
+	Action            string          `json:"action,omitempty"`
+	RiskSummary       string          `json:"riskSummary,omitempty"`
+	Severity          string          `json:"severity,omitempty"`
 }
 
 // TargetArgsDigest returns a sha256 digest of canonical JSON arguments. Empty
@@ -176,6 +179,117 @@ func boundApprovalTargetArgsPreview(preview json.RawMessage) (json.RawMessage, e
 	return json.RawMessage(bounded), nil
 }
 
+type canonicalJSONNumber string
+
+func (n canonicalJSONNumber) MarshalJSON() ([]byte, error) {
+	return []byte(n), nil
+}
+
+func normalizeCanonicalJSONNumbers(value any) (any, error) {
+	switch typed := value.(type) {
+	case json.Number:
+		normalized, err := normalizeJSONNumberString(typed.String())
+		if err != nil {
+			return nil, err
+		}
+		return canonicalJSONNumber(normalized), nil
+	case []any:
+		out := make([]any, len(typed))
+		for i := range typed {
+			normalized, err := normalizeCanonicalJSONNumbers(typed[i])
+			if err != nil {
+				return nil, err
+			}
+			out[i] = normalized
+		}
+		return out, nil
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			normalized, err := normalizeCanonicalJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = normalized
+		}
+		return out, nil
+	default:
+		return value, nil
+	}
+}
+
+func normalizeJSONNumberString(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("parse target arguments: empty JSON number")
+	}
+	sign := ""
+	if strings.HasPrefix(raw, "-") {
+		sign = "-"
+		raw = strings.TrimPrefix(raw, "-")
+	}
+	exponent := 0
+	if expIndex := strings.IndexAny(raw, "eE"); expIndex >= 0 {
+		parsed, err := strconv.Atoi(raw[expIndex+1:])
+		if err != nil {
+			return "", fmt.Errorf("parse target arguments: invalid JSON number exponent %q", raw)
+		}
+		if parsed > maxApprovalNumberCanonicalChars || parsed < -maxApprovalNumberCanonicalChars {
+			return "", fmt.Errorf("parse target arguments: JSON number exponent exceeds safe bound")
+		}
+		exponent = parsed
+		raw = raw[:expIndex]
+	}
+	intPart, fracPart, _ := strings.Cut(raw, ".")
+	if intPart == "" {
+		return "", fmt.Errorf("parse target arguments: invalid JSON number %q", raw)
+	}
+	digitsRaw := intPart + fracPart
+	leadingZeros := len(digitsRaw) - len(strings.TrimLeft(digitsRaw, "0"))
+	digits := strings.TrimLeft(digitsRaw, "0")
+	if digits == "" {
+		return "0", nil
+	}
+	if len(digits) > maxApprovalNumberCanonicalChars {
+		return "", fmt.Errorf("parse target arguments: JSON number exceeds safe canonical length")
+	}
+	decimalPos := len(intPart) + exponent - leadingZeros
+	var out string
+	switch {
+	case decimalPos <= 0:
+		zeros := -decimalPos
+		if zeros+len(digits)+2 > maxApprovalNumberCanonicalChars {
+			return "", fmt.Errorf("parse target arguments: JSON number exceeds safe canonical length")
+		}
+		out = "0." + strings.Repeat("0", zeros) + digits
+	case decimalPos >= len(digits):
+		zeros := decimalPos - len(digits)
+		if len(digits)+zeros > maxApprovalNumberCanonicalChars {
+			return "", fmt.Errorf("parse target arguments: JSON number exceeds safe canonical length")
+		}
+		out = digits + strings.Repeat("0", zeros)
+	default:
+		out = digits[:decimalPos] + "." + digits[decimalPos:]
+	}
+	if dot := strings.IndexByte(out, '.'); dot >= 0 {
+		intPart = out[:dot]
+		fracPart = strings.TrimRight(out[dot+1:], "0")
+		if fracPart == "" {
+			out = intPart
+		} else {
+			out = intPart + "." + fracPart
+		}
+	}
+	if strings.HasPrefix(out, "0.") {
+		return sign + out, nil
+	}
+	out = strings.TrimLeft(out, "0")
+	if out == "" {
+		out = "0"
+	}
+	return sign + out, nil
+}
+
 func canonicalJSON(raw json.RawMessage) ([]byte, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -191,7 +305,11 @@ func canonicalJSON(raw json.RawMessage) ([]byte, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("parse target arguments: trailing data")
 	}
-	canonical, err := json.Marshal(value)
+	normalized, err := normalizeCanonicalJSONNumbers(value)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := json.Marshal(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize target arguments: %w", err)
 	}

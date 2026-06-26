@@ -49,6 +49,41 @@ func TestApprovalIDChangesByTaskToolOrArgs(t *testing.T) {
 	}
 }
 
+func TestApprovalTargetDigestNormalizesNumericSpellingsLikeExecution(t *testing.T) {
+	intDigest, err := TargetArgsDigest(json.RawMessage(`{"amount":1}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(int) error = %v", err)
+	}
+	floatDigest, err := TargetArgsDigest(json.RawMessage(`{"amount":1.0}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(float) error = %v", err)
+	}
+	if intDigest != floatDigest {
+		t.Fatalf("numeric-equivalent digests differ: %s != %s", intDigest, floatDigest)
+	}
+}
+
+func TestApprovalTargetDigestPreservesLargeNumericIdentity(t *testing.T) {
+	left, err := TargetArgsDigest(json.RawMessage(`{"account":9007199254740992}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(left) error = %v", err)
+	}
+	right, err := TargetArgsDigest(json.RawMessage(`{"account":9007199254740993}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(right) error = %v", err)
+	}
+	if left == right {
+		t.Fatalf("large distinct numeric digests collided: %s", left)
+	}
+}
+
+func TestApprovalTargetDigestRejectsHugeNumberExponent(t *testing.T) {
+	_, err := TargetArgsDigest(json.RawMessage(`{"amount":1e1000000}`))
+	if err == nil || !strings.Contains(err.Error(), "exceeds safe") {
+		t.Fatalf("TargetArgsDigest() error = %v, want safe bound error", err)
+	}
+}
+
 func TestApprovalIDChangesByTargetSpecDigest(t *testing.T) {
 	argsDigest, err := TargetArgsDigest(json.RawMessage(`{"incident":"inc-1"}`))
 	if err != nil {

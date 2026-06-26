@@ -71,6 +71,22 @@ func TestFilterEventsForTaskUIDScopesRequestAndDecisionEvents(t *testing.T) {
 	}
 }
 
+func TestResolvedIncludesTargetArgsPreview(t *testing.T) {
+	preview := json.RawMessage(`{"incident":"inc-1"}`)
+	resolved := Resolved([]Approval{{
+		ID:                "approval-1",
+		TargetTool:        "dispatch_work_order",
+		TargetArgsPreview: preview,
+		Status:            StatusApproved,
+	}})
+	if len(resolved) != 1 {
+		t.Fatalf("resolved length = %d, want 1", len(resolved))
+	}
+	if string(resolved[0].TargetArgsPreview) != string(preview) {
+		t.Fatalf("TargetArgsPreview = %s, want %s", resolved[0].TargetArgsPreview, preview)
+	}
+}
+
 func TestResolvedBoundsDecisionReason(t *testing.T) {
 	longReason := strings.Repeat("because ", maxApprovalTargetTextChars)
 	resolved := Resolved([]Approval{{

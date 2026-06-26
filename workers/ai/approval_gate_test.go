@@ -323,7 +323,7 @@ func TestApprovalGateMismatchedCustomToolSpecRequestsNewApproval(t *testing.T) {
 
 	args := json.RawMessage(`{"incident":"inc-1"}`)
 	oldTool := approvalTestCustomTool(toolServer.URL + "/old")
-	oldSpecDigest, err := approvals.TargetSpecDigest(oldTool.Spec)
+	oldSpecDigest, err := approvalTargetSpecDigest(oldTool)
 	if err != nil {
 		t.Fatalf("old spec digest: %v", err)
 	}
@@ -482,18 +482,20 @@ func TestApprovalGateSkipsDuplicateApprovedFireWithinWorker(t *testing.T) {
 
 func TestResolvedApprovalsContextIsReadable(t *testing.T) {
 	got := formatResolvedApprovalsContext([]approvals.ResolvedApproval{{
-		ID:           "k-1",
-		TargetTool:   "dispatch_work_order",
-		Status:       approvals.StatusApproved,
-		Actor:        "reviewer-a",
-		DecisionTime: "2026-06-23T10:00:00Z",
-		Reason:       "safe to dispatch",
+		ID:                "k-1",
+		TargetTool:        "dispatch_work_order",
+		Status:            approvals.StatusApproved,
+		Actor:             "reviewer-a",
+		DecisionTime:      "2026-06-23T10:00:00Z",
+		Reason:            "safe to dispatch",
+		TargetArgsPreview: json.RawMessage(`{"incident":"inc-1"}`),
 	}})
 	wantParts := []string{
 		"## Resolved Human Approvals",
 		"APPROVED k-1",
 		"dispatch_work_order",
 		"reviewer-a",
+		`args={"incident":"inc-1"}`,
 		"safe to dispatch",
 	}
 	for _, want := range wantParts {
@@ -519,6 +521,50 @@ func approvalTargetForTest(t *testing.T, args json.RawMessage) approvals.Approva
 		t.Fatalf("NewApprovalTarget() error = %v", err)
 	}
 	return target
+}
+
+func TestApprovalTargetSpecDigestKeepsHTTPToolSpecDigest(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	got, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
+	}
+	want, err := approvals.TargetSpecDigest(tool.Spec)
+	if err != nil {
+		t.Fatalf("TargetSpecDigest() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("HTTP tool digest = %q, want raw spec digest %q", got, want)
+	}
+}
+
+func TestApprovalTargetSpecDigestIncludesMCPStatusEndpoint(t *testing.T) {
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			Description: "mcp tool",
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "template-a"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: "http://actor-a/mcp",
+			Actor:    &corev1alpha1.ToolActorStatus{RouteHost: "actor-a.test"},
+		},
+	}
+	first, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
+	}
+	tool.Status.Endpoint = "http://actor-b/mcp"
+	second, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() second error = %v", err)
+	}
+	if first == second {
+		t.Fatalf("MCP status endpoint change did not affect approval target digest")
+	}
 }
 
 func approvalTestCustomTool(url string) *corev1alpha1.Tool {
@@ -641,7 +687,7 @@ func TestRequestApprovalToolDuplicateTerminalDecisionReturnsWholeBatchToModel(t 
 	t.Setenv(workerenv.AutonomousMode, "true")
 	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	args := json.RawMessage(`{"incident":"inc-1"}`)
-	specDigest, err := approvals.TargetSpecDigest(customTool.Spec)
+	specDigest, err := approvalTargetSpecDigest(customTool)
 	if err != nil {
 		t.Fatalf("target spec digest: %v", err)
 	}
@@ -704,7 +750,7 @@ func TestRequestApprovalToolCallEmitsCustomToolSpecDigest(t *testing.T) {
 	t.Setenv(workerenv.AutonomousMode, "true")
 	recorder := common.NewFakeEventRecorder()
 	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	wantDigest, err := approvals.TargetSpecDigest(customTool.Spec)
+	wantDigest, err := approvalTargetSpecDigest(customTool)
 	if err != nil {
 		t.Fatalf("target spec digest: %v", err)
 	}
@@ -853,7 +899,7 @@ func TestApprovalGatePreScanStaleExplicitCustomToolSpecBlocksWholeBatch(t *testi
 	}))
 	defer toolServer.Close()
 	oldTool := approvalTestCustomTool(toolServer.URL + "/old")
-	oldSpecDigest, err := approvals.TargetSpecDigest(oldTool.Spec)
+	oldSpecDigest, err := approvalTargetSpecDigest(oldTool)
 	if err != nil {
 		t.Fatalf("old target spec digest: %v", err)
 	}
@@ -918,7 +964,7 @@ func TestApprovalGateStaleExplicitCustomToolSpecDoesNotExecuteWithoutRequiredToo
 	}))
 	defer toolServer.Close()
 	oldTool := approvalTestCustomTool(toolServer.URL + "/old")
-	oldSpecDigest, err := approvals.TargetSpecDigest(oldTool.Spec)
+	oldSpecDigest, err := approvalTargetSpecDigest(oldTool)
 	if err != nil {
 		t.Fatalf("old target spec digest: %v", err)
 	}
@@ -983,7 +1029,7 @@ func TestApprovalGateDeclinedExplicitCustomToolTargetDoesNotExecuteWithoutRequir
 	}))
 	defer toolServer.Close()
 	customTool := approvalTestCustomTool(toolServer.URL)
-	specDigest, err := approvals.TargetSpecDigest(customTool.Spec)
+	specDigest, err := approvalTargetSpecDigest(customTool)
 	if err != nil {
 		t.Fatalf("target spec digest: %v", err)
 	}
