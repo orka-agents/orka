@@ -1087,6 +1087,75 @@ func TestApprovalGateDeclinedExplicitCustomToolTargetDoesNotExecuteWithoutRequir
 	}
 }
 
+func TestApprovalGateDeclinedExplicitCustomToolBodyAuthTargetDoesNotExecuteWithoutRequiredTools(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		fmt.Fprint(w, `{"ok":true}`) //nolint:errcheck
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL)
+	customTool.Spec.HTTP.AuthInject = "body"
+	customTool.Spec.HTTP.AuthBodyKey = "api_key"
+	specDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+	approvedArgs := json.RawMessage(`{"incident":"inc-1"}`)
+	retryArgs := json.RawMessage(`{"incident":"inc-1","api_key":"model-supplied"}`)
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		approvedArgs,
+		"dispatch",
+		"",
+		"",
+		specDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	declined := resolvedApprovalForTarget(target)
+	declined.Status = approvals.StatusDeclined
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{declined})
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching",
+				ToolCalls: []llm.ToolCall{{
+					ID:        "call-1",
+					Name:      gatedDispatchTool,
+					Arguments: retryArgs,
+				}},
+				StopReason: "tool_use",
+			},
+			{Content: declineHandledResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != declineHandledResult {
+		t.Fatalf("result = %q, want decline handled", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("declined body-auth approval target executed custom tool")
+	}
+}
+
 func TestApprovalGateDeclinedExplicitApprovalTargetDoesNotExecuteWithoutRequiredTools(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()

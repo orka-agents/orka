@@ -7354,6 +7354,40 @@ func TestResolvedApprovalsJSONForTaskCapsWorkerEnvWindow(t *testing.T) {
 	}
 }
 
+func TestResolvedApprovalsJSONForWorkerEnvBoundsAggregatePreviewPayload(t *testing.T) {
+	resolved := make([]approvals.ResolvedApproval, 0, maxResolvedApprovalsForWorkerEnv)
+	preview := json.RawMessage(`{"payload":"` + strings.Repeat("x", 8*1024) + `"}`)
+	for i := range maxResolvedApprovalsForWorkerEnv {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:                fmt.Sprintf("approval-%02d", i),
+			TargetTool:        "dispatch_work_order",
+			TargetArgsDigest:  fmt.Sprintf("digest-%02d", i),
+			TargetArgsPreview: append(json.RawMessage(nil), preview...),
+			Status:            approvals.StatusApproved,
+		})
+	}
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	if len(bounded) == 0 {
+		t.Fatal("bounded approvals unexpectedly empty")
+	}
+	for _, approval := range bounded {
+		if len(approval.TargetArgsPreview) != 0 {
+			t.Fatalf("approval %s retained TargetArgsPreview length %d", approval.ID, len(approval.TargetArgsPreview))
+		}
+	}
+}
+
 func TestHandleAutonomousIteration_ApprovedAtMaxIterationResumes(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{

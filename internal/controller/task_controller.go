@@ -55,11 +55,12 @@ import (
 )
 
 const (
-	taskTransactionTokenPendingTimeout = 2 * time.Minute
-	failedMountEventStaleAfter         = 2 * time.Minute
-	podLogLimitBytes                   = int64(5 << 20)
-	stdoutResultLogLimitBytes          = int64(15 << 20)
-	maxResolvedApprovalsForWorkerEnv   = 32
+	taskTransactionTokenPendingTimeout        = 2 * time.Minute
+	failedMountEventStaleAfter                = 2 * time.Minute
+	podLogLimitBytes                          = int64(5 << 20)
+	stdoutResultLogLimitBytes                 = int64(15 << 20)
+	maxResolvedApprovalsForWorkerEnv          = 32
+	maxResolvedApprovalsJSONForWorkerEnvBytes = 32 * 1024
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -926,13 +927,41 @@ func (r *TaskReconciler) resolvedApprovalsJSONForTask(ctx context.Context, task 
 		approvals.FilterEventsForTaskUID(listed, string(task.UID)),
 		time.Time{},
 	))
-	resolved = latestResolvedApprovalsForWorkerEnv(resolved)
+	return resolvedApprovalsJSONForWorkerEnv(resolved)
+}
+
+func resolvedApprovalsJSONForWorkerEnv(values []approvals.ResolvedApproval) (string, error) {
+	resolved := latestResolvedApprovalsForWorkerEnv(values)
 	if len(resolved) == 0 {
 		return "", nil
 	}
-	data, err := json.Marshal(resolved)
+	bounded := append([]approvals.ResolvedApproval(nil), resolved...)
+	data, err := json.Marshal(bounded)
 	if err != nil {
 		return "", err
+	}
+	if len(data) <= maxResolvedApprovalsJSONForWorkerEnvBytes {
+		return string(data), nil
+	}
+	for i := range bounded {
+		bounded[i].TargetArgsPreview = nil
+	}
+	data, err = json.Marshal(bounded)
+	if err != nil {
+		return "", err
+	}
+	if len(data) <= maxResolvedApprovalsJSONForWorkerEnvBytes {
+		return string(data), nil
+	}
+	for len(bounded) > 0 && len(data) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		bounded = bounded[1:]
+		data, err = json.Marshal(bounded)
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(bounded) == 0 {
+		return "", nil
 	}
 	return string(data), nil
 }

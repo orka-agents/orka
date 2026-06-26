@@ -186,7 +186,8 @@ func (g *approvalGate) targetForCall(
 	args json.RawMessage,
 	customTool *corev1alpha1.Tool,
 ) (approvals.ApprovalTarget, error) {
-	if err := validateApprovalTargetArguments(args); err != nil {
+	targetArgs, err := approvalTargetArguments(args, customTool)
+	if err != nil {
 		return approvals.ApprovalTarget{}, err
 	}
 	targetSpecDigest, err := approvalTargetSpecDigest(customTool)
@@ -198,7 +199,7 @@ func (g *approvalGate) targetForCall(
 		g.taskName,
 		g.taskUID,
 		toolName,
-		args,
+		targetArgs,
 		fmt.Sprintf("Execute %s", toolName),
 		fmt.Sprintf("Human approval is required before executing %s", toolName),
 		"warning",
@@ -206,15 +207,35 @@ func (g *approvalGate) targetForCall(
 	)
 }
 
-func validateApprovalTargetArguments(args json.RawMessage) error {
+func approvalTargetArguments(args json.RawMessage, customTool *corev1alpha1.Tool) (json.RawMessage, error) {
 	if len(strings.TrimSpace(string(args))) == 0 {
-		return nil
+		return args, nil
 	}
-	var targetArgsObject map[string]any
+	var targetArgsObject map[string]json.RawMessage
 	if err := json.Unmarshal(args, &targetArgsObject); err != nil || targetArgsObject == nil {
-		return fmt.Errorf("target arguments must be a JSON object")
+		return nil, fmt.Errorf("target arguments must be a JSON object")
 	}
-	return nil
+	if authBodyKey := approvalAuthBodyKey(customTool); authBodyKey != "" {
+		if _, ok := targetArgsObject[authBodyKey]; ok {
+			delete(targetArgsObject, authBodyKey)
+			out, err := json.Marshal(targetArgsObject)
+			if err != nil {
+				return nil, fmt.Errorf("sanitize target arguments: %w", err)
+			}
+			return json.RawMessage(out), nil
+		}
+	}
+	return args, nil
+}
+
+func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
+	if customTool == nil || customTool.Spec.HTTP == nil {
+		return ""
+	}
+	if strings.TrimSpace(customTool.Spec.HTTP.AuthInject) != "body" {
+		return ""
+	}
+	return strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey)
 }
 
 func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
