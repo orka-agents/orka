@@ -175,6 +175,48 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 	}
 }
 
+func TestApprovalGatePreScanReturnsMalformedGatedArgsToModel(t *testing.T) {
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "bad gated args",
+				ToolCalls: []llm.ToolCall{
+					{
+						ID:        "call-dispatch",
+						Name:      gatedDispatchTool,
+						Arguments: json.RawMessage(`{"unterminated"`),
+					},
+					{
+						ID:        "call-other",
+						Name:      "other_tool",
+						Arguments: json.RawMessage(`{"ok":true}`),
+					},
+				},
+				StopReason: "tool_use",
+			},
+			{Content: "corrected", StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}, {Name: "other_tool"}},
+		nil,
+		nil,
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != "corrected" {
+		t.Fatalf("result = %q, want corrected", result)
+	}
+}
+
 func TestApprovalGatePrepareApprovedCallSkipsUngatedMalformedArgs(t *testing.T) {
 	args := json.RawMessage(`{"unterminated"`)
 	for _, tt := range []struct {

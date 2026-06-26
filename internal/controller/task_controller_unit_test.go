@@ -482,6 +482,28 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskRejectsApprovalRequiredTools(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-runtime-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "only supported for type: ai") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want runtime approval rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

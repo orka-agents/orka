@@ -2612,6 +2612,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
 			return err
 		}
+		if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
+			return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
+		}
 		// Prompt is required for agent tasks
 		if task.Spec.Prompt == "" {
 			return fmt.Errorf("prompt is required for type: agent tasks")

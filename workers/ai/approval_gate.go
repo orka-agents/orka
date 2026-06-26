@@ -130,7 +130,10 @@ func (g *approvalGate) preScan(
 			if !requiresApproval {
 				continue
 			}
-			return nil, err
+			return &approvalBatchDecision{
+				continueLLM: true,
+				toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
+			}, nil
 		}
 		decision, found := g.resolvedDecision(target)
 		if found && decision.Status != approvals.StatusApproved {
