@@ -148,14 +148,27 @@ type preparedToolRequest struct {
 	mcp              bool
 }
 
-func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
+	if len(bytes.TrimSpace(args)) == 0 {
+		return make(map[string]any), nil
+	}
 	var params map[string]any
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
-			return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
-		}
-	} else {
-		params = make(map[string]any)
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
+	if err := dec.Decode(&params); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("trailing data")
+	}
+	return params, nil
+}
+
+func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	params, err := decodeToolArguments(args)
+	if err != nil {
+		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
 
 	httpConfig, routeHost, err := toolHTTPConfig(tool)

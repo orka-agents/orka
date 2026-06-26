@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +91,41 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 
 	if result != expectedResponse {
 		t.Errorf("Execute() = %v, want %v", result, expectedResponse)
+	}
+}
+
+func TestToolExecutor_Execute_PreservesLargeJSONIntegers(t *testing.T) {
+	var receivedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"account":9007199254740993}`)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(receivedBody, `"account":9007199254740993`) {
+		t.Fatalf("request body = %s, want large integer preserved", receivedBody)
+	}
+	if strings.Contains(receivedBody, `9007199254740992`) {
+		t.Fatalf("request body = %s, large integer was rounded", receivedBody)
 	}
 }
 

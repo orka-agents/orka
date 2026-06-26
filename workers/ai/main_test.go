@@ -671,7 +671,7 @@ func TestAIWorkerEventToolCallCompleteness(t *testing.T) {
 			StopReason: "tool_use",
 			Model:      "test-model",
 		},
-		{Content: "done", StopReason: "end_turn", Model: "test-model"},
+		{Content: doneResult, StopReason: "end_turn", Model: "test-model"},
 	}}
 	recorder := common.NewFakeEventRecorder()
 
@@ -682,7 +682,7 @@ func TestAIWorkerEventToolCallCompleteness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
-	if result != "done" {
+	if result != doneResult {
 		t.Fatalf("result = %q, want done", result)
 	}
 	assertRecordedEventTypesEventually(t, recorder, []string{

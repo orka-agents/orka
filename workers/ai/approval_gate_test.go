@@ -31,6 +31,7 @@ const (
 	gatedDispatchTool    = "dispatch_work_order"
 	declineHandledResult = "decline handled"
 	correctedResult      = "corrected"
+	doneResult           = "done"
 )
 
 func TestApprovalGatePrescansBatchBeforeExecutingGatedTool(t *testing.T) {
@@ -150,7 +151,7 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 				}},
 				StopReason: "tool_use",
 			},
-			{Content: "done", StopReason: "end_turn"},
+			{Content: doneResult, StopReason: "end_turn"},
 		}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
@@ -164,7 +165,7 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 	if err != nil {
 		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
 	}
-	if result != "done" {
+	if result != doneResult {
 		t.Fatalf("result = %q, want done", result)
 	}
 	var body map[string]any
@@ -173,6 +174,70 @@ func TestApprovalGateExecutesApprovedMatchingTargetWithIdempotencyKey(t *testing
 	}
 	if body["idempotencyKey"] != target.ApprovalID {
 		t.Fatalf("executed args = %#v, want idempotencyKey %s", body, target.ApprovalID)
+	}
+}
+
+func TestApprovalGateMarksApprovedCustomToolFiredWhenAttemptFails(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		http.Error(w, "applied then failed", http.StatusInternalServerError)
+	}))
+	defer toolServer.Close()
+	customTool := approvalTestCustomTool(toolServer.URL)
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	specDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("target spec digest: %v", err)
+	}
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		specDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	setResolvedApprovalsEnv(t, []approvals.ResolvedApproval{resolvedApprovalForTarget(target)})
+	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
+	t.Setenv(workerenv.AutonomousMode, "true")
+
+	result, err := executeAgentLoopWithEvents(
+		context.Background(),
+		&mockProvider{responses: []*llm.CompletionResponse{
+			{
+				Content: "dispatching twice",
+				ToolCalls: []llm.ToolCall{
+					{ID: "call-dispatch-1", Name: gatedDispatchTool, Arguments: args},
+					{ID: "call-dispatch-2", Name: gatedDispatchTool, Arguments: args},
+				},
+				StopReason: "tool_use",
+			},
+			{Content: doneResult, StopReason: "end_turn"},
+		}},
+		[]llm.Message{{Role: "user", Content: "handle incident"}},
+		"",
+		"test-model",
+		[]llm.Tool{{Name: gatedDispatchTool}},
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		worker.NewToolExecutor(),
+		common.NewFakeEventRecorder(),
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "incident-task", TaskUID: "task-uid-1"},
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoopWithEvents() error = %v", err)
+	}
+	if result != doneResult {
+		t.Fatalf("result = %q, want done", result)
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("custom tool executions = %d, want one attempted side effect", executions.Load())
 	}
 }
 
@@ -461,7 +526,7 @@ func TestApprovalGateSkipsDuplicateApprovedFireWithinWorker(t *testing.T) {
 				}},
 				StopReason: "tool_use",
 			},
-			{Content: "done", StopReason: "end_turn"},
+			{Content: doneResult, StopReason: "end_turn"},
 		}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
@@ -621,7 +686,7 @@ func TestApprovalToolingRequiresAutonomousMode(t *testing.T) {
 	t.Setenv(workerenv.ApprovalRequiredTools, gatedDispatchTool)
 	_, err := executeAgentLoopWithEvents(
 		context.Background(),
-		&mockProvider{response: &llm.CompletionResponse{Content: "done", StopReason: "end_turn"}},
+		&mockProvider{response: &llm.CompletionResponse{Content: doneResult, StopReason: "end_turn"}},
 		[]llm.Message{{Role: "user", Content: "handle incident"}},
 		"",
 		"test-model",

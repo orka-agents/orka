@@ -1006,6 +1006,7 @@ func executeAgentLoopWithEvents(
 				execCtx := ctx
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
+					approvalGate.markFired(approvalKey)
 				}
 				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
 			} else {
@@ -1023,6 +1024,7 @@ func executeAgentLoopWithEvents(
 					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 				}
 				if execErr == nil {
+					approvalGate.markFired(approvalKey)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
 				}
 			}
@@ -1046,9 +1048,6 @@ func executeAgentLoopWithEvents(
 						"resultLength": len(result),
 					})),
 				)
-				if !alreadyFired {
-					approvalGate.markFired(approvalKey)
-				}
 			}
 
 			// Add tool result

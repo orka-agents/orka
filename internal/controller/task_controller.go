@@ -55,12 +55,14 @@ import (
 )
 
 const (
-	taskTransactionTokenPendingTimeout        = 2 * time.Minute
-	failedMountEventStaleAfter                = 2 * time.Minute
-	podLogLimitBytes                          = int64(5 << 20)
-	stdoutResultLogLimitBytes                 = int64(15 << 20)
-	maxResolvedApprovalsForWorkerEnv          = 32
-	maxResolvedApprovalsJSONForWorkerEnvBytes = 32 * 1024
+	taskTransactionTokenPendingTimeout            = 2 * time.Minute
+	failedMountEventStaleAfter                    = 2 * time.Minute
+	podLogLimitBytes                              = int64(5 << 20)
+	stdoutResultLogLimitBytes                     = int64(15 << 20)
+	maxResolvedApprovalsJSONForWorkerEnvBytes     = 32 * 1024
+	maxRecentResolvedApprovalsForWorkerEnv        = 32
+	maxResolvedApprovalWorkerEnvFieldBytes        = 512
+	resolvedApprovalWorkerEnvJSONOverheadEstimate = 128
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -931,46 +933,185 @@ func (r *TaskReconciler) resolvedApprovalsJSONForTask(ctx context.Context, task 
 }
 
 func resolvedApprovalsJSONForWorkerEnv(values []approvals.ResolvedApproval) (string, error) {
-	resolved := latestResolvedApprovalsForWorkerEnv(values)
-	if len(resolved) == 0 {
+	if len(values) == 0 {
 		return "", nil
 	}
-	bounded := append([]approvals.ResolvedApproval(nil), resolved...)
-	data, err := json.Marshal(bounded)
-	if err != nil {
-		return "", err
-	}
-	if len(data) <= maxResolvedApprovalsJSONForWorkerEnvBytes {
-		return string(data), nil
-	}
-	for i := range bounded {
-		bounded[i].TargetArgsPreview = nil
-	}
-	data, err = json.Marshal(bounded)
-	if err != nil {
-		return "", err
-	}
-	if len(data) <= maxResolvedApprovalsJSONForWorkerEnvBytes {
-		return string(data), nil
-	}
-	for len(bounded) > 0 && len(data) > maxResolvedApprovalsJSONForWorkerEnvBytes {
-		bounded = bounded[1:]
-		data, err = json.Marshal(bounded)
-		if err != nil {
-			return "", err
+
+	if resolvedApprovalsLikelyFitWorkerEnv(values, resolvedApprovalWorkerEnvFullPayload) {
+		bounded := append([]approvals.ResolvedApproval(nil), values...)
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(bounded); err != nil || ok {
+			return data, err
 		}
 	}
-	if len(bounded) == 0 {
-		return "", nil
+
+	if resolvedApprovalsLikelyFitWorkerEnv(values, resolvedApprovalWorkerEnvNoPreviewPayload) {
+		withoutPreviews := append([]approvals.ResolvedApproval(nil), values...)
+		for i := range withoutPreviews {
+			withoutPreviews[i].TargetArgsPreview = nil
+		}
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(withoutPreviews); err != nil || ok {
+			return data, err
+		}
 	}
-	return string(data), nil
+
+	compact := compactResolvedApprovalsForWorkerEnv(values)
+	if resolvedApprovalsLikelyFitWorkerEnv(compact, resolvedApprovalWorkerEnvCompactPayload) {
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(compact); err != nil || ok {
+			return data, err
+		}
+	}
+
+	selected, err := selectResolvedApprovalsForWorkerEnv(compact)
+	if err != nil || len(selected) == 0 {
+		return "", err
+	}
+	data, ok, err := marshalResolvedApprovalsForWorkerEnv(selected)
+	if err != nil || !ok {
+		return "", err
+	}
+	return data, nil
 }
 
-func latestResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) []approvals.ResolvedApproval {
-	if len(values) <= maxResolvedApprovalsForWorkerEnv {
-		return values
+func marshalResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) (string, bool, error) {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", false, err
 	}
-	return values[len(values)-maxResolvedApprovalsForWorkerEnv:]
+	if len(data) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		return "", false, nil
+	}
+	return string(data), true, nil
+}
+
+type resolvedApprovalWorkerEnvPayload int
+
+const (
+	resolvedApprovalWorkerEnvFullPayload resolvedApprovalWorkerEnvPayload = iota
+	resolvedApprovalWorkerEnvNoPreviewPayload
+	resolvedApprovalWorkerEnvCompactPayload
+)
+
+func resolvedApprovalsLikelyFitWorkerEnv(
+	values []approvals.ResolvedApproval,
+	payload resolvedApprovalWorkerEnvPayload,
+) bool {
+	estimated := 2
+	for _, approval := range values {
+		estimated += resolvedApprovalWorkerEnvJSONOverheadEstimate
+		estimated += len(approval.ID) + len(approval.TaskUID) + len(approval.TargetTool)
+		estimated += len(approval.TargetArgsDigest) + len(approval.TargetSpecDigest) + len(approval.Status)
+		if payload != resolvedApprovalWorkerEnvCompactPayload {
+			estimated += len(approval.Actor) + len(approval.DecisionTime) + len(approval.Reason)
+			estimated += len(approval.Action) + len(approval.RiskSummary) + len(approval.Severity)
+		}
+		if payload == resolvedApprovalWorkerEnvFullPayload {
+			estimated += len(approval.TargetArgsPreview)
+		}
+		if estimated > maxResolvedApprovalsJSONForWorkerEnvBytes {
+			return false
+		}
+	}
+	return true
+}
+
+func resolvedApprovalWorkerEnvField(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxResolvedApprovalWorkerEnvFieldBytes {
+		return value
+	}
+	return value[:maxResolvedApprovalWorkerEnvFieldBytes]
+}
+
+func compactResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) []approvals.ResolvedApproval {
+	compact := make([]approvals.ResolvedApproval, 0, len(values))
+	for _, approval := range values {
+		compact = append(compact, approvals.ResolvedApproval{
+			ID:               resolvedApprovalWorkerEnvField(approval.ID),
+			TaskUID:          resolvedApprovalWorkerEnvField(approval.TaskUID),
+			TargetTool:       resolvedApprovalWorkerEnvField(approval.TargetTool),
+			TargetArgsDigest: resolvedApprovalWorkerEnvField(approval.TargetArgsDigest),
+			TargetSpecDigest: resolvedApprovalWorkerEnvField(approval.TargetSpecDigest),
+			Status:           resolvedApprovalWorkerEnvField(approval.Status),
+		})
+	}
+	return compact
+}
+
+func selectResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) ([]approvals.ResolvedApproval, error) {
+	selected := make([]approvals.ResolvedApproval, 0, min(len(values), maxRecentResolvedApprovalsForWorkerEnv))
+	selectedIndexes := make(map[int]struct{}, min(len(values), maxRecentResolvedApprovalsForWorkerEnv))
+
+	// Always reserve space for the newest decisions first so recent approvals can
+	// resume required tool calls even when a long history contains many old denials.
+	for i := len(values) - 1; i >= 0 && len(selectedIndexes) < maxRecentResolvedApprovalsForWorkerEnv; i-- {
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, values[i])
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+
+	// Add older blocking terminal decisions before older approvals. Dropping an
+	// old approval can re-request approval; dropping an old decline/expiry can
+	// allow a previously denied target to execute.
+	for i, approval := range values {
+		if !resolvedApprovalBlocksExecution(approval) {
+			continue
+		}
+		if _, ok := selectedIndexes[i]; ok {
+			continue
+		}
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, approval)
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+
+	for i := len(values) - 1; i >= 0; i-- {
+		if _, ok := selectedIndexes[i]; ok {
+			continue
+		}
+		if resolvedApprovalBlocksExecution(values[i]) {
+			continue
+		}
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, values[i])
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+	return selected, nil
+}
+
+func appendResolvedApprovalIfWorkerEnvFits(
+	selected []approvals.ResolvedApproval,
+	approval approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, bool, error) {
+	candidate := append(append([]approvals.ResolvedApproval(nil), selected...), approval)
+	if _, ok, err := marshalResolvedApprovalsForWorkerEnv(candidate); err != nil {
+		return nil, false, err
+	} else if ok {
+		return candidate, true, nil
+	}
+	return selected, false, nil
+}
+
+func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
+	status := strings.TrimSpace(approval.Status)
+	return status != "" && status != approvals.StatusApproved
 }
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.

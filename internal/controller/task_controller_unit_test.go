@@ -7320,7 +7320,7 @@ func appendApprovalRequestedForControllerTest(t *testing.T, r *TaskReconciler, t
 	}
 }
 
-func TestResolvedApprovalsJSONForTaskCapsWorkerEnvWindow(t *testing.T) {
+func TestResolvedApprovalsJSONForTaskPreservesResolvedDecisionsWithinBudget(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Name:      "auto-approval-window",
@@ -7328,7 +7328,7 @@ func TestResolvedApprovalsJSONForTaskCapsWorkerEnvWindow(t *testing.T) {
 		UID:       types.UID("task-uid"),
 	}}
 	r := newUnitReconciler(scheme, task)
-	total := maxResolvedApprovalsForWorkerEnv + 5
+	const total = 40
 	for i := range total {
 		approvalID := fmt.Sprintf("approval-%02d", i)
 		appendApprovalRequestedForControllerTest(t, r, task, approvalID)
@@ -7339,25 +7339,29 @@ func TestResolvedApprovalsJSONForTaskCapsWorkerEnvWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvedApprovalsJSONForTask() error = %v", err)
 	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
 	var resolved []approvals.ResolvedApproval
 	if err := json.Unmarshal([]byte(got), &resolved); err != nil {
 		t.Fatalf("unmarshal resolved approvals: %v", err)
 	}
-	if len(resolved) != maxResolvedApprovalsForWorkerEnv {
-		t.Fatalf("resolved approvals length = %d, want %d", len(resolved), maxResolvedApprovalsForWorkerEnv)
+	if len(resolved) != total {
+		t.Fatalf("resolved approvals length = %d, want %d", len(resolved), total)
 	}
-	if resolved[0].ID != "approval-05" {
-		t.Fatalf("first retained approval = %q, want approval-05", resolved[0].ID)
+	if resolved[0].ID != "approval-00" {
+		t.Fatalf("first retained approval = %q, want approval-00", resolved[0].ID)
 	}
-	if resolved[len(resolved)-1].ID != "approval-36" {
-		t.Fatalf("last retained approval = %q, want approval-36", resolved[len(resolved)-1].ID)
+	if resolved[len(resolved)-1].ID != "approval-39" {
+		t.Fatalf("last retained approval = %q, want approval-39", resolved[len(resolved)-1].ID)
 	}
 }
 
 func TestResolvedApprovalsJSONForWorkerEnvBoundsAggregatePreviewPayload(t *testing.T) {
-	resolved := make([]approvals.ResolvedApproval, 0, maxResolvedApprovalsForWorkerEnv)
+	const total = 40
+	resolved := make([]approvals.ResolvedApproval, 0, total)
 	preview := json.RawMessage(`{"payload":"` + strings.Repeat("x", 8*1024) + `"}`)
-	for i := range maxResolvedApprovalsForWorkerEnv {
+	for i := range total {
 		resolved = append(resolved, approvals.ResolvedApproval{
 			ID:                fmt.Sprintf("approval-%02d", i),
 			TargetTool:        "dispatch_work_order",
@@ -7385,6 +7389,98 @@ func TestResolvedApprovalsJSONForWorkerEnvBoundsAggregatePreviewPayload(t *testi
 		if len(approval.TargetArgsPreview) != 0 {
 			t.Fatalf("approval %s retained TargetArgsPreview length %d", approval.ID, len(approval.TargetArgsPreview))
 		}
+	}
+}
+
+func TestResolvedApprovalsJSONForWorkerEnvPreservesOlderBlockingDecisionsWhenCompacting(t *testing.T) {
+	resolved := []approvals.ResolvedApproval{{
+		ID:               "approval-denied-old",
+		TaskUID:          "task-uid",
+		TargetTool:       "dispatch_work_order",
+		TargetArgsDigest: "denied-digest",
+		Status:           approvals.StatusDeclined,
+		Reason:           strings.Repeat("denied ", 4096),
+	}}
+	for i := range 800 {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:               fmt.Sprintf("approval-approved-%03d", i),
+			TaskUID:          "task-uid",
+			TargetTool:       "dispatch_work_order",
+			TargetArgsDigest: fmt.Sprintf("approved-digest-%03d", i),
+			Status:           approvals.StatusApproved,
+			Reason:           strings.Repeat("approved ", 4096),
+		})
+	}
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	foundDecline := false
+	for _, approval := range bounded {
+		if approval.ID == "approval-denied-old" {
+			foundDecline = true
+			if approval.Status != approvals.StatusDeclined {
+				t.Fatalf("old blocking approval status = %q, want declined", approval.Status)
+			}
+			if approval.Reason != "" || len(approval.TargetArgsPreview) != 0 {
+				t.Fatalf("old blocking approval was not compacted: %#v", approval)
+			}
+		}
+	}
+	if !foundDecline {
+		t.Fatalf("old blocking approval was dropped from bounded payload of %d approvals", len(bounded))
+	}
+}
+
+func TestResolvedApprovalsJSONForWorkerEnvPreservesRecentApprovalWhenBlockingHistoryExceedsBudget(t *testing.T) {
+	resolved := make([]approvals.ResolvedApproval, 0, 801)
+	for i := range 800 {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:               fmt.Sprintf("approval-declined-%03d", i),
+			TaskUID:          "task-uid",
+			TargetTool:       "dispatch_work_order",
+			TargetArgsDigest: fmt.Sprintf("declined-digest-%03d", i),
+			Status:           approvals.StatusDeclined,
+		})
+	}
+	resolved = append(resolved, approvals.ResolvedApproval{
+		ID:               "approval-approved-recent",
+		TaskUID:          "task-uid",
+		TargetTool:       "dispatch_work_order",
+		TargetArgsDigest: "approved-digest-recent",
+		Status:           approvals.StatusApproved,
+	})
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	foundRecentApproval := false
+	for _, approval := range bounded {
+		if approval.ID == "approval-approved-recent" {
+			foundRecentApproval = true
+			if approval.Status != approvals.StatusApproved {
+				t.Fatalf("recent approval status = %q, want approved", approval.Status)
+			}
+		}
+	}
+	if !foundRecentApproval {
+		t.Fatalf("recent approved decision was dropped from bounded payload of %d approvals", len(bounded))
 	}
 }
 
