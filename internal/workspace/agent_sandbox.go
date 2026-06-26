@@ -21,9 +21,9 @@ import (
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 const (
@@ -71,8 +71,8 @@ type agentSandboxSDKClient struct {
 	readyTimeout time.Duration
 }
 
-func (c *agentSandboxSDKClient) CreateSandbox(ctx context.Context, template, namespace, warmPoolPolicy string) (agentSandboxHandle, error) {
-	claim, err := c.createSandboxClaim(ctx, "", template, namespace, warmPoolPolicy)
+func (c *agentSandboxSDKClient) CreateSandbox(ctx context.Context, template, namespace, _ string) (agentSandboxHandle, error) {
+	claim, err := c.createSandboxClaim(ctx, "", template, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,7 @@ func (c *agentSandboxSDKClient) CreateSandboxWithName(ctx context.Context, claim
 		return c.CreateSandbox(ctx, template, namespace, warmPoolPolicy)
 	}
 	created := false
-	if _, err := c.createSandboxClaim(ctx, claimName, template, namespace, warmPoolPolicy); err != nil {
+	if _, err := c.createSandboxClaim(ctx, claimName, template, namespace); err != nil {
 		if !k8serrors.IsAlreadyExists(err) {
 			return nil, err
 		}
@@ -186,7 +186,7 @@ func agentSandboxNextReadyBackoff(current time.Duration) time.Duration {
 
 func agentSandboxReady(conditions []metav1.Condition) bool {
 	for _, cond := range conditions {
-		if cond.Type == string(sandboxv1alpha1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+		if cond.Type == string(sandboxv1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
 			return true
 		}
 	}
@@ -200,15 +200,14 @@ func agentSandboxReadyContext(ctx context.Context, timeout time.Duration) (conte
 	return contextWithTimeout(ctx, timeout)
 }
 
-func (c *agentSandboxSDKClient) createSandboxClaim(ctx context.Context, claimName, template, namespace, warmPoolPolicy string) (*sandboxextv1alpha1.SandboxClaim, error) {
-	claim := &sandboxextv1alpha1.SandboxClaim{
+func (c *agentSandboxSDKClient) createSandboxClaim(ctx context.Context, claimName, warmPoolName, namespace string) (*sandboxextv1beta1.SandboxClaim, error) {
+	claim := &sandboxextv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      claimName,
 			Namespace: namespace,
 		},
-		Spec: sandboxextv1alpha1.SandboxClaimSpec{
-			TemplateRef: sandboxextv1alpha1.SandboxTemplateRef{Name: template},
-			WarmPool:    agentSandboxWarmPoolPolicy(warmPoolPolicy),
+		Spec: sandboxextv1beta1.SandboxClaimSpec{
+			WarmPoolRef: sandboxextv1beta1.SandboxWarmPoolRef{Name: warmPoolName},
 		},
 	}
 	if strings.TrimSpace(claimName) == "" {
@@ -216,18 +215,9 @@ func (c *agentSandboxSDKClient) createSandboxClaim(ctx context.Context, claimNam
 	}
 	created, err := c.k8s.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("%w: template=%s namespace=%s: %w", sandbox.ErrClaimFailed, template, namespace, err)
+		return nil, fmt.Errorf("%w: warmpool=%s namespace=%s: %w", sandbox.ErrClaimFailed, warmPoolName, namespace, err)
 	}
 	return created, nil
-}
-
-func agentSandboxWarmPoolPolicy(policy string) *sandboxextv1alpha1.WarmPoolPolicy {
-	policy = strings.TrimSpace(policy)
-	if policy == "" {
-		return nil
-	}
-	warmPoolPolicy := sandboxextv1alpha1.WarmPoolPolicy(policy)
-	return &warmPoolPolicy
 }
 
 func agentSandboxDeleteCreatedClaim(k8s *sandbox.K8sHelper, claimName, namespace string) {
@@ -742,7 +732,7 @@ func (e *AgentSandboxExecutor) apiURLForClaim() string {
 
 func (e *AgentSandboxExecutor) agentSandboxOptions(req ClaimRequest) sandbox.Options {
 	opts := sandbox.Options{
-		TemplateName: req.Template.Name,
+		WarmPoolName: req.Template.Name,
 		Namespace:    req.Namespace,
 		APIURL:       e.apiURLForClaim(),
 		Quiet:        true,
