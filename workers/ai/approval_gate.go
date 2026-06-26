@@ -158,6 +158,19 @@ func (g *approvalGate) requiresApproval(toolName string) bool {
 	return ok
 }
 
+func (g *approvalGate) hasResolvedHistoryForTool(toolName string) bool {
+	if g == nil {
+		return false
+	}
+	toolName = strings.TrimSpace(toolName)
+	for _, decision := range g.resolved {
+		if decision.TargetTool == toolName {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *approvalGate) preScan(
 	ctx context.Context,
 	calls []llm.ToolCall,
@@ -191,7 +204,7 @@ func (g *approvalGate) preScan(
 						toolResults: blockingApprovalOverflowBatchToolResults(calls, call.ID, toolName),
 					}, nil
 				}
-				if len(g.resolved) > 0 && customTools[toolName] != nil {
+				if g.hasResolvedHistoryForTool(toolName) && customTools[toolName] != nil {
 					return &approvalBatchDecision{
 						continueLLM: true,
 						toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
@@ -425,6 +438,9 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 	usesBodyAuth := customTool.Spec.HTTP.AuthSecretRef != nil &&
 		strings.TrimSpace(customTool.Spec.HTTP.AuthInject) == approvalAuthInjectBody
 	if usesBodyAuth {
+		if customTool.Spec.MCP != nil && customTool.Spec.MCP.SubstrateActor != nil {
+			return fmt.Errorf("approval-gated MCP tool %q does not support body auth", customTool.Name)
+		}
 		if strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey) == "" {
 			return fmt.Errorf("approval-gated tool %q authBodyKey is required for body auth", customTool.Name)
 		}
@@ -503,12 +519,16 @@ func approvalAuthRefVersion(customTool *corev1alpha1.Tool) (string, string) {
 
 func approvalTargetSpecDigestFromCustomTools(
 	customTools map[string]*corev1alpha1.Tool,
+	refresh ...func(context.Context, string, *corev1alpha1.Tool),
 ) func(context.Context, string) (string, error) {
-	return func(_ context.Context, targetTool string) (string, error) {
+	return func(ctx context.Context, targetTool string) (string, error) {
 		targetTool = strings.TrimSpace(targetTool)
 		customTool := customTools[targetTool]
 		if customTool == nil {
 			return "", fmt.Errorf("targetTool %q is not an enabled custom tool", targetTool)
+		}
+		if len(refresh) > 0 && refresh[0] != nil {
+			refresh[0](ctx, targetTool, customTool)
 		}
 		return approvalTargetSpecDigest(customTool)
 	}
@@ -658,7 +678,7 @@ func (g *approvalGate) prepareApprovedCall(
 					strings.TrimSpace(toolName),
 				)
 			}
-			if len(g.resolved) > 0 && customTool != nil {
+			if g.hasResolvedHistoryForTool(toolName) && customTool != nil {
 				return nil, "", false, err
 			}
 			return args, "", false, nil
@@ -935,7 +955,10 @@ func explicitApprovalTargetForCall(
 		return approvals.ApprovalTarget{}, fmt.Errorf("tool context is not configured")
 	}
 	targetTool := strings.TrimSpace(req.TargetTool)
-	targetSpecDigest, err := approvalTargetSpecDigestFromCustomTools(customTools)(ctx, targetTool)
+	targetSpecDigest, err := approvalTargetSpecDigestFromCustomTools(
+		customTools,
+		baseToolCtx.ApprovalTargetRefresh,
+	)(ctx, targetTool)
 	if err != nil {
 		return approvals.ApprovalTarget{}, err
 	}
@@ -1007,7 +1030,10 @@ func executeRequestApprovalToolCall(
 			toolCtxCopy.Tenant = toolCtxCopy.Namespace
 		}
 		if toolCtxCopy.ApprovalTargetSpecDigest == nil {
-			toolCtxCopy.ApprovalTargetSpecDigest = approvalTargetSpecDigestFromCustomTools(customTools)
+			toolCtxCopy.ApprovalTargetSpecDigest = approvalTargetSpecDigestFromCustomTools(
+				customTools,
+				toolCtxCopy.ApprovalTargetRefresh,
+			)
 		}
 		if toolCtxCopy.ApprovalTargetArguments == nil {
 			toolCtxCopy.ApprovalTargetArguments = approvalTargetArgumentsFromCustomTools(customTools)

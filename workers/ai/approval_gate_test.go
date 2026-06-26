@@ -396,6 +396,30 @@ func TestApprovalGateTargetForCallRefreshesAuthRefBeforeRequestingApproval(t *te
 	}
 }
 
+func TestApprovalGatePrepareApprovedCallIgnoresUnrelatedHistoryOnTargetBuildError(t *testing.T) {
+	otherTarget := approvalTargetForTest(t, json.RawMessage(`{"incident":"inc-1"}`))
+	customTool := approvalTestCustomTool("https://tools.example.test/other")
+	customTool.Name = "other-tool"
+	customTool.Spec.HTTP.Headers = map[string]string{"idempotency-key": "static"}
+	args := json.RawMessage(`{"incident":"inc-2"}`)
+	gate := &approvalGate{
+		resolved: []approvals.ResolvedApproval{resolvedApprovalForTarget(otherTarget)},
+	}
+
+	gotArgs, approvalKey, alreadyFired, err := gate.prepareApprovedCall(
+		context.Background(),
+		"other-tool",
+		args,
+		customTool,
+	)
+	if err != nil {
+		t.Fatalf("prepareApprovedCall() error = %v, want unrelated target-build error ignored", err)
+	}
+	if string(gotArgs) != string(args) || approvalKey != "" || alreadyFired {
+		t.Fatalf("prepareApprovedCall() = args %s key %q fired %t", gotArgs, approvalKey, alreadyFired)
+	}
+}
+
 func TestApprovalGatePrepareApprovedCallRefreshesAuthRefBeforeConsumingApproval(t *testing.T) {
 	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	customTool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
@@ -957,6 +981,26 @@ func TestApprovalTargetSpecDigestRejectsMountedCredentialSource(t *testing.T) {
 	}
 }
 
+func TestApprovalTargetSpecDigestRejectsMCPBodyAuth(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/mcp")
+	tool.Spec.MCP = &corev1alpha1.MCPToolServer{
+		SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "template-a"},
+		},
+	}
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Spec.HTTP.AuthInject = approvalAuthInjectBody
+	tool.Spec.HTTP.AuthBodyKey = approvalTestAuthKey
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "MCP") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want MCP body auth rejection", err)
+	}
+}
+
 func TestApprovalTargetSpecDigestRejectsBodyAuthWithoutBodyKey(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
@@ -1310,6 +1354,45 @@ func TestRequestApprovalToolDuplicateTerminalDecisionReturnsWholeBatchToModel(t 
 	}
 	if result != correctedResult {
 		t.Fatalf("result = %q, want %s", result, correctedResult)
+	}
+}
+
+func TestExplicitApprovalTargetRefreshesBeforeDigest(t *testing.T) {
+	customTool := approvalAuthRefToolForTest()
+	customTool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	baseToolCtx := &toolspkg.ToolContext{
+		Namespace: "default",
+		TaskID:    "incident-task",
+		TaskUID:   "task-uid-1",
+		ApprovalTargetRefresh: func(_ context.Context, _ string, tool *corev1alpha1.Tool) {
+			tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+		},
+	}
+	call := llm.ToolCall{
+		ID:   "call-approval",
+		Name: "request_approval",
+		Arguments: json.RawMessage(
+			`{"action":"dispatch","targetTool":"dispatch_work_order","targetArguments":{"incident":"inc-1"}}`,
+		),
+	}
+	target, err := explicitApprovalTargetForCall(
+		context.Background(),
+		call,
+		map[string]*corev1alpha1.Tool{gatedDispatchTool: customTool},
+		baseToolCtx,
+	)
+	if err != nil {
+		t.Fatalf("explicitApprovalTargetForCall() error = %v", err)
+	}
+	refreshedDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("refreshed spec digest: %v", err)
+	}
+	if target.TargetSpecDigest != refreshedDigest {
+		t.Fatalf("TargetSpecDigest = %q, want refreshed digest %q", target.TargetSpecDigest, refreshedDigest)
 	}
 }
 
