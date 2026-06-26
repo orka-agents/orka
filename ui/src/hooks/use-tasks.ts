@@ -100,12 +100,17 @@ export async function fetchTaskEvents(
     }
   }
 
+  const latestFetchedSeq = events.reduce(
+    (latest, event) => Math.max(latest, event.seq),
+    previous?.latestSeq ?? 0,
+  )
+
   return {
     namespace: response?.namespace ?? previous?.namespace ?? namespace,
     streamType: response?.streamType ?? previous?.streamType ?? 'task',
     streamID: response?.streamID ?? previous?.streamID ?? id,
     afterSeq: previous?.afterSeq ?? 0,
-    latestSeq: targetLatestSeq ?? response?.latestSeq ?? previous?.latestSeq ?? 0,
+    latestSeq: Math.max(targetLatestSeq ?? 0, response?.latestSeq ?? 0, latestFetchedSeq),
     events,
   }
 }

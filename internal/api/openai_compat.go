@@ -663,7 +663,7 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 // handleStreamingCompletion handles a streaming chat completion request.
 func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c fiber.Ctx,
-	_ context.Context,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -678,9 +678,10 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 	// Capture for closure
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
