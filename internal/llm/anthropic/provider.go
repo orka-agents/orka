@@ -204,6 +204,16 @@ func handleStreamEvent(
 	hasToolCalls *bool,
 ) bool {
 	switch e := event.AsAny().(type) {
+	case anthropic.MessageStartEvent:
+		if e.Message.Usage.InputTokens > 0 || e.Message.Model != "" {
+			if !send(llm.StreamChunk{
+				InputTokens: int(e.Message.Usage.InputTokens),
+				Model:       e.Message.Model,
+				Provider:    genai.ProviderAnthropic,
+			}) {
+				return false
+			}
+		}
 	case anthropic.ContentBlockStartEvent:
 		cb := e.ContentBlock
 		if cb.Type == "tool_use" {

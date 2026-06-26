@@ -872,6 +872,21 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					}},
 				}
 				_ = writeStreamChunk(w, finishChunk)
+				if streamOpts != nil && streamOpts.IncludeUsage {
+					usageChunk := OAIResponse{
+						ID:      completionID,
+						Object:  "chat.completion.chunk",
+						Created: created,
+						Model:   model,
+						Choices: []OAIChoice{},
+						Usage: &OAIUsage{
+							PromptTokens:     chunk.InputTokens,
+							CompletionTokens: chunk.OutputTokens,
+							TotalTokens:      chunk.InputTokens + chunk.OutputTokens,
+						},
+					}
+					_ = writeStreamChunk(w, usageChunk)
+				}
 			}
 		}
 

@@ -739,6 +739,7 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		return envVars
 	}
 	envVars = setControllerEnv(envVars, workerenv.EnableTelemetry, scheduledRunLabelValue)
+	unreachableSignalOverrides := unreachableWorkerOTLPSignalEndpoints(os.Getenv)
 	// Copy only non-secret scalar OTLP settings. Header env vars carry
 	// credentials, and certificate env vars are file paths whose source files are
 	// not mounted into worker Pods by the controller.
@@ -759,6 +760,9 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
 	} {
+		if signal := otlpSignalFromEnvName(name); signal != "" && unreachableSignalOverrides[signal] {
+			continue
+		}
 		value := os.Getenv(name)
 		if strings.HasSuffix(name, "_ENDPOINT") && !isWorkerReachableOTLPEndpoint(value) {
 			value = ""
@@ -766,6 +770,26 @@ func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1al
 		envVars = setControllerEnv(envVars, name, safeWorkerOTLPEnvValue(name, value))
 	}
 	return envVars
+}
+
+func unreachableWorkerOTLPSignalEndpoints(getenv func(string) string) map[string]bool {
+	out := map[string]bool{}
+	for _, signal := range []string{"TRACES", "METRICS"} {
+		name := "OTEL_EXPORTER_OTLP_" + signal + "_ENDPOINT"
+		if strings.TrimSpace(getenv(name)) != "" && !isWorkerReachableOTLPEndpoint(getenv(name)) {
+			out[signal] = true
+		}
+	}
+	return out
+}
+
+func otlpSignalFromEnvName(name string) string {
+	for _, signal := range []string{"TRACES", "METRICS"} {
+		if strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_"+signal+"_") {
+			return signal
+		}
+	}
+	return ""
 }
 
 func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {

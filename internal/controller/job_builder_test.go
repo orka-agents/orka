@@ -2533,6 +2533,37 @@ func TestJobBuilder_buildEnvVars_TelemetryRequiresWorkerReachableEndpoint(t *tes
 	}
 }
 
+func TestJobBuilder_buildEnvVars_TelemetryDropsUnreachableSignalOverrides(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "1s")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "grpc")
+	builder := setupJobBuilder()
+	builder.EnableTelemetry = true
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); !ok || got.Value != "otel-collector:4317" {
+		t.Fatalf("generic endpoint = %#v, found=%v", got, ok)
+	}
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+	} {
+		if got, ok := findEnvVar(envVars, name); ok {
+			t.Fatalf("%s should not be copied with unreachable traces endpoint, got %#v", name, got)
+		}
+	}
+	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"); !ok || got.Value != "grpc" {
+		t.Fatalf("metrics protocol = %#v, found=%v", got, ok)
+	}
+}
+
 func TestJobBuilder_buildEnvVars_TelemetryAllowsSignalSpecificEndpoints(t *testing.T) {
 	tests := []struct {
 		name      string

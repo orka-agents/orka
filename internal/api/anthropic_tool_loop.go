@@ -81,6 +81,18 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 		if chunk.ToolCall != nil {
 			resp.ToolCalls = append(resp.ToolCalls, *chunk.ToolCall)
 		}
+		if chunk.InputTokens > 0 {
+			resp.InputTokens = chunk.InputTokens
+		}
+		if chunk.OutputTokens > 0 {
+			resp.OutputTokens = chunk.OutputTokens
+		}
+		if chunk.Model != "" {
+			resp.Model = chunk.Model
+		}
+		if chunk.Provider != "" {
+			resp.Provider = chunk.Provider
+		}
 		if chunk.Done {
 			if chunk.StopReason != "" {
 				resp.StopReason = chunk.StopReason
