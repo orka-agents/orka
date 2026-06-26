@@ -47,6 +47,7 @@ type approvalGate struct {
 	required         map[string]struct{}
 	resolved         []approvals.ResolvedApproval
 	blockingOverflow bool
+	refreshTarget    func(context.Context, string, *corev1alpha1.Tool)
 	firedKeys        map[string]bool
 	recorder         common.EventRecorder
 }
@@ -69,6 +70,10 @@ func newApprovalGateFromEnv(recorder common.EventRecorder, baseToolCtx *tools.To
 	if len(required) > 0 && strings.TrimSpace(taskUID) == "" {
 		return nil, fmt.Errorf("%s is required for approval-required tools", workerenv.TaskUID)
 	}
+	var refreshTarget func(context.Context, string, *corev1alpha1.Tool)
+	if baseToolCtx != nil {
+		refreshTarget = baseToolCtx.ApprovalTargetRefresh
+	}
 	return &approvalGate{
 		namespace:        namespace,
 		taskName:         taskName,
@@ -76,6 +81,7 @@ func newApprovalGateFromEnv(recorder common.EventRecorder, baseToolCtx *tools.To
 		required:         required,
 		resolved:         resolved,
 		blockingOverflow: blockingOverflow,
+		refreshTarget:    refreshTarget,
 		firedKeys:        map[string]bool{},
 		recorder:         recorder,
 	}, nil
@@ -625,6 +631,7 @@ func approvalEmitterFromRecorder(recorder common.EventRecorder) func(context.Con
 }
 
 func (g *approvalGate) prepareApprovedCall(
+	ctx context.Context,
 	toolName string,
 	args json.RawMessage,
 	customTool *corev1alpha1.Tool,
@@ -635,6 +642,9 @@ func (g *approvalGate) prepareApprovedCall(
 	}
 	if !requiresApproval && len(g.resolved) == 0 && !g.blockingOverflow {
 		return args, "", false, nil
+	}
+	if customTool != nil && g.refreshTarget != nil {
+		g.refreshTarget(ctx, toolName, customTool)
 	}
 	target, err := g.targetForCall(toolName, args, customTool)
 	if err != nil {
@@ -778,6 +788,11 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 	}
 	if baseToolCtxCopy.TaskUID == "" {
 		baseToolCtxCopy.TaskUID = os.Getenv(workerenv.TaskUID)
+	}
+	if baseToolCtxCopy.ApprovalTargetRefresh == nil && baseToolCtxCopy.Client != nil {
+		baseToolCtxCopy.ApprovalTargetRefresh = func(ctx context.Context, _ string, tool *corev1alpha1.Tool) {
+			bindApprovalAuthRefVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
+		}
 	}
 	return &baseToolCtxCopy
 }

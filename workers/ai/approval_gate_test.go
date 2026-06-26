@@ -360,6 +360,50 @@ func TestApprovalGatePreScanReturnsNonObjectGatedArgsToModel(t *testing.T) {
 	}
 }
 
+func TestApprovalGatePrepareApprovedCallRefreshesAuthRefBeforeConsumingApproval(t *testing.T) {
+	customTool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	customTool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	customTool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	args := json.RawMessage(`{"incident":"inc-1"}`)
+	oldSpecDigest, err := approvalTargetSpecDigest(customTool)
+	if err != nil {
+		t.Fatalf("old target spec digest: %v", err)
+	}
+	target, err := approvals.NewApprovalTarget(
+		"default",
+		"incident-task",
+		"task-uid-1",
+		gatedDispatchTool,
+		args,
+		"dispatch",
+		"",
+		"",
+		oldSpecDigest,
+	)
+	if err != nil {
+		t.Fatalf("approval target: %v", err)
+	}
+	gate := &approvalGate{
+		namespace: "default",
+		taskName:  "incident-task",
+		taskUID:   "task-uid-1",
+		required:  map[string]struct{}{gatedDispatchTool: {}},
+		resolved:  []approvals.ResolvedApproval{resolvedApprovalForTarget(target)},
+		firedKeys: map[string]bool{},
+		refreshTarget: func(_ context.Context, _ string, tool *corev1alpha1.Tool) {
+			tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+		},
+	}
+
+	_, _, _, err = gate.prepareApprovedCall(context.Background(), gatedDispatchTool, args, customTool)
+	if err == nil || !strings.Contains(err.Error(), "is not resolved") {
+		t.Fatalf("prepareApprovedCall() error = %v, want unresolved after auth ref version refresh", err)
+	}
+}
+
 func TestApprovalGatePrepareApprovedCallSkipsUngatedMalformedArgs(t *testing.T) {
 	args := json.RawMessage(`{"unterminated"`)
 	for _, tt := range []struct {
@@ -374,7 +418,7 @@ func TestApprovalGatePrepareApprovedCallSkipsUngatedMalformedArgs(t *testing.T) 
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			gate := &approvalGate{resolved: tt.resolved}
-			gotArgs, approvalKey, alreadyFired, err := gate.prepareApprovedCall("ungated_tool", args, nil)
+			gotArgs, approvalKey, alreadyFired, err := gate.prepareApprovedCall(context.Background(), "ungated_tool", args, nil)
 			if err != nil {
 				t.Fatalf("prepareApprovedCall() error = %v", err)
 			}
@@ -878,28 +922,62 @@ func TestApprovalTargetSpecDigestRejectsTransactionTokenHeader(t *testing.T) {
 	}
 }
 
-func TestBindApprovalAuthRefVersionSkipsEmptyAuthRefValue(t *testing.T) {
+func bindApprovalAuthRefVersionForTest(
+	t *testing.T,
+	tool *corev1alpha1.Tool,
+	value string,
+	resourceVersion string,
+) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "dispatch-auth", Namespace: "default", UID: "uid-1", ResourceVersion: "10"},
-		Data:       map[string][]byte{"authref": []byte("  ")},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "dispatch-auth",
+			Namespace:       "default",
+			UID:             "uid-1",
+			ResourceVersion: resourceVersion,
+		},
+		Data: map[string][]byte{"authref": []byte(value)},
 	}
-	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
-	tool.Annotations = map[string]string{
-		approvalAuthRefUIDAnnotation:             "stale-uid",
-		approvalAuthRefResourceVersionAnnotation: "9",
-	}
-
 	bindApprovalAuthRefVersion(
 		context.Background(),
 		ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(),
 		"default",
 		tool,
 	)
+}
+
+func approvalAuthRefToolForTest() *corev1alpha1.Tool {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	return tool
+}
+
+func TestBindApprovalAuthRefVersionUpdatesRotatedAuthRef(t *testing.T) {
+	tool := approvalAuthRefToolForTest()
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+
+	bindApprovalAuthRefVersionForTest(t, tool, "value", "11")
+
+	if got := tool.Annotations[approvalAuthRefResourceVersionAnnotation]; got != "11" {
+		t.Fatalf("auth ref resourceVersion annotation = %q, want refreshed version 11", got)
+	}
+}
+
+func TestBindApprovalAuthRefVersionSkipsEmptyAuthRefValue(t *testing.T) {
+	tool := approvalAuthRefToolForTest()
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "stale-uid",
+		approvalAuthRefResourceVersionAnnotation: "9",
+	}
+
+	bindApprovalAuthRefVersionForTest(t, tool, "  ", "10")
 
 	if got := tool.Annotations[approvalAuthRefUIDAnnotation]; got != "" {
 		t.Fatalf("auth ref UID annotation = %q, want unset for empty auth ref value", got)

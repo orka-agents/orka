@@ -1038,20 +1038,23 @@ func executeAgentLoopWithEvents(
 			var execArgs json.RawMessage
 			approvalKey := ""
 			alreadyFired := false
+			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
+					ctx,
 					toolName,
 					tc.Arguments,
-					customTools[toolName],
+					customToolForCall,
 				)
 			}
 			if execErr != nil {
 				// execErr is handled by the common error path below.
 			} else if alreadyFired {
 				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
-			} else if customTool, ok := customTools[toolName]; ok {
+			} else if customToolForCall != nil {
+				customTool := customToolForCall
 				execCtx := ctx
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
