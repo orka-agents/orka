@@ -19,6 +19,12 @@ import (
 	"github.com/sozercan/orka/internal/tracing/genai"
 )
 
+type streamUsageState struct {
+	InputTokens int
+	Model       string
+	Provider    string
+}
+
 func init() {
 	llm.RegisterProvider("anthropic", func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
@@ -202,17 +208,14 @@ func handleStreamEvent(
 	currentToolCall **llm.ToolCall,
 	toolCallArgs *[]byte,
 	hasToolCalls *bool,
+	usage *streamUsageState,
 ) bool {
 	switch e := event.AsAny().(type) {
 	case anthropic.MessageStartEvent:
-		if e.Message.Usage.InputTokens > 0 || e.Message.Model != "" {
-			if !send(llm.StreamChunk{
-				InputTokens: int(e.Message.Usage.InputTokens),
-				Model:       e.Message.Model,
-				Provider:    genai.ProviderAnthropic,
-			}) {
-				return false
-			}
+		if usage != nil {
+			usage.InputTokens = int(e.Message.Usage.InputTokens)
+			usage.Model = e.Message.Model
+			usage.Provider = genai.ProviderAnthropic
 		}
 	case anthropic.ContentBlockStartEvent:
 		cb := e.ContentBlock
@@ -253,12 +256,25 @@ func handleStreamEvent(
 		if *hasToolCalls && stopReason == "" {
 			stopReason = "tool_use"
 		}
+		inputTokens := int(e.Usage.InputTokens)
+		model := ""
+		provider := genai.ProviderAnthropic
+		if usage != nil {
+			if inputTokens == 0 {
+				inputTokens = usage.InputTokens
+			}
+			model = usage.Model
+			if usage.Provider != "" {
+				provider = usage.Provider
+			}
+		}
 		if !send(llm.StreamChunk{
 			Done:         true,
 			StopReason:   stopReason,
-			InputTokens:  int(e.Usage.InputTokens),
+			InputTokens:  inputTokens,
 			OutputTokens: int(e.Usage.OutputTokens),
-			Provider:     genai.ProviderAnthropic,
+			Model:        model,
+			Provider:     provider,
 		}) {
 			return false
 		}
@@ -291,9 +307,10 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		var currentToolCall *llm.ToolCall
 		var toolCallArgs []byte
 		hasToolCalls := false
+		usage := streamUsageState{}
 
 		for stream.Next() {
-			if !handleStreamEvent(stream.Current(), send, &currentToolCall, &toolCallArgs, &hasToolCalls) {
+			if !handleStreamEvent(stream.Current(), send, &currentToolCall, &toolCallArgs, &hasToolCalls, &usage) {
 				return
 			}
 		}
