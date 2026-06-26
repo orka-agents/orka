@@ -16,6 +16,8 @@ Options:
   --replicas N                      deployment replicas (default: 1)
   --port N                          listen and service port (default: 1337)
   --service-type TYPE               ClusterIP, NodePort, or LoadBalancer (default: ClusterIP)
+  --no-network-policy               do not render the default restrictive NetworkPolicy
+                                    and delete the managed policy if it exists
   --providers-config PATH           JSON/YAML provider config to mount as a ConfigMap
   --providers-configmap NAME        ConfigMap name for providers config (default: <name>-providers)
   --env-secret ENV=SECRET:KEY       add env var from an existing Secret (repeatable)
@@ -97,6 +99,7 @@ timeout="180s"
 create_namespace="true"
 wait_rollout="true"
 print_only="false"
+network_policy="true"
 token_pvc=""
 copilot_token_secret=""
 copilot_token_key="token"
@@ -171,6 +174,10 @@ while [[ $# -gt 0 ]]; do
     --service-type)
       service_type="${2:?missing value for --service-type}"
       shift 2
+      ;;
+    --no-network-policy)
+      network_policy="false"
+      shift
       ;;
     --providers-config)
       providers_config="${2:?missing value for --providers-config}"
@@ -259,6 +266,9 @@ is_positive_int "$port" || error "Invalid port: $port"
 ((10#$port <= 65535)) || error "Invalid port: $port"
 case "$service_type" in ClusterIP|NodePort|LoadBalancer) ;; *) error "Invalid service type: $service_type" ;; esac
 case "$log_level" in debug|info|error) ;; *) error "Invalid log level: $log_level" ;; esac
+if [[ "$network_policy" == "true" && "$service_type" != "ClusterIP" ]]; then
+  echo "Warning: --service-type $service_type exposes Vekil externally, but the default NetworkPolicy only permits labeled in-cluster sources. Use --no-network-policy or extend the policy for the intended external source ranges." >&2
+fi
 if [[ -n "$providers_configmap" ]]; then
   is_dns_subdomain "$providers_configmap" || error "Invalid ConfigMap name: $providers_configmap"
 else
@@ -516,6 +526,39 @@ spec:
       port: $port
       targetPort: http
 EOF_SERVICE
+
+  if [[ "$network_policy" == "true" ]]; then
+    cat <<EOF_NETWORK_POLICY
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${name}-ingress
+  namespace: $namespace
+  labels:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/instance: $name
+    app.kubernetes.io/managed-by: vekil-reverse-proxy-deploy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vekil
+      app.kubernetes.io/instance: $name
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+        - namespaceSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+      ports:
+        - protocol: TCP
+          port: $port
+EOF_NETWORK_POLICY
+  fi
 }
 
 if [[ "$print_only" == "true" ]]; then
@@ -545,6 +588,10 @@ fi
 
 render_workload | k apply -f -
 
+if [[ "$network_policy" == "false" ]]; then
+  k -n "$namespace" delete networkpolicy "${name}-ingress" --ignore-not-found
+fi
+
 if [[ "$copilot_token_secret_changed" == "true" || "$providers_configmap_changed" == "true" ]]; then
   k -n "$namespace" rollout restart "deployment/$name"
 fi
@@ -558,6 +605,24 @@ cat <<EOF_DONE
 
 Vekil service URL inside the cluster:
   http://$name.$namespace.svc.cluster.local:$port
+
+Access control:
+EOF_DONE
+if [[ "$network_policy" == "true" ]]; then
+  cat <<EOF_DONE
+  The default NetworkPolicy allows TCP/$port only from labeled in-cluster sources:
+    - pods in namespace '$namespace' labeled 'vekil.sozercan.io/access=true'
+    - pods in namespaces labeled 'vekil.sozercan.io/access=true'
+  NodePort/LoadBalancer traffic and kubelet probes may need additional ingress exceptions.
+  NetworkPolicy enforcement depends on the cluster CNI.
+EOF_DONE
+else
+  cat <<EOF_DONE
+  No NetworkPolicy is rendered. The managed policy '${name}-ingress' was deleted if it existed.
+  Ensure another authentication or network boundary protects this proxy before sharing it.
+EOF_DONE
+fi
+cat <<EOF_DONE
 
 Local verification:
   kubectl${context_name:+ --context $context_name} -n $namespace port-forward svc/$name $port:$port

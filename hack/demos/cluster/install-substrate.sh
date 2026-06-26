@@ -114,6 +114,50 @@ cluster_health() {
   [[ "${healthy}" == 1 ]]
 }
 
+reconcile_vekil_network_policy() {
+  local ctx="$1"
+  local ns="$2"
+  local port
+  local selector_yaml
+
+  kubectl --context "${ctx}" -n "${ns}" get service vekil >/dev/null \
+    || die "vekil Service ${ns}/vekil is missing; cannot reconcile NetworkPolicy for clients"
+  port="$(kubectl --context "${ctx}" -n "${ns}" get service vekil -o jsonpath='{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
+  port="${port:-1337}"
+  selector_yaml="$(kubectl --context "${ctx}" -n "${ns}" get deployment vekil -o json \
+    | jq -r '.spec.selector.matchLabels // {} | to_entries[] | "      \(.key): \(.value | @json)"')"
+  [[ -n "${selector_yaml}" ]] || die "vekil Deployment ${ns}/vekil has no selector labels for NetworkPolicy"
+
+  kubectl --context "${ctx}" -n "${ns}" apply -f - <<YAML
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vekil-ingress
+  namespace: ${ns}
+  labels:
+    app.kubernetes.io/name: vekil
+    app.kubernetes.io/instance: vekil
+    app.kubernetes.io/managed-by: vekil-reverse-proxy-deploy
+spec:
+  podSelector:
+    matchLabels:
+${selector_yaml}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+        - namespaceSelector:
+            matchLabels:
+              vekil.sozercan.io/access: "true"
+      ports:
+        - protocol: TCP
+          port: ${port}
+YAML
+}
+
 # prompt_cluster_action: resolves reuse|recreate|cancel for an existing cluster.
 # Honors DEMO_CLUSTER_REUSE when set; otherwise prompts on /dev/tty (so it works
 # even when the script's stdin is redirected, e.g. via make). With no tty and no
@@ -197,6 +241,14 @@ if [[ "${AGENTIC}" == "1" ]]; then
   log "Ensuring substrate demo namespace ${SUBSTRATE_NS}"
   kubectl --context "${ctx}" create namespace "${SUBSTRATE_NS}" --dry-run=client -o yaml \
     | kubectl --context "${ctx}" apply -f -
+  log "Ensuring substrate template namespace ${SUBSTRATE_TEMPLATE_NS}"
+  kubectl --context "${ctx}" create namespace "${SUBSTRATE_TEMPLATE_NS}" --dry-run=client -o yaml \
+    | kubectl --context "${ctx}" apply -f -
+  log "Allowing namespaces ${SUBSTRATE_NS} and ${SUBSTRATE_TEMPLATE_NS} to reach the vekil NetworkPolicy"
+  kubectl --context "${ctx}" label namespace "${SUBSTRATE_NS}" \
+    vekil.sozercan.io/access=true --overwrite >/dev/null
+  kubectl --context "${ctx}" label namespace "${SUBSTRATE_TEMPLATE_NS}" \
+    vekil.sozercan.io/access=true --overwrite >/dev/null
 
   # ---- 1. Codex-capable Actor image -------------------------------------
   # The agentic run executes a real codex CLI INSIDE the gVisor Actor, so the
@@ -243,11 +295,20 @@ if [[ "${AGENTIC}" == "1" ]]; then
       break
     fi
   done
+  vekil_exists=0
   if kubectl --context "${ctx}" -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
-    log "vekil already deployed in ${VEKIL_NS} — leaving it (re-run device-code login if /readyz is down)"
+    vekil_exists=1
+  fi
+  if [[ "${vekil_exists}" == 1 ]]; then
+    log "vekil already deployed in ${VEKIL_NS} — reconciling only the managed NetworkPolicy"
+    reconcile_vekil_network_policy "${ctx}" "${VEKIL_NS}"
+    kubectl --context "${ctx}" -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil NetworkPolicy ${VEKIL_NS}/vekil-ingress was not reconciled"
   elif [[ -x "${vekil_script}" ]]; then
     log "Deploying vekil model proxy to ${VEKIL_NS} (device-code login)"
     bash "${vekil_script}" --context "${ctx}" --namespace "${VEKIL_NS}" --skip-wait
+    kubectl --context "${ctx}" -n "${VEKIL_NS}" get networkpolicy vekil-ingress >/dev/null \
+      || die "vekil NetworkPolicy ${VEKIL_NS}/vekil-ingress was not reconciled"
     log "ACTION REQUIRED: complete the GitHub device-code login printed in vekil's logs:"
     log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
     log "  (visit the URL, enter the code; then /readyz returns 200)"
