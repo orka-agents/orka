@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -100,6 +101,14 @@ func NewTracingMiddleware() fiber.Handler {
 		}
 
 		status := c.Response().StatusCode()
+		if err != nil && status < fiber.StatusBadRequest {
+			var fiberErr *fiber.Error
+			if errors.As(err, &fiberErr) {
+				status = fiberErr.Code
+			} else {
+				status = fiber.StatusInternalServerError
+			}
+		}
 		span.SetAttributes(attribute.Int("http.status_code", status))
 		if status >= 400 {
 			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))

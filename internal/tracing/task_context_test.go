@@ -10,6 +10,7 @@ import (
 	"context"
 	"testing"
 
+	"go.opentelemetry.io/otel/baggage"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -23,15 +24,26 @@ func TestTaskTraceContextRoundTrip(t *testing.T) {
 		t.Fatalf("Init() error = %v", err)
 	}
 	h := testutil.NewSpanHarness(t)
-	ctx, parent := Tracer("test").Start(context.Background(), "creator")
+	bg, err := baggage.Parse("tenant=acme")
+	if err != nil {
+		t.Fatalf("parse baggage: %v", err)
+	}
+	ctx := baggage.ContextWithBaggage(context.Background(), bg)
+	ctx, parent := Tracer("test").Start(ctx, "creator")
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default"}}
 	StampTaskTraceContext(ctx, task)
 	parent.End()
 	if task.Annotations[labels.AnnotationTraceParent] == "" {
 		t.Fatalf("missing %s annotation", labels.AnnotationTraceParent)
 	}
+	if task.Annotations[labels.AnnotationTraceBaggage] != "tenant=acme" {
+		t.Fatalf("%s = %q, want tenant=acme", labels.AnnotationTraceBaggage, task.Annotations[labels.AnnotationTraceBaggage])
+	}
 
 	extracted := ExtractTaskTraceContext(context.Background(), task)
+	if got := baggage.FromContext(extracted).String(); got != "tenant=acme" {
+		t.Fatalf("extracted baggage = %q, want tenant=acme", got)
+	}
 	_, child := Tracer("test").Start(extracted, "controller")
 	child.End()
 	spans := h.Recorder.Ended()

@@ -9,9 +9,11 @@ package api
 import (
 	"context"
 
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
 )
 
 func detachedSpanContext(ctx context.Context) context.Context {
-	return trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	detached := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
+	return baggage.ContextWithBaggage(detached, baggage.FromContext(ctx))
 }

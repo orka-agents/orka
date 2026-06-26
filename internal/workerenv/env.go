@@ -70,6 +70,7 @@ const (
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
 	TraceParent     = "ORKA_TRACEPARENT"
 	TraceState      = "ORKA_TRACESTATE"
+	TraceBaggage    = "ORKA_BAGGAGE"
 
 	// Coordination/autonomous env vars used by AI worker and coordination tools.
 	CoordinationEnabled       = "ORKA_COORDINATION_ENABLED"
@@ -437,6 +438,7 @@ type AIWorkerEnv struct {
 	EnableTelemetry bool
 	TraceParent     string
 	TraceState      string
+	TraceBaggage    string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -462,6 +464,7 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	}
 	envVars = AppendIfSet(envVars, TraceParent, e.TraceParent)
 	envVars = AppendIfSet(envVars, TraceState, e.TraceState)
+	envVars = AppendIfSet(envVars, TraceBaggage, e.TraceBaggage)
 	if len(e.Fallbacks) > 0 {
 		envVars = append(envVars, Env(AIFallbackCount, strconv.Itoa(len(e.Fallbacks))))
 		for i, fallback := range e.Fallbacks {
@@ -486,6 +489,7 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		EnableTelemetry: IsTrue(getenv(EnableTelemetry)) || strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "",
 		TraceParent:     getenv(TraceParent),
 		TraceState:      getenv(TraceState),
+		TraceBaggage:    getenv(TraceBaggage),
 	}
 }
 

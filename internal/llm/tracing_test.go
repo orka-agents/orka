@@ -112,8 +112,13 @@ func (p *telemetryProvider) Stream(context.Context, *CompletionRequest) (<-chan 
 		chunk.Provider = "azure-openai"
 		chunk.Model = "fallback-model"
 	}
+	if p.name == "stream-failed" {
+		chunk = StreamChunk{Done: true, StopReason: "response.failed"}
+	}
 	ch <- chunk
-	ch <- StreamChunk{Done: true, StopReason: "stop"}
+	if p.name != "stream-failed" {
+		ch <- StreamChunk{Done: true, StopReason: "stop"}
+	}
 	close(ch)
 	return ch, nil
 }
@@ -255,6 +260,26 @@ func TestTracingProviderStreamUsesChunkProviderAndModel(t *testing.T) {
 	if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {
 		t.Fatalf("operation duration datapoints = %d, want 1", got)
 	}
+}
+
+func TestTracingProviderStreamFailureStopReasonSetsError(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-failed", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Status().Code != codes.Error {
+		t.Fatalf("status = %v, want error", spans[0].Status())
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrErrorType, "response.failed")
 }
 
 func TestTracingProviderStreamEmitsFirstChunk(t *testing.T) {

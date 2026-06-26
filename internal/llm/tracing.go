@@ -141,6 +141,11 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			}
 			if chunk.StopReason != "" {
 				finishReasons = []string{chunk.StopReason}
+				if streamStopReasonIsError(chunk.StopReason) && chunk.Error == nil {
+					errType = chunk.StopReason
+					span.SetStatus(codes.Error, chunk.StopReason)
+					span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+				}
 			}
 			if chunk.Error != nil {
 				errType = errorType(chunk.Error)
@@ -164,6 +169,15 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		}
 	}()
 	return out, nil
+}
+
+func streamStopReasonIsError(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "response.failed", "response.incomplete":
+		return true
+	default:
+		return false
+	}
 }
 
 func spanName(req *CompletionRequest) string {

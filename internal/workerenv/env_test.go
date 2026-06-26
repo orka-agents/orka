@@ -34,6 +34,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		EnableTelemetry: true,
 		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
 		TraceState:      "vendor=value",
+		TraceBaggage:    "tenant=acme",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -61,8 +62,8 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
 	}
-	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState {
-		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q", parsed, env.TraceParent, env.TraceState)
+	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
+		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)
 	}
 	if len(parsed.Fallbacks) != 1 {
 		t.Fatalf("fallback count = %d, want 1", len(parsed.Fallbacks))
@@ -370,6 +371,9 @@ func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
 	}
 	if got.TraceState != env[TraceState] {
 		t.Fatalf("TraceState = %q, want %q", got.TraceState, env[TraceState])
+	}
+	if got.TraceBaggage != env[TraceBaggage] {
+		t.Fatalf("TraceBaggage = %q, want %q", got.TraceBaggage, env[TraceBaggage])
 	}
 }
 

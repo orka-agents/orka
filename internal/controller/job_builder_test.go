@@ -2455,13 +2455,15 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	builder.EnableTelemetry = true
 	traceparent := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
 	tracestate := "vendor=value"
+	baggage := "tenant=acme"
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
 			Namespace: defaultNS,
 			Annotations: map[string]string{
-				labels.AnnotationTraceParent: traceparent,
-				labels.AnnotationTraceState:  tracestate,
+				labels.AnnotationTraceParent:  traceparent,
+				labels.AnnotationTraceState:   tracestate,
+				labels.AnnotationTraceBaggage: baggage,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
@@ -2491,12 +2493,15 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	if got, ok := findEnvVar(envVars, workerenv.TraceState); !ok || got.Value != tracestate {
 		t.Fatalf("%s = %#v, found=%v", workerenv.TraceState, got, ok)
 	}
+	if got, ok := findEnvVar(envVars, workerenv.TraceBaggage); !ok || got.Value != baggage {
+		t.Fatalf("%s = %#v, found=%v", workerenv.TraceBaggage, got, ok)
+	}
 
 	agentTask := task.DeepCopy()
 	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
 	envVars = builder.buildEnvVars(context.Background(), agentTask, nil, nil)
-	if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok {
-		t.Fatal("agent tasks should receive telemetry enablement because they use the AI worker")
+	if _, ok := findEnvVar(envVars, workerenv.EnableTelemetry); ok {
+		t.Fatal("agent runtime tasks should not receive AI-worker telemetry enablement until the harness path consumes it")
 	}
 
 	containerTask := task.DeepCopy()

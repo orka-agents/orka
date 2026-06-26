@@ -115,6 +115,7 @@ func run() (err error) {
 		ctx = tracing.ExtractContext(ctx, tracing.MapCarrier{
 			"traceparent": workerEnv.TraceParent,
 			"tracestate":  workerEnv.TraceState,
+			"baggage":     workerEnv.TraceBaggage,
 		})
 	}
 
