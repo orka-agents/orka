@@ -807,8 +807,33 @@ func isLiveCopilotProxyForbiddenText(value string) bool {
 	return strings.Contains(value, "copilot-proxy") && strings.Contains(value, "403 Forbidden")
 }
 
+func isLiveCopilotProxyCodexMetadataPassthroughText(value string) bool {
+	return strings.Contains(value, "invalid_request_body") &&
+		strings.Contains(value, "Unknown parameter") &&
+		strings.Contains(value, "internal_chat_message_metadata_passthrough")
+}
+
 func liveCopilotProxyTaskFailedWithForbidden(taskName string) bool {
+	return liveCopilotProxyTaskFailedWithLogMatch(taskName, isLiveCopilotProxyForbiddenText)
+}
+
+func liveCopilotProxyTaskFailedWithCodexMetadataPassthrough(taskName string) bool {
+	return liveCopilotProxyTaskFailedWithLogMatch(taskName, isLiveCopilotProxyCodexMetadataPassthroughText)
+}
+
+func liveCopilotProxyTaskFailedWithLogMatch(taskName string, match func(string) bool) bool {
+	if match == nil {
+		return false
+	}
 	task := fetchTaskSnapshot(taskName)
+	if match(task.Status.Message) {
+		return true
+	}
+	for _, condition := range task.Status.Conditions {
+		if match(condition.Message) || match(condition.Reason) {
+			return true
+		}
+	}
 	if strings.TrimSpace(task.Status.JobName) == "" {
 		return false
 	}
@@ -818,7 +843,7 @@ func liveCopilotProxyTaskFailedWithForbidden(taskName string) bool {
 	if err != nil {
 		return false
 	}
-	return isLiveCopilotProxyForbiddenText(output)
+	return match(output)
 }
 
 func firstProxyModelMatchingPrefixes(catalog proxyModelCatalog, prefixes ...string) string {

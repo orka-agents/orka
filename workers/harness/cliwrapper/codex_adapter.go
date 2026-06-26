@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sozercan/orka/internal/workerenv"
@@ -27,11 +28,8 @@ func (a *CodexAdapter) Name() string { return RuntimeCodex }
 
 func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
-	if !agentCfg.AllowBash {
-		return nil, fmt.Errorf(
-			"codex runtime requires %s=true because the Codex CLI cannot disable shell execution",
-			workerenv.AllowBash,
-		)
+	if err := validateCodexToolPolicy(agentCfg); err != nil {
+		return nil, err
 	}
 
 	outputFile, err := os.CreateTemp("", "codex-last-message-*")
@@ -102,6 +100,79 @@ func (a *CodexAdapter) ParseResult(_ context.Context, _ TurnContext, run Command
 		}
 	}
 	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeCodex}}, nil
+}
+
+func validateCodexToolPolicy(cfg *agentEnvConfig) error {
+	if cfg == nil {
+		cfg = &agentEnvConfig{}
+	}
+	if !cfg.AllowBash {
+		return fmt.Errorf(
+			"codex runtime requires %s=true because the Codex CLI cannot disable shell execution",
+			workerenv.AllowBash,
+		)
+	}
+	for _, tool := range cfg.DisallowedTools {
+		if isDisallowedCodexBashTool(tool) {
+			return fmt.Errorf(
+				"codex runtime cannot enforce %s=%q because the Codex CLI cannot disable shell execution",
+				workerenv.DisallowedTools,
+				strings.TrimSpace(tool),
+			)
+		}
+		if strings.TrimSpace(tool) != "" && !isCodexWebSearchTool(tool) {
+			return fmt.Errorf(
+				"codex runtime cannot enforce %s=%q because the Codex CLI only supports disabling WebSearch",
+				workerenv.DisallowedTools,
+				strings.TrimSpace(tool),
+			)
+		}
+	}
+	if cfg.AllowedToolsSet && !codexToolListAllowsBash(cfg.AllowedTools) {
+		return fmt.Errorf(
+			"codex runtime cannot enforce %s=%q without Bash because the Codex CLI cannot disable shell execution",
+			workerenv.AllowedTools,
+			trimmedTools(cfg.AllowedTools),
+		)
+	}
+	return nil
+}
+
+func codexToolListAllowsBash(tools []string) bool {
+	return slices.ContainsFunc(tools, isUnscopedCodexBashTool)
+}
+
+func isDisallowedCodexBashTool(tool string) bool {
+	// Scoped Bash deny entries still target shell execution. Codex cannot
+	// disable shell execution or enforce command scopes, so reject them.
+	return isCodexBashAlias(codexToolName(tool))
+}
+
+func isUnscopedCodexBashTool(tool string) bool {
+	tool = strings.TrimSpace(tool)
+	if _, _, ok := strings.Cut(tool, "("); ok {
+		// A scoped Bash allow entry is narrower than full Bash access; treating it
+		// as satisfying Codex's shell requirement would silently widen policy.
+		return false
+	}
+	return isCodexBashAlias(tool)
+}
+
+func isCodexBashAlias(tool string) bool {
+	switch normalizeToolName(tool) {
+	case "bash", "shell", "codeexec", "terminal":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexToolName(toolSpec string) string {
+	toolSpec = strings.TrimSpace(toolSpec)
+	if name, _, ok := strings.Cut(toolSpec, "("); ok {
+		toolSpec = name
+	}
+	return strings.TrimSpace(toolSpec)
 }
 
 func buildCodexArgs(
@@ -263,12 +334,11 @@ func codexWebSearchSetting(cfg *agentEnvConfig) (string, bool) {
 }
 
 func hasWebSearchTool(tools []string) bool {
-	for _, tool := range tools {
-		if normalizeToolName(tool) == "websearch" {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(tools, isCodexWebSearchTool)
+}
+
+func isCodexWebSearchTool(tool string) bool {
+	return normalizeToolName(tool) == "websearch"
 }
 
 func normalizeToolName(tool string) string {
