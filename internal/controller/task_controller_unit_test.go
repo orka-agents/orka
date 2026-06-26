@@ -609,6 +609,59 @@ func TestValidateTaskAgentCompatibility_AITaskWithRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_RequestApprovalToolRequiresAutonomous(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		task  *corev1alpha1.Task
+		agent *corev1alpha1.Agent
+	}{
+		{
+			name: "agent tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}},
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+				},
+			},
+		},
+		{
+			name: "task tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				AI:   &corev1alpha1.AISpec{Tools: []string{"request_approval"}},
+			}},
+			agent: &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			if err := r.validateTaskAgentCompatibility(tt.task, tt.agent); err == nil ||
+				!strings.Contains(err.Error(), "enabled autonomous") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous request_approval rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RequestApprovalAllowedForAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:    true,
+				Autonomous: true,
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireAutonomous(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

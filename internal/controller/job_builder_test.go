@@ -1390,8 +1390,10 @@ func TestJobBuilder_buildEnvVars_NoCoordination(t *testing.T) {
 
 	envVars := builder.buildEnvVars(context.Background(), task, agent, nil)
 
+	if env, found := findEnvVar(envVars, workerenv.CoordinationEnabled); !found || env.Value != "" {
+		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.CoordinationEnabled, env, found)
+	}
 	coordinationVars := []string{
-		"ORKA_COORDINATION_ENABLED",
 		"ORKA_COORDINATION_MAX_DEPTH",
 		"ORKA_COORDINATION_MAX_CHILDREN",
 		"ORKA_COORDINATION_ALLOWED_AGENTS",
@@ -2541,6 +2543,9 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 			Prompt: "Coordinate incident",
 			Env: []corev1.EnvVar{
 				{Name: workerenv.TaskUID, Value: "spoofed-uid"},
+				{Name: workerenv.AITools, Value: "request_approval"},
+				{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue},
+				{Name: workerenv.AutonomousMode, Value: scheduledRunLabelValue},
 				{Name: workerenv.ResolvedApprovals, Value: `[{"id":"spoofed"}]`},
 				{Name: workerenv.ApprovalRequiredTools, Value: "spoofed_tool"},
 			},
@@ -2551,10 +2556,15 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 	if env, ok := findEnvVar(envVars, workerenv.TaskUID); !ok || env.Value != "real-uid" {
 		t.Fatalf("%s = %#v, found=%t; want real-uid", workerenv.TaskUID, env, ok)
 	}
-	if env, ok := findEnvVar(envVars, workerenv.ResolvedApprovals); !ok || env.Value != "" {
-		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.ResolvedApprovals, env, ok)
-	}
-	if env, ok := findEnvVar(envVars, workerenv.ApprovalRequiredTools); !ok || env.Value != "" {
-		t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", workerenv.ApprovalRequiredTools, env, ok)
+	for _, name := range []string{
+		workerenv.AITools,
+		workerenv.CoordinationEnabled,
+		workerenv.AutonomousMode,
+		workerenv.ResolvedApprovals,
+		workerenv.ApprovalRequiredTools,
+	} {
+		if env, ok := findEnvVar(envVars, name); !ok || env.Value != "" {
+			t.Fatalf("%s = %#v, found=%t; want explicit empty controller-owned value", name, env, ok)
+		}
 	}
 }

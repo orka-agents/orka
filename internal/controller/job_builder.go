@@ -586,7 +586,10 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
 	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
 	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
-	envVars = setControllerEnv(envVars, workerenv.ResolvedApprovals, "")
+	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
+	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
+	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
 	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
@@ -838,7 +841,7 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		depth = d
 	}
 
-	envVars = append(envVars, workerenv.CoordinationEnv{
+	for _, envVar := range (workerenv.CoordinationEnv{
 		Enabled:                 true,
 		MaxDepth:                int(agent.Spec.Coordination.MaxDepth),
 		MaxChildren:             int(agent.Spec.Coordination.MaxConcurrentChildren),
@@ -847,7 +850,9 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		AutonomousMode:          agent.Spec.Coordination.Autonomous,
 		AutonomousIteration:     int(task.Status.Iteration),
 		AutonomousMaxIterations: int(agent.Spec.Coordination.MaxIterations),
-	}.EnvVars()...)
+	}).EnvVars() {
+		envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
+	}
 	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(agent.Spec.Coordination.ApprovalRequiredTools))
 }
 
@@ -919,7 +924,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	if len(cfg.tools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{Name: workerenv.AITools, Value: strings.Join(cfg.tools, ",")})
+		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
 	}
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {

@@ -2624,6 +2624,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent != nil && agent.Spec.Runtime != nil {
 			return fmt.Errorf("agent %q has runtime configured (use type: agent instead of type: ai)", agent.Name)
 		}
+		if aiTaskRequestsApprovalTooling(task, agent) && !agentHasAutonomousCoordination(agent) {
+			return fmt.Errorf("request_approval requires enabled autonomous coordination mode")
+		}
 		if agent != nil && agent.Spec.Coordination != nil {
 			approvalRequiredTools := agent.Spec.Coordination.ApprovalRequiredTools
 			if len(approvalRequiredTools) > 0 &&
@@ -2638,6 +2641,31 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		// Container tasks don't use agents, no validation needed
 	}
 	return nil
+}
+
+func aiTaskRequestsApprovalTooling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if agent != nil {
+		for _, toolRef := range agent.Spec.Tools {
+			if toolRef.Enabled != nil && !*toolRef.Enabled {
+				continue
+			}
+			if strings.TrimSpace(toolRef.Name) == "request_approval" {
+				return true
+			}
+		}
+	}
+	if task != nil && task.Spec.AI != nil {
+		for _, toolName := range task.Spec.AI.Tools {
+			if strings.TrimSpace(toolName) == "request_approval" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func agentHasAutonomousCoordination(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && agent.Spec.Coordination.Autonomous
 }
 
 func invalidApprovalRequiredBuiltInTool(values []string) string {
