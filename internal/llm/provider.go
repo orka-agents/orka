@@ -88,13 +88,15 @@ type ToolCall struct {
 
 // StreamChunk represents a chunk of a streaming response
 type StreamChunk struct {
-	Content    string    `json:"content,omitempty"`
-	ToolCall   *ToolCall `json:"tool_call,omitempty"`
-	Done       bool      `json:"done"`
-	StopReason string    `json:"stop_reason,omitempty"`
-	Provider   string    `json:"provider,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	Error      error     `json:"error,omitempty"`
+	Content      string    `json:"content,omitempty"`
+	ToolCall     *ToolCall `json:"tool_call,omitempty"`
+	Done         bool      `json:"done"`
+	StopReason   string    `json:"stop_reason,omitempty"`
+	Provider     string    `json:"provider,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	InputTokens  int       `json:"input_tokens,omitempty"`
+	OutputTokens int       `json:"output_tokens,omitempty"`
+	Error        error     `json:"error,omitempty"`
 }
 
 // ProviderConfig holds configuration for creating a provider

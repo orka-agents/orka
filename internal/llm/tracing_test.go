@@ -117,7 +117,12 @@ func (p *telemetryProvider) Stream(context.Context, *CompletionRequest) (<-chan 
 	}
 	ch <- chunk
 	if p.name != "stream-failed" {
-		ch <- StreamChunk{Done: true, StopReason: "stop"}
+		done := StreamChunk{Done: true, StopReason: "stop"}
+		if p.name == "stream-usage" {
+			done.InputTokens = 13
+			done.OutputTokens = 8
+		}
+		ch <- done
 	}
 	close(ch)
 	return ch, nil
@@ -288,6 +293,30 @@ func TestTracingProviderStreamUsesChunkProviderAndModel(t *testing.T) {
 	rm := mh.Collect(t)
 	if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {
 		t.Fatalf("operation duration datapoints = %d, want 1", got)
+	}
+}
+
+func TestTracingProviderStreamRecordsTokenUsage(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	mh := testutil.NewMetricHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{name: "stream-usage", telemetryName: "openai"})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "gpt-stream"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	attrs := spanAttrs(spans[0])
+	assertIntAttr(t, attrs, genai.AttrUsageInputTokens, 13)
+	assertIntAttr(t, attrs, genai.AttrUsageOutputTokens, 8)
+	rm := mh.Collect(t)
+	if got := histogramPointCount(rm, genai.MetricClientTokenUsage); got != 2 {
+		t.Fatalf("token usage datapoints = %d, want 2", got)
 	}
 }
 

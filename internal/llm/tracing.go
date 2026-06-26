@@ -120,9 +120,15 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		var errType string
 		selectedProviderName := providerName
 		selectedModel := requestModel(req)
+		streamResp := &CompletionResponse{}
 		defer func() {
 			if len(finishReasons) > 0 {
 				span.SetAttributes(attribute.StringSlice(genai.AttrResponseFinishReasons, finishReasons))
+			}
+			if streamResp.InputTokens > 0 || streamResp.OutputTokens > 0 {
+				streamResp.Model = selectedModel
+				setResponseAttributes(span, streamResp, selectedProviderName)
+				tp.recordTokenUsage(ctx, streamResp, selectedProviderName, selectedModel)
 			}
 			tp.recordOperationDuration(ctx, time.Since(start).Seconds(), selectedProviderName, selectedModel, errType)
 			span.End()
@@ -137,6 +143,12 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			if strings.TrimSpace(chunk.Model) != "" {
 				selectedModel = chunk.Model
 				span.SetAttributes(attribute.String(genai.AttrResponseModel, selectedModel))
+			}
+			if chunk.InputTokens > 0 {
+				streamResp.InputTokens = chunk.InputTokens
+			}
+			if chunk.OutputTokens > 0 {
+				streamResp.OutputTokens = chunk.OutputTokens
 			}
 			if !firstChunkRecorded && (chunk.Content != "" || chunk.ToolCall != nil || chunk.Done || chunk.Error != nil) {
 				firstChunkRecorded = true

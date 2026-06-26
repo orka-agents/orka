@@ -869,6 +869,8 @@ func TestStream_ChatCompletions(t *testing.T) {
 		flusher.Flush()
 		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n") //nolint:errcheck
 		flusher.Flush()
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n") //nolint:errcheck
+		flusher.Flush()
 		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		flusher.Flush()
 	}))
@@ -893,11 +895,19 @@ func TestStream_ChatCompletions(t *testing.T) {
 	}
 
 	var content strings.Builder
+	var inputTokens, outputTokens int
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
 		}
+		if chunk.InputTokens > 0 || chunk.OutputTokens > 0 {
+			inputTokens = chunk.InputTokens
+			outputTokens = chunk.OutputTokens
+		}
 		content.WriteString(chunk.Content) //nolint:errcheck
+	}
+	if inputTokens != 10 || outputTokens != 5 {
+		t.Fatalf("stream usage = input:%d output:%d, want input:10 output:5", inputTokens, outputTokens)
 	}
 	if got := content.String(); got != "Hi there" {
 		t.Errorf("expected 'Hi there', got %q", got)
@@ -1314,14 +1324,22 @@ func TestStream_ResponsesAPI(t *testing.T) {
 
 	var content strings.Builder
 	var gotDone bool
+	var inputTokens, outputTokens int
 	for chunk := range ch {
 		if chunk.Error != nil {
 			t.Fatalf("unexpected error: %v", chunk.Error)
+		}
+		if chunk.InputTokens > 0 || chunk.OutputTokens > 0 {
+			inputTokens = chunk.InputTokens
+			outputTokens = chunk.OutputTokens
 		}
 		content.WriteString(chunk.Content) //nolint:errcheck
 		if chunk.Done {
 			gotDone = true
 		}
+	}
+	if inputTokens != 5 || outputTokens != 3 {
+		t.Fatalf("stream usage = input:%d output:%d, want input:5 output:3", inputTokens, outputTokens)
 	}
 	if got := content.String(); got != "Hello World" {
 		t.Errorf("expected 'Hello World', got %q", got)

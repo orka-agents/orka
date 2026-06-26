@@ -1843,6 +1843,8 @@ func TestAddSecretVolumes_AIAgentEnvFromReservesTelemetryEnv(t *testing.T) {
 		workerenv.EnableTelemetry,
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
 		"OTEL_RESOURCE_ATTRIBUTES",
 	} {
 		got, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, name)
@@ -2478,6 +2480,10 @@ func TestSafeWorkerOTLPEnvValueStripsUserinfoFromEndpoints(t *testing.T) {
 	got := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "https://user:pass@collector:4318")
 	if got != "https://collector:4318" {
 		t.Fatalf("sanitized endpoint = %q, want %q", got, "https://collector:4318")
+	}
+	got = safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_ENDPOINT", "user:pass@collector:4317")
+	if got != "collector:4317" {
+		t.Fatalf("scheme-less sanitized endpoint = %q, want %q", got, "collector:4317")
 	}
 
 	unchanged := safeWorkerOTLPEnvValue("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret")

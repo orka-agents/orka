@@ -1298,12 +1298,24 @@ func reservedAIWorkerTelemetryEnvNames() []string {
 		"OTEL_EXPORTER_OTLP_INSECURE",
 		"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
 		"OTEL_EXPORTER_OTLP_METRICS_INSECURE",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
 		"OTEL_EXPORTER_OTLP_TIMEOUT",
 		"OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
 		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
 		"OTEL_EXPORTER_OTLP_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
 		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_CLIENT_KEY",
+		"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+		"OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY",
 		"OTEL_RESOURCE_ATTRIBUTES",
 	}
 }
@@ -1549,12 +1561,21 @@ func safeWorkerOTLPEnvValue(name, value string) string {
 	if !strings.HasSuffix(name, "_ENDPOINT") {
 		return value
 	}
-	parsed, err := url.Parse(value)
+	parseValue := value
+	schemeLess := !strings.Contains(value, "://")
+	if schemeLess {
+		parseValue = "//" + value
+	}
+	parsed, err := url.Parse(parseValue)
 	if err != nil || parsed.User == nil {
 		return value
 	}
 	parsed.User = nil
-	return parsed.String()
+	sanitized := parsed.String()
+	if schemeLess {
+		return strings.TrimPrefix(sanitized, "//")
+	}
+	return sanitized
 }
 
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {

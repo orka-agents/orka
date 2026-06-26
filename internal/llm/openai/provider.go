@@ -692,7 +692,14 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 			return false
 		}
 	}
-	send(llm.StreamChunk{Done: true, StopReason: stopReason})
+	send(llm.StreamChunk{
+		Done:         true,
+		StopReason:   stopReason,
+		InputTokens:  int(evt.Response.Usage.InputTokens),
+		OutputTokens: int(evt.Response.Usage.OutputTokens),
+		Model:        evt.Response.Model,
+		Provider:     genai.ProviderOpenAI,
+	})
 	return false
 }
 
@@ -879,6 +886,9 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 		params := openai.ChatCompletionNewParams{
 			Model:    req.Model,
 			Messages: convertMessages(req.Messages, req.SystemPrompt),
+			StreamOptions: openai.ChatCompletionStreamOptionsParam{
+				IncludeUsage: openai.Bool(true),
+			},
 		}
 		if req.MaxTokens > 0 {
 			params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
@@ -895,6 +905,7 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
+		doneSent := false
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -922,9 +933,22 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 				}
 			}
 
+			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+				if !send(llm.StreamChunk{
+					InputTokens:  int(chunk.Usage.PromptTokens),
+					OutputTokens: int(chunk.Usage.CompletionTokens),
+					Model:        chunk.Model,
+					Provider:     genai.ProviderOpenAI,
+				}) {
+					return
+				}
+			}
+
 			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
-				send(llm.StreamChunk{Done: true, StopReason: chunk.Choices[0].FinishReason})
-				return
+				if !send(llm.StreamChunk{Done: true, StopReason: chunk.Choices[0].FinishReason}) {
+					return
+				}
+				doneSent = true
 			}
 		}
 
@@ -932,7 +956,9 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
 			return
 		}
-		send(llm.StreamChunk{Done: true})
+		if !doneSent {
+			send(llm.StreamChunk{Done: true})
+		}
 	}()
 	return ch
 }
