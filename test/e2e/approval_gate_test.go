@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -132,7 +133,8 @@ var _ = Describe("Human Approval Gate", Ordered, func() {
 		applyManifest(taskManifest)
 
 		By("waiting for the worker to request approval and park without executing the tool")
-		approvalID := waitForPendingApproval(apiBaseURL, approvalTaskName, approvalToolName, 3*time.Minute)
+		approvalID := waitForPendingApproval(approvalTaskName, approvalToolName, 3*time.Minute)
+		waitForPendingApprovalAPI(apiBaseURL, approvalTaskName, approvalID, 30*time.Second)
 		Expect(fetchApprovalMockDispatchCount(approvalMockName, approvalMockPort)).To(Equal(0))
 
 		By("approving the requested action through the controller API")
@@ -314,21 +316,38 @@ func applyManifest(manifest string) {
 	Expect(err).NotTo(HaveOccurred())
 }
 
-func waitForPendingApproval(apiBaseURL, taskName, targetTool string, timeout time.Duration) string {
+func waitForPendingApproval(taskName, targetTool string, timeout time.Duration) string {
 	var approvalID string
+	pattern := regexp.MustCompile(`waiting for approval ([^\s]+) for ` + regexp.QuoteMeta(targetTool))
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "task", taskName,
+			"-o", "jsonpath={.status.message}",
+			"-n", namespace,
+		)
+		message, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		match := pattern.FindStringSubmatch(message)
+		g.Expect(match).To(HaveLen(2), "task should be parked on approval for %s, message=%q", targetTool, message)
+		approvalID = match[1]
+	}, timeout, 2*time.Second).Should(Succeed())
+	return approvalID
+}
+
+func waitForPendingApprovalAPI(apiBaseURL, taskName, approvalID string, timeout time.Duration) {
 	Eventually(func(g Gomega) {
 		approvalsList, status, err := listTaskApprovals(apiBaseURL, taskName)
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(status).To(Equal(http.StatusOK))
+		found := false
 		for _, approval := range approvalsList.Approvals {
-			if approval.TargetTool == targetTool && approval.Status == approvals.StatusPending {
-				approvalID = approval.ID
-				return
+			if approval.ID == approvalID {
+				found = true
+				g.Expect(approval.Status).To(Equal(approvals.StatusPending))
+				break
 			}
 		}
-		g.Expect(approvalID).NotTo(BeEmpty(), "approval should be pending for %s", targetTool)
+		g.Expect(found).To(BeTrue(), "approval API should list pending approval %s", approvalID)
 	}, timeout, 2*time.Second).Should(Succeed())
-	return approvalID
 }
 
 type taskApprovalList struct {
