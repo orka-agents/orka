@@ -135,7 +135,9 @@ var _ = Describe("Human Approval Gate", Ordered, func() {
 		Expect(fetchApprovalMockDispatchCount(approvalMockName, approvalMockPort)).To(Equal(0))
 
 		By("approving the requested action through the controller API")
-		decideApproval(apiBaseURL, approvalTaskName, approvalID, "approve")
+		token, err := serviceAccountToken()
+		Expect(err).NotTo(HaveOccurred())
+		decideApproval(apiBaseURL, approvalTaskName, approvalID, "approve", token)
 
 		By("waiting for the task to resume and succeed")
 		phase := waitForTaskCompletion(approvalTaskName, 5*time.Minute)
@@ -330,13 +332,17 @@ func waitForPendingApproval(taskName, targetTool string, timeout time.Duration) 
 	return approvalID
 }
 
-func decideApproval(apiBaseURL, taskName, approvalID, decision string) {
+func decideApproval(apiBaseURL, taskName, approvalID, decision, token string) {
 	body := []byte(fmt.Sprintf(`{"decision":%q,"reason":"approval gate e2e"}`, decision))
 	url := fmt.Sprintf(
 		"%s/api/v1/tasks/%s/approvals/%s/decision?namespace=%s",
 		strings.TrimRight(apiBaseURL, "/"), taskName, approvalID, namespace,
 	)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	Expect(err).NotTo(HaveOccurred())
 	defer resp.Body.Close()
 	Expect(resp.StatusCode).To(Equal(http.StatusOK))
