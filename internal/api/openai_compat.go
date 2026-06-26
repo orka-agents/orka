@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -234,7 +235,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+	ctx, cancel := context.WithTimeout(c.Context(), h.config.MaxDuration)
 	defer cancel()
 
 	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
@@ -479,7 +480,7 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 // bytes during multi-minute coordinator workflows.
 func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	c fiber.Ctx,
-	_ context.Context,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -495,9 +496,10 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	capturedProvider := provider
 	capturedReq := req
 	capturedToolCtx := toolCtx
+	streamBaseCtx := trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(ctx))
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		// Send role chunk

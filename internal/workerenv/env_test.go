@@ -31,6 +31,9 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		BaseURL:         "https://example.test/v1",
 		AzureAPIVersion: "2024-10-21",
 		Tools:           []string{"delegate_task", "wait_for_tasks"},
+		EnableTelemetry: true,
+		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:      "vendor=value",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -57,6 +60,9 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
+	}
+	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState {
+		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q", parsed, env.TraceParent, env.TraceState)
 	}
 	if len(parsed.Fallbacks) != 1 {
 		t.Fatalf("fallback count = %d, want 1", len(parsed.Fallbacks))
@@ -353,6 +359,7 @@ func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
 		AIPrompt:        "hello",
 		EnableTelemetry: "true",
 		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:      "vendor=value",
 	}
 	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
 	if !got.EnableTelemetry {
@@ -360,6 +367,9 @@ func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
 	}
 	if got.TraceParent != env[TraceParent] {
 		t.Fatalf("TraceParent = %q, want %q", got.TraceParent, env[TraceParent])
+	}
+	if got.TraceState != env[TraceState] {
+		t.Fatalf("TraceState = %q, want %q", got.TraceState, env[TraceState])
 	}
 }
 

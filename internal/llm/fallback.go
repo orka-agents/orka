@@ -186,12 +186,14 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		if f.tracker != nil {
 			f.tracker.Reset(c.provider.Name())
 		}
+		providerName := ProviderTelemetryName(c.provider)
+		modelName := requestModel(callReq)
 		outCh := make(chan StreamChunk)
 		go func() {
 			defer close(outCh)
-			outCh <- firstChunk
+			outCh <- withStreamTelemetry(firstChunk, providerName, modelName)
 			for chunk := range innerCh {
-				outCh <- chunk
+				outCh <- withStreamTelemetry(chunk, providerName, modelName)
 			}
 		}()
 		return outCh, nil
@@ -204,6 +206,16 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 	close(ch)
 	return ch, nil
+}
+
+func withStreamTelemetry(chunk StreamChunk, providerName, modelName string) StreamChunk {
+	if strings.TrimSpace(chunk.Provider) == "" {
+		chunk.Provider = providerName
+	}
+	if strings.TrimSpace(chunk.Model) == "" {
+		chunk.Model = modelName
+	}
+	return chunk
 }
 
 // shortestCooldown returns the provider with the shortest remaining cooldown.

@@ -113,21 +113,31 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		defer close(out)
 		var finishReasons []string
 		var errType string
+		selectedProviderName := providerName
+		selectedModel := requestModel(req)
 		defer func() {
 			if len(finishReasons) > 0 {
 				span.SetAttributes(attribute.StringSlice(genai.AttrResponseFinishReasons, finishReasons))
 			}
-			tp.recordOperationDuration(ctx, time.Since(start).Seconds(), providerName, requestModel(req), errType)
+			tp.recordOperationDuration(ctx, time.Since(start).Seconds(), selectedProviderName, selectedModel, errType)
 			span.End()
 		}()
 
 		var firstChunkRecorded bool
 		for chunk := range innerCh {
+			if strings.TrimSpace(chunk.Provider) != "" {
+				selectedProviderName = genai.NormalizeProviderName(chunk.Provider)
+				span.SetAttributes(attribute.String(genai.AttrProviderName, selectedProviderName))
+			}
+			if strings.TrimSpace(chunk.Model) != "" {
+				selectedModel = chunk.Model
+				span.SetAttributes(attribute.String(genai.AttrResponseModel, selectedModel))
+			}
 			if !firstChunkRecorded && (chunk.Content != "" || chunk.ToolCall != nil || chunk.Done || chunk.Error != nil) {
 				firstChunkRecorded = true
 				latency := time.Since(start).Seconds()
 				span.SetAttributes(attribute.Float64(genai.AttrResponseTimeToFirstChunk, latency))
-				tp.recordTimeToFirstChunk(ctx, latency, providerName, requestModel(req))
+				tp.recordTimeToFirstChunk(ctx, latency, selectedProviderName, selectedModel)
 			}
 			if chunk.StopReason != "" {
 				finishReasons = []string{chunk.StopReason}

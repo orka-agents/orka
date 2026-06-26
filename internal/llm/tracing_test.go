@@ -107,7 +107,12 @@ func (p *telemetryProvider) Complete(context.Context, *CompletionRequest) (*Comp
 }
 func (p *telemetryProvider) Stream(context.Context, *CompletionRequest) (<-chan StreamChunk, error) {
 	ch := make(chan StreamChunk, 2)
-	ch <- StreamChunk{Content: "hello"}
+	chunk := StreamChunk{Content: "hello"}
+	if p.name == "fallback(openai)" {
+		chunk.Provider = "azure-openai"
+		chunk.Model = "fallback-model"
+	}
+	ch <- chunk
 	ch <- StreamChunk{Done: true, StopReason: "stop"}
 	close(ch)
 	return ch, nil
@@ -224,6 +229,32 @@ func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *te
 	}
 	attrs := spanAttrs(spans[0])
 	assertStringAttr(t, attrs, genai.AttrProviderName, genai.ProviderAzureOpenAI)
+}
+
+func TestTracingProviderStreamUsesChunkProviderAndModel(t *testing.T) {
+	h := testutil.NewSpanHarness(t)
+	mh := testutil.NewMetricHarness(t)
+	tp := NewTracingProvider(&telemetryProvider{
+		name:          "fallback(openai)",
+		telemetryName: "openai",
+	})
+	ch, err := tp.Stream(context.Background(), &CompletionRequest{Model: "primary-model"})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	for range ch {
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	attrs := spanAttrs(spans[0])
+	assertStringAttr(t, attrs, genai.AttrProviderName, genai.ProviderAzureOpenAI)
+	assertStringAttr(t, attrs, genai.AttrResponseModel, "fallback-model")
+	rm := mh.Collect(t)
+	if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {
+		t.Fatalf("operation duration datapoints = %d, want 1", got)
+	}
 }
 
 func TestTracingProviderStreamEmitsFirstChunk(t *testing.T) {

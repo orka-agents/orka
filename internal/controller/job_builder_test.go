@@ -2455,12 +2455,14 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	builder := setupJobBuilder()
 	builder.EnableTelemetry = true
 	traceparent := "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"
+	tracestate := "vendor=value"
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
 			Namespace: defaultNS,
 			Annotations: map[string]string{
 				labels.AnnotationTraceParent: traceparent,
+				labels.AnnotationTraceState:  tracestate,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "p"},
@@ -2485,8 +2487,11 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 			t.Fatalf("%s must not be copied into task workloads", name)
 		}
 	}
-	if got, ok := findEnvVar(envVars, workerenv.TraceParent); !ok || got.Value == "" {
+	if got, ok := findEnvVar(envVars, workerenv.TraceParent); !ok || got.Value != traceparent {
 		t.Fatalf("%s = %#v, found=%v", workerenv.TraceParent, got, ok)
+	}
+	if got, ok := findEnvVar(envVars, workerenv.TraceState); !ok || got.Value != tracestate {
+		t.Fatalf("%s = %#v, found=%v", workerenv.TraceState, got, ok)
 	}
 
 	agentTask := task.DeepCopy()

@@ -112,7 +112,10 @@ func run() (err error) {
 		}
 	}()
 	if workerEnv.TraceParent != "" {
-		ctx = tracing.ExtractContext(ctx, tracing.MapCarrier{"traceparent": workerEnv.TraceParent})
+		ctx = tracing.ExtractContext(ctx, tracing.MapCarrier{
+			"traceparent": workerEnv.TraceParent,
+			"tracestate":  workerEnv.TraceState,
+		})
 	}
 
 	transactionLogFields := workerenv.TransactionLogFields(

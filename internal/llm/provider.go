@@ -92,6 +92,8 @@ type StreamChunk struct {
 	ToolCall   *ToolCall `json:"tool_call,omitempty"`
 	Done       bool      `json:"done"`
 	StopReason string    `json:"stop_reason,omitempty"`
+	Provider   string    `json:"provider,omitempty"`
+	Model      string    `json:"model,omitempty"`
 	Error      error     `json:"error,omitempty"`
 }
 

@@ -245,7 +245,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+	ctx, cancel := context.WithTimeout(c.Context(), h.config.MaxDuration)
 	defer cancel()
 
 	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
