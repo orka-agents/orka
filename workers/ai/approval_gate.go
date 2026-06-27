@@ -383,19 +383,33 @@ func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
 	return strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey)
 }
 
-func safeApprovalTTSURLIdentity(value string) string {
+func approvalTTSURLIdentity(value string) (string, string) {
 	value = strings.TrimRight(strings.TrimSpace(value), "/")
 	if value == "" {
-		return ""
+		return "", ""
 	}
 	parsed, err := neturl.Parse(value)
 	if err != nil {
-		return ""
+		return "", ""
+	}
+	extra := []string{}
+	if parsed.User != nil {
+		extra = append(extra, "userinfo="+parsed.User.String())
+	}
+	if parsed.RawQuery != "" {
+		extra = append(extra, "query="+parsed.RawQuery)
+	}
+	if parsed.Fragment != "" {
+		extra = append(extra, "fragment="+parsed.Fragment)
 	}
 	parsed.User = nil
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
-	return parsed.String()
+	if len(extra) == 0 {
+		return parsed.String(), ""
+	}
+	sum := sha256.Sum256([]byte(strings.Join(extra, "\n")))
+	return parsed.String(), hex.EncodeToString(sum[:])
 }
 
 func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
@@ -467,6 +481,7 @@ type approvalTransactionAuthorityShape struct {
 	TransactionRequesterDigest string `json:"transactionRequesterDigest,omitempty"`
 	KontxtOutboundScope        string `json:"kontxtOutboundScope,omitempty"`
 	KontxtTTSURL               string `json:"kontxtTTSURL,omitempty"`
+	KontxtTTSURLExtraSHA256    string `json:"kontxtTTSURLExtraSHA256,omitempty"`
 	KontxtTTSAudience          string `json:"kontxtTTSAudience,omitempty"`
 	KontxtTTSSource            string `json:"kontxtTTSSource,omitempty"`
 	KontxtSubjectType          string `json:"kontxtSubjectType,omitempty"`
@@ -484,6 +499,7 @@ func approvalTransactionAuthorityIdentity() (*approvalTransactionAuthorityShape,
 	if ttsURL != "" && subjectType == "" {
 		subjectType = contexttoken.SubjectTokenTypeForSource(ttsSource)
 	}
+	ttsSafeURL, ttsURLExtraDigest := approvalTTSURLIdentity(ttsURL)
 	identity := &approvalTransactionAuthorityShape{
 		TransactionID:              strings.TrimSpace(os.Getenv(workerenv.TransactionID)),
 		TransactionScope:           strings.TrimSpace(os.Getenv(workerenv.TransactionScope)),
@@ -491,7 +507,8 @@ func approvalTransactionAuthorityIdentity() (*approvalTransactionAuthorityShape,
 		TransactionContextDigest:   strings.TrimSpace(os.Getenv(workerenv.TransactionContextDigest)),
 		TransactionRequesterDigest: strings.TrimSpace(os.Getenv(workerenv.TransactionRequesterContextDigest)),
 		KontxtOutboundScope:        strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope)),
-		KontxtTTSURL:               safeApprovalTTSURLIdentity(ttsURL),
+		KontxtTTSURL:               ttsSafeURL,
+		KontxtTTSURLExtraSHA256:    ttsURLExtraDigest,
 		KontxtTTSAudience:          strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSAudience)),
 		KontxtTTSSource:            ttsSource,
 		KontxtSubjectType:          subjectType,

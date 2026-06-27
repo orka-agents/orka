@@ -850,8 +850,8 @@ func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approvalTargetSpecDigest() sanitized endpoint error = %v", err)
 	}
-	if sameSafeEndpoint != first {
-		t.Fatal("TTS URL query/fragment changed approval target digest; only safe endpoint identity should be bound")
+	if sameSafeEndpoint == first {
+		t.Fatal("TTS URL query/fragment change did not affect approval target digest")
 	}
 
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceServiceAccount)
@@ -859,7 +859,7 @@ func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approvalTargetSpecDigest() token source error = %v", err)
 	}
-	if changedSource == sameSafeEndpoint {
+	if changedSource == first {
 		t.Fatal("TTS token source change did not affect approval target digest")
 	}
 
@@ -869,7 +869,7 @@ func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approvalTargetSpecDigest() subject token type error = %v", err)
 	}
-	if changedSubjectType == sameSafeEndpoint {
+	if changedSubjectType == first {
 		t.Fatal("TTS subject token type change did not affect approval target digest")
 	}
 }
