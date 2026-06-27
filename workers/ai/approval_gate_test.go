@@ -824,6 +824,56 @@ func TestApprovalTargetSpecDigestIncludesTransactionAuthorityDigest(t *testing.T
 	}
 }
 
+func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	t.Setenv(workerenv.ContextTokenTTSURL, "https://tts-a.example.test/exchange?nonce=one#frag")
+	t.Setenv(workerenv.ContextTokenTTSAudience, "aud-1")
+	t.Setenv(workerenv.ContextTokenToolTokenTTL, "5m")
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenSubjectTokenType, "urn:subject:one")
+	first, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
+	}
+
+	t.Setenv(workerenv.ContextTokenTTSURL, "https://tts-b.example.test/exchange?nonce=two#frag")
+	changedEndpoint, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() endpoint error = %v", err)
+	}
+	if changedEndpoint == first {
+		t.Fatal("TTS endpoint change did not affect approval target digest")
+	}
+
+	t.Setenv(workerenv.ContextTokenTTSURL, "https://tts-a.example.test/exchange?nonce=changed#other")
+	sameSafeEndpoint, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() sanitized endpoint error = %v", err)
+	}
+	if sameSafeEndpoint != first {
+		t.Fatal("TTS URL query/fragment changed approval target digest; only safe endpoint identity should be bound")
+	}
+
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceServiceAccount)
+	changedSource, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() token source error = %v", err)
+	}
+	if changedSource == sameSafeEndpoint {
+		t.Fatal("TTS token source change did not affect approval target digest")
+	}
+
+	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
+	t.Setenv(workerenv.ContextTokenSubjectTokenType, "urn:subject:two")
+	changedSubjectType, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatalf("approvalTargetSpecDigest() subject token type error = %v", err)
+	}
+	if changedSubjectType == sameSafeEndpoint {
+		t.Fatal("TTS subject token type change did not affect approval target digest")
+	}
+}
+
 func TestApprovalTargetSpecDigestKeepsHTTPToolSpecDigest(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
 	got, err := approvalTargetSpecDigest(tool)
