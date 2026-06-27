@@ -360,3 +360,43 @@ func TestExecutionSpecOnAgentAndTaskSpec(t *testing.T) {
 		t.Errorf("Task.Execution.RuntimeClassName = %q, want %q", task.Execution.RuntimeClassName, testExecutionRuntimeClassGVisor)
 	}
 }
+
+func TestAgentRuntimeReferenceOnAgentCLI(t *testing.T) {
+	runtime := AgentCLIRuntime{RuntimeRef: &AgentRuntimeReference{Name: "fibey-agentkit"}}
+	if runtime.RuntimeRef == nil || runtime.RuntimeRef.Name != "fibey-agentkit" {
+		t.Fatalf("RuntimeRef = %#v, want fibey-agentkit", runtime.RuntimeRef)
+	}
+	if runtime.Type != "" {
+		t.Fatalf("Type = %q, want empty for runtimeRef custom runtime", runtime.Type)
+	}
+}
+
+func TestAgentRuntimeCRDSpecFields(t *testing.T) {
+	supportsCancel := true
+	runtime := AgentRuntime{
+		Spec: AgentRuntimeRegistrySpec{
+			ContractVersion: AgentRuntimeContractHarnessV1,
+			Deployment: AgentRuntimeDeploymentSpec{
+				Mode:     AgentRuntimeDeploymentModeExternalEndpoint,
+				Endpoint: "http://fibey-agentkit.default.svc.cluster.local:8080",
+			},
+			ClientAuth: AgentRuntimeClientAuth{BearerAuthRef: AgentRuntimeBearerAuthReference{
+				Name: "fibey-agentkit-harness-token",
+				Key:  "token",
+			}},
+			Capabilities: &AgentRuntimeCapabilitiesSpec{
+				ToolExecutionModes: []AgentRuntimeToolExecutionMode{AgentRuntimeToolExecutionModeObserved},
+				SupportsCancel:     &supportsCancel,
+			},
+		},
+	}
+	if runtime.Spec.ContractVersion != AgentRuntimeContractHarnessV1 {
+		t.Fatalf("ContractVersion = %q", runtime.Spec.ContractVersion)
+	}
+	if runtime.Spec.Deployment.Mode != AgentRuntimeDeploymentModeExternalEndpoint {
+		t.Fatalf("Deployment.Mode = %q", runtime.Spec.Deployment.Mode)
+	}
+	if runtime.Spec.ClientAuth.BearerAuthRef.Name != "fibey-agentkit-harness-token" {
+		t.Fatalf("BearerAuthRef.Name = %q", runtime.Spec.ClientAuth.BearerAuthRef.Name)
+	}
+}

@@ -11,7 +11,7 @@ import (
 )
 
 func TestEchoHarnessCancelEndpointMatchesCapabilities(t *testing.T) {
-	s := &server{turns: map[harness.HarnessTurnID]harness.StartTurnRequest{}}
+	s := &server{runtimeName: "orka-example-echo-harness", turns: map[harness.HarnessTurnID]harness.StartTurnRequest{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.health)
 	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)

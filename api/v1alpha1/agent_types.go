@@ -72,10 +72,15 @@ type AgentSpec struct {
 }
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
+// +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 type AgentCLIRuntime struct {
-	// Type specifies which CLI runtime to use
-	// +kubebuilder:validation:Required
-	Type AgentRuntimeType `json:"type"`
+	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
+	// +optional
+	Type AgentRuntimeType `json:"type,omitempty"`
+
+	// RuntimeRef selects an admin-governed AgentRuntime for custom/BYO harness runtimes.
+	// +optional
+	RuntimeRef *AgentRuntimeReference `json:"runtimeRef,omitempty"`
 
 	// DefaultMaxTurns is the default maximum agent loop iterations for tasks using this Agent
 	// +kubebuilder:validation:Minimum=1

@@ -1,0 +1,21 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: sample-agentkit
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://sample-agentkit.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: sample-agentkit-harness-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+    - observed
+    supportsCancel: true
+    supportsRuntimeSessions: true

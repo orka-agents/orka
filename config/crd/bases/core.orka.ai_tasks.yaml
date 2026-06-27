@@ -2043,6 +2043,38 @@ spec:
                         type: string
                     type: object
                 type: object
+              harnessRuntime:
+                description: |-
+                  HarnessRuntime records the controller-resolved harness runtime target for an
+                  in-flight agent turn. It intentionally stores only non-secret routing metadata
+                  and Secret references, never bearer values.
+                properties:
+                  authRefField:
+                    description: AuthRefField is the Secret data field selected when
+                      the turn started.
+                    type: string
+                  authRefName:
+                    description: AuthRefName is the Secret name selected when the
+                      turn started.
+                    type: string
+                  contractVersion:
+                    description: ContractVersion is the Orka harness contract version
+                      used for the turn.
+                    type: string
+                  endpoint:
+                    description: Endpoint is the non-secret harness base URL selected
+                      when the turn started.
+                    type: string
+                  runtimeGeneration:
+                    description: RuntimeGeneration is the AgentRuntime generation
+                      selected when the turn started.
+                    format: int64
+                    type: integer
+                  runtimeRefName:
+                    description: RuntimeRefName is the AgentRuntime name for custom
+                      runtimeRef turns. Empty means built-in CLI wrapper.
+                    type: string
+                type: object
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).

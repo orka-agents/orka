@@ -759,6 +759,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.AgentRuntimeReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
+		os.Exit(1)
+	}
+
 	if err := (&controller.ProviderReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

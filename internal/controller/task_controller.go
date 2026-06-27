@@ -2507,12 +2507,23 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent.Spec.Runtime == nil {
 			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 		}
-		switch agent.Spec.Runtime.Type {
-		case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+		hasRuntimeRef := agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
+		hasBuiltInRuntime := strings.TrimSpace(string(agent.Spec.Runtime.Type)) != ""
+		switch {
+		case hasRuntimeRef && hasBuiltInRuntime:
+			return fmt.Errorf("agent %q sets both runtime.type and runtime.runtimeRef; set exactly one", agent.Name)
+		case hasRuntimeRef:
+			// Custom runtimes are resolved through AgentRuntime readiness before StartTurn.
+		case hasBuiltInRuntime:
+			switch agent.Spec.Runtime.Type {
+			case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+			default:
+				return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
+			}
 		default:
-			return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
+			return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 		}
-		if taskRequestsReadOnlyAgent(task) {
+		if taskRequestsReadOnlyAgent(task) && hasBuiltInRuntime {
 			switch agent.Spec.Runtime.Type {
 			case corev1alpha1.AgentRuntimeCodex:
 				return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")

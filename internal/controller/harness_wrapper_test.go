@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/harness/harnesstest"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -61,9 +64,9 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 }
 
 func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
-	t.Setenv(harnessWrapperAuthValueEnv, "controller-auth-value")
+	t.Setenv(harnessWrapperAuthValueEnv, "x")
 	cfg := cliwrapper.DefaultConfig()
-	cfg.AuthValue = "controller-auth-value"
+	cfg.AuthValue = "x"
 	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +81,128 @@ func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
 	updated := runHarnessWrapperTaskToCompletion(t, r, task)
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+}
+
+func TestHarnessWrapperTaskRunsAgainstRuntimeRefAgentRuntime(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit"})
+	defer server.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	updated := runHarnessWrapperTaskToCompletion(t, r, task)
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded (message=%s)", updated.Status.Phase, updated.Status.Message)
+	}
+	if got := updated.Annotations[harnessWrapperRuntimeRefAnno]; got != "fibey-agentkit" {
+		t.Fatalf("runtimeRef annotation = %q, want fibey-agentkit", got)
+	}
+	if got := updated.Annotations[harnessWrapperContractAnno]; got != "orka.harness.v1" {
+		t.Fatalf("contract annotation = %q, want orka.harness.v1", got)
+	}
+}
+
+func TestHarnessWrapperRuntimeRefFreezesEndpointForRunningTurn(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit"})
+	defer server.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+
+	var running corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &running); err != nil {
+		t.Fatalf("get running task: %v", err)
+	}
+	var changed corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "fibey-agentkit", Namespace: task.Namespace}, &changed); err != nil {
+		t.Fatalf("get runtime: %v", err)
+	}
+	changed.Spec.Deployment.Endpoint = "http://127.0.0.1:1"
+	changed.Generation = 2
+	changed.Status.Ready = false
+	changed.Status.ObservedGeneration = 1
+	if err := r.Update(context.Background(), &changed); err != nil {
+		t.Fatalf("update runtime spec: %v", err)
+	}
+	if err := r.Status().Update(context.Background(), &changed); err != nil {
+		t.Fatalf("update runtime status: %v", err)
+	}
+
+	if _, err := r.handleRunning(context.Background(), &running); err != nil {
+		t.Fatalf("handleRunning: %v", err)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded using frozen endpoint (message=%s)", updated.Status.Phase, updated.Status.Message)
+	}
+}
+
+func TestHarnessWrapperRuntimeRefNotReadyWaitsBeforeStartTurn(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL)
+	runtime.Status.Ready = false
+	runtime.Status.Message = "probe failed"
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %s, want dependency wait", result.RequeueAfter)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending", updated.Status.Phase)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("server requests = %d, want 0 before StartTurn", got)
+	}
+}
+
+func TestHarnessWrapperRuntimeRefStaleGenerationWaitsBeforeStartTurn(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://127.0.0.1:1")
+	runtime.Generation = 2
+	runtime.Status.ObservedGeneration = 1
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %s, want dependency wait", result.RequeueAfter)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
+		t.Fatalf("phase = %s, want Pending", updated.Status.Phase)
 	}
 }
 
@@ -193,6 +318,41 @@ func attachHarnessWrapperRuntimeSecret(task *corev1alpha1.Task, agent *corev1alp
 			workerenv.OpenAIAPIKey: []byte("test-runtime-key"),
 		},
 	}
+}
+
+func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
+	const name = "fibey-agentkit"
+	runtime := &corev1alpha1.AgentRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
+		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
+				Mode:     corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
+				Endpoint: endpoint,
+			},
+			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{BearerAuthRef: corev1alpha1.AgentRuntimeBearerAuthReference{
+				Name: name + "-token",
+				Key:  "token",
+			}},
+		},
+		Status: corev1alpha1.AgentRuntimeStatus{
+			Ready:              true,
+			ObservedGeneration: 1,
+			ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
+				ProtocolVersion:         "orka.harness.v1",
+				RuntimeName:             name,
+				ToolExecutionModes:      []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionModeObserved},
+				SupportsCancel:          true,
+				MaxConcurrentTurns:      1,
+				SupportsRuntimeSessions: true,
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}},
+		Data:       map[string][]byte{"token": []byte("x")},
+	}
+	return runtime, secret
 }
 
 func hasExecutionEventType(eventsList []store.ExecutionEvent, typ string) bool {

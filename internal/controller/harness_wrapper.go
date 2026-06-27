@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -32,22 +33,28 @@ import (
 const cliwrapperLocalOutputRef = "cliwrapper-result-v1"
 
 const (
-	harnessWrapperEndpointEnv            = "ORKA_HARNESS_WRAPPER_ENDPOINT"
-	harnessWrapperAuthValueEnv           = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
-	harnessWrapperAuthValueFileEnv       = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
-	harnessWrapperTurnIDAnnotation       = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation      = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperCorrelationIDAnno      = "orka.ai/harness-wrapper-correlation-id"
-	harnessWrapperLastFrameSeqAnno       = "orka.ai/harness-wrapper-last-frame-seq"
-	harnessWrapperStartedAnno            = "orka.ai/harness-wrapper-started"
-	harnessWrapperPlannedAtAnno          = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperMetadataAnno           = "orka.ai/harness-wrapper-metadata"
-	harnessWrapperOutputFetchRetriesAnno = "orka.ai/harness-wrapper-output-fetch-retries"
-	harnessWrapperMaxOutputFetchRetries  = 3
-	harnessWrapperSkillsFilesMeta        = "skillsFiles"
-	harnessWrapperStreamPollTimeout      = 2 * time.Second
-	harnessWrapperNoTimeoutDuration      = time.Hour * 24 * 365 * 100
-	harnessWrapperRuntimeGeneric         = "generic"
+	harnessWrapperEndpointEnv             = "ORKA_HARNESS_WRAPPER_ENDPOINT"
+	harnessWrapperAuthValueEnv            = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
+	harnessWrapperAuthValueFileEnv        = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
+	harnessWrapperTurnIDAnnotation        = "orka.ai/harness-wrapper-turn-id"
+	harnessWrapperRuntimeAnnotation       = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperCorrelationIDAnno       = "orka.ai/harness-wrapper-correlation-id"
+	harnessWrapperLastFrameSeqAnno        = "orka.ai/harness-wrapper-last-frame-seq"
+	harnessWrapperStartedAnno             = "orka.ai/harness-wrapper-started"
+	harnessWrapperPlannedAtAnno           = "orka.ai/harness-wrapper-planned-at"
+	harnessWrapperMetadataAnno            = "orka.ai/harness-wrapper-metadata"
+	harnessWrapperRuntimeRefAnno          = "orka.ai/harness-wrapper-runtime-ref"
+	harnessWrapperContractAnno            = "orka.ai/harness-wrapper-contract-version"
+	harnessWrapperRuntimeEndpointAnno     = "orka.ai/harness-wrapper-runtime-endpoint"
+	harnessWrapperRuntimeGenerationAnno   = "orka.ai/harness-wrapper-runtime-generation"
+	harnessWrapperRuntimeAuthRefNameAnno  = "orka.ai/harness-wrapper-runtime-auth-secret-name"
+	harnessWrapperRuntimeAuthRefFieldAnno = "orka.ai/harness-wrapper-runtime-auth-secret-key"
+	harnessWrapperOutputFetchRetriesAnno  = "orka.ai/harness-wrapper-output-fetch-retries"
+	harnessWrapperMaxOutputFetchRetries   = 3
+	harnessWrapperSkillsFilesMeta         = "skillsFiles"
+	harnessWrapperStreamPollTimeout       = 2 * time.Second
+	harnessWrapperNoTimeoutDuration       = time.Hour * 24 * 365 * 100
+	harnessWrapperRuntimeGeneric          = "generic"
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -79,6 +86,235 @@ func harnessWrapperAuthValue() string {
 		}
 	}
 	return strings.TrimSpace(os.Getenv(harnessWrapperAuthValueEnv))
+}
+
+type harnessRuntimeTarget struct {
+	Endpoint        string
+	BearerToken     string
+	RuntimeName     string
+	RuntimeRefName  string
+	ContractVersion string
+	Wrapper         string
+	Generation      int64
+	AuthRefName     string
+	AuthRefField    string
+}
+
+type agentRuntimeDependencyNotReadyError struct {
+	message string
+}
+
+func (e agentRuntimeDependencyNotReadyError) Error() string { return e.message }
+
+func isAgentRuntimeDependencyNotReady(err error) bool {
+	var notReady agentRuntimeDependencyNotReadyError
+	return errors.As(err, &notReady)
+}
+
+func agentHarnessRuntimeName(agent *corev1alpha1.Agent) string {
+	if agent != nil && agent.Spec.Runtime != nil {
+		if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+			return strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+		}
+		if strings.TrimSpace(string(agent.Spec.Runtime.Type)) != "" {
+			return string(agent.Spec.Runtime.Type)
+		}
+	}
+	return string(corev1alpha1.AgentRuntimeClaude)
+}
+
+func agentHarnessRuntimeRefName(agent *corev1alpha1.Agent) string {
+	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return ""
+	}
+	return strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
+}
+
+func harnessWrapperPlannedRuntimeRefName(task *corev1alpha1.Task) string {
+	if task == nil || task.Annotations == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(task.Annotations[harnessWrapperRuntimeRefAnno]); value != "" {
+		return value
+	}
+	metadata := harnessWrapperPlannedMetadata(task, "")
+	return strings.TrimSpace(metadata["runtimeRef"])
+}
+
+func harnessRuntimeTargetFromStatus(task *corev1alpha1.Task) (harnessRuntimeTarget, bool) {
+	if task == nil || task.Status.HarnessRuntime == nil {
+		return harnessRuntimeTarget{}, false
+	}
+	status := task.Status.HarnessRuntime
+	if strings.TrimSpace(status.RuntimeRefName) == "" || strings.TrimSpace(status.Endpoint) == "" ||
+		strings.TrimSpace(status.AuthRefName) == "" || strings.TrimSpace(status.AuthRefField) == "" {
+		return harnessRuntimeTarget{}, false
+	}
+	contract := strings.TrimSpace(status.ContractVersion)
+	if contract == "" {
+		contract = harness.ProtocolVersion
+	}
+	return harnessRuntimeTarget{
+		Endpoint:        strings.TrimSpace(status.Endpoint),
+		RuntimeName:     strings.TrimSpace(status.RuntimeRefName),
+		RuntimeRefName:  strings.TrimSpace(status.RuntimeRefName),
+		ContractVersion: contract,
+		Wrapper:         "external-endpoint",
+		Generation:      status.RuntimeGeneration,
+		AuthRefName:     strings.TrimSpace(status.AuthRefName),
+		AuthRefField:    strings.TrimSpace(status.AuthRefField),
+	}, true
+}
+
+func harnessWrapperApplyRuntimeTargetMetadata(metadata map[string]string, target harnessRuntimeTarget) map[string]string {
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if target.RuntimeRefName == "" {
+		return metadata
+	}
+	metadata["runtimeRef"] = target.RuntimeRefName
+	metadata["wrapper"] = target.Wrapper
+	metadata["contractVersion"] = target.ContractVersion
+	metadata["runtimeEndpoint"] = target.Endpoint
+	metadata["runtimeGeneration"] = strconv.FormatInt(target.Generation, 10)
+	metadata["runtimeAuthRefName"] = target.AuthRefName
+	metadata["runtimeAuthRefField"] = target.AuthRefField
+	return metadata
+}
+
+func harnessRuntimeStatusFromTarget(target harnessRuntimeTarget) *corev1alpha1.HarnessRuntimeStatus {
+	if target.RuntimeRefName == "" {
+		return nil
+	}
+	return &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:    target.RuntimeRefName,
+		ContractVersion:   target.ContractVersion,
+		Endpoint:          target.Endpoint,
+		RuntimeGeneration: target.Generation,
+		AuthRefName:       target.AuthRefName,
+		AuthRefField:      target.AuthRefField,
+	}
+}
+
+func (r *TaskReconciler) patchHarnessRuntimeStatus(ctx context.Context, task *corev1alpha1.Task, target harnessRuntimeTarget) error {
+	status := harnessRuntimeStatusFromTarget(target)
+	if status == nil {
+		return nil
+	}
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.HarnessRuntime = status
+	})
+}
+
+func (r *TaskReconciler) resolveHarnessRuntimeTarget(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) (harnessRuntimeTarget, error) {
+	if taskHasHarnessWrapperTurn(task) {
+		if frozen, ok := harnessRuntimeTargetFromStatus(task); ok {
+			token, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.AuthRefName, frozen.AuthRefField)
+			if err != nil {
+				return harnessRuntimeTarget{}, err
+			}
+			frozen.BearerToken = token
+			return frozen, nil
+		}
+	}
+	runtimeRefName := agentHarnessRuntimeRefName(agent)
+	if runtimeRefName == "" {
+		runtimeRefName = harnessWrapperPlannedRuntimeRefName(task)
+	}
+	if runtimeRefName == "" {
+		endpoint := harnessWrapperEndpoint()
+		if endpoint == "" {
+			return harnessRuntimeTarget{}, fmt.Errorf("%s is required when agent harness runtime is enabled", harnessWrapperEndpointEnv)
+		}
+		return harnessRuntimeTarget{
+			Endpoint:        endpoint,
+			BearerToken:     (harnessWrapperAuthValue()),
+			RuntimeName:     agentHarnessRuntimeName(agent),
+			ContractVersion: harness.ProtocolVersion,
+			Wrapper:         "cli",
+		}, nil
+	}
+	if task == nil {
+		return harnessRuntimeTarget{}, fmt.Errorf("task is required to resolve runtimeRef %q", runtimeRefName)
+	}
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: runtimeRefName}, runtime); err != nil {
+		if apierrors.IsNotFound(err) {
+			return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q not found in namespace %q", runtimeRefName, task.Namespace)
+		}
+		return harnessRuntimeTarget{}, fmt.Errorf("read AgentRuntime %q: %w", runtimeRefName, err)
+	}
+	if runtime.Status.ObservedGeneration != runtime.Generation {
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: observedGeneration %d is stale for generation %d", runtimeRefName, runtime.Status.ObservedGeneration, runtime.Generation)}
+	}
+	if !runtime.Status.Ready {
+		message := strings.TrimSpace(runtime.Status.Message)
+		if message == "" {
+			message = "runtime is not Ready"
+		}
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %s", runtimeRefName, message)}
+	}
+	if runtime.Spec.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 {
+		return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q has unsupported contractVersion %q", runtimeRefName, runtime.Spec.ContractVersion)
+	}
+	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
+		return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q has unsupported deployment.mode %q", runtimeRefName, runtime.Spec.Deployment.Mode)
+	}
+	token, err := r.resolveAgentRuntimeBearerToken(ctx, runtime)
+	if err != nil {
+		return harnessRuntimeTarget{}, err
+	}
+	ref := runtime.Spec.ClientAuth.BearerAuthRef
+	return harnessRuntimeTarget{
+		Endpoint:        strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
+		BearerToken:     token,
+		RuntimeName:     runtimeRefName,
+		RuntimeRefName:  runtimeRefName,
+		ContractVersion: string(runtime.Spec.ContractVersion),
+		Wrapper:         "external-endpoint",
+		Generation:      runtime.Generation,
+		AuthRefName:     strings.TrimSpace(ref.Name),
+		AuthRefField:    strings.TrimSpace(ref.Key),
+	}, nil
+}
+
+func (r *TaskReconciler) resolveAgentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, error) {
+	if runtime == nil {
+		return "", fmt.Errorf("AgentRuntime is required")
+	}
+	ref := runtime.Spec.ClientAuth.BearerAuthRef
+	return r.resolveAgentRuntimeBearerTokenFromRef(ctx, runtime.Namespace, runtime.Name, ref.Name, ref.Key)
+}
+
+func (r *TaskReconciler) resolveAgentRuntimeBearerTokenFromRef(
+	ctx context.Context,
+	namespace string,
+	runtimeName string,
+	refName string,
+	refField string,
+) (string, error) {
+	refName = strings.TrimSpace(refName)
+	refField = strings.TrimSpace(refField)
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: refName}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("AgentRuntime %q bearer token Secret %q not found", runtimeName, refName)
+		}
+		return "", fmt.Errorf("read AgentRuntime %q bearer token Secret %q: %w", runtimeName, refName, err)
+	}
+	if err := validateAgentRuntimeBearerSecretUse(runtimeName, secret); err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(secret.Data[refField]))
+	if value == "" {
+		return "", fmt.Errorf("AgentRuntime %q bearer token Secret %q key %q is empty or missing", runtimeName, refName, refField)
+	}
+	return value, nil
 }
 
 //nolint:gocyclo // Coordinates idempotent turn planning, wrapper start, and Running transition.
@@ -116,14 +352,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
 
-	endpoint := harnessWrapperEndpoint()
-	if endpoint == "" {
-		return r.failTask(ctx, task, fmt.Sprintf("%s is required when agent harness runtime is enabled", harnessWrapperEndpointEnv))
-	}
 	if r.ExecutionEventStore == nil {
 		return r.failTask(ctx, task, "execution event store is required for harness wrapper mode")
 	}
 	var request harness.StartTurnRequest
+	var target harnessRuntimeTarget
 	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if !taskHasHarnessWrapperTurn(task) {
@@ -148,7 +381,18 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		if err != nil {
 			return r.failTask(ctx, task, err.Error())
 		}
+		target, err = r.resolveHarnessRuntimeTarget(ctx, task, agent)
+		if err != nil {
+			if isAgentRuntimeDependencyNotReady(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
+		}
+		request.Metadata = harnessWrapperApplyRuntimeTargetMetadata(request.Metadata, target)
 		if err := r.patchHarnessWrapperPlannedTurn(ctx, task, request); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.patchHarnessRuntimeStatus(ctx, task, target); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -162,9 +406,18 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			task.Status = latest.Status
 			return ctrl.Result{}, nil
 		}
-		client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+		if strings.TrimSpace(target.Endpoint) == "" {
+			target, err = r.resolveHarnessRuntimeTarget(ctx, task, agent)
+			if err != nil {
+				if isAgentRuntimeDependencyNotReady(err) {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
+			}
+		}
+		client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
 		if err != nil {
-			return r.failTask(ctx, task, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
+			return r.failTask(ctx, task, fmt.Sprintf("invalid harness runtime endpoint: %v", err))
 		}
 		if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
 			if harnessWrapperCapabilitiesErrorIsRetryable(err) {
@@ -209,6 +462,16 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		}
 	}
 
+	if strings.TrimSpace(target.Endpoint) == "" {
+		target, err = r.resolveHarnessRuntimeTarget(ctx, task, agent)
+		if err != nil {
+			if isAgentRuntimeDependencyNotReady(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
+		}
+	}
+
 	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		if t.Status.Phase != corev1alpha1.TaskPhasePending && t.Status.Phase != corev1alpha1.TaskPhaseRunning {
@@ -218,6 +481,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		t.Status.StartTime = &now
 		t.Status.Attempts = attempts
 		t.Status.JobName = ""
+		t.Status.HarnessRuntime = harnessRuntimeStatusFromTarget(target)
 		t.Status.Message = "harness wrapper turn running"
 		transitionedToRunning = true
 	}); err != nil {
@@ -251,9 +515,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 //nolint:gocyclo // Handles stream polling, event mapping, and terminal task classification in one reconcile step.
 func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	endpoint := harnessWrapperEndpoint()
-	if endpoint == "" {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("%s is required when agent harness runtime is enabled", harnessWrapperEndpointEnv))
+	target, targetErr := r.resolveHarnessRuntimeTarget(ctx, task, nil)
+	if targetErr != nil {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(targetErr.Error()))
 	}
 	if r.ExecutionEventStore == nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "execution event store is required for harness wrapper mode")
@@ -267,9 +531,9 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn identity does not match task")
 	}
-	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+	client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
 	if err != nil {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness wrapper endpoint: %v", err))
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness runtime endpoint: %v", err))
 	}
 	result := harness.TurnRunResult{}
 	mapCtx := harness.EventMapContext{
@@ -536,6 +800,27 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	if runtimeRefName := strings.TrimSpace(request.Metadata["runtimeRef"]); runtimeRefName != "" {
+		task.Annotations[harnessWrapperRuntimeRefAnno] = runtimeRefName
+	} else {
+		delete(task.Annotations, harnessWrapperRuntimeRefAnno)
+	}
+	if contractVersion := strings.TrimSpace(request.Metadata["contractVersion"]); contractVersion != "" {
+		task.Annotations[harnessWrapperContractAnno] = contractVersion
+	} else {
+		task.Annotations[harnessWrapperContractAnno] = harness.ProtocolVersion
+	}
+	copyPlannedAnnotation := func(annotationKey, metadataKey string) {
+		if value := strings.TrimSpace(request.Metadata[metadataKey]); value != "" {
+			task.Annotations[annotationKey] = value
+		} else {
+			delete(task.Annotations, annotationKey)
+		}
+	}
+	copyPlannedAnnotation(harnessWrapperRuntimeEndpointAnno, "runtimeEndpoint")
+	copyPlannedAnnotation(harnessWrapperRuntimeGenerationAnno, "runtimeGeneration")
+	copyPlannedAnnotation(harnessWrapperRuntimeAuthRefNameAnno, "runtimeAuthRefName")
+	copyPlannedAnnotation(harnessWrapperRuntimeAuthRefFieldAnno, "runtimeAuthRefField")
 	plannedMetadata := make(map[string]string, len(request.Metadata))
 	for key, value := range request.Metadata {
 		if key == "systemPrompt" || key == harnessWrapperSkillsFilesMeta {
@@ -611,10 +896,7 @@ func harnessWrapperPlannedTurnMatchesTask(task *corev1alpha1.Task, agent *corev1
 	if !taskHasPlannedHarnessWrapperTurn(task) {
 		return false
 	}
-	runtimeName := string(corev1alpha1.AgentRuntimeClaude)
-	if agent != nil && agent.Spec.Runtime != nil {
-		runtimeName = string(agent.Spec.Runtime.Type)
-	}
+	runtimeName := agentHarnessRuntimeName(agent)
 	correlationID := string(task.UID)
 	if strings.TrimSpace(correlationID) == "" {
 		correlationID = task.Namespace + "/" + task.Name
@@ -685,6 +967,12 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperStartedAnno)
 		delete(task.Annotations, harnessWrapperPlannedAtAnno)
 		delete(task.Annotations, harnessWrapperMetadataAnno)
+		delete(task.Annotations, harnessWrapperRuntimeRefAnno)
+		delete(task.Annotations, harnessWrapperContractAnno)
+		delete(task.Annotations, harnessWrapperRuntimeEndpointAnno)
+		delete(task.Annotations, harnessWrapperRuntimeGenerationAnno)
+		delete(task.Annotations, harnessWrapperRuntimeAuthRefNameAnno)
+		delete(task.Annotations, harnessWrapperRuntimeAuthRefFieldAnno)
 		delete(task.Annotations, harnessWrapperOutputFetchRetriesAnno)
 	}
 	return r.Patch(ctx, task, patch)
@@ -723,11 +1011,11 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
 		return nil
 	}
-	endpoint := harnessWrapperEndpoint()
-	if endpoint == "" {
-		return nil
+	target, err := r.resolveHarnessRuntimeTarget(ctx, task, nil)
+	if err != nil {
+		return err
 	}
-	client, err := harness.NewClient(endpoint, harness.WithBearerToken(harnessWrapperAuthValue()))
+	client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
 	if err != nil {
 		return err
 	}
@@ -757,10 +1045,7 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
-	runtimeName := string(corev1alpha1.AgentRuntimeClaude)
-	if agent != nil && agent.Spec.Runtime != nil {
-		runtimeName = string(agent.Spec.Runtime.Type)
-	}
+	runtimeName := agentHarnessRuntimeName(agent)
 	attempts := harnessWrapperCurrentAttempt(task)
 	request, err := r.harnessWrapperStartTurnRequest(ctx, task, agent, now, attempts)
 	if err != nil {
@@ -787,10 +1072,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
-	runtimeName := string(corev1alpha1.AgentRuntimeClaude)
-	if agent != nil && agent.Spec.Runtime != nil {
-		runtimeName = string(agent.Spec.Runtime.Type)
-	}
+	runtimeName := agentHarnessRuntimeName(agent)
 	turnID := harnessWrapperTurnID(task, attempts)
 	correlationID := string(task.UID)
 	if strings.TrimSpace(correlationID) == "" {
@@ -834,9 +1116,14 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	runtimeName string,
 ) (map[string]string, error) {
 	metadata := map[string]string{
-		"runtime":  runtimeName,
-		"wrapper":  "cli",
-		"maxTurns": "50",
+		"runtime":         runtimeName,
+		"wrapper":         "cli",
+		"contractVersion": harness.ProtocolVersion,
+		"maxTurns":        "50",
+	}
+	if runtimeRefName := agentHarnessRuntimeRefName(agent); runtimeRefName != "" {
+		metadata["runtimeRef"] = runtimeRefName
+		metadata["wrapper"] = "external-endpoint"
 	}
 	if agent != nil {
 		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {

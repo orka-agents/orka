@@ -26,6 +26,7 @@ const (
 	BehaviorCancellation    FakeBehavior = "cancellation"
 	BehaviorInvalidFrame    FakeBehavior = "invalid-frame"
 	BehaviorRedactionOutput FakeBehavior = "secret-output"
+	BehaviorMissingTerminal FakeBehavior = "missing-terminal"
 )
 
 type FakeHarnessConfig struct {
@@ -33,6 +34,8 @@ type FakeHarnessConfig struct {
 	Delay           time.Duration
 	RuntimeName     string
 	RuntimeVersion  string
+	ProtocolVersion string
+	AuthToken       string
 	ProviderKind    harness.ProviderKind
 	RedactionOutput string
 	Now             func() time.Time
@@ -65,6 +68,9 @@ func NewFakeHarnessServer(config FakeHarnessConfig) *FakeHarnessServer {
 	}
 	if config.RuntimeVersion == "" {
 		config.RuntimeVersion = "test"
+	}
+	if config.ProtocolVersion == "" {
+		config.ProtocolVersion = harness.ProtocolVersion
 	}
 	if config.ProviderKind == "" {
 		config.ProviderKind = harness.ProviderKindKubernetesService
@@ -117,7 +123,7 @@ func (s *FakeHarnessServer) handleCapabilities(w http.ResponseWriter, r *http.Re
 	}
 	harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
 		Version:                 harness.ProtocolVersion,
-		ProtocolVersion:         harness.ProtocolVersion,
+		ProtocolVersion:         s.config.ProtocolVersion,
 		Transport:               harness.HTTPTransport,
 		RuntimeName:             s.config.RuntimeName,
 		RuntimeVersion:          s.config.RuntimeVersion,
@@ -129,7 +135,23 @@ func (s *FakeHarnessServer) handleCapabilities(w http.ResponseWriter, r *http.Re
 	})
 }
 
+func (s *FakeHarnessServer) authorized(w http.ResponseWriter, r *http.Request) bool {
+	want := strings.TrimSpace(s.config.AuthToken)
+	if want == "" {
+		return true
+	}
+	got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if got != want {
+		harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	return true
+}
+
 func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -163,6 +185,9 @@ func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *FakeHarnessServer) handleTurn(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
 	turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
 	if err != nil {
 		if errors.Is(err, harness.ErrTurnPathNotFound) {
@@ -274,6 +299,10 @@ func (s *FakeHarnessServer) framesFor(turn *fakeTurn) []harness.HarnessEventFram
 		output.Content = json.RawMessage(fmt.Sprintf(`{"message":%q}`, s.config.RedactionOutput))
 		completed := s.frame(turn, 3, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{Result: "ok", FinalEventSeq: 3})
 		return []harness.HarnessEventFrame{start, output, completed}
+	case BehaviorMissingTerminal:
+		output := s.frame(turn, 2, harness.FrameRuntimeOutput, "echo", nil)
+		output.ContentText = "echo: " + turn.request.Input.Prompt
+		return []harness.HarnessEventFrame{start, output}
 	case BehaviorLongRunning, BehaviorCancellation:
 		return []harness.HarnessEventFrame{start}
 	default:
