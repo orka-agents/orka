@@ -172,7 +172,9 @@ func assertUnauthenticatedTurnResourcesRejected(
 		result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
 		return
 	}
-	if err := unauth.StreamFrames(ctx, request.TurnID, 0, func(harness.HarnessEventFrame) error { return nil }); err == nil {
+	streamCtx, cancel := context.WithTimeout(ctx, controlTimeout)
+	defer cancel()
+	if err := unauth.StreamFrames(streamCtx, request.TurnID, 0, func(harness.HarnessEventFrame) error { return nil }); err == nil {
 		result.addFailure("unauthenticated event stream was accepted")
 	} else if !isAuthRequiredError(err) {
 		result.addFailure(fmt.Sprintf("unauthenticated event stream returned %v, want 401/403", err))
