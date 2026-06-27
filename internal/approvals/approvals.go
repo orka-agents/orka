@@ -223,7 +223,7 @@ func ListEvents(ctx context.Context, eventStore store.ExecutionEventStore, names
 	for {
 		batch, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
 			Namespace:  namespace,
-			StreamType: events.ExecutionEventStreamTypeTask,
+			StreamType: store.ExecutionEventStreamTypeTask,
 			StreamID:   taskName,
 			EventTypes: EventTypes(),
 			AfterSeq:   after,
