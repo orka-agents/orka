@@ -484,6 +484,24 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support runtimeRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only runtimeRef rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

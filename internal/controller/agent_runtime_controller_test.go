@@ -154,6 +154,16 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 	return runtime, secret
 }
 
+func TestValidateAgentRuntimeRequiredCapabilitiesRequiresObservedMode(t *testing.T) {
+	runtime := &corev1alpha1.AgentRuntime{}
+	err := validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{
+		ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
+	})
+	if err == nil || !strings.Contains(err.Error(), "observed") {
+		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v, want observed mode requirement", err)
+	}
+}
+
 func TestObservedCapabilitiesFromConformanceMapsModes(t *testing.T) {
 	got := observedCapabilitiesFromConformance(&harness.CapabilitiesResponse{
 		ProtocolVersion:         harness.ProtocolVersion,

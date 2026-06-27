@@ -95,23 +95,14 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		return
 	}
 	request := defaultStartTurnRequest("conformance-turn")
+	if result.ObservedCapabilities != nil && strings.TrimSpace(result.ObservedCapabilities.RuntimeName) != "" {
+		request.Metadata["runtime"] = strings.TrimSpace(result.ObservedCapabilities.RuntimeName)
+	}
 	if target.StartTurnRequest != nil {
 		request = *target.StartTurnRequest
 	}
-	if target.RequireAuth && strings.TrimSpace(target.BearerToken) != "" {
-		unauth, err := newClient(baseURL, "", target.HTTPClient, controlTimeout)
-		if err != nil {
-			result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
-		} else {
-			probe := request
-			probe.TurnID = harness.HarnessTurnID(string(request.TurnID) + "-unauth")
-			probe.CorrelationID = request.CorrelationID + "-unauth"
-			if _, err := unauth.StartTurn(ctx, probe); err == nil {
-				result.addFailure("unauthenticated start turn was accepted")
-			} else if !isAuthRequiredError(err) {
-				result.addFailure(fmt.Sprintf("unauthenticated start turn returned %v, want 401/403", err))
-			}
-		}
+	if target.RequireAuth {
+		assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request)
 	}
 
 	client, err := newClient(baseURL, target.BearerToken, target.HTTPClient, controlTimeout)
@@ -123,33 +114,8 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		result.addFailure(fmt.Sprintf("start turn failed: %v", err))
 		return
 	}
-	if target.RequireAuth && strings.TrimSpace(target.BearerToken) != "" {
-		unauth, err := newClient(baseURL, "", target.HTTPClient, controlTimeout)
-		if err != nil {
-			result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
-		} else {
-			if err := unauth.StreamFrames(ctx, request.TurnID, 0, func(harness.HarnessEventFrame) error { return nil }); err == nil {
-				result.addFailure("unauthenticated event stream was accepted")
-			} else if !isAuthRequiredError(err) {
-				result.addFailure(fmt.Sprintf("unauthenticated event stream returned %v, want 401/403", err))
-			}
-			if result.ObservedCapabilities != nil && result.ObservedCapabilities.SupportsCancel {
-				if _, err := unauth.CancelTurn(ctx, harness.CancelTurnRequest{
-					Version:          harness.ProtocolVersion,
-					Namespace:        request.Namespace,
-					TaskName:         request.TaskName,
-					SessionName:      request.SessionName,
-					RuntimeSessionID: request.RuntimeSessionID,
-					TurnID:           request.TurnID,
-					CorrelationID:    request.CorrelationID,
-					Reason:           "conformance unauthenticated cancel probe",
-				}); err == nil {
-					result.addFailure("unauthenticated cancel turn was accepted")
-				} else if !isAuthRequiredError(err) {
-					result.addFailure(fmt.Sprintf("unauthenticated cancel turn returned %v, want 401/403", err))
-				}
-			}
-		}
+	if target.RequireAuth {
+		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
 	}
 	frames := []harness.HarnessEventFrame{}
 	if err := client.StreamFrames(ctx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
@@ -159,6 +125,71 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		result.addFailure(fmt.Sprintf("stream frames failed: %v", err))
 		return
 	}
+	validateProbeFrames(result, request, frames)
+}
+
+func assertUnauthenticatedStartRejected(
+	ctx context.Context,
+	target Target,
+	result *Result,
+	baseURL string,
+	controlTimeout time.Duration,
+	request harness.StartTurnRequest,
+) {
+	unauth, err := newClient(baseURL, "", target.HTTPClient, controlTimeout)
+	if err != nil {
+		result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
+		return
+	}
+	probe := request
+	probe.TurnID = harness.HarnessTurnID(string(request.TurnID) + "-unauth")
+	probe.CorrelationID = request.CorrelationID + "-unauth"
+	if _, err := unauth.StartTurn(ctx, probe); err == nil {
+		result.addFailure("unauthenticated start turn was accepted")
+	} else if !isAuthRequiredError(err) {
+		result.addFailure(fmt.Sprintf("unauthenticated start turn returned %v, want 401/403", err))
+	}
+}
+
+func assertUnauthenticatedTurnResourcesRejected(
+	ctx context.Context,
+	target Target,
+	result *Result,
+	baseURL string,
+	controlTimeout time.Duration,
+	request harness.StartTurnRequest,
+) {
+	unauth, err := newClient(baseURL, "", target.HTTPClient, controlTimeout)
+	if err != nil {
+		result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
+		return
+	}
+	if err := unauth.StreamFrames(ctx, request.TurnID, 0, func(harness.HarnessEventFrame) error { return nil }); err == nil {
+		result.addFailure("unauthenticated event stream was accepted")
+	} else if !isAuthRequiredError(err) {
+		result.addFailure(fmt.Sprintf("unauthenticated event stream returned %v, want 401/403", err))
+	}
+	if result.ObservedCapabilities == nil || !result.ObservedCapabilities.SupportsCancel {
+		return
+	}
+	_, err = unauth.CancelTurn(ctx, harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		Reason:           "conformance unauthenticated cancel probe",
+	})
+	if err == nil {
+		result.addFailure("unauthenticated cancel turn was accepted")
+	} else if !isAuthRequiredError(err) {
+		result.addFailure(fmt.Sprintf("unauthenticated cancel turn returned %v, want 401/403", err))
+	}
+}
+
+func validateProbeFrames(result *Result, request harness.StartTurnRequest, frames []harness.HarnessEventFrame) {
 	if len(frames) == 0 {
 		result.addFailure("stream returned no frames")
 		return

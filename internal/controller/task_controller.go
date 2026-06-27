@@ -2523,6 +2523,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		default:
 			return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 		}
+		if taskRequestsReadOnlyAgent(task) && hasRuntimeRef {
+			return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes in observed mode because Orka cannot enforce remote tool side effects")
+		}
 		if taskRequestsReadOnlyAgent(task) && hasBuiltInRuntime {
 			switch agent.Spec.Runtime.Type {
 			case corev1alpha1.AgentRuntimeCodex:

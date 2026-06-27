@@ -170,6 +170,9 @@ func harnessWrapperApplyRuntimeTargetMetadata(metadata map[string]string, target
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
+	if strings.TrimSpace(target.RuntimeName) != "" {
+		metadata["runtime"] = strings.TrimSpace(target.RuntimeName)
+	}
 	if target.RuntimeRefName == "" {
 		return metadata
 	}
@@ -270,10 +273,14 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 		return harnessRuntimeTarget{}, err
 	}
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
+	runtimeName := runtimeRefName
+	if runtime.Status.ObservedCapabilities != nil && strings.TrimSpace(runtime.Status.ObservedCapabilities.RuntimeName) != "" {
+		runtimeName = strings.TrimSpace(runtime.Status.ObservedCapabilities.RuntimeName)
+	}
 	return harnessRuntimeTarget{
 		Endpoint:        strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
 		BearerToken:     token,
-		RuntimeName:     runtimeRefName,
+		RuntimeName:     runtimeName,
 		RuntimeRefName:  runtimeRefName,
 		ContractVersion: string(runtime.Spec.ContractVersion),
 		Wrapper:         "external-endpoint",
@@ -414,6 +421,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 				}
 				return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
 			}
+			request.Metadata = harnessWrapperApplyRuntimeTargetMetadata(request.Metadata, target)
 		}
 		client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
 		if err != nil {

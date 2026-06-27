@@ -22,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
@@ -80,10 +81,13 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, agentRuntimeProbeTimeout)
 	defer cancel()
-	result := conformance.CheckReadiness(probeCtx, conformance.Target{
+	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready
+	result := conformance.Check(probeCtx, conformance.Target{
 		BaseURL:        runtime.Spec.Deployment.Endpoint,
 		BearerToken:    token,
 		ControlTimeout: agentRuntimeProbeTimeout,
+		ProbeTurn:      deepProbe,
+		RequireAuth:    deepProbe,
 	})
 	observed := observedCapabilitiesFromConformance(result.ObservedCapabilities)
 	if !result.Passed {
@@ -168,6 +172,9 @@ func validateAgentRuntimeRequiredCapabilities(
 ) error {
 	if caps == nil {
 		return fmt.Errorf("observed capabilities are missing")
+	}
+	if !capabilityHasToolMode(caps, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
+		return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", corev1alpha1.AgentRuntimeToolExecutionModeObserved)
 	}
 	required := runtime.Spec.Capabilities
 	if required == nil {
@@ -264,6 +271,7 @@ func sanitizeAgentRuntimeStatusMessage(message string) string {
 func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.AgentRuntime{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
 		Named("agentruntime").
 		Complete(r)
 }
