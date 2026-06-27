@@ -46,28 +46,24 @@ func clearDeprecatedHarnessRuntimeAnnotations(annotations map[string]string) {
 }
 
 const (
-	harnessWrapperEndpointEnv             = "ORKA_HARNESS_WRAPPER_ENDPOINT"
-	harnessWrapperAuthValueEnv            = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
-	harnessWrapperAuthValueFileEnv        = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
-	harnessWrapperTurnIDAnnotation        = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation       = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperCorrelationIDAnno       = "orka.ai/harness-wrapper-correlation-id"
-	harnessWrapperLastFrameSeqAnno        = "orka.ai/harness-wrapper-last-frame-seq"
-	harnessWrapperStartedAnno             = "orka.ai/harness-wrapper-started"
-	harnessWrapperPlannedAtAnno           = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperMetadataAnno            = "orka.ai/harness-wrapper-metadata"
-	harnessWrapperRuntimeRefAnno          = "orka.ai/harness-wrapper-runtime-ref"
-	harnessWrapperContractAnno            = "orka.ai/harness-wrapper-contract-version"
-	harnessWrapperRuntimeEndpointAnno     = "orka.ai/harness-wrapper-runtime-endpoint"
-	harnessWrapperRuntimeGenerationAnno   = "orka.ai/harness-wrapper-runtime-generation"
-	harnessWrapperRuntimeAuthRefNameAnno  = "orka.ai/harness-wrapper-runtime-auth-secret-name"
-	harnessWrapperRuntimeAuthRefFieldAnno = "orka.ai/harness-wrapper-runtime-auth-secret-key"
-	harnessWrapperOutputFetchRetriesAnno  = "orka.ai/harness-wrapper-output-fetch-retries"
-	harnessWrapperMaxOutputFetchRetries   = 3
-	harnessWrapperSkillsFilesMeta         = "skillsFiles"
-	harnessWrapperStreamPollTimeout       = 2 * time.Second
-	harnessWrapperNoTimeoutDuration       = time.Hour * 24 * 365 * 100
-	harnessWrapperRuntimeGeneric          = "generic"
+	harnessWrapperEndpointEnv            = "ORKA_HARNESS_WRAPPER_ENDPOINT"
+	harnessWrapperAuthValueEnv           = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
+	harnessWrapperAuthValueFileEnv       = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
+	harnessWrapperTurnIDAnnotation       = "orka.ai/harness-wrapper-turn-id"
+	harnessWrapperRuntimeAnnotation      = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperCorrelationIDAnno      = "orka.ai/harness-wrapper-correlation-id"
+	harnessWrapperLastFrameSeqAnno       = "orka.ai/harness-wrapper-last-frame-seq"
+	harnessWrapperStartedAnno            = "orka.ai/harness-wrapper-started"
+	harnessWrapperPlannedAtAnno          = "orka.ai/harness-wrapper-planned-at"
+	harnessWrapperMetadataAnno           = "orka.ai/harness-wrapper-metadata"
+	harnessWrapperRuntimeRefAnno         = "orka.ai/harness-wrapper-runtime-ref"
+	harnessWrapperContractAnno           = "orka.ai/harness-wrapper-contract-version"
+	harnessWrapperOutputFetchRetriesAnno = "orka.ai/harness-wrapper-output-fetch-retries"
+	harnessWrapperMaxOutputFetchRetries  = 3
+	harnessWrapperSkillsFilesMeta        = "skillsFiles"
+	harnessWrapperStreamPollTimeout      = 2 * time.Second
+	harnessWrapperNoTimeoutDuration      = time.Hour * 24 * 365 * 100
+	harnessWrapperRuntimeGeneric         = "generic"
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
