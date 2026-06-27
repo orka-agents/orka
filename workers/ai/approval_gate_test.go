@@ -1069,8 +1069,13 @@ func TestBindApprovalAuthRefVersionClearsStaleAnnotationsWhenUnavailable(t *test
 func TestApprovalTargetSpecDigestRejectsMountedCredentialSource(t *testing.T) {
 	root := t.TempDir()
 	oldRoots := approvalMountRoots
+	oldToolRoot := approvalToolMountRoot
 	approvalMountRoots = []string{root}
-	t.Cleanup(func() { approvalMountRoots = oldRoots })
+	approvalToolMountRoot = filepath.Join(root, "tools")
+	t.Cleanup(func() {
+		approvalMountRoots = oldRoots
+		approvalToolMountRoot = oldToolRoot
+	})
 	if err := os.WriteFile(filepath.Join(root, "authref"), []byte("test"), 0o600); err != nil {
 		t.Fatalf("write mounted auth ref marker: %v", err)
 	}
@@ -1083,6 +1088,34 @@ func TestApprovalTargetSpecDigestRejectsMountedCredentialSource(t *testing.T) {
 	_, err := approvalTargetSpecDigest(tool)
 	if err == nil || !strings.Contains(err.Error(), "mounted credential source") {
 		t.Fatalf("approvalTargetSpecDigest() error = %v, want mounted credential source rejection", err)
+	}
+}
+
+func TestApprovalTargetSpecDigestRejectsToolMountedCredentialSource(t *testing.T) {
+	root := t.TempDir()
+	oldRoots := approvalMountRoots
+	oldToolRoot := approvalToolMountRoot
+	approvalMountRoots = nil
+	approvalToolMountRoot = root
+	t.Cleanup(func() {
+		approvalMountRoots = oldRoots
+		approvalToolMountRoot = oldToolRoot
+	})
+	if err := os.MkdirAll(filepath.Join(root, "dispatch-auth"), 0o700); err != nil {
+		t.Fatalf("create mounted tool auth root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "dispatch-auth", "authref"), []byte("test"), 0o600); err != nil {
+		t.Fatalf("write mounted tool auth ref marker: %v", err)
+	}
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.AuthSecretRef = &corev1alpha1.SecretKeySelector{Name: "dispatch-auth", Key: "authref"}
+	tool.Annotations = map[string]string{
+		approvalAuthRefUIDAnnotation:             "uid-1",
+		approvalAuthRefResourceVersionAnnotation: "10",
+	}
+	_, err := approvalTargetSpecDigest(tool)
+	if err == nil || !strings.Contains(err.Error(), "mounted credential source") {
+		t.Fatalf("approvalTargetSpecDigest() error = %v, want mounted tool credential source rejection", err)
 	}
 }
 

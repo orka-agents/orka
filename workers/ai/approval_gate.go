@@ -41,6 +41,7 @@ const (
 )
 
 var approvalMountRoots = []string{"/secrets/task", "/secrets/agent"}
+var approvalToolMountRoot = "/secrets/tools"
 
 type approvalGate struct {
 	namespace        string
@@ -571,7 +572,7 @@ func validateApprovalCustomToolCompatibility(customTool *corev1alpha1.Tool) erro
 		}
 	}
 	if customTool.Spec.HTTP.AuthSecretRef != nil {
-		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Key) {
+		if approvalMountedCredentialExists(customTool.Spec.HTTP.AuthSecretRef.Name, customTool.Spec.HTTP.AuthSecretRef.Key) {
 			return fmt.Errorf(
 				"approval-gated tool %q mounted credential source cannot be approval-bound",
 				customTool.Name,
@@ -593,13 +594,19 @@ func approvalURLUsesPlaceholder(customTool *corev1alpha1.Tool, key string) bool 
 	return key != "" && strings.Contains(customTool.Spec.HTTP.URL, "{{"+key+"}}")
 }
 
-func approvalMountedCredentialExists(key string) bool {
+func approvalMountedCredentialExists(secretName, key string) bool {
+	secretName = strings.TrimSpace(secretName)
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return false
 	}
 	for _, root := range approvalMountRoots {
 		if _, err := os.Stat(filepath.Join(root, key)); err == nil {
+			return true
+		}
+	}
+	if secretName != "" && strings.TrimSpace(approvalToolMountRoot) != "" {
+		if _, err := os.Stat(filepath.Join(approvalToolMountRoot, secretName, key)); err == nil {
 			return true
 		}
 	}

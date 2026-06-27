@@ -1087,12 +1087,14 @@ func executeAgentLoopWithEvents(
 				execCtx := ctx
 				if approvalKey != "" {
 					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
-					approvalGate.markFired(approvalKey)
 				}
 				executeCustomTool := func(callCtx context.Context) (string, error) {
 					return toolExecutor.Execute(callCtx, customTool, execArgs)
 				}
 				result, execErr = executeCustomToolWithTelemetry(execCtx, toolName, tc.ID, executeCustomTool)
+				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
+					approvalGate.markFired(approvalKey)
+				}
 			} else {
 				// Fall back to built-in tools
 				if approvalKey != "" {

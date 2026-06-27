@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -93,15 +94,34 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	}
 
 	if prepared.mcp {
-		return e.executeMCPToolCall(ctx, httpClient, prepared)
+		result, err := e.executeMCPToolCall(ctx, httpClient, prepared)
+		if err != nil {
+			return "", ToolRequestAttemptedError{Err: err}
+		}
+		return result, nil
 	}
 
 	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.authToken, prepared.transactionToken)
 	if err != nil {
-		return "", err
+		return "", ToolRequestAttemptedError{Err: err}
 	}
 
 	return string(respBody), nil
+}
+
+// ToolRequestAttemptedError wraps errors that occur after a custom tool request
+// may already have reached the remote endpoint.
+type ToolRequestAttemptedError struct {
+	Err error
+}
+
+func (e ToolRequestAttemptedError) Error() string { return e.Err.Error() }
+func (e ToolRequestAttemptedError) Unwrap() error { return e.Err }
+
+// ToolRequestWasAttempted reports whether err happened after the custom tool send path began.
+func ToolRequestWasAttempted(err error) bool {
+	var attempted ToolRequestAttemptedError
+	return errors.As(err, &attempted)
 }
 
 func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets ...string) ([]byte, error) {
