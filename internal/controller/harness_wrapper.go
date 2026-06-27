@@ -168,10 +168,6 @@ func harnessWrapperApplyRuntimeTargetMetadata(metadata map[string]string, target
 	metadata["runtimeRef"] = target.RuntimeRefName
 	metadata["wrapper"] = target.Wrapper
 	metadata["contractVersion"] = target.ContractVersion
-	metadata["runtimeEndpoint"] = target.Endpoint
-	metadata["runtimeGeneration"] = strconv.FormatInt(target.Generation, 10)
-	metadata["runtimeAuthRefName"] = target.AuthRefName
-	metadata["runtimeAuthRefField"] = target.AuthRefField
 	return metadata
 }
 
@@ -804,17 +800,11 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	} else {
 		task.Annotations[harnessWrapperContractAnno] = harness.ProtocolVersion
 	}
-	copyPlannedAnnotation := func(annotationKey, metadataKey string) {
-		if value := strings.TrimSpace(request.Metadata[metadataKey]); value != "" {
-			task.Annotations[annotationKey] = value
-		} else {
-			delete(task.Annotations, annotationKey)
-		}
-	}
-	copyPlannedAnnotation(harnessWrapperRuntimeEndpointAnno, "runtimeEndpoint")
-	copyPlannedAnnotation(harnessWrapperRuntimeGenerationAnno, "runtimeGeneration")
-	copyPlannedAnnotation(harnessWrapperRuntimeAuthRefNameAnno, "runtimeAuthRefName")
-	copyPlannedAnnotation(harnessWrapperRuntimeAuthRefFieldAnno, "runtimeAuthRefField")
+	delete(task.Annotations, harnessWrapperRuntimeEndpointAnno)
+	delete(task.Annotations, harnessWrapperRuntimeGenerationAnno)
+	delete(task.Annotations, harnessWrapperRuntimeAuthRefNameAnno)
+	delete(task.Annotations, harnessWrapperRuntimeAuthRefFieldAnno)
+
 	plannedMetadata := make(map[string]string, len(request.Metadata))
 	for key, value := range request.Metadata {
 		if key == "systemPrompt" || key == harnessWrapperSkillsFilesMeta {

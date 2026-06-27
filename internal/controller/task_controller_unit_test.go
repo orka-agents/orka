@@ -484,6 +484,56 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "agent secretRef",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-creds"}
+			},
+			wantError: "agent secretRef",
+		},
+		{
+			name: "task secretRef",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-creds"}
+			},
+			wantError: "task secretRef",
+		},
+		{
+			name: "workspace gitSecretRef",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/example/repo",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				}}
+			},
+			wantError: "gitSecretRef",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+				},
+			}
+			tt.mutate(task, agent)
+			err := r.validateTaskAgentCompatibility(task, agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

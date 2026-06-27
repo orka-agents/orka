@@ -2495,6 +2495,22 @@ func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.Works
 	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
+func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent != nil && agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support agent secretRef credential delivery")
+	}
+	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support task secretRef credential delivery")
+	}
+	if ws := effectiveWorkspace(task); ws != nil && ws.GitSecretRef != nil && strings.TrimSpace(ws.GitSecretRef.Name) != "" {
+		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support workspace gitSecretRef credential delivery")
+	}
+	if taskRequestsReadOnlyAgent(task) {
+		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes in observed mode because Orka cannot enforce remote tool side effects")
+	}
+	return nil
+}
+
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
 func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	switch task.Spec.Type {
@@ -2523,8 +2539,10 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		default:
 			return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 		}
-		if taskRequestsReadOnlyAgent(task) && hasRuntimeRef {
-			return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes in observed mode because Orka cannot enforce remote tool side effects")
+		if hasRuntimeRef {
+			if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
+				return err
+			}
 		}
 		if taskRequestsReadOnlyAgent(task) && hasBuiltInRuntime {
 			switch agent.Spec.Runtime.Type {
