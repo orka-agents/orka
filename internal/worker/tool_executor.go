@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,7 @@ const (
 	mcpToolsCallMethod               = "tools/call"
 	mcpInitializeMethod              = "initialize"
 	mcpInitializedNotificationMethod = "notifications/initialized"
+	toolIdempotencyKeyHeader         = "Idempotency-Key"
 )
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
@@ -97,10 +99,25 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 
 	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.authToken, prepared.transactionToken)
 	if err != nil {
-		return "", err
+		return "", ToolRequestAttemptedError{Err: err}
 	}
 
 	return string(respBody), nil
+}
+
+// ToolRequestAttemptedError wraps errors that occur after a custom tool request
+// may already have reached the remote endpoint.
+type ToolRequestAttemptedError struct {
+	Err error
+}
+
+func (e ToolRequestAttemptedError) Error() string { return e.Err.Error() }
+func (e ToolRequestAttemptedError) Unwrap() error { return e.Err }
+
+// ToolRequestWasAttempted reports whether err happened after the custom tool send path began.
+func ToolRequestWasAttempted(err error) bool {
+	var attempted ToolRequestAttemptedError
+	return errors.As(err, &attempted)
 }
 
 func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets ...string) ([]byte, error) {
@@ -120,6 +137,25 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 	return respBody, nil
 }
 
+type toolIdempotencyKeyContextKey struct{}
+
+// WithToolIdempotencyKey attaches a trusted idempotency key for HTTP tool execution.
+func WithToolIdempotencyKey(ctx context.Context, key string) context.Context {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolIdempotencyKeyContextKey{}, key)
+}
+
+func toolIdempotencyKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	key, _ := ctx.Value(toolIdempotencyKeyContextKey{}).(string)
+	return strings.TrimSpace(key)
+}
+
 type preparedToolRequest struct {
 	httpConfig       corev1alpha1.HTTPExecution
 	request          *http.Request
@@ -128,14 +164,27 @@ type preparedToolRequest struct {
 	mcp              bool
 }
 
-func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
+	if len(bytes.TrimSpace(args)) == 0 {
+		return make(map[string]any), nil
+	}
 	var params map[string]any
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
-			return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
-		}
-	} else {
-		params = make(map[string]any)
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
+	if err := dec.Decode(&params); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("trailing data")
+	}
+	return params, nil
+}
+
+func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	params, err := decodeToolArguments(args)
+	if err != nil {
+		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
 
 	httpConfig, routeHost, err := toolHTTPConfig(tool)
@@ -197,6 +246,17 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
+	}
+	approvalIdempotencyKey := toolIdempotencyKeyFromContext(ctx)
+	if approvalIdempotencyKey != "" {
+		if existing := strings.TrimSpace(req.Header.Get(toolIdempotencyKeyHeader)); existing != "" && existing != approvalIdempotencyKey {
+			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", toolIdempotencyKeyHeader)
+		}
+		if isMCP {
+			req.Header.Del(toolIdempotencyKeyHeader)
+		} else {
+			req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
+		}
 	}
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -381,11 +441,18 @@ func (e *ToolExecutor) executeMCPToolCall(ctx context.Context, httpClient *http.
 	if err := e.sendMCPInitializedNotification(ctx, httpClient, prepared, sessionID, protocolVersion); err != nil {
 		return "", err
 	}
+	if key := toolIdempotencyKeyFromContext(prepared.request.Context()); key != "" {
+		prepared.request.Header.Set(toolIdempotencyKeyHeader, key)
+	}
 	respBody, err := executeMCPHTTPRequest(httpClient, prepared.request, mcpToolCallRequestID, prepared.authToken, prepared.transactionToken, sessionID)
 	if err != nil {
-		return "", err
+		return "", ToolRequestAttemptedError{Err: err}
 	}
-	return decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	result, err = decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	if err != nil {
+		return "", ToolRequestAttemptedError{Err: err}
+	}
+	return result, nil
 }
 
 func (e *ToolExecutor) initializeMCP(ctx context.Context, httpClient *http.Client, prepared preparedToolRequest) (string, string, error) {
@@ -447,6 +514,9 @@ func (e *ToolExecutor) terminateMCPSession(ctx context.Context, httpClient *http
 	}
 	req.Host = prepared.request.Host
 	req.Header = prepared.request.Header.Clone()
+	if toolIdempotencyKeyFromContext(prepared.request.Context()) != "" {
+		req.Header.Del(toolIdempotencyKeyHeader)
+	}
 	req.Header.Del("Content-Type")
 	req.Header.Set(mcpSessionIDHeader, sessionID)
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolHeaderValue(protocolVersion))
@@ -478,6 +548,9 @@ func newMCPRequest(ctx context.Context, prepared preparedToolRequest, body []byt
 	}
 	req.Host = prepared.request.Host
 	req.Header = prepared.request.Header.Clone()
+	if toolIdempotencyKeyFromContext(prepared.request.Context()) != "" {
+		req.Header.Del(toolIdempotencyKeyHeader)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolHeaderValue(protocolVersion))

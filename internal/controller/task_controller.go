@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,9 +40,11 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	execevents "github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
@@ -52,10 +55,14 @@ import (
 )
 
 const (
-	taskTransactionTokenPendingTimeout = 2 * time.Minute
-	failedMountEventStaleAfter         = 2 * time.Minute
-	podLogLimitBytes                   = int64(5 << 20)
-	stdoutResultLogLimitBytes          = int64(15 << 20)
+	taskTransactionTokenPendingTimeout            = 2 * time.Minute
+	failedMountEventStaleAfter                    = 2 * time.Minute
+	podLogLimitBytes                              = int64(5 << 20)
+	stdoutResultLogLimitBytes                     = int64(15 << 20)
+	maxResolvedApprovalsJSONForWorkerEnvBytes     = 32 * 1024
+	maxRecentResolvedApprovalsForWorkerEnv        = 32
+	maxResolvedApprovalWorkerEnvFieldBytes        = 512
+	resolvedApprovalWorkerEnvJSONOverheadEstimate = 128
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -84,6 +91,7 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
+	APIReader                          client.Reader
 	Scheme                             *runtime.Scheme
 	JobBuilder                         *JobBuilder
 	SessionManager                     *SessionManager
@@ -521,6 +529,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
+		log.Error(err, "failed to clear durable approval decision nudge")
+		return ctrl.Result{}, err
+	}
+
 	if taskTransactionTokenPending(task) {
 		return r.handleTransactionTokenPending(ctx, task)
 	}
@@ -900,6 +913,247 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	return provider, nil
 }
 
+func taskNeedsApprovalState(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return task != nil &&
+		task.Spec.Type == corev1alpha1.TaskTypeAI &&
+		agent != nil &&
+		agent.Spec.Coordination != nil &&
+		agent.Spec.Coordination.Autonomous
+}
+
+func (r *TaskReconciler) resolvedApprovalsJSONForTask(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return "", nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return "", err
+	}
+	// Match parking semantics: only explicit terminal approval events are injected.
+	// V1 does not persist consumed-action markers in Orka; workers pass the
+	// approval ID as the downstream idempotency key, so cross-Job duplicate
+	// suppression remains the downstream service's responsibility.
+	resolved := approvals.Resolved(approvals.Derive(
+		approvals.FilterEventsForTaskUID(listed, string(task.UID)),
+		time.Time{},
+	))
+	return resolvedApprovalsJSONForWorkerEnv(resolved)
+}
+
+func resolvedApprovalsJSONForWorkerEnv(values []approvals.ResolvedApproval) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+
+	if resolvedApprovalsLikelyFitWorkerEnv(values, resolvedApprovalWorkerEnvFullPayload) {
+		bounded := append([]approvals.ResolvedApproval(nil), values...)
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(bounded); err != nil || ok {
+			return data, err
+		}
+	}
+
+	if resolvedApprovalsLikelyFitWorkerEnv(values, resolvedApprovalWorkerEnvNoPreviewPayload) {
+		withoutPreviews := append([]approvals.ResolvedApproval(nil), values...)
+		for i := range withoutPreviews {
+			withoutPreviews[i].TargetArgsPreview = nil
+		}
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(withoutPreviews); err != nil || ok {
+			return data, err
+		}
+	}
+
+	compact := compactResolvedApprovalsForWorkerEnv(values)
+	if resolvedApprovalsLikelyFitWorkerEnv(compact, resolvedApprovalWorkerEnvCompactPayload) {
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(compact); err != nil || ok {
+			return data, err
+		}
+	}
+
+	selected, err := selectResolvedApprovalsForWorkerEnv(compact)
+	if err != nil || len(selected) == 0 {
+		return "", err
+	}
+	data, ok, err := marshalResolvedApprovalsForWorkerEnv(selected)
+	if err != nil || !ok {
+		return "", err
+	}
+	return data, nil
+}
+
+func marshalResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) (string, bool, error) {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", false, err
+	}
+	if len(data) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		return "", false, nil
+	}
+	return string(data), true, nil
+}
+
+type resolvedApprovalWorkerEnvPayload int
+
+const (
+	resolvedApprovalWorkerEnvFullPayload resolvedApprovalWorkerEnvPayload = iota
+	resolvedApprovalWorkerEnvNoPreviewPayload
+	resolvedApprovalWorkerEnvCompactPayload
+)
+
+func resolvedApprovalsLikelyFitWorkerEnv(
+	values []approvals.ResolvedApproval,
+	payload resolvedApprovalWorkerEnvPayload,
+) bool {
+	estimated := 2
+	for _, approval := range values {
+		estimated += resolvedApprovalWorkerEnvJSONOverheadEstimate
+		estimated += len(approval.ID) + len(approval.TaskUID) + len(approval.TargetTool)
+		estimated += len(approval.TargetArgsDigest) + len(approval.TargetSpecDigest) + len(approval.Status)
+		if payload != resolvedApprovalWorkerEnvCompactPayload {
+			estimated += len(approval.Actor) + len(approval.DecisionTime) + len(approval.Reason)
+			estimated += len(approval.Action) + len(approval.RiskSummary) + len(approval.Severity)
+		}
+		if payload == resolvedApprovalWorkerEnvFullPayload {
+			estimated += len(approval.TargetArgsPreview)
+		}
+		if estimated > maxResolvedApprovalsJSONForWorkerEnvBytes {
+			return false
+		}
+	}
+	return true
+}
+
+func resolvedApprovalWorkerEnvField(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxResolvedApprovalWorkerEnvFieldBytes {
+		return value
+	}
+	return value[:maxResolvedApprovalWorkerEnvFieldBytes]
+}
+
+func compactResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) []approvals.ResolvedApproval {
+	compact := make([]approvals.ResolvedApproval, 0, len(values))
+	for _, approval := range values {
+		compact = append(compact, approvals.ResolvedApproval{
+			ID:               resolvedApprovalWorkerEnvField(approval.ID),
+			TaskUID:          resolvedApprovalWorkerEnvField(approval.TaskUID),
+			TargetTool:       resolvedApprovalWorkerEnvField(approval.TargetTool),
+			TargetArgsDigest: resolvedApprovalWorkerEnvField(approval.TargetArgsDigest),
+			TargetSpecDigest: resolvedApprovalWorkerEnvField(approval.TargetSpecDigest),
+			Status:           resolvedApprovalWorkerEnvField(approval.Status),
+		})
+	}
+	return compact
+}
+
+func selectResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) ([]approvals.ResolvedApproval, error) {
+	selected := make([]approvals.ResolvedApproval, 0, min(len(values), maxRecentResolvedApprovalsForWorkerEnv))
+	selectedIndexes := make(map[int]struct{}, min(len(values), maxRecentResolvedApprovalsForWorkerEnv))
+
+	// Always reserve space for the newest decisions first so recent approvals can
+	// resume required tool calls even when a long history contains many old denials.
+	for i := len(values) - 1; i >= 0 && len(selectedIndexes) < maxRecentResolvedApprovalsForWorkerEnv; i-- {
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, values[i])
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+
+	// Add older blocking terminal decisions before older approvals. Dropping an
+	// old approval can re-request approval; dropping an old decline/expiry can
+	// allow a previously denied target to execute.
+	omittedBlocking := false
+	for i, approval := range values {
+		if !resolvedApprovalBlocksExecution(approval) {
+			continue
+		}
+		if _, ok := selectedIndexes[i]; ok {
+			continue
+		}
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, approval)
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		} else {
+			omittedBlocking = true
+		}
+	}
+	if omittedBlocking {
+		var err error
+		selected, err = ensureBlockingOverflowSentinelFitsWorkerEnv(selected)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for i := len(values) - 1; i >= 0; i-- {
+		if _, ok := selectedIndexes[i]; ok {
+			continue
+		}
+		if resolvedApprovalBlocksExecution(values[i]) {
+			continue
+		}
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, values[i])
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+	return selected, nil
+}
+
+func ensureBlockingOverflowSentinelFitsWorkerEnv(
+	selected []approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, error) {
+	sentinel := approvals.BlockingOverflowResolvedApproval()
+	if slices.ContainsFunc(selected, approvals.IsResolvedApprovalBlockingOverflow) {
+		return selected, nil
+	}
+	for {
+		candidate := append([]approvals.ResolvedApproval{sentinel}, selected...)
+		if _, ok, err := marshalResolvedApprovalsForWorkerEnv(candidate); err != nil {
+			return nil, err
+		} else if ok {
+			return candidate, nil
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("blocking approval overflow sentinel does not fit worker env budget")
+		}
+		drop := len(selected) - 1
+		selected = append(selected[:drop], selected[drop+1:]...)
+	}
+}
+
+func appendResolvedApprovalIfWorkerEnvFits(
+	selected []approvals.ResolvedApproval,
+	approval approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, bool, error) {
+	candidate := append(append([]approvals.ResolvedApproval(nil), selected...), approval)
+	if _, ok, err := marshalResolvedApprovalsForWorkerEnv(candidate); err != nil {
+		return nil, false, err
+	} else if ok {
+		return candidate, true, nil
+	}
+	return selected, false, nil
+}
+
+func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
+	status := strings.TrimSpace(approval.Status)
+	return status != "" && status != approvals.StatusApproved
+}
+
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -950,9 +1204,24 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		reservedPoolActor = true
 	}
 
+	resolvedApprovalsJSON := ""
+	if taskNeedsApprovalState(task, agent) {
+		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to derive resolved approvals")
+			if reservedPoolActor {
+				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+					return ctrl.Result{}, releaseErr
+				}
+			}
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		ExecutionWorkspace: workspaceRequest,
+		ExecutionWorkspace:    workspaceRequest,
+		ResolvedApprovalsJSON: resolvedApprovalsJSON,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1322,6 +1591,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if elapsed > task.Spec.Timeout.Duration {
+			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+				return result, err
+			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
 				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
@@ -1398,6 +1670,29 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.isAutonomousTask(ctx, task) {
+				oldJob := task.Status.JobName
+				latest := &corev1alpha1.Task{}
+				reader := r.APIReader
+				if reader == nil {
+					reader = r.Client
+				}
+				if latestErr := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); latestErr != nil {
+					return ctrl.Result{}, latestErr
+				}
+				if latest.Status.JobName != oldJob || latest.Status.Phase != corev1alpha1.TaskPhaseRunning {
+					task.Status = latest.Status
+					log.Info("job not found for stale autonomous task state; requeueing with latest status",
+						"oldJob", oldJob,
+						"latestJob", latest.Status.JobName,
+						"latestPhase", latest.Status.Phase)
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				task = latest
+				if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+					return result, err
+				}
+			}
 			if r.isWithinJobCreationVisibilityGracePeriod(task) {
 				log.Info("job not found shortly after creation, waiting for cache visibility",
 					"job", task.Status.JobName,
@@ -1427,6 +1722,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if job.Status.Failed > 0 {
+		if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+			return result, err
+		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
@@ -2534,6 +2832,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
 			return err
 		}
+		if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
+			return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
+		}
 		// Prompt is required for agent tasks
 		if task.Spec.Prompt == "" {
 			return fmt.Errorf("prompt is required for type: agent tasks")
@@ -2543,10 +2844,69 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent != nil && agent.Spec.Runtime != nil {
 			return fmt.Errorf("agent %q has runtime configured (use type: agent instead of type: ai)", agent.Name)
 		}
+		if aiTaskRequestsApprovalTooling(task, agent) && !agentHasAutonomousCoordination(agent) {
+			return fmt.Errorf("request_approval requires enabled autonomous coordination mode")
+		}
+		if agent != nil && agent.Spec.Coordination != nil {
+			approvalRequiredTools := agent.Spec.Coordination.ApprovalRequiredTools
+			if len(approvalRequiredTools) > 0 &&
+				(!agent.Spec.Coordination.Enabled || !agent.Spec.Coordination.Autonomous) {
+				return fmt.Errorf("agent %q approvalRequiredTools requires enabled autonomous coordination mode", agent.Name)
+			}
+			if invalidTool := invalidApprovalRequiredBuiltInTool(approvalRequiredTools); invalidTool != "" {
+				return fmt.Errorf("agent %q approvalRequiredTools cannot include built-in tool %q", agent.Name, invalidTool)
+			}
+		}
 	case corev1alpha1.TaskTypeContainer:
 		// Container tasks don't use agents, no validation needed
 	}
 	return nil
+}
+
+func aiTaskRequestsApprovalTooling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if agent != nil {
+		for _, toolRef := range agent.Spec.Tools {
+			if toolRef.Enabled != nil && !*toolRef.Enabled {
+				continue
+			}
+			if strings.TrimSpace(toolRef.Name) == "request_approval" {
+				return true
+			}
+		}
+	}
+	if task != nil && task.Spec.AI != nil {
+		for _, toolName := range task.Spec.AI.Tools {
+			if strings.TrimSpace(toolName) == "request_approval" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func agentHasAutonomousCoordination(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && agent.Spec.Coordination.Autonomous
+}
+
+func invalidApprovalRequiredBuiltInTool(values []string) string {
+	builtIns := approvalRequiredBuiltInToolSet()
+	for _, value := range values {
+		toolName := strings.TrimSpace(value)
+		if builtIns[toolName] {
+			return toolName
+		}
+	}
+	return ""
+}
+
+func approvalRequiredBuiltInToolSet() map[string]bool {
+	builtIns := map[string]bool{}
+	for _, name := range tools.KnownBuiltInToolNames() {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			builtIns[trimmed] = true
+		}
+	}
+	return builtIns
 }
 
 // handleScheduled manages the scheduling loop for recurring tasks.
@@ -2765,6 +3125,9 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
 		return err
 	}
@@ -3229,6 +3592,145 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous
 }
 
+func (r *TaskReconciler) pendingApprovalsForTask(ctx context.Context, task *corev1alpha1.Task) ([]approvals.Approval, error) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return nil, nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return nil, err
+	}
+	// Use zero time intentionally: v1 approval parking resolves only by
+	// explicit terminal approval events. There is no expiry producer yet, so
+	// passive expiresAt evaluation would silently resume consequential work.
+	return approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Time{}), nil
+}
+
+func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+	pending, err := r.pendingApprovalsForTask(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to derive pending approvals")
+		return ctrl.Result{}, false, err
+	}
+	if len(pending) == 0 {
+		return ctrl.Result{}, false, nil
+	}
+	approval := pending[0]
+	target := approval.TargetTool
+	if target == "" {
+		target = approval.Action
+	}
+	if target == "" {
+		target = "requested action"
+	}
+	log.Info(
+		"autonomous task waiting for approval",
+		"approvalID", approval.ID,
+		"targetTool", approval.TargetTool,
+		"iteration", task.Status.Iteration,
+	)
+	waitingMessage := fmt.Sprintf(
+		"waiting for approval %s for %s at iteration %d",
+		approval.ID,
+		target,
+		task.Status.Iteration,
+	)
+	if task.Status.Message != waitingMessage {
+		task.Status.Message = waitingMessage
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, false, err
+		}
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if !r.isAutonomousTask(ctx, task) {
+		return ctrl.Result{}, false, nil
+	}
+	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		return result, true, err
+	}
+	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if resumingAfterApproval {
+		result, err := r.handleAutonomousIteration(ctx, task)
+		return result, true, err
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func parseAnnotationInt64(value string) int64 {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
+}
+
+func (r *TaskReconciler) resumingAfterApprovalDecision(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	waitingStatus := strings.HasPrefix(task.Status.Message, "waiting for approval ")
+	decisionNudge := task.Annotations != nil && task.Annotations[labels.AnnotationApprovalDecidedAt] != ""
+	if decisionNudge && task.Annotations != nil {
+		decisionSeq := parseAnnotationInt64(task.Annotations[labels.AnnotationApprovalDecisionSeq])
+		resumedSeq := parseAnnotationInt64(task.Annotations[labels.AnnotationApprovalResumedSeq])
+		decisionNudge = decisionSeq == 0 || decisionSeq > resumedSeq
+	}
+	if !waitingStatus && !decisionNudge {
+		return false, nil
+	}
+	if r == nil || r.ExecutionEventStore == nil {
+		return false, nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return false, err
+	}
+	resolved := approvals.Resolved(approvals.Derive(
+		approvals.FilterEventsForTaskUID(listed, string(task.UID)),
+		time.Time{},
+	))
+	return len(resolved) > 0, nil
+}
+
+func (r *TaskReconciler) clearApprovalDecisionNudge(ctx context.Context, task *corev1alpha1.Task) error {
+	if r == nil || task == nil || task.Annotations == nil || task.Annotations[labels.AnnotationApprovalDecidedAt] == "" {
+		return nil
+	}
+	var updated *corev1alpha1.Task
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, current); err != nil {
+			return err
+		}
+		if seq := strings.TrimSpace(current.Annotations[labels.AnnotationApprovalDecisionSeq]); seq != "" {
+			current.Annotations[labels.AnnotationApprovalResumedSeq] = seq
+		}
+		delete(current.Annotations, labels.AnnotationApprovalDecidedAt)
+		delete(current.Annotations, labels.AnnotationApprovalDecisionID)
+		delete(current.Annotations, labels.AnnotationApprovalDecisionStatus)
+		delete(current.Annotations, labels.AnnotationApprovalDecisionSeq)
+		if err := r.Update(ctx, current); err != nil {
+			return err
+		}
+		updated = current
+		return nil
+	}); err != nil {
+		return err
+	}
+	if updated != nil {
+		task.ResourceVersion = updated.ResourceVersion
+		task.Annotations = updated.Annotations
+	}
+	return nil
+}
+
 // handleAutonomousIteration handles the completion of one autonomous loop iteration.
 // It saves plan state, checks termination conditions, and creates a new Job if needed.
 func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
@@ -3240,10 +3742,19 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		log.Error(err, "failed to collect iteration result")
 	}
 
+	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		return result, err
+	}
+
+	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Check plan state for termination signals
 	if r.PlanStore != nil {
 		plan, err := r.PlanStore.GetPlan(ctx, task.Namespace, task.Name)
-		if err == nil && plan.GoalComplete {
+		if err == nil && plan.GoalComplete && !resumingAfterApproval {
 			log.Info("autonomous task goal complete", "iteration", task.Status.Iteration, "summary", plan.Summary)
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
 				fmt.Sprintf("goal complete after %d iterations: %s", task.Status.Iteration+1, plan.Summary))
@@ -3265,7 +3776,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	maxIter := agent.Spec.Coordination.MaxIterations
-	if maxIter > 0 && task.Status.Iteration+1 >= maxIter {
+	if maxIter > 0 && task.Status.Iteration+1 >= maxIter && !resumingAfterApproval {
 		log.Info("autonomous task reached max iterations", "maxIterations", maxIter)
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
 			fmt.Sprintf("reached max iterations (%d)", maxIter))
@@ -3312,6 +3823,11 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	if err := r.Status().Update(ctx, task); err != nil {
 		log.Error(err, "failed to update status for autonomous iteration")
 		return ctrl.Result{}, err
+	}
+	if resumingAfterApproval {
+		if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	log.Info("autonomous task advancing to next iteration", "nextIteration", task.Status.Iteration)

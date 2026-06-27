@@ -93,6 +93,7 @@ spec:
 | `enabled` | bool | `false` | Enable agent-to-agent coordination tools |
 | `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
+| `approvalRequiredTools` | list | `[]` | Custom Tool CRD names that require human approval before execution in enabled autonomous coordination mode. Built-in tools, including `request_approval`, are rejected |
 | `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
 | `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
 | `maxDepth` | int32 | `3` | Maximum delegation depth |
@@ -100,6 +101,8 @@ spec:
 **Auto-injected coordination tools** (when `enabled: true`):
 
 `delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`, `recall_memory`, `remember`, `propose_memory`, `search_transcript`, `create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+
+When `autonomous: true`, `request_approval` is also injected so the worker can park the task after an explicit human approval request.
 
 **Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
 

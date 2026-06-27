@@ -17,6 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const getIssueToolName = "get_issue"
+
 // GetIssueTool fetches full details of a specific GitHub issue including comments.
 type GetIssueTool struct {
 	k8sClient  client.Client
@@ -64,7 +66,7 @@ func NewGetIssueTool(k8sClient client.Client) *GetIssueTool {
 
 // Name returns the tool name.
 func (t *GetIssueTool) Name() string {
-	return "get_issue"
+	return getIssueToolName
 }
 
 // Description returns the tool description.

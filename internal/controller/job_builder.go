@@ -279,6 +279,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 type JobBuildOptions struct {
 	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
 	ExecutionWorkspace    *ExecutionWorkspaceRequest
+	ResolvedApprovalsJSON string
 }
 
 // Build creates a Job for the given Task.
@@ -572,6 +573,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
+		TaskUID:        string(task.UID),
 		ResultEndpoint: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
 		ControllerURL:  b.ControllerURL,
 	}.EnvVars()
@@ -582,8 +584,20 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add task-level env vars. AI worker telemetry env vars are reserved for
 	// controller injection so workload authors cannot bypass default-off telemetry
-	// policy or redirect GenAI metadata to arbitrary collectors.
+	// policy or redirect GenAI metadata to arbitrary collectors. Restore
+	// controller-owned identity and approval env vars so task authors cannot
+	// spoof execution identity or approval state.
 	envVars = appendTaskEnvVars(envVars, task)
+	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
+	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
+	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
+	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
+	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
+	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
+	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
+	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
+	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
 	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
@@ -628,6 +642,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
+	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
@@ -920,7 +935,7 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		depth = d
 	}
 
-	return append(envVars, workerenv.CoordinationEnv{
+	for _, envVar := range (workerenv.CoordinationEnv{
 		Enabled:                 true,
 		MaxDepth:                int(agent.Spec.Coordination.MaxDepth),
 		MaxChildren:             int(agent.Spec.Coordination.MaxConcurrentChildren),
@@ -929,7 +944,10 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		AutonomousMode:          agent.Spec.Coordination.Autonomous,
 		AutonomousIteration:     int(task.Status.Iteration),
 		AutonomousMaxIterations: int(agent.Spec.Coordination.MaxIterations),
-	}.EnvVars()...)
+	}).EnvVars() {
+		envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
+	}
+	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(agent.Spec.Coordination.ApprovalRequiredTools))
 }
 
 // addAIEnvVars adds AI-specific environment variables
@@ -983,6 +1001,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 				cfg.tools = append(cfg.tools, ct)
 			}
 		}
+		if agent.Spec.Coordination.Autonomous && !slices.Contains(cfg.tools, "request_approval") {
+			cfg.tools = append(cfg.tools, "request_approval")
+		}
 	}
 
 	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
@@ -997,7 +1018,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	if len(cfg.tools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{Name: workerenv.AITools, Value: strings.Join(cfg.tools, ",")})
+		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
 	}
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -1605,6 +1626,25 @@ func safeWorkerOTLPEnvValue(name, value string) string {
 		return strings.TrimPrefix(sanitized, "//")
 	}
 	return sanitized
+}
+
+func setControllerEnvValue(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	out := make([]corev1.EnvVar, 0, len(envVars)+1)
+	set := false
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+			continue
+		}
+		if !set {
+			out = append(out, corev1.EnvVar{Name: name, Value: value})
+			set = true
+		}
+	}
+	if !set {
+		out = append(out, corev1.EnvVar{Name: name, Value: value})
+	}
+	return out
 }
 
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -217,6 +218,37 @@ var _ = Describe("Manager", Ordered, func() {
 			By("getting the metrics by checking curl-metrics logs")
 			verifyMetricsAvailable := func(g Gomega) {
 				metricsOutput, err := getMetricsOutput()
+				if err != nil || !strings.Contains(metricsOutput, "< HTTP/1.1 200 OK") {
+					_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found"))
+					cmd := exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
+						"--namespace", namespace,
+						"--image=curlimages/curl:latest",
+						"--overrides",
+						fmt.Sprintf(`{
+							"spec": {
+								"containers": [{
+									"name": "curl",
+									"image": "curlimages/curl:latest",
+									"command": ["/bin/sh", "-c"],
+									"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
+									"securityContext": {
+										"readOnlyRootFilesystem": true,
+										"allowPrivilegeEscalation": false,
+										"capabilities": {
+											"drop": ["ALL"]
+										},
+										"runAsNonRoot": true,
+										"runAsUser": 1000,
+										"seccompProfile": {
+											"type": "RuntimeDefault"
+										}
+									}
+								}],
+								"serviceAccountName": "%s"
+							}
+						}`, token, metricsServiceName, namespace, serviceAccountName))
+					_, _ = utils.Run(cmd)
+				}
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 				g.Expect(metricsOutput).NotTo(BeEmpty())
 				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))

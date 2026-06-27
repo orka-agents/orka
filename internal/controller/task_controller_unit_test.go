@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
@@ -484,6 +485,28 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskRejectsApprovalRequiredTools(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-runtime-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "only supported for type: ai") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want runtime approval rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -586,6 +609,124 @@ func TestValidateTaskAgentCompatibility_AITaskWithRuntime(t *testing.T) {
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err == nil {
 		t.Error("expected error for AI task referencing agent with runtime")
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RequestApprovalToolRequiresAutonomous(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		task  *corev1alpha1.Task
+		agent *corev1alpha1.Agent
+	}{
+		{
+			name: "agent tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}},
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+				},
+			},
+		},
+		{
+			name: "task tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				AI:   &corev1alpha1.AISpec{Tools: []string{"request_approval"}},
+			}},
+			agent: &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			if err := r.validateTaskAgentCompatibility(tt.task, tt.agent); err == nil ||
+				!strings.Contains(err.Error(), "enabled autonomous") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous request_approval rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RequestApprovalAllowedForAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:    true,
+				Autonomous: true,
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordinationEnabled(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want enabled autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRejectBuiltIns(t *testing.T) {
+	for _, toolName := range []string{"request_approval", "create_container_task", "web_search", "file_read", "web_fetch", "list_issues", "get_issue", "list_pull_requests", "recall_memory", "search_transcript", "delegate_task", "send_message", "check_messages", "post_review_comment", "check_pr_review_marker", "comment_on_issue", "update_agent"} {
+		t.Run(toolName, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						Autonomous:            true,
+						ApprovalRequiredTools: []string{toolName},
+					},
+				},
+			}
+			if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+				!strings.Contains(err.Error(), "cannot include built-in tool") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want built-in rejection", err)
+			}
+		})
 	}
 }
 
@@ -3272,6 +3413,92 @@ func TestHandleRunning_Timeout(t *testing.T) {
 	}
 }
 
+func TestHandleRunning_AutonomousTaskTimeoutWithPendingApprovalParksBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Second}
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-timeout-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-timeout-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-timeout-approval-agent"},
+			Timeout:     &timeout,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-timeout-approval-job",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-timeout-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-timeout-approval-job" {
+		t.Fatalf("task status = %#v, want parked Running before timeout failure", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousTaskTimeoutWithApprovedApprovalResumesBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Second}
+	startTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-timeout-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "run-timeout-approved-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-timeout-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-timeout-approved-agent"},
+			Timeout:  &timeout,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			StartTime: &startTime,
+			JobName:   "run-timeout-approved-job",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-timeout-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-timeout-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-timeout-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", task.Status)
+	}
+}
+
 func TestHandleRunning_JobNotFound(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -3289,6 +3516,51 @@ func TestHandleRunning_JobNotFound(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Errorf("expected phase Failed for missing job, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_AutonomousJobNotFoundUsesFreshTaskState(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-stale-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+	staleTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-stale-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-stale-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:   corev1alpha1.TaskPhaseRunning,
+			JobName: "old-job",
+		},
+	}
+	freshTask := staleTask.DeepCopy()
+	freshTask.Status = corev1alpha1.TaskStatus{
+		Phase:     corev1alpha1.TaskPhasePending,
+		JobName:   "",
+		Iteration: 1,
+		Message:   "autonomous iteration 1",
+	}
+	r := newUnitReconciler(scheme, staleTask, agent)
+	r.APIReader = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(freshTask).
+		Build()
+
+	result, err := r.handleRunning(context.Background(), staleTask)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("expected requeue for stale autonomous state, got %v", result.RequeueAfter)
+	}
+	if staleTask.Status.Phase != corev1alpha1.TaskPhasePending || staleTask.Status.JobName != "" || staleTask.Status.Iteration != 1 {
+		t.Fatalf("task status = %#v, want fresh pending autonomous status", staleTask.Status)
 	}
 }
 
@@ -3395,6 +3667,279 @@ func TestHandleRunning_JobFailed_WithRetry(t *testing.T) {
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected phase Pending for retry, got %s", task.Status.Phase)
+	}
+}
+
+func TestHandleRunning_AutonomousJobFailedWithPendingApprovalParksBeforeRetry(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-failed-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-fail-approval", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-fail-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-failed-approval-agent"},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-fail-approval",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-failed-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-job-fail-approval" {
+		t.Fatalf("task status = %#v, want parked Running without retry", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousDeadlineFailedWithPendingApprovalParksBeforeTimeout(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Minute}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-deadline-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-deadline-approval", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Failed: 1,
+			Conditions: []batchv1.JobCondition{{
+				Type:   batchv1.JobFailed,
+				Status: corev1.ConditionTrue,
+				Reason: batchv1.JobReasonDeadlineExceeded,
+			}},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-deadline-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-deadline-approval-agent"},
+			Timeout:     &timeout,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-deadline-approval",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-deadline-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != "run-job-deadline-approval" {
+		t.Fatalf("task status = %#v, want parked Running before timeout", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousDeadlineFailedWithApprovedApprovalResumesBeforeTimeout(t *testing.T) {
+	scheme := newTestScheme()
+	timeout := metav1.Duration{Duration: time.Minute}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-deadline-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-deadline-approved", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Failed: 1,
+			Conditions: []batchv1.JobCondition{{
+				Type:   batchv1.JobFailed,
+				Status: corev1.ConditionTrue,
+				Reason: batchv1.JobReasonDeadlineExceeded,
+			}},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-deadline-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-deadline-approved-agent"},
+			Timeout:  &timeout,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-deadline-approved",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-deadline-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-deadline-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-deadline-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", task.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousJobNotFoundWithPendingApprovalParksBeforeRetry(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-missing-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-missing-approval", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			AgentRef:    &corev1alpha1.AgentReference{Name: "auto-missing-approval-agent"},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "missing-approval-job",
+			Attempts:  1,
+			Iteration: 1,
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-missing-job")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning || updated.Status.JobName != "missing-approval-job" {
+		t.Fatalf("task status = %#v, want parked Running without retry", updated.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousJobNotFoundWithApprovedApprovalResumesBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-missing-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-missing-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-missing-approved-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "missing-approved-job",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-missing-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-missing-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-missing-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending || updated.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", updated.Status)
+	}
+}
+
+func TestHandleRunning_AutonomousJobFailedWithApprovedApprovalResumesBeforeFail(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-failed-approved-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-job-fail-approved", Namespace: "default"},
+		Status:     batchv1.JobStatus{Failed: 1},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-fail-approved", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "auto-failed-approved-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			JobName:   "run-job-fail-approved",
+			Attempts:  1,
+			Iteration: 1,
+			Message:   "waiting for approval approval-failed-approved for dispatch_work_order at iteration 1",
+		},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-failed-approved")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-failed-approved")
+
+	result, err := r.handleRunning(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRunning() error = %v", err)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed Pending iteration 2", task.Status)
 	}
 }
 
@@ -6734,5 +7279,515 @@ func TestTaskEventWriteFailureDoesNotBreakStatusUpdate(t *testing.T) {
 	}
 	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("phase = %s, want Pending despite event write failure", updated.Status.Phase)
+	}
+}
+
+func TestHandleAutonomousIteration_PendingApprovalParksBeforeAdvancing(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "approval-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-1")
+
+	result, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleAutonomousIteration() error = %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 30s", result.RequeueAfter)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.Iteration != 1 || task.Status.JobName != "approval-job" {
+		t.Fatalf("task status = %#v, want parked running at same iteration/job", task.Status)
+	}
+	if !strings.Contains(task.Status.Message, "waiting for approval approval-1") || !strings.Contains(task.Status.Message, "dispatch_work_order") {
+		t.Fatalf("status message = %q", task.Status.Message)
+	}
+	var stillThere batchv1.Job
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "approval-job", Namespace: "default"}, &stillThere); err != nil {
+		t.Fatalf("old job was deleted while parked: %v", err)
+	}
+}
+
+func TestHandleAutonomousIteration_PendingApprovalParksBeforeMaxIterations(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-max-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 2},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-max", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-max-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-max")
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleAutonomousIteration() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want Running parked instead of max-iteration completion", task.Status.Phase)
+	}
+}
+
+func appendApprovalRequestedForControllerTest(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, approvalID string) {
+	t.Helper()
+	content, err := json.Marshal(map[string]string{
+		"approvalID":       approvalID,
+		"targetTool":       "dispatch_work_order",
+		"targetArgsDigest": "digest",
+		"action":           "Execute dispatch_work_order",
+	})
+	if err != nil {
+		t.Fatalf("marshal approval: %v", err)
+	}
+	_, err = r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		TaskName:   task.Name,
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		ToolCallID: approvalID,
+		ToolName:   "dispatch_work_order",
+		Severity:   events.ExecutionEventSeverityWarning,
+		Summary:    "approval requested",
+		Content:    content,
+	})
+	if err != nil {
+		t.Fatalf("append approval: %v", err)
+	}
+}
+
+func TestResolvedApprovalsJSONForTaskPreservesResolvedDecisionsWithinBudget(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name:      "auto-approval-window",
+		Namespace: "default",
+		UID:       types.UID("task-uid"),
+	}}
+	r := newUnitReconciler(scheme, task)
+	const total = 40
+	for i := range total {
+		approvalID := fmt.Sprintf("approval-%02d", i)
+		appendApprovalRequestedForControllerTest(t, r, task, approvalID)
+		appendApprovalDecisionForControllerTest(t, r, task, approvalID)
+	}
+
+	got, err := r.resolvedApprovalsJSONForTask(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForTask() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var resolved []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &resolved); err != nil {
+		t.Fatalf("unmarshal resolved approvals: %v", err)
+	}
+	if len(resolved) != total {
+		t.Fatalf("resolved approvals length = %d, want %d", len(resolved), total)
+	}
+	if resolved[0].ID != "approval-00" {
+		t.Fatalf("first retained approval = %q, want approval-00", resolved[0].ID)
+	}
+	if resolved[len(resolved)-1].ID != "approval-39" {
+		t.Fatalf("last retained approval = %q, want approval-39", resolved[len(resolved)-1].ID)
+	}
+}
+
+func TestResolvedApprovalsJSONForWorkerEnvBoundsAggregatePreviewPayload(t *testing.T) {
+	const total = 40
+	resolved := make([]approvals.ResolvedApproval, 0, total)
+	preview := json.RawMessage(`{"payload":"` + strings.Repeat("x", 8*1024) + `"}`)
+	for i := range total {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:                fmt.Sprintf("approval-%02d", i),
+			TargetTool:        "dispatch_work_order",
+			TargetArgsDigest:  fmt.Sprintf("digest-%02d", i),
+			TargetArgsPreview: append(json.RawMessage(nil), preview...),
+			Status:            approvals.StatusApproved,
+		})
+	}
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	if len(bounded) == 0 {
+		t.Fatal("bounded approvals unexpectedly empty")
+	}
+	for _, approval := range bounded {
+		if len(approval.TargetArgsPreview) != 0 {
+			t.Fatalf("approval %s retained TargetArgsPreview length %d", approval.ID, len(approval.TargetArgsPreview))
+		}
+	}
+}
+
+func TestResolvedApprovalsJSONForWorkerEnvPreservesOlderBlockingDecisionsWhenCompacting(t *testing.T) {
+	resolved := []approvals.ResolvedApproval{{
+		ID:               "approval-denied-old",
+		TaskUID:          "task-uid",
+		TargetTool:       "dispatch_work_order",
+		TargetArgsDigest: "denied-digest",
+		Status:           approvals.StatusDeclined,
+		Reason:           strings.Repeat("denied ", 4096),
+	}}
+	for i := range 800 {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:               fmt.Sprintf("approval-approved-%03d", i),
+			TaskUID:          "task-uid",
+			TargetTool:       "dispatch_work_order",
+			TargetArgsDigest: fmt.Sprintf("approved-digest-%03d", i),
+			Status:           approvals.StatusApproved,
+			Reason:           strings.Repeat("approved ", 4096),
+		})
+	}
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	foundDecline := false
+	for _, approval := range bounded {
+		if approval.ID == "approval-denied-old" {
+			foundDecline = true
+			if approval.Status != approvals.StatusDeclined {
+				t.Fatalf("old blocking approval status = %q, want declined", approval.Status)
+			}
+			if approval.Reason != "" || len(approval.TargetArgsPreview) != 0 {
+				t.Fatalf("old blocking approval was not compacted: %#v", approval)
+			}
+		}
+	}
+	if !foundDecline {
+		t.Fatalf("old blocking approval was dropped from bounded payload of %d approvals", len(bounded))
+	}
+}
+
+func TestResolvedApprovalsJSONForWorkerEnvAddsBlockingOverflowSentinel(t *testing.T) {
+	resolved := make([]approvals.ResolvedApproval, 0, 900)
+	for i := range 900 {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:               fmt.Sprintf("approval-declined-%03d", i),
+			TaskUID:          "task-uid",
+			TargetTool:       "dispatch_work_order",
+			TargetArgsDigest: fmt.Sprintf("declined-digest-%03d", i),
+			Status:           approvals.StatusDeclined,
+		})
+	}
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	foundOverflow := false
+	for _, approval := range bounded {
+		if approvals.IsResolvedApprovalBlockingOverflow(approval) {
+			foundOverflow = true
+		}
+	}
+	if !foundOverflow {
+		t.Fatalf("blocking overflow sentinel missing from bounded payload of %d approvals", len(bounded))
+	}
+}
+
+func TestResolvedApprovalsJSONForWorkerEnvPreservesRecentApprovalWhenBlockingHistoryExceedsBudget(t *testing.T) {
+	resolved := make([]approvals.ResolvedApproval, 0, 801)
+	for i := range 800 {
+		resolved = append(resolved, approvals.ResolvedApproval{
+			ID:               fmt.Sprintf("approval-declined-%03d", i),
+			TaskUID:          "task-uid",
+			TargetTool:       "dispatch_work_order",
+			TargetArgsDigest: fmt.Sprintf("declined-digest-%03d", i),
+			Status:           approvals.StatusDeclined,
+		})
+	}
+	resolved = append(resolved, approvals.ResolvedApproval{
+		ID:               "approval-approved-recent",
+		TaskUID:          "task-uid",
+		TargetTool:       "dispatch_work_order",
+		TargetArgsDigest: "approved-digest-recent",
+		Status:           approvals.StatusApproved,
+	})
+
+	got, err := resolvedApprovalsJSONForWorkerEnv(resolved)
+	if err != nil {
+		t.Fatalf("resolvedApprovalsJSONForWorkerEnv() error = %v", err)
+	}
+	if len(got) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		t.Fatalf("resolved approvals JSON length = %d, want <= %d", len(got), maxResolvedApprovalsJSONForWorkerEnvBytes)
+	}
+	var bounded []approvals.ResolvedApproval
+	if err := json.Unmarshal([]byte(got), &bounded); err != nil {
+		t.Fatalf("unmarshal bounded approvals: %v", err)
+	}
+	foundRecentApproval := false
+	for _, approval := range bounded {
+		if approval.ID == "approval-approved-recent" {
+			foundRecentApproval = true
+			if approval.Status != approvals.StatusApproved {
+				t.Fatalf("recent approval status = %q, want approved", approval.Status)
+			}
+		}
+	}
+	if !foundRecentApproval {
+		t.Fatalf("recent approved decision was dropped from bounded payload of %d approvals", len(bounded))
+	}
+}
+
+func TestHandleAutonomousIteration_ApprovedAtMaxIterationResumes(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-resume-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 2},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "approval-resume-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-resume", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-resume-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-resume-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-resume")
+
+	if _, err := r.handleAutonomousIteration(context.Background(), task); err != nil {
+		t.Fatalf("initial park error = %v", err)
+	}
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-resume")
+	result, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resume error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed pending iteration 2", task.Status)
+	}
+	if result.RequeueAfter != 5*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 5s", result.RequeueAfter)
+	}
+}
+
+func appendApprovalDecisionForControllerTest(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task, approvalID string) {
+	t.Helper()
+	content, err := json.Marshal(map[string]string{
+		"approvalID": approvalID,
+		"taskUID":    string(task.UID),
+		"decision":   "approve",
+	})
+	if err != nil {
+		t.Fatalf("marshal approval decision: %v", err)
+	}
+	_, err = r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		TaskName:   task.Name,
+		Type:       events.ExecutionEventTypeApprovalApproved,
+		ToolCallID: approvalID,
+		Severity:   events.ExecutionEventSeverityInfo,
+		Summary:    "approval decided",
+		Content:    content,
+	})
+	if err != nil {
+		t.Fatalf("append approval decision: %v", err)
+	}
+}
+
+func TestHandleAutonomousIteration_FastApprovalAtMaxIterationResumes(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-fast-approval-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 2},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "fast-approval-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "auto-fast-approval",
+			Namespace:   "default",
+			Annotations: map[string]string{labels.AnnotationApprovalDecidedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-fast-approval-agent"}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "fast-approval-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-fast")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-fast")
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("resume error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed pending iteration 2", task.Status)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if updated.Annotations[labels.AnnotationApprovalDecidedAt] != "" {
+		t.Fatalf("approval decision nudge was not cleared: %#v", updated.Annotations)
+	}
+}
+
+func TestHandleAutonomousIteration_FastApprovalStatusUpdateFailureKeepsNudge(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-fast-approval-fail-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 2},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "fast-approval-fail-job", Namespace: "default"}}
+	decisionTime := time.Now().UTC().Format(time.RFC3339Nano)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "auto-fast-approval-fail",
+			Namespace: "default",
+			Annotations: map[string]string{
+				labels.AnnotationApprovalDecidedAt:   decisionTime,
+				labels.AnnotationApprovalDecisionSeq: "7",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-fast-approval-fail-agent"}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "fast-approval-fail-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-fast-fail")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-fast-fail")
+
+	statusErr := errors.New("status update failed")
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatalf("test client does not implement WithWatch: %T", r.Client)
+	}
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" {
+				return statusErr
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if !errors.Is(err, statusErr) {
+		t.Fatalf("handleAutonomousIteration() error = %v, want %v", err, statusErr)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if got := updated.Annotations[labels.AnnotationApprovalDecidedAt]; got != decisionTime {
+		t.Fatalf("approval decision nudge = %q, want preserved %q; annotations=%#v", got, decisionTime, updated.Annotations)
+	}
+	if got := updated.Annotations[labels.AnnotationApprovalDecisionSeq]; got != "7" {
+		t.Fatalf("approval decision seq = %q, want preserved; annotations=%#v", got, updated.Annotations)
+	}
+	if got := updated.Annotations[labels.AnnotationApprovalResumedSeq]; got != "" {
+		t.Fatalf("approval resumed seq = %q, want unset until resumed status is durable", got)
+	}
+}
+
+func TestHandleAutonomousIteration_PendingApprovalParksBeforeGoalComplete(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-goal-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-goal")
+	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-approval-goal", &store.PlanState{
+		GoalComplete: true,
+		Summary:      "done",
+	})
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleAutonomousIteration() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want parked Running before goal-complete", task.Status.Phase)
+	}
+}
+
+func TestHandleAutonomousIteration_ResolvedApprovalResumesBeforeGoalComplete(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal-resume-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 10},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "approval-goal-resume-job", Namespace: "default"}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-approval-goal-resume", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-approval-goal-resume-agent"}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "approval-goal-resume-job", Message: "waiting for approval approval-goal for dispatch_work_order at iteration 1"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-goal")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-goal")
+	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-approval-goal-resume", &store.PlanState{
+		GoalComplete: true,
+		Summary:      "done",
+	})
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleAutonomousIteration() error = %v", err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending || task.Status.Iteration != 2 {
+		t.Fatalf("task status = %#v, want resumed pending iteration 2", task.Status)
 	}
 }
