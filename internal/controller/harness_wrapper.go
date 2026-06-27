@@ -89,15 +89,16 @@ func harnessWrapperAuthValue() string {
 }
 
 type harnessRuntimeTarget struct {
-	Endpoint        string
-	BearerToken     string
-	RuntimeName     string
-	RuntimeRefName  string
-	ContractVersion string
-	Wrapper         string
-	Generation      int64
-	AuthRefName     string
-	AuthRefField    string
+	Endpoint               string
+	BearerToken            string
+	RuntimeName            string
+	RuntimeRefName         string
+	ContractVersion        string
+	Wrapper                string
+	Generation             int64
+	AuthRefName            string
+	AuthRefField           string
+	AuthRefResourceVersion string
 }
 
 type agentRuntimeDependencyNotReadyError struct {
@@ -148,14 +149,15 @@ func harnessRuntimeTargetFromStatus(task *corev1alpha1.Task) (harnessRuntimeTarg
 		runtimeName = strings.TrimSpace(status.RuntimeRefName)
 	}
 	return harnessRuntimeTarget{
-		Endpoint:        strings.TrimSpace(status.Endpoint),
-		RuntimeName:     runtimeName,
-		RuntimeRefName:  strings.TrimSpace(status.RuntimeRefName),
-		ContractVersion: contract,
-		Wrapper:         "external-endpoint",
-		Generation:      status.RuntimeGeneration,
-		AuthRefName:     strings.TrimSpace(status.AuthRefName),
-		AuthRefField:    strings.TrimSpace(status.AuthRefField),
+		Endpoint:               strings.TrimSpace(status.Endpoint),
+		RuntimeName:            runtimeName,
+		RuntimeRefName:         strings.TrimSpace(status.RuntimeRefName),
+		ContractVersion:        contract,
+		Wrapper:                "external-endpoint",
+		Generation:             status.RuntimeGeneration,
+		AuthRefName:            strings.TrimSpace(status.AuthRefName),
+		AuthRefField:           strings.TrimSpace(status.AuthRefField),
+		AuthRefResourceVersion: strings.TrimSpace(status.AuthRefResourceVersion),
 	}, true
 }
 
@@ -180,13 +182,14 @@ func harnessRuntimeStatusFromTarget(target harnessRuntimeTarget) *corev1alpha1.H
 		return nil
 	}
 	return &corev1alpha1.HarnessRuntimeStatus{
-		RuntimeRefName:    target.RuntimeRefName,
-		RuntimeName:       target.RuntimeName,
-		ContractVersion:   target.ContractVersion,
-		Endpoint:          target.Endpoint,
-		RuntimeGeneration: target.Generation,
-		AuthRefName:       target.AuthRefName,
-		AuthRefField:      target.AuthRefField,
+		RuntimeRefName:         target.RuntimeRefName,
+		RuntimeName:            target.RuntimeName,
+		ContractVersion:        target.ContractVersion,
+		Endpoint:               target.Endpoint,
+		RuntimeGeneration:      target.Generation,
+		AuthRefName:            target.AuthRefName,
+		AuthRefField:           target.AuthRefField,
+		AuthRefResourceVersion: target.AuthRefResourceVersion,
 	}
 }
 
@@ -207,11 +210,15 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 ) (harnessRuntimeTarget, error) {
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if frozen, ok := harnessRuntimeTargetFromStatus(task); ok {
-			token, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.AuthRefName, frozen.AuthRefField)
+			token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.AuthRefName, frozen.AuthRefField)
 			if err != nil {
 				return harnessRuntimeTarget{}, err
 			}
+			if !taskHasHarnessWrapperTurn(task) && strings.TrimSpace(frozen.AuthRefResourceVersion) != authRefResourceVersion {
+				return r.resolveReadyAgentRuntimeTarget(ctx, task, frozen.RuntimeRefName)
+			}
 			frozen.BearerToken = token
+			frozen.AuthRefResourceVersion = authRefResourceVersion
 			return frozen, nil
 		}
 	}
@@ -229,6 +236,14 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 			Wrapper:         "cli",
 		}, nil
 	}
+	return r.resolveReadyAgentRuntimeTarget(ctx, task, runtimeRefName)
+}
+
+func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	runtimeRefName string,
+) (harnessRuntimeTarget, error) {
 	if task == nil {
 		return harnessRuntimeTarget{}, fmt.Errorf("task is required to resolve runtimeRef %q", runtimeRefName)
 	}
@@ -255,9 +270,12 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
 		return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q has unsupported deployment.mode %q", runtimeRefName, runtime.Spec.Deployment.Mode)
 	}
-	token, err := r.resolveAgentRuntimeBearerToken(ctx, runtime)
+	token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerToken(ctx, runtime)
 	if err != nil {
 		return harnessRuntimeTarget{}, err
+	}
+	if strings.TrimSpace(runtime.Status.ObservedAuthRefResourceVersion) != authRefResourceVersion {
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: bearer token Secret version changed since runtime readiness", runtimeRefName)}
 	}
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
 	runtimeName := runtimeRefName
@@ -265,21 +283,22 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 		runtimeName = strings.TrimSpace(runtime.Status.ObservedCapabilities.RuntimeName)
 	}
 	return harnessRuntimeTarget{
-		Endpoint:        strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
-		BearerToken:     token,
-		RuntimeName:     runtimeName,
-		RuntimeRefName:  runtimeRefName,
-		ContractVersion: string(runtime.Spec.ContractVersion),
-		Wrapper:         "external-endpoint",
-		Generation:      runtime.Generation,
-		AuthRefName:     strings.TrimSpace(ref.Name),
-		AuthRefField:    strings.TrimSpace(ref.Key),
+		Endpoint:               strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
+		BearerToken:            token,
+		RuntimeName:            runtimeName,
+		RuntimeRefName:         runtimeRefName,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Wrapper:                "external-endpoint",
+		Generation:             runtime.Generation,
+		AuthRefName:            strings.TrimSpace(ref.Name),
+		AuthRefField:           strings.TrimSpace(ref.Key),
+		AuthRefResourceVersion: authRefResourceVersion,
 	}, nil
 }
 
-func (r *TaskReconciler) resolveAgentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, error) {
+func (r *TaskReconciler) resolveAgentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, string, error) {
 	if runtime == nil {
-		return "", fmt.Errorf("AgentRuntime is required")
+		return "", "", fmt.Errorf("AgentRuntime is required")
 	}
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
 	return r.resolveAgentRuntimeBearerTokenFromRef(ctx, runtime.Namespace, runtime.Name, ref.Name, ref.Key)
@@ -291,24 +310,24 @@ func (r *TaskReconciler) resolveAgentRuntimeBearerTokenFromRef(
 	runtimeName string,
 	refName string,
 	refField string,
-) (string, error) {
+) (string, string, error) {
 	refName = strings.TrimSpace(refName)
 	refField = strings.TrimSpace(refField)
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: refName}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", fmt.Errorf("AgentRuntime %q bearer token Secret %q not found", runtimeName, refName)
+			return "", "", fmt.Errorf("AgentRuntime %q bearer token Secret %q not found", runtimeName, refName)
 		}
-		return "", fmt.Errorf("read AgentRuntime %q bearer token Secret %q: %w", runtimeName, refName, err)
+		return "", "", fmt.Errorf("read AgentRuntime %q bearer token Secret %q: %w", runtimeName, refName, err)
 	}
 	if err := validateAgentRuntimeBearerSecretUse(runtimeName, secret); err != nil {
-		return "", err
+		return "", "", err
 	}
 	value := strings.TrimSpace(string(secret.Data[refField]))
 	if value == "" {
-		return "", fmt.Errorf("AgentRuntime %q bearer token Secret %q key %q is empty or missing", runtimeName, refName, refField)
+		return "", "", fmt.Errorf("AgentRuntime %q bearer token Secret %q key %q is empty or missing", runtimeName, refName, refField)
 	}
-	return value, nil
+	return value, strings.TrimSpace(secret.ResourceVersion), nil
 }
 
 //nolint:gocyclo // Coordinates idempotent turn planning, wrapper start, and Running transition.

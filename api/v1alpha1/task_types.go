@@ -496,6 +496,10 @@ type HarnessRuntimeStatus struct {
 	// AuthRefField is the Secret data field selected when the turn started.
 	// +optional
 	AuthRefField string `json:"authRefField,omitempty"`
+
+	// AuthRefResourceVersion is the auth Secret resourceVersion validated before starting the turn.
+	// +optional
+	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
 }
 
 // ResultReference indicates whether a result is available for the task

@@ -247,6 +247,20 @@ func TestHarnessWrapperBuiltInRuntimeIgnoresRuntimeRefAnnotation(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://custom.example.invalid")
+	runtime.Status.ObservedAuthRefResourceVersion = "1"
+	token.ResourceVersion = "2"
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if !isAgentRuntimeDependencyNotReady(err) {
+		t.Fatalf("resolveHarnessRuntimeTarget() error = %v, want dependency-not-ready after auth Secret version changed", err)
+	}
+}
+
 func TestHarnessWrapperRuntimeRefMissingAgentRuntimeFailsClearly(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "missing-runtime"}}
@@ -397,8 +411,9 @@ func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.
 			}},
 		},
 		Status: corev1alpha1.AgentRuntimeStatus{
-			Ready:              true,
-			ObservedGeneration: 1,
+			Ready:                          true,
+			ObservedGeneration:             1,
+			ObservedAuthRefResourceVersion: "1",
 			ObservedCapabilities: &corev1alpha1.AgentRuntimeObservedCapabilities{
 				ProtocolVersion:         "orka.harness.v1",
 				RuntimeName:             name,
@@ -410,7 +425,7 @@ func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}},
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, ResourceVersion: "1", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}},
 		Data:       map[string][]byte{"token": []byte("x")},
 	}
 	return runtime, secret

@@ -2057,6 +2057,10 @@ spec:
                     description: AuthRefName is the Secret name selected when the
                       turn started.
                     type: string
+                  authRefResourceVersion:
+                    description: AuthRefResourceVersion is the auth Secret resourceVersion
+                      validated before starting the turn.
+                    type: string
                   contractVersion:
                     description: ContractVersion is the Orka harness contract version
                       used for the turn.
