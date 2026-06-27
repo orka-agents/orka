@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
@@ -1295,6 +1296,93 @@ func TestCreateSecurityPullRequest_ExistingPR(t *testing.T) {
 	require.Equal(t, securityTestRepoPRURL, finding.PRURL)
 	require.NotNil(t, finding.PRNumber)
 	require.Equal(t, 99, *finding.PRNumber)
+}
+
+func TestCreateSecurityPullRequestRejectsInvalidScanURLBeforeReadingGitSecret(t *testing.T) {
+	tests := []struct {
+		name    string
+		repoURL string
+	}{
+		{name: "non github host", repoURL: "https://attacker.example/owner/repo.git"},
+		{name: "embedded credentials", repoURL: "https://token@github.com/owner/repo.git"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			require.NoError(t, corev1.AddToScheme(scheme))
+
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "scan-1",
+					Namespace: "demo",
+				},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: tt.repoURL,
+					GitSecretRef: &corev1.LocalObjectReference{
+						Name: "missing-git-creds",
+					},
+				},
+			}
+
+			secretReads := 0
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(scan).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*corev1.Secret); ok {
+							secretReads++
+							return fmt.Errorf("unexpected git secret read for %s", key.Name)
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				}).
+				Build()
+			db, err := sqlite.NewDB(":memory:")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			securityStore := sqlite.NewStore(db, ":memory:")
+
+			handlers := NewHandlers(HandlersConfig{
+				Client:        fakeClient,
+				SecurityStore: securityStore,
+			})
+
+			ctx := context.Background()
+			require.NoError(t, securityStore.UpsertFinding(ctx, &store.Finding{
+				ID:             "finding-1",
+				Namespace:      "demo",
+				RepositoryScan: "scan-1",
+				ScanRunID:      "scan-run-1",
+				Fingerprint:    "fp-1",
+				Title:          "Command injection",
+				Summary:        "Unsanitized user input reaches shell execution.",
+				Severity:       "critical",
+				Confidence:     "high",
+				State:          "validated",
+			}))
+			require.NoError(t, securityStore.CreatePatchProposal(ctx, &store.PatchProposal{
+				ID:             "patch-1",
+				Namespace:      "demo",
+				RepositoryScan: "scan-1",
+				FindingID:      "finding-1",
+				TaskName:       "patch-task-1",
+				Branch:         "orka/security/fnd-123",
+				Status:         "succeeded",
+			}))
+
+			app := fiber.New()
+			app.Post("/security/findings/:id/pull-request", handlers.CreateSecurityPullRequest)
+
+			req := httptest.NewRequest(http.MethodPost, "/security/findings/finding-1/pull-request?namespace=demo", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.Zero(t, secretReads, "invalid scan URL should be rejected before reading git credentials")
+		})
+	}
 }
 
 func TestCreateSecurityPatchTaskRequiresPushedBranch(t *testing.T) {

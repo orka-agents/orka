@@ -456,3 +456,45 @@ func TestHandlers_ToolRESTMutationRejectsAuthSecretRef(t *testing.T) {
 	})
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
+
+func TestHandlers_RepositoryScanMutationsRequireGitHubRepoURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		repoURL string
+	}{
+		{name: "non github host", repoURL: "https://attacker.example/owner/repo.git"},
+		{name: "embedded credentials", repoURL: "https://token@github.com/owner/repo.git"},
+		{name: "github url with query", repoURL: "https://github.com/owner/repo.git?token=secret"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/security/repositories", handlers.CreateRepositoryScan)
+			app.Put("/security/repositories/:name", handlers.UpdateRepositoryScan)
+			validBody := map[string]any{
+				"name": "repo-scan",
+				"spec": map[string]any{
+					"repoURL":          "https://github.com/example/repo",
+					"analysisAgentRef": map[string]any{"name": "scanner"},
+				},
+			}
+			invalidBody := map[string]any{
+				"name": "repo-scan",
+				"spec": map[string]any{
+					"repoURL":          tt.repoURL,
+					"analysisAgentRef": map[string]any{"name": "scanner"},
+				},
+			}
+
+			resp := testJSONRequest(t, app, http.MethodPost, "/security/repositories", invalidBody)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+			resp = testJSONRequest(t, app, http.MethodPost, "/security/repositories", validBody)
+			require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+			resp = testJSONRequest(t, app, http.MethodPut, "/security/repositories/repo-scan", invalidBody)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		})
+	}
+}

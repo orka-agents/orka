@@ -41,17 +41,14 @@ type UpdateThreatModelRequest struct {
 	Source  string `json:"source,omitempty"`
 }
 
-const sourceProviderGitHub = "github"
-
 func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScanSpec) {
 	if spec.Provider == "" {
-		spec.Provider = sourceProviderGitHub
+		spec.Provider = corev1alpha1.SourceProviderGitHub
 	}
 	if spec.ValidationMode == "" {
 		spec.ValidationMode = "light"
 	}
-	if spec.Owner == "" || spec.Repository == "" {
-		owner, repo := security.ParseRepositoryURL(spec.RepoURL)
+	if owner, repo, err := security.ParseGitHubRepositoryURL(spec.RepoURL); err == nil {
 		if spec.Owner == "" {
 			spec.Owner = owner
 		}
@@ -62,6 +59,22 @@ func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScan
 	if spec.PRBaseBranch == "" && spec.Branch != "" {
 		spec.PRBaseBranch = spec.Branch
 	}
+}
+
+func validateRepositoryScanSpec(spec corev1alpha1.RepositoryScanSpec) error {
+	if strings.TrimSpace(spec.RepoURL) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.repoURL is required")
+	}
+	if spec.Provider != "" && spec.Provider != corev1alpha1.SourceProviderGitHub {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.provider must be %s", corev1alpha1.SourceProviderGitHub))
+	}
+	if _, _, err := security.ParseGitHubRepositoryURL(spec.RepoURL); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if spec.AnalysisAgentRef.Name == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.analysisAgentRef.name is required")
+	}
+	return nil
 }
 
 func (h *Handlers) ensureSecurityStore() error {
@@ -452,11 +465,8 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if name == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
-	if req.Spec.RepoURL == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.repoURL is required")
-	}
-	if req.Spec.AnalysisAgentRef.Name == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.analysisAgentRef.name is required")
+	if err := validateRepositoryScanSpec(req.Spec); err != nil {
+		return err
 	}
 
 	explicitNamespace := req.Namespace
@@ -515,11 +525,8 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 		return err
 	}
 
-	if req.Spec.RepoURL == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.repoURL is required")
-	}
-	if req.Spec.AnalysisAgentRef.Name == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.analysisAgentRef.name is required")
+	if err := validateRepositoryScanSpec(req.Spec); err != nil {
+		return err
 	}
 
 	h.normalizeRepositoryScanSpec(&req.Spec)
@@ -1205,6 +1212,10 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	if proposal.Branch == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "patch proposal does not have branch metadata")
 	}
+	owner, repo, err := security.ParseGitHubRepositoryURL(scan.Spec.RepoURL)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if scan.Spec.GitSecretRef == nil {
 		return fiber.NewError(fiber.StatusBadRequest, "repository scan does not have git credentials configured")
 	}
@@ -1219,11 +1230,6 @@ func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	token := extractGitToken(secret)
 	if token == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "git secret does not contain a GitHub token")
-	}
-
-	owner, repo := security.ParseRepositoryURL(scan.Spec.RepoURL)
-	if owner == "" || repo == "" {
-		return fiber.NewError(fiber.StatusBadRequest, "repository URL must be a GitHub repository")
 	}
 
 	baseBranch := scan.Spec.PRBaseBranch
