@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -523,57 +524,110 @@ func supportedEndpointsFromItem(item any) []string {
 }
 
 func startControllerAPIPortForward(localPort int) (string, context.CancelFunc, *exec.Cmd, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
-
-	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
-		"-n", namespace,
-		"svc/"+controllerAPIService,
-		fmt.Sprintf("%d:8080", localPort),
-	)
-	cmd.Stdout = GinkgoWriter
-	cmd.Stderr = GinkgoWriter
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return "", nil, nil, err
-	}
-
-	Eventually(func(g Gomega) {
-		resp, err := http.Get(baseURL + "/healthz")
-		g.Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
-		g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-	}, 60*time.Second, time.Second).Should(Succeed())
-
-	return baseURL, cancel, cmd, nil
+	return startHTTPPortForwardAndWait(namespace, controllerAPIService, localPort, 8080, "/healthz")
 }
 
 func startServicePortForward(serviceNamespace, serviceName string, localPort, remotePort int) (string, context.CancelFunc, *exec.Cmd, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	return startHTTPPortForwardAndWait(serviceNamespace, serviceName, localPort, remotePort, "/readyz")
+}
+
+func startHTTPPortForwardAndWait(serviceNamespace, serviceName string, localPort, remotePort int, readyPath string) (string, context.CancelFunc, *exec.Cmd, error) {
+	rootCtx, rootCancel := context.WithCancel(context.Background())
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
+	readyURL := baseURL + "/" + strings.TrimLeft(readyPath, "/")
+	client := http.Client{Timeout: 2 * time.Second}
 
-	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
-		"-n", serviceNamespace,
-		"svc/"+serviceName,
-		fmt.Sprintf("%d:%d", localPort, remotePort),
-	)
-	cmd.Stdout = GinkgoWriter
-	cmd.Stderr = GinkgoWriter
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return "", nil, nil, err
+	var cmd *exec.Cmd
+	var cmdCancel context.CancelFunc
+	var cmdExit <-chan error
+	var cancelOnce sync.Once
+	clearCurrent := func() {
+		cmd = nil
+		cmdCancel = nil
+		cmdExit = nil
+	}
+	stopCurrent := func() {
+		if cmdCancel != nil {
+			cmdCancel()
+		}
+		if cmdExit != nil {
+			<-cmdExit
+		}
+		clearCurrent()
+	}
+	cancel := func() {
+		cancelOnce.Do(func() {
+			rootCancel()
+			stopCurrent()
+		})
+	}
+	start := func() error {
+		cmdCtx, cancelCmd := context.WithCancel(rootCtx)
+		next := exec.CommandContext(cmdCtx, "kubectl", "port-forward",
+			"-n", serviceNamespace,
+			"svc/"+serviceName,
+			fmt.Sprintf("%d:%d", localPort, remotePort),
+		)
+		next.Stdout = GinkgoWriter
+		next.Stderr = GinkgoWriter
+		if err := next.Start(); err != nil {
+			cancelCmd()
+			return err
+		}
+		exitCh := make(chan error, 1)
+		go func() { exitCh <- next.Wait() }()
+		cmd = next
+		cmdCancel = cancelCmd
+		cmdExit = exitCh
+		return nil
 	}
 
-	Eventually(func(g Gomega) {
-		resp, err := http.Get(baseURL + "/readyz")
-		g.Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
-		g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
-	}, 60*time.Second, time.Second).Should(Succeed())
+	var lastErr error
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if cmd == nil {
+			if err := start(); err != nil {
+				lastErr = err
+				time.Sleep(time.Second)
+				continue
+			}
+		}
 
-	return baseURL, cancel, cmd, nil
+		resp, err := client.Get(readyURL)
+		if err == nil && resp != nil {
+			func() {
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					lastErr = nil
+					return
+				}
+				lastErr = fmt.Errorf("%s returned status %d", readyURL, resp.StatusCode)
+			}()
+			if lastErr == nil {
+				return baseURL, cancel, cmd, nil
+			}
+		} else if err != nil {
+			lastErr = err
+		}
+
+		select {
+		case err := <-cmdExit:
+			if err != nil {
+				lastErr = fmt.Errorf("kubectl port-forward exited before readiness: %w", err)
+			} else {
+				lastErr = fmt.Errorf("kubectl port-forward exited before readiness")
+			}
+			clearCurrent()
+		default:
+		}
+		time.Sleep(time.Second)
+	}
+
+	cancel()
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out waiting for %s", readyURL)
+	}
+	return "", nil, nil, fmt.Errorf("port-forward to service %s/%s did not become ready: %w", serviceNamespace, serviceName, lastErr)
 }
 
 func serviceProxyPath(serviceNamespace, serviceName string, servicePort int, endpointPath string) string {
@@ -1147,6 +1201,8 @@ func findStatusCondition(conditions []statusConditionSnapshot, conditionType str
 func stopPortForward(cancel context.CancelFunc, cmd *exec.Cmd) {
 	if cancel != nil {
 		cancel()
+	} else if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
 	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Wait()
