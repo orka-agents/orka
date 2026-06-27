@@ -30,6 +30,13 @@ on:
       - "go.mod"
       - "go.sum"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: agentruntime-external-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   agentruntime-external-e2e:
     name: AgentRuntime external endpoint
