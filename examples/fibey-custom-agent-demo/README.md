@@ -11,6 +11,36 @@ docker build -t ghcr.io/sozercan/orka-example-echo-harness:latest -f examples/ha
 kind load docker-image ghcr.io/sozercan/orka-example-echo-harness:latest --name <your-kind-cluster>
 ```
 
+## Using a real AgentKit image
+
+The checked-in Deployment is a deterministic echo harness stand-in. To test a real AgentKit image after AgentKit's Orka protocol mode is available, replace the container image in `mock-agentkit-service.yaml` and configure the service with:
+
+```yaml
+env:
+- name: AGENTKIT_PROTOCOL
+  value: orka
+- name: AGENTKIT_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: fibey-agentkit-harness-token
+      key: token
+```
+
+The same Secret is referenced by `AgentRuntime.spec.clientAuth.bearerTokenSecretRef` and must keep the labels:
+
+```yaml
+orka.ai/agent-runtime-auth: "true"
+orka.ai/agent-runtime-name: fibey-agentkit
+```
+
+After applying the manifests, the expected readiness check is:
+
+```bash
+kubectl wait --for=condition=Ready agentruntime/fibey-agentkit --timeout=60s
+```
+
+A successful Task should produce native Orka timeline events mapped from harness frames, including `AgentRuntimeStarted`, runtime output events, and `AgentRuntimeCompleted`. The Task status should also include `status.harnessRuntime.runtimeRefName: fibey-agentkit`, showing the resolved runtime target was frozen for the accepted turn.
+
 ## Apply the demo
 
 ```bash

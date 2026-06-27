@@ -18,6 +18,8 @@ Orka consumes only the `orka.harness.v1` endpoint for custom/BYO agent runtimes.
 
 For the first milestone, Orka supports `AgentRuntime.spec.deployment.mode: external-endpoint`. The runtime is pre-deployed outside the `AgentRuntime` controller, and Orka validates the endpoint before any `Task` may route to it. Managed custom runtime Deployments are explicitly deferred until the protocol seam is proven.
 
+`AgentRuntime` is **namespaced in this first slice**. Issue #160 describes the long-term cluster-scoped, admin-owned registry, but the external-endpoint milestone intentionally mirrors the existing namespaced `Provider` governance pattern so namespace owners can validate the protocol seam without introducing cluster-wide admission or runtime allowlists in the same PR. Admin governance is still required for Secret use: harness bearer-token Secrets must explicitly opt in with `orka.ai/agent-runtime-auth: "true"` and may scope themselves to a single runtime with `orka.ai/agent-runtime-name`. A future follow-up can add a cluster-scoped registry or namespace allowlist once managed/dedicated-image runtimes and the BYO trust tier are designed. This ADR records the namespaced choice as deliberate, not accidental drift from #160's end state.
+
 Agents select custom runtimes with `spec.runtime.runtimeRef`. Built-in CLI runtimes continue to use `spec.runtime.type: codex|claude|copilot` and the shared harness-wrapper endpoint. An Agent must set exactly one of `type` or `runtimeRef`.
 
 Tool execution is split into two phases:

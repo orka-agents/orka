@@ -206,6 +206,26 @@ func TestHarnessWrapperRuntimeRefStaleGenerationWaitsBeforeStartTurn(t *testing.
 	}
 }
 
+func TestHarnessWrapperRuntimeRefMissingAgentRuntimeFailsClearly(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "missing-runtime"}}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, `AgentRuntime "missing-runtime" not found`) {
+		t.Fatalf("message = %q, want missing AgentRuntime context", updated.Status.Message)
+	}
+}
+
 func TestHarnessWrapperStartTurnUsesComputedAttemptForTurnID(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Status.Attempts = 1

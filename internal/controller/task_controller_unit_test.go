@@ -502,6 +502,59 @@ func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T)
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskRuntimeRefValid(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for runtimeRef", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskRuntimeTypeAndRefRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:       corev1alpha1.AgentRuntimeCodex,
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+			},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "both runtime.type and runtime.runtimeRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want type/runtimeRef conflict", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskRuntimeNeitherTypeNorRefRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "exactly one of type or runtimeRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing type/runtimeRef rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

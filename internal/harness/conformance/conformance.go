@@ -110,9 +110,13 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		result.addFailure(fmt.Sprintf("create authenticated client: %v", err))
 		return
 	}
-	if _, err := client.StartTurn(ctx, request); err != nil {
+	started, err := client.StartTurn(ctx, request)
+	if err != nil {
 		result.addFailure(fmt.Sprintf("start turn failed: %v", err))
 		return
+	}
+	if strings.TrimSpace(started.EventStreamPath) == "" {
+		result.addFailure("start turn response eventStreamPath is required")
 	}
 	if target.RequireAuth {
 		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
@@ -198,6 +202,9 @@ func validateProbeFrames(result *Result, request harness.StartTurnRequest, frame
 	for i, frame := range frames {
 		if err := frame.ValidateRequired(); err != nil {
 			result.addFailure(fmt.Sprintf("frame %d is invalid: %v", i, err))
+		}
+		if !harness.IsKnownFrameType(frame.Type) {
+			result.addFailure(fmt.Sprintf("frame %d type %q is unknown", i, frame.Type))
 		}
 		if frame.RuntimeSessionID != request.RuntimeSessionID || frame.TurnID != request.TurnID || frame.CorrelationID != request.CorrelationID {
 			result.addFailure(fmt.Sprintf("frame %d identity does not match requested turn", i))

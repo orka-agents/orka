@@ -88,6 +88,49 @@ func TestAgentRuntimeReconcilerRejectsUnlabeledBearerSecret(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeReconcilerReportsMissingBearerSecret(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	defer server.Close()
+
+	runtime, _ := testAgentRuntimeAndSecret(server.URL())
+	r := newAgentRuntimeUnitReconciler(t, runtime)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false")
+	}
+	if !strings.Contains(updated.Status.Message, "not found") {
+		t.Fatalf("Message = %q, want missing Secret context", updated.Status.Message)
+	}
+}
+
+func TestAgentRuntimeReconcilerReportsMissingBearerSecretKey(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL())
+	secret.Data = map[string][]byte{"other": []byte("x")}
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false")
+	}
+	if !strings.Contains(updated.Status.Message, "key") || !strings.Contains(updated.Status.Message, "empty or missing") {
+		t.Fatalf("Message = %q, want missing key context", updated.Status.Message)
+	}
+}
+
 func TestAgentRuntimeReconcilerRequiresCapabilitySubset(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
 	defer server.Close()
