@@ -468,21 +468,21 @@ type approvalTransactionAuthorityShape struct {
 	KontxtOutboundScope        string `json:"kontxtOutboundScope,omitempty"`
 	KontxtTTSURL               string `json:"kontxtTTSURL,omitempty"`
 	KontxtTTSAudience          string `json:"kontxtTTSAudience,omitempty"`
-	KontxtTTSTokenSource       string `json:"kontxtTTSTokenSource,omitempty"`
-	KontxtSubjectTokenType     string `json:"kontxtSubjectTokenType,omitempty"`
+	KontxtTTSSource            string `json:"kontxtTTSSource,omitempty"`
+	KontxtSubjectType          string `json:"kontxtSubjectType,omitempty"`
 	KontxtToolTTL              string `json:"kontxtToolTTL,omitempty"`
 	MountedAuthoritySHA256     string `json:"mountedAuthoritySHA256,omitempty"`
 }
 
 func approvalTransactionAuthorityIdentity() (*approvalTransactionAuthorityShape, error) {
 	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
-	ttsTokenSource := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSTokenSource))
-	if ttsURL != "" && ttsTokenSource == "" {
-		ttsTokenSource = contexttoken.TTSTokenSourceServiceAccount
+	ttsSource := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSTokenSource))
+	if ttsURL != "" && ttsSource == "" {
+		ttsSource = contexttoken.TTSTokenSourceServiceAccount
 	}
-	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
-	if ttsURL != "" && subjectTokenType == "" {
-		subjectTokenType = contexttoken.SubjectTokenTypeForSource(ttsTokenSource)
+	subjectType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
+	if ttsURL != "" && subjectType == "" {
+		subjectType = contexttoken.SubjectTokenTypeForSource(ttsSource)
 	}
 	identity := &approvalTransactionAuthorityShape{
 		TransactionID:              strings.TrimSpace(os.Getenv(workerenv.TransactionID)),
@@ -493,8 +493,8 @@ func approvalTransactionAuthorityIdentity() (*approvalTransactionAuthorityShape,
 		KontxtOutboundScope:        strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope)),
 		KontxtTTSURL:               safeApprovalTTSURLIdentity(ttsURL),
 		KontxtTTSAudience:          strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSAudience)),
-		KontxtTTSTokenSource:       ttsTokenSource,
-		KontxtSubjectTokenType:     subjectTokenType,
+		KontxtTTSSource:            ttsSource,
+		KontxtSubjectType:          subjectType,
 		KontxtToolTTL:              strings.TrimSpace(os.Getenv(workerenv.ContextTokenToolTokenTTL)),
 	}
 	if path := strings.TrimSpace(os.Getenv(workerenv.TransactionTokenFile)); path != "" {
