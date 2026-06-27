@@ -94,11 +94,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 	}
 
 	if prepared.mcp {
-		result, err := e.executeMCPToolCall(ctx, httpClient, prepared)
-		if err != nil {
-			return "", ToolRequestAttemptedError{Err: err}
-		}
-		return result, nil
+		return e.executeMCPToolCall(ctx, httpClient, prepared)
 	}
 
 	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.authToken, prepared.transactionToken)
@@ -450,9 +446,13 @@ func (e *ToolExecutor) executeMCPToolCall(ctx context.Context, httpClient *http.
 	}
 	respBody, err := executeMCPHTTPRequest(httpClient, prepared.request, mcpToolCallRequestID, prepared.authToken, prepared.transactionToken, sessionID)
 	if err != nil {
-		return "", err
+		return "", ToolRequestAttemptedError{Err: err}
 	}
-	return decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	result, err = decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	if err != nil {
+		return "", ToolRequestAttemptedError{Err: err}
+	}
+	return result, nil
 }
 
 func (e *ToolExecutor) initializeMCP(ctx context.Context, httpClient *http.Client, prepared preparedToolRequest) (string, string, error) {
