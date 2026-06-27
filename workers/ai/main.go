@@ -242,8 +242,17 @@ func run() (err error) {
 
 		// Fetch existing plan state from controller
 		planContext := loadPlanContext()
-		if planContext != "" {
+		resolvedApprovals, err := parseResolvedApprovals(os.Getenv(workerenv.ResolvedApprovals))
+		if err != nil {
+			return err
+		}
+		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
+		if planContext != "" && resolvedContext != "" {
+			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n%s\n\n## Task\n\n%s", planContext, resolvedContext, prompt)
+		} else if planContext != "" {
 			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n## Task\n\n%s", planContext, prompt)
+		} else if resolvedContext != "" {
+			prompt = prependResolvedApprovalsContext(prompt, resolvedApprovals)
 		}
 
 		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
@@ -378,11 +387,60 @@ func loadCustomTools(
 			fmt.Printf("Warning: tool %q not found as built-in or CRD: %v\n", name, err)
 			continue
 		}
+		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 
 		customTools[name] = tool
 	}
 
 	return customTools
+}
+
+func clearApprovalAuthRefVersion(tool *corev1alpha1.Tool) {
+	if tool == nil || tool.Annotations == nil {
+		return
+	}
+	delete(tool.Annotations, approvalAuthRefUIDAnnotation)
+	delete(tool.Annotations, approvalAuthRefResourceVersionAnnotation)
+	delete(tool.Annotations, legacyApprovalAuthRefUIDAnnotation)
+	delete(tool.Annotations, legacyApprovalAuthRefResourceVersionAnnotation)
+}
+
+func bindApprovalAuthRefVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+) {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.AuthSecretRef == nil {
+		return
+	}
+	clearApprovalAuthRefVersion(tool)
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: namespace, Name: tool.Spec.HTTP.AuthSecretRef.Name}
+	if err := k8sClient.Get(ctx, key, secret); err != nil {
+		fmt.Printf(
+			"Warning: auth secret %q for tool %q was not available for approval binding: %v\n",
+			key.Name,
+			tool.Name,
+			err,
+		)
+		return
+	}
+	if strings.TrimSpace(string(secret.Data[tool.Spec.HTTP.AuthSecretRef.Key])) == "" {
+		clearApprovalAuthRefVersion(tool)
+		fmt.Printf(
+			"Warning: auth secret %q key %q for tool %q is empty; approval binding skipped\n",
+			key.Name,
+			tool.Spec.HTTP.AuthSecretRef.Key,
+			tool.Name,
+		)
+		return
+	}
+	if tool.Annotations == nil {
+		tool.Annotations = map[string]string{}
+	}
+	tool.Annotations[approvalAuthRefUIDAnnotation] = string(secret.UID)
+	tool.Annotations[approvalAuthRefResourceVersionAnnotation] = secret.ResourceVersion
 }
 
 // buildLLMTools builds the combined tool list for the LLM
@@ -868,6 +926,14 @@ func executeAgentLoopWithEvents(
 		maxIterations = 100
 	}
 	allowedToolCalls := advertisedToolNames(llmTools)
+	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
+		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
+	}
+	baseToolCtx = prepareApprovalToolContext(baseToolCtx, eventRecorder)
+	approvalGate, err := newApprovalGateFromEnv(eventRecorder, baseToolCtx)
+	if err != nil {
+		return "", err
+	}
 
 	for iteration := range maxIterations {
 		req := &llm.CompletionRequest{
@@ -955,6 +1021,30 @@ func executeAgentLoopWithEvents(
 			ToolCalls: resp.ToolCalls,
 		})
 
+		var approvalResult string
+		var done bool
+		var continueLoop bool
+		var approvalErr error
+		messages, approvalResult, done, continueLoop, approvalErr = processApprovalBatch(
+			ctx,
+			messages,
+			resp.ToolCalls,
+			approvalGate,
+			allowedToolCalls,
+			customTools,
+			eventRecorder,
+			baseToolCtx,
+		)
+		if approvalErr != nil {
+			return "", approvalErr
+		}
+		if done {
+			return approvalResult, nil
+		}
+		if continueLoop {
+			continue
+		}
+
 		// Execute tool calls
 		for _, tc := range resp.ToolCalls {
 			fmt.Printf("Executing tool: %s\n", tc.Name)
@@ -973,16 +1063,43 @@ func executeAgentLoopWithEvents(
 				})),
 			)
 
+			var execArgs json.RawMessage
+			approvalKey := ""
+			alreadyFired := false
+			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
 				tools.RecordRejectedToolCall(ctx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
-			} else if customTool, ok := customTools[toolName]; ok {
-				executeCustomTool := func(execCtx context.Context) (string, error) {
-					return toolExecutor.Execute(execCtx, customTool, tc.Arguments)
+			} else {
+				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
+					ctx,
+					toolName,
+					tc.Arguments,
+					customToolForCall,
+				)
+			}
+			if execErr != nil {
+				// execErr is handled by the common error path below.
+			} else if alreadyFired {
+				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
+			} else if customToolForCall != nil {
+				customTool := customToolForCall
+				execCtx := ctx
+				if approvalKey != "" {
+					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
 				}
-				result, execErr = executeCustomToolWithTelemetry(ctx, toolName, tc.ID, executeCustomTool)
+				executeCustomTool := func(callCtx context.Context) (string, error) {
+					return toolExecutor.Execute(callCtx, customTool, execArgs)
+				}
+				result, execErr = executeCustomToolWithTelemetry(execCtx, toolName, tc.ID, executeCustomTool)
+				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
+					approvalGate.markFired(approvalKey)
+				}
 			} else {
 				// Fall back to built-in tools
+				if approvalKey != "" {
+					execArgs, execErr = injectIdempotencyKey(execArgs, approvalKey)
+				}
 				execCtx := ctx
 				if baseToolCtx != nil {
 					toolCtxCopy := *baseToolCtx
@@ -992,7 +1109,10 @@ func executeAgentLoopWithEvents(
 					}
 					execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 				}
-				result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, tc.Arguments)
+				if execErr == nil {
+					approvalGate.markFired(approvalKey)
+					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+				}
 			}
 
 			if execErr != nil {
@@ -1027,6 +1147,14 @@ func executeAgentLoopWithEvents(
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {
+	if len(coordinationEnv.ApprovalRequiredTools) > 0 {
+		return true
+	}
+	_, requestApprovalAdvertised := allowedToolCalls["request_approval"]
+	return requestApprovalAdvertised
 }
 
 func executeCustomToolWithTelemetry(

@@ -484,6 +484,28 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskRejectsApprovalRequiredTools(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-runtime-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "only supported for type: ai") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want runtime approval rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -707,6 +729,124 @@ func TestValidateTaskAgentCompatibility_AITaskWithRuntime(t *testing.T) {
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err == nil {
 		t.Error("expected error for AI task referencing agent with runtime")
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RequestApprovalToolRequiresAutonomous(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		task  *corev1alpha1.Task
+		agent *corev1alpha1.Agent
+	}{
+		{
+			name: "agent tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}},
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+				},
+			},
+		},
+		{
+			name: "task tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				AI:   &corev1alpha1.AISpec{Tools: []string{"request_approval"}},
+			}},
+			agent: &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			if err := r.validateTaskAgentCompatibility(tt.task, tt.agent); err == nil ||
+				!strings.Contains(err.Error(), "enabled autonomous") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous request_approval rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RequestApprovalAllowedForAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:    true,
+				Autonomous: true,
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordinationEnabled(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want enabled autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRejectBuiltIns(t *testing.T) {
+	for _, toolName := range []string{"request_approval", "create_container_task", "web_search", "file_read", "web_fetch", "list_issues", "get_issue", "list_pull_requests", "recall_memory", "search_transcript", "delegate_task", "send_message", "check_messages", "post_review_comment", "check_pr_review_marker", "comment_on_issue", "update_agent"} {
+		t.Run(toolName, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						Autonomous:            true,
+						ApprovalRequiredTools: []string{toolName},
+					},
+				},
+			}
+			if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+				!strings.Contains(err.Error(), "cannot include built-in tool") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want built-in rejection", err)
+			}
+		})
 	}
 }
 

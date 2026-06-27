@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -561,19 +562,31 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
 		return err
 	}
-	pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
-	if err != nil {
-		return err
-	}
 	var req UpdateSubstrateActorPoolRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	pool.Spec = req.Spec
-	if err := h.client.Update(c.Context(), pool); err != nil {
+	var updated *corev1alpha1.SubstrateActorPool
+	var fetchErr error
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pool, err := h.fetchSubstrateActorPool(c, c.Params("name"))
+		if err != nil {
+			fetchErr = err
+			return nil
+		}
+		pool.Spec = req.Spec
+		if err := h.client.Update(c.Context(), pool); err != nil {
+			return err
+		}
+		updated = pool
+		return nil
+	}); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update substrate actor pool: %v", err))
 	}
-	return c.JSON(pool)
+	if fetchErr != nil {
+		return fetchErr
+	}
+	return c.JSON(updated)
 }
 
 // DeleteSubstrateActorPool deletes an Orka Substrate actor pool.

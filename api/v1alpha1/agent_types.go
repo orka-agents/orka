@@ -237,6 +237,12 @@ type CoordinationConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxIterations int32 `json:"maxIterations,omitempty"`
+
+	// ApprovalRequiredTools lists custom tool names that require a human approval before execution.
+	// This field is only honored when coordination is enabled and autonomous mode is true.
+	// Built-in tools such as request_approval, delegate_task, and web_search are rejected.
+	// +optional
+	ApprovalRequiredTools []string `json:"approvalRequiredTools,omitempty"`
 }
 
 // AllowedAgent defines an agent that can be delegated to

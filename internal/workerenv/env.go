@@ -81,6 +81,9 @@ const (
 	AutonomousMode            = "ORKA_AUTONOMOUS_MODE"
 	AutonomousIteration       = "ORKA_AUTONOMOUS_ITERATION"
 	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
+	TaskUID                   = "ORKA_TASK_UID"
+	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
+	ResolvedApprovals         = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
 	Prompt                      = "ORKA_PROMPT"
@@ -313,6 +316,7 @@ func JoinCSV(values []string) string {
 type BaseEnv struct {
 	TaskName           string
 	TaskNamespace      string
+	TaskUID            string
 	ResultEndpoint     string
 	ControllerURL      string
 	TransactionID      string
@@ -327,6 +331,7 @@ func (e BaseEnv) EnvVars() []corev1.EnvVar {
 		Env(ResultEndpoint, e.ResultEndpoint),
 		Env(ControllerURL, e.ControllerURL),
 	}
+	envVars = AppendIfSet(envVars, TaskUID, e.TaskUID)
 	envVars = AppendIfSet(envVars, TransactionID, e.TransactionID)
 	envVars = AppendIfSet(envVars, TransactionProfile, e.TransactionProfile)
 	return envVars
@@ -337,6 +342,7 @@ func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	return BaseEnv{
 		TaskName:           getenv(TaskName),
 		TaskNamespace:      getenv(TaskNamespace),
+		TaskUID:            getenv(TaskUID),
 		ResultEndpoint:     getenv(ResultEndpoint),
 		ControllerURL:      getenv(ControllerURL),
 		TransactionID:      getenv(TransactionID),
@@ -712,6 +718,7 @@ type CoordinationEnv struct {
 	AutonomousMode          bool
 	AutonomousIteration     int
 	AutonomousMaxIterations int
+	ApprovalRequiredTools   []string
 }
 
 // EnvVars renders coordination/autonomous env vars.
@@ -739,6 +746,9 @@ func (e CoordinationEnv) EnvVars() []corev1.EnvVar {
 			envVars = append(envVars, Env(AutonomousMaxIterations, strconv.Itoa(e.AutonomousMaxIterations)))
 		}
 	}
+	if len(e.ApprovalRequiredTools) > 0 {
+		envVars = append(envVars, Env(ApprovalRequiredTools, JoinCSV(e.ApprovalRequiredTools)))
+	}
 	return envVars
 }
 
@@ -753,6 +763,7 @@ func ParseCoordinationEnv(getenv func(string) string) CoordinationEnv {
 		AutonomousMode:          IsTrue(getenv(AutonomousMode)),
 		AutonomousIteration:     parsePositiveInt(getenv(AutonomousIteration)),
 		AutonomousMaxIterations: parsePositiveInt(getenv(AutonomousMaxIterations)),
+		ApprovalRequiredTools:   SplitCSV(getenv(ApprovalRequiredTools)),
 	}
 }
 

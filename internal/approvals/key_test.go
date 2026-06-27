@@ -1,0 +1,192 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package approvals
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestApprovalTargetDigestCanonicalizesJSONObject(t *testing.T) {
+	left, err := TargetArgsDigest(json.RawMessage(`{ "b" : 2, "a" : { "z" : true, "m" : "ok" } }`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(left) error = %v", err)
+	}
+	right, err := TargetArgsDigest(json.RawMessage(`{"a":{"m":"ok","z":true},"b":2}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(right) error = %v", err)
+	}
+	if left != right {
+		t.Fatalf("digest changed with map order/whitespace: %s != %s", left, right)
+	}
+}
+
+func TestApprovalIDChangesByTaskToolOrArgs(t *testing.T) {
+	argsA, err := TargetArgsDigest(json.RawMessage(`{"incident":"inc-1"}`))
+	if err != nil {
+		t.Fatalf("digest argsA: %v", err)
+	}
+	argsB, err := TargetArgsDigest(json.RawMessage(`{"incident":"inc-2"}`))
+	if err != nil {
+		t.Fatalf("digest argsB: %v", err)
+	}
+	base := ApprovalID("default", "incident-task", "task-uid-1", "dispatch_work_order", argsA)
+	for name, got := range map[string]string{
+		"namespace": ApprovalID("other", "incident-task", "task-uid-1", "dispatch_work_order", argsA),
+		"task":      ApprovalID("default", "other-task", "task-uid-1", "dispatch_work_order", argsA),
+		"taskUID":   ApprovalID("default", "incident-task", "task-uid-2", "dispatch_work_order", argsA),
+		"tool":      ApprovalID("default", "incident-task", "task-uid-1", "escalate_incident", argsA),
+		"args":      ApprovalID("default", "incident-task", "task-uid-1", "dispatch_work_order", argsB),
+	} {
+		if got == base {
+			t.Fatalf("ApprovalID did not change when %s changed", name)
+		}
+	}
+}
+
+func TestApprovalTargetDigestNormalizesNumericSpellingsLikeExecution(t *testing.T) {
+	intDigest, err := TargetArgsDigest(json.RawMessage(`{"amount":1}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(int) error = %v", err)
+	}
+	floatDigest, err := TargetArgsDigest(json.RawMessage(`{"amount":1.0}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(float) error = %v", err)
+	}
+	if intDigest != floatDigest {
+		t.Fatalf("numeric-equivalent digests differ: %s != %s", intDigest, floatDigest)
+	}
+}
+
+func TestApprovalTargetDigestPreservesLargeNumericIdentity(t *testing.T) {
+	left, err := TargetArgsDigest(json.RawMessage(`{"account":9007199254740992}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(left) error = %v", err)
+	}
+	right, err := TargetArgsDigest(json.RawMessage(`{"account":9007199254740993}`))
+	if err != nil {
+		t.Fatalf("TargetArgsDigest(right) error = %v", err)
+	}
+	if left == right {
+		t.Fatalf("large distinct numeric digests collided: %s", left)
+	}
+}
+
+func TestApprovalTargetDigestRejectsHugeNumberExponent(t *testing.T) {
+	_, err := TargetArgsDigest(json.RawMessage(`{"amount":1e1000000}`))
+	if err == nil || !strings.Contains(err.Error(), "exceeds safe") {
+		t.Fatalf("TargetArgsDigest() error = %v, want safe bound error", err)
+	}
+}
+
+func TestApprovalIDChangesByTargetSpecDigest(t *testing.T) {
+	argsDigest, err := TargetArgsDigest(json.RawMessage(`{"incident":"inc-1"}`))
+	if err != nil {
+		t.Fatalf("digest args: %v", err)
+	}
+	base := ApprovalID("default", "incident-task", "task-uid-1", "dispatch_work_order", argsDigest, "spec-a")
+	if got := ApprovalID("default", "incident-task", "task-uid-1", "dispatch_work_order", argsDigest, "spec-b"); got == base {
+		t.Fatalf("ApprovalID did not change when target spec digest changed")
+	}
+}
+
+func TestNewApprovalTargetCarriesTargetSpecDigest(t *testing.T) {
+	target, err := NewApprovalTarget(
+		"default",
+		"task-1",
+		"task-uid-1",
+		"dispatch_work_order",
+		json.RawMessage(`{"safe":"ok"}`),
+		"dispatch",
+		"",
+		"",
+		"spec-digest",
+	)
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	if target.TargetSpecDigest != "spec-digest" {
+		t.Fatalf("TargetSpecDigest = %q, want spec-digest", target.TargetSpecDigest)
+	}
+	if target.ApprovalID != ApprovalID("default", "task-1", "task-uid-1", "dispatch_work_order", target.TargetArgsDigest, "spec-digest") {
+		t.Fatalf("ApprovalID was not bound to spec digest")
+	}
+}
+
+func TestApprovalTargetPayloadDoesNotPersistRawSensitiveArgs(t *testing.T) {
+	sensitiveKey := "api" + "Token"
+	sensitiveValue := "sensitive" + "-value"
+	rawArgs, err := json.Marshal(map[string]string{sensitiveKey: sensitiveValue, "safe": "ok"})
+	if err != nil {
+		t.Fatalf("marshal raw args: %v", err)
+	}
+	target, err := NewApprovalTarget("default", "task-1", "task-uid-1", "dispatch_work_order", rawArgs, "Dispatch work order", "Needs human", "warning")
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	payload, err := json.Marshal(target)
+	if err != nil {
+		t.Fatalf("marshal target: %v", err)
+	}
+	if strings.Contains(string(payload), sensitiveValue) {
+		t.Fatalf("target payload leaked raw args: %s", payload)
+	}
+	if !strings.Contains(string(payload), `"safe":"ok"`) {
+		t.Fatalf("target payload did not include sanitized safe argument preview: %s", payload)
+	}
+	if target.TargetArgsDigest == "" || target.ApprovalID == "" {
+		t.Fatalf("target missing digest/id: %#v", target)
+	}
+}
+
+func TestApprovalTargetArgsPreviewIsBounded(t *testing.T) {
+	large := strings.Repeat("x", maxApprovalTargetArgsPreviewBytes+1024)
+	target, err := NewApprovalTarget(
+		"default",
+		"task-1",
+		"task-uid-1",
+		"dispatch_work_order",
+		json.RawMessage(`{"note":"`+large+`"}`),
+		"Dispatch work order",
+		"Needs human",
+		"warning",
+	)
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	if len(target.TargetArgsPreview) > maxApprovalTargetArgsPreviewBytes {
+		t.Fatalf("TargetArgsPreview length = %d, want <= %d", len(target.TargetArgsPreview), maxApprovalTargetArgsPreviewBytes)
+	}
+	if !strings.Contains(string(target.TargetArgsPreview), "truncated") {
+		t.Fatalf("TargetArgsPreview = %s, want truncation marker", target.TargetArgsPreview)
+	}
+}
+
+func TestApprovalTargetTextFieldsAreBounded(t *testing.T) {
+	largeAction := strings.Repeat("approve ", maxApprovalTargetTextChars)
+	largeRisk := strings.Repeat("risk ", maxApprovalTargetTextChars)
+	target, err := NewApprovalTarget(
+		"default",
+		"task-1",
+		"task-uid-1",
+		"dispatch_work_order",
+		json.RawMessage(`{"safe":"ok"}`),
+		largeAction,
+		largeRisk,
+		"warning",
+	)
+	if err != nil {
+		t.Fatalf("NewApprovalTarget() error = %v", err)
+	}
+	if len([]rune(target.Action)) > maxApprovalTargetTextChars {
+		t.Fatalf("Action length = %d, want <= %d", len([]rune(target.Action)), maxApprovalTargetTextChars)
+	}
+	if len([]rune(target.RiskSummary)) > maxApprovalTargetTextChars {
+		t.Fatalf("RiskSummary length = %d, want <= %d", len([]rune(target.RiskSummary)), maxApprovalTargetTextChars)
+	}
+}

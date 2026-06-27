@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +91,41 @@ func TestToolExecutor_Execute_Success(t *testing.T) {
 
 	if result != expectedResponse {
 		t.Errorf("Execute() = %v, want %v", result, expectedResponse)
+	}
+}
+
+func TestToolExecutor_Execute_PreservesLargeJSONIntegers(t *testing.T) {
+	var receivedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: server.URL},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"account":9007199254740993}`)); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(receivedBody, `"account":9007199254740993`) {
+		t.Fatalf("request body = %s, want large integer preserved", receivedBody)
+	}
+	if strings.Contains(receivedBody, `9007199254740992`) {
+		t.Fatalf("request body = %s, large integer was rounded", receivedBody)
 	}
 }
 
@@ -274,6 +310,93 @@ func TestToolExecutor_Execute_MCPSubstrateActorInitializesSession(t *testing.T) 
 	}
 	if result != "mcp-session-ok" {
 		t.Fatalf("Execute() = %q, want mcp-session-ok", result)
+	}
+	if calls != 4 {
+		t.Fatalf("calls = %d, want 4", calls)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorSendsApprovalIdempotencyOnlyOnToolsCall(t *testing.T) {
+	const sessionID = "session-approval-1"
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "" {
+				t.Fatalf("delete %s = %q, want empty", toolIdempotencyKeyHeader, got)
+			}
+			if got := r.Header.Get(mcpSessionIDHeader); got != sessionID {
+				t.Fatalf("delete %s = %q, want %q", mcpSessionIDHeader, got, sessionID)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			calls++
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "" {
+				t.Fatalf("initialize %s = %q, want empty", toolIdempotencyKeyHeader, got)
+			}
+			if got := body["method"]; got != mcpInitializeMethod {
+				t.Fatalf("first MCP method = %v, want %s", got, mcpInitializeMethod)
+			}
+			w.Header().Set(mcpSessionIDHeader, sessionID)
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}`)) //nolint:errcheck
+		case 1:
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "" {
+				t.Fatalf("initialized %s = %q, want empty", toolIdempotencyKeyHeader, got)
+			}
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("second MCP method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case 2:
+			if got := r.Header.Get(toolIdempotencyKeyHeader); got != "approval-marker-1" {
+				t.Fatalf("tools/call %s = %q, want approval-marker-1", toolIdempotencyKeyHeader, got)
+			}
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("third MCP method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"approved-call-ok"}]}}`)) //nolint:errcheck
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{
+		client:     server.Client(),
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{
+			MCP: &corev1alpha1.MCPToolServer{
+				SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+					TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+				},
+			},
+		},
+		Status: corev1alpha1.ToolStatus{
+			Endpoint: server.URL + "/mcp",
+			Actor: &corev1alpha1.ToolActorStatus{
+				RouteHost: "actor-1.actors.test",
+			},
+		},
+	}
+	ctx := WithToolIdempotencyKey(context.Background(), "approval-marker-1")
+
+	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "approved-call-ok" {
+		t.Fatalf("Execute() = %q, want approved-call-ok", result)
 	}
 	if calls != 4 {
 		t.Fatalf("calls = %d, want 4", calls)
@@ -819,6 +942,34 @@ func TestToolExecutor_Execute_DefaultMethodPOST(t *testing.T) {
 
 	if receivedMethod != http.MethodPost {
 		t.Errorf("Method = %s, want POST", receivedMethod)
+	}
+}
+
+func TestToolExecutor_Execute_IdempotencyKeyHeader(t *testing.T) {
+	var receivedHeader string
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&receivedBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+	ctx := WithToolIdempotencyKey(context.Background(), "approval-key-1")
+
+	_, err := executor.Execute(ctx, tool, json.RawMessage(`{"input":"test"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if receivedHeader != "approval-key-1" {
+		t.Fatalf("Idempotency-Key = %q, want approval-key-1", receivedHeader)
+	}
+	if _, ok := receivedBody["idempotencyKey"]; ok {
+		t.Fatalf("idempotency key was injected into body: %#v", receivedBody)
 	}
 }
 
@@ -1954,5 +2105,26 @@ func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
 	// Should be exactly 10MB
 	if len(result) != 10*1024*1024 {
 		t.Errorf("response size = %d bytes, want exactly 10MB", len(result))
+	}
+}
+
+func TestToolExecutor_Execute_IdempotencyKeyReservedHeaderConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("server should not be called when Idempotency-Key conflicts")
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL: server.URL,
+		Headers: map[string]string{
+			"Idempotency-Key": "tool-key",
+		},
+	}}}
+	ctx := WithToolIdempotencyKey(context.Background(), "approval-key")
+
+	_, err := executor.Execute(ctx, tool, json.RawMessage(`{"input":"test"}`))
+	if err == nil || !strings.Contains(err.Error(), "reserved header") {
+		t.Fatalf("Execute() error = %v, want reserved header conflict", err)
 	}
 }

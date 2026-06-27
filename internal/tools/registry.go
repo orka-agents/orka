@@ -10,11 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/tracing/genai"
@@ -33,6 +35,7 @@ type ToolContext struct {
 	Namespace                 string
 	SessionID                 string
 	TaskID                    string
+	TaskUID                   string
 	ToolCallID                string
 	Tenant                    string
 	Provider                  string
@@ -59,6 +62,10 @@ type ToolContext struct {
 	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
 	RequireSecretReadAuthorization bool
 	IncrementTasks                 func()
+	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
+	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool)
 }
 
 type toolContextKey struct{}
@@ -180,6 +187,18 @@ func (r *Registry) List() []Tool {
 		tools = append(tools, tool)
 	}
 	return tools
+}
+
+// Names returns all registered tool names in stable order.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Execute executes a tool by name. It is the DRY instrumentation point for
@@ -353,6 +372,7 @@ func RegisterBuiltinTools() {
 	DefaultRegistry.Register(NewFileReadTool())
 	DefaultRegistry.Register(NewWebFetchTool())
 	DefaultRegistry.Register(NewFileWriteTool())
+	DefaultRegistry.Register(NewRequestApprovalTool())
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client
@@ -424,6 +444,28 @@ func RegisterProxyPRTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
 }
 
+// KnownBuiltInToolNames returns every built-in tool name known to Orka, including
+// tools registered in the default proxy registry and coordination tools that are
+// registered in worker processes. Controller-side validation uses this to reject
+// approvalRequiredTools entries that would be handled as built-ins rather than
+// Tool CRDs.
+func KnownBuiltInToolNames() []string {
+	seen := map[string]bool{}
+	for _, group := range [][]string{DefaultRegistry.Names(), ChatToolNames(), CoordinationToolNames()} {
+		for _, name := range group {
+			if name != "" {
+				seen[name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ChatToolNames returns the names of all chat tools in registration order.
 func ChatToolNames() []string {
 	return []string{
@@ -435,6 +477,37 @@ func ChatToolNames() []string {
 		createToolCRDToolName,
 		deleteToolToolName,
 		deleteSessionToolName,
+	}
+}
+
+// CoordinationToolNames returns the names of all coordination tools registered by
+// RegisterCoordinationTools in worker processes.
+func CoordinationToolNames() []string {
+	return []string{
+		delegateTaskToolName,
+		waitForTasksToolName,
+		createContainerTaskToolName,
+		cancelTaskToolName,
+		sendMessageToolName,
+		checkMessagesToolName,
+		createPullRequestToolName,
+		checkPullRequestCIToolName,
+		mergePullRequestToolName,
+		autoMergePullRequestToolName,
+		reviewPullRequestToolName,
+		postReviewCommentToolName,
+		checkPRReviewMarkerToolName,
+		listIssuesToolName,
+		listPullRequestsToolName,
+		getIssueToolName,
+		commentOnIssueToolName,
+		createAgentToolName,
+		deleteAgentToolName,
+		updatePlanToolName,
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
 	}
 }
 

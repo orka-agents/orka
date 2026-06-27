@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,6 +82,50 @@ func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
 	updated := runHarnessWrapperTaskToCompletion(t, r, task)
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+}
+
+func TestPatchHarnessWrapperStartedPreservesPlannedTurnAnnotationsFromLocalTask(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	expected := map[string]string{
+		harnessWrapperTurnIDAnnotation:  "turn-1",
+		harnessWrapperRuntimeAnnotation: "runtime-1",
+		harnessWrapperCorrelationIDAnno: "correlation-1",
+		harnessWrapperLastFrameSeqAnno:  "0",
+		harnessWrapperPlannedAtAnno:     time.Now().UTC().Format(time.RFC3339Nano),
+		harnessWrapperMetadataAnno:      ` {"runtime":"claude","wrapper":"cli"} `,
+	}
+	local := task.DeepCopy()
+	local.Annotations = map[string]string{}
+	maps.Copy(local.Annotations, expected)
+	local.Annotations[harnessWrapperOutputFetchRetriesAnno] = "1"
+	r := newUnitReconciler(newTestScheme(), task)
+
+	if err := r.patchHarnessWrapperStarted(context.Background(), local); err != nil {
+		t.Fatalf("patchHarnessWrapperStarted: %v", err)
+	}
+
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	for _, key := range []string{
+		harnessWrapperTurnIDAnnotation,
+		harnessWrapperRuntimeAnnotation,
+		harnessWrapperCorrelationIDAnno,
+		harnessWrapperLastFrameSeqAnno,
+		harnessWrapperPlannedAtAnno,
+		harnessWrapperMetadataAnno,
+	} {
+		if updated.Annotations[key] != expected[key] {
+			t.Fatalf("annotation %s = %q, want %q", key, updated.Annotations[key], expected[key])
+		}
+	}
+	if updated.Annotations[harnessWrapperStartedAnno] != scheduledRunLabelValue {
+		t.Fatalf("started annotation = %q, want %q", updated.Annotations[harnessWrapperStartedAnno], scheduledRunLabelValue)
+	}
+	if _, ok := updated.Annotations[harnessWrapperOutputFetchRetriesAnno]; ok {
+		t.Fatalf("output retry annotation should not be restored during start: %#v", updated.Annotations)
 	}
 }
 

@@ -43,6 +43,7 @@ var builtinToolsList = []fiber.Map{
 	builtinToolResponse(tools.NewFileReadTool()),
 	builtinToolResponse(tools.NewWebFetchTool()),
 	builtinToolResponse(tools.NewFileWriteTool()),
+	builtinToolResponse(tools.NewRequestApprovalTool()),
 }
 
 // builtinToolsMap indexes built-in tools by name for single-tool lookup.
