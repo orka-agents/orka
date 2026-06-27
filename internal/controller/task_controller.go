@@ -239,6 +239,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
+	if task.Spec.Schedule == "" {
+		ctx = tracing.ExtractTaskTraceContext(ctx, task)
+	}
 	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
 		trace.WithAttributes(spanAttributes...),
@@ -525,6 +528,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 // handlePending handles Tasks in Pending phase
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
+		log.Error(err, "failed to clear durable approval decision nudge")
+		return ctrl.Result{}, err
+	}
 
 	if taskTransactionTokenPending(task) {
 		return r.handleTransactionTokenPending(ctx, task)
@@ -3021,6 +3029,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	child.Spec.SuccessfulRunsHistoryLimit = nil
 	child.Spec.FailedRunsHistoryLimit = nil
 	child.Spec.Suspend = nil
+	tracing.StampTaskTraceContext(ctx, child)
 
 	// Set owner reference
 	if err := ctrl.SetControllerReference(task, child, r.Scheme); err != nil {
@@ -3780,12 +3789,6 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	if resumingAfterApproval {
-		if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
 	// Enforce child task history limits
 	if err := r.enforceHistoryLimits(ctx, task); err != nil {
 		log.Error(err, "failed to enforce history limits for autonomous task")
@@ -3817,6 +3820,11 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	if err := r.Status().Update(ctx, task); err != nil {
 		log.Error(err, "failed to update status for autonomous iteration")
 		return ctrl.Result{}, err
+	}
+	if resumingAfterApproval {
+		if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	log.Info("autonomous task advancing to next iteration", "nextIteration", task.Status.Iteration)

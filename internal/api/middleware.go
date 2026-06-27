@@ -7,11 +7,13 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -73,16 +75,18 @@ func NewMetricsMiddleware() fiber.Handler {
 func NewTracingMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		tracer := tracing.Tracer("orka.api")
-		ctx, span := tracer.Start(c.Context(), fmt.Sprintf("%s %s", c.Method(), c.Route().Path),
+		ctx := otel.GetTextMapPropagator().Extract(c.Context(), fiberHeaderCarrier{c: c})
+		method := c.Method()
+		ctx, span := tracer.Start(ctx, method,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
-				attribute.String("http.method", c.Method()),
-				attribute.String("http.route", c.Route().Path),
-				attribute.String("http.url", c.OriginalURL()),
+				attribute.String("http.method", method),
+				attribute.String("http.url", c.BaseURL()+c.Path()),
 			),
 		)
 		defer span.End()
 
+		// Make the extracted server span context visible to downstream handlers.
 		c.SetContext(ctx)
 
 		if reqID := requestid.FromContext(c); reqID != "" {
@@ -91,7 +95,20 @@ func NewTracingMiddleware() fiber.Handler {
 
 		err := c.Next()
 
+		if route := c.Route().Path; route != "" {
+			span.SetName(fmt.Sprintf("%s %s", method, route))
+			span.SetAttributes(attribute.String("http.route", route))
+		}
+
 		status := c.Response().StatusCode()
+		if err != nil && status < fiber.StatusBadRequest {
+			var fiberErr *fiber.Error
+			if errors.As(err, &fiberErr) {
+				status = fiberErr.Code
+			} else {
+				status = fiber.StatusInternalServerError
+			}
+		}
 		span.SetAttributes(attribute.Int("http.status_code", status))
 		if status >= 400 {
 			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", status))
@@ -99,4 +116,29 @@ func NewTracingMiddleware() fiber.Handler {
 
 		return err
 	}
+}
+
+type fiberHeaderCarrier struct {
+	c fiber.Ctx
+}
+
+func (c fiberHeaderCarrier) Get(key string) string {
+	if c.c == nil {
+		return ""
+	}
+	return c.c.Get(key)
+}
+
+func (c fiberHeaderCarrier) Set(string, string) {}
+
+func (c fiberHeaderCarrier) Keys() []string {
+	if c.c == nil {
+		return nil
+	}
+	headers := c.c.GetReqHeaders()
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	return keys
 }

@@ -1,6 +1,8 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
+import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
@@ -13,6 +15,7 @@ import {
   useTaskResult,
   useCreateTask,
   useDeleteTask,
+  useTaskEvents,
 } from './use-tasks'
 
 function createWrapper() {
@@ -62,6 +65,167 @@ describe('useTaskResult', () => {
     expect(result.current.data).toEqual({ result: 'task output' })
   })
 })
+
+
+
+describe('useTaskEvents', () => {
+  it('fetches pages until the initial latest sequence is covered', async () => {
+    const requests: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/events', ({ request, params }) => {
+        const url = new URL(request.url)
+        requests.push(url.search)
+        const after = url.searchParams.get('after')
+        if (!after) {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 0,
+            latestSeq: 1001,
+            events: [{
+              id: 'default/task/my-task/1000',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1000,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              inputTokens: 5,
+              outputTokens: 7,
+              createdAt: '2026-01-01T00:00:00Z',
+            }],
+          })
+        }
+        if (after === '1000') {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 1000,
+            latestSeq: 1001,
+            events: [{
+              id: 'default/task/my-task/1001',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1001,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              inputTokens: 11,
+              outputTokens: 13,
+              createdAt: '2026-01-01T00:00:01Z',
+            }],
+          })
+        }
+        expect(after).toBe('1001')
+        return HttpResponse.json({
+          namespace: 'default',
+          streamType: 'task',
+          streamID: params.id,
+          afterSeq: 1001,
+          latestSeq: 1001,
+          events: [],
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useTaskEvents('my-task'), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(requests).toEqual([
+      '?namespace=default&limit=1000',
+      '?namespace=default&limit=1000&after=1000',
+    ])
+    expect(result.current.data?.latestSeq).toBe(1001)
+    expect(result.current.data?.events.map((event) => event.seq)).toEqual([1000, 1001])
+
+    await act(async () => {
+      await result.current.refetch()
+    })
+    expect(requests).toEqual([
+      '?namespace=default&limit=1000',
+      '?namespace=default&limit=1000&after=1000',
+      '?namespace=default&limit=1000&after=1001',
+    ])
+    expect(result.current.data?.events.map((event) => event.seq)).toEqual([1000, 1001])
+  })
+
+  it('does not advance cursor past retained events when latest grows mid-fetch', async () => {
+    const requests: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/events', ({ request, params }) => {
+        const url = new URL(request.url)
+        requests.push(url.search)
+        const after = url.searchParams.get('after')
+        if (!after) {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 0,
+            latestSeq: 2000,
+            events: [{
+              id: 'default/task/my-task/1999',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 1999,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              createdAt: '2026-01-01T00:00:00Z',
+            }],
+          })
+        }
+        if (after === '1999') {
+          return HttpResponse.json({
+            namespace: 'default',
+            streamType: 'task',
+            streamID: params.id,
+            afterSeq: 1999,
+            latestSeq: 2500,
+            events: [{
+              id: 'default/task/my-task/2000',
+              namespace: 'default',
+              streamType: 'task',
+              streamID: params.id,
+              seq: 2000,
+              type: 'ModelRequestCompleted',
+              severity: 'info',
+              createdAt: '2026-01-01T00:00:01Z',
+            }],
+          })
+        }
+        expect(after).toBe('2000')
+        return HttpResponse.json({
+          namespace: 'default',
+          streamType: 'task',
+          streamID: params.id,
+          afterSeq: 2000,
+          latestSeq: 2500,
+          events: [],
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useTaskEvents('my-task'), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(result.current.data?.latestSeq).toBe(2000)
+    expect(result.current.data?.events.map((event) => event.seq)).toEqual([1999, 2000])
+
+    await act(async () => {
+      await result.current.refetch()
+    })
+    await waitFor(() => expect(result.current.data?.latestSeq).toBe(2500))
+    expect(requests).toEqual([
+      '?namespace=default&limit=1000',
+      '?namespace=default&limit=1000&after=1999',
+      '?namespace=default&limit=1000&after=2000',
+    ])
+  })
+})
+
 
 describe('useCreateTask', () => {
   it('creates a task via mutation', async () => {

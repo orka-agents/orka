@@ -110,6 +110,13 @@ var (
 	liveCopilotProxyGPTModelPrefixes = []string{
 		"gpt-",
 	}
+	liveCopilotProxyCodexModelPreferences = []string{
+		"gpt-5.3-codex",
+		"gpt-5-codex",
+	}
+	liveCopilotProxyCodexModelPrefixes = []string{
+		"gpt-",
+	}
 	liveCopilotProxyChatGPTModelPreferences = []string{
 		"gpt-4o",
 		"gpt-4o-2024-11-20",
@@ -832,6 +839,27 @@ func firstPreferredProxyModel(catalog proxyModelCatalog, preferredIDs []string, 
 		return ""
 	}
 	return candidates[0]
+}
+
+func firstPreferredProxyModelSupportingEndpoint(catalog proxyModelCatalog, endpoint string, preferredIDs []string, prefixes ...string) string {
+	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
+		if catalog.modelSupportsEndpoint(modelID, endpoint) {
+			return modelID
+		}
+	}
+	return ""
+}
+
+func firstPreferredProxyCodexModelSupportingEndpoint(catalog proxyModelCatalog, endpoint string, preferredIDs []string, prefixes ...string) string {
+	for _, modelID := range preferredProxyModelCandidates(catalog, preferredIDs, prefixes...) {
+		if !strings.Contains(strings.ToLower(strings.TrimSpace(modelID)), "codex") {
+			continue
+		}
+		if catalog.modelSupportsEndpoint(modelID, endpoint) {
+			return modelID
+		}
+	}
+	return ""
 }
 
 func preferredProxyModelCandidates(catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) []string {

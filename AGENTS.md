@@ -98,4 +98,5 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - Reviewing a memory proposal does not apply it; use the explicit proposal apply endpoint for accepted `memory` proposals when durable memory should be created
 - Kontxt TxTokens are accepted via `Txn-Token` by default; `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist
 - Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs
+- OpenTelemetry GenAI constants are hand-rolled in `internal/tracing/genai`; telemetry is enabled with `--enable-telemetry`/`--enable-tracing`, workers honor `ORKA_ENABLE_TELEMETRY`, and prompt/completion content capture remains default-off/fail-closed
 - Harness-wrapper real-world validation should include at least one Codex/Claude task through Vekil, workspace clone/read, fork/checkpoint continuation, cancel/timeout, unsafe workspace URL rejection, and (when a GitHub token is available) branch push + PR creation/cleanup on a temporary branch.

@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils'
 import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
-import type { Task, PlanState, TaskPhase } from '@/schemas/task'
+import type { Task, PlanState, TaskPhase, ExecutionEvent } from '@/schemas/task'
 
 interface TimelineEvent {
   key: string
@@ -84,7 +84,9 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
   const iteration = task.status?.iteration ?? 0
   if (iteration > 0) {
     const terminal = isTerminalPhase(phase)
-    const startMs = task.status?.startTime ? new Date(task.status.startTime).getTime() : NaN
+    const startMs = task.status?.startTime
+      ? new Date(task.status.startTime).getTime()
+      : NaN
     const anchorMs = Math.max(
       ...conditionTimes,
       Number.isNaN(startMs) ? -Infinity : startMs,
@@ -93,7 +95,9 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
       key: `iteration-${iteration}`,
       label: `Iteration ${iteration}`,
       detail: plan?.summary,
-      at: Number.isFinite(anchorMs) ? new Date(anchorMs).toISOString() : undefined,
+      at: Number.isFinite(anchorMs)
+        ? new Date(anchorMs).toISOString()
+        : undefined,
       bucket: 0,
       status: terminal ? 'done' : 'active',
     })
@@ -108,7 +112,12 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
       label: phase as string,
       at: task.status?.completionTime,
       bucket: 1,
-      status: phase === 'Failed' ? 'failed' : phase === 'Cancelled' ? 'cancelled' : 'done',
+      status:
+        phase === 'Failed'
+          ? 'failed'
+          : phase === 'Cancelled'
+            ? 'cancelled'
+            : 'done',
     })
   }
 
@@ -133,12 +142,25 @@ function EventIcon({ status }: { status: TimelineEvent['status'] }) {
   if (status === 'failed')
     return <XCircle className="size-4 text-status-failed" aria-hidden="true" />
   if (status === 'cancelled')
-    return <MinusCircle className="size-4 text-muted-foreground" aria-hidden="true" />
+    return (
+      <MinusCircle
+        className="size-4 text-muted-foreground"
+        aria-hidden="true"
+      />
+    )
   if (status === 'done')
-    return <CheckCircle2 className="size-4 text-status-succeeded" aria-hidden="true" />
+    return (
+      <CheckCircle2
+        className="size-4 text-status-succeeded"
+        aria-hidden="true"
+      />
+    )
   if (status === 'active')
     return (
-      <Circle className="size-4 text-status-running motion-safe:animate-pulse-live" aria-hidden="true" />
+      <Circle
+        className="size-4 text-status-running motion-safe:animate-pulse-live"
+        aria-hidden="true"
+      />
     )
   return <Circle className="size-4 text-muted-foreground" aria-hidden="true" />
 }
@@ -146,6 +168,7 @@ function EventIcon({ status }: { status: TimelineEvent['status'] }) {
 interface RunTimelineProps {
   task: Task
   plan?: PlanState
+  events?: ExecutionEvent[]
   className?: string
 }
 
@@ -160,8 +183,24 @@ interface RunTimelineProps {
  * Handles a missing `plan` gracefully (falls back to a conditions-only
  * timeline). Intended to be gated by the caller on `iteration > 0`.
  */
-export function RunTimeline({ task, plan, className }: RunTimelineProps) {
+export function RunTimeline({
+  task,
+  plan,
+  events: taskEvents = [],
+  className,
+}: RunTimelineProps) {
   const events = buildEvents(task, plan)
+  const modelEvents = taskEvents.filter(
+    (event) => event.type === 'ModelRequestCompleted',
+  )
+  const totalIn = modelEvents.reduce(
+    (sum, event) => sum + (event.inputTokens ?? 0),
+    0,
+  )
+  const totalOut = modelEvents.reduce(
+    (sum, event) => sum + (event.outputTokens ?? 0),
+    0,
+  )
   const iteration = task.status?.iteration ?? 0
   const progressPct = plan?.progressPct
   const goalComplete = plan?.goalComplete ?? false
@@ -172,10 +211,17 @@ export function RunTimeline({ task, plan, className }: RunTimelineProps) {
         <div className="space-y-1">
           <div className="flex items-center justify-between text-sm">
             <span className="flex items-center gap-1.5 font-medium">
-              {goalComplete && <Flag className="size-3.5 text-status-succeeded" aria-hidden="true" />}
+              {goalComplete && (
+                <Flag
+                  className="size-3.5 text-status-succeeded"
+                  aria-hidden="true"
+                />
+              )}
               {goalComplete ? 'Goal complete' : 'Progress toward goal'}
             </span>
-            <span className="tabular-nums text-muted-foreground">{progressPct}%</span>
+            <span className="tabular-nums text-muted-foreground">
+              {progressPct}%
+            </span>
           </div>
           <div
             className="relative h-2 overflow-hidden rounded-full bg-muted"
@@ -206,12 +252,43 @@ export function RunTimeline({ task, plan, className }: RunTimelineProps) {
         </div>
       )}
 
+      {modelEvents.length > 0 && (
+        <div
+          className="rounded-md border bg-card p-3 text-xs"
+          aria-label="GenAI telemetry"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">GenAI</span>
+            <span className="rounded-full bg-muted px-2 py-0.5">
+              {totalIn + totalOut} tokens
+            </span>
+            <span className="text-muted-foreground">
+              {totalIn} input / {totalOut} output
+            </span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {modelEvents.map((event) => (
+              <span
+                key={event.id || event.seq}
+                className="rounded-full border px-2 py-0.5 text-muted-foreground"
+              >
+                {event.model ?? 'unknown model'}
+                {event.provider ? ` · ${event.provider}` : ''}
+                {event.stopReason ? ` · ${event.stopReason}` : ''}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <ol className="space-y-0">
         {events.map((e, i) => (
           <li key={e.key} className="flex gap-3">
             <div className="flex flex-col items-center">
               <EventIcon status={e.status} />
-              {i < events.length - 1 && <span className="w-px flex-1 bg-border" aria-hidden="true" />}
+              {i < events.length - 1 && (
+                <span className="w-px flex-1 bg-border" aria-hidden="true" />
+              )}
             </div>
             <div className={cn('pb-4', i === events.length - 1 && 'pb-0')}>
               <p
@@ -224,7 +301,9 @@ export function RunTimeline({ task, plan, className }: RunTimelineProps) {
               >
                 {e.label}
               </p>
-              {e.detail && <p className="text-xs text-muted-foreground">{e.detail}</p>}
+              {e.detail && (
+                <p className="text-xs text-muted-foreground">{e.detail}</p>
+              )}
             </div>
           </li>
         ))}

@@ -66,6 +66,12 @@ const (
 	AITools           = "ORKA_AI_TOOLS"
 	AIFallbackCount   = "ORKA_AI_FALLBACK_COUNT"
 
+	// Telemetry env vars.
+	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
+	TraceParent     = "ORKA_TRACEPARENT"
+	TraceState      = "ORKA_TRACESTATE"
+	TraceBaggage    = "ORKA_BAGGAGE"
+
 	// Coordination/autonomous env vars used by AI worker and coordination tools.
 	CoordinationEnabled       = "ORKA_COORDINATION_ENABLED"
 	CoordinationMaxDepth      = "ORKA_COORDINATION_MAX_DEPTH"
@@ -435,6 +441,10 @@ type AIWorkerEnv struct {
 	AzureAPIVersion string
 	Tools           []string
 	Fallbacks       []FallbackProviderEnv
+	EnableTelemetry bool
+	TraceParent     string
+	TraceState      string
+	TraceBaggage    string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -455,6 +465,12 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
 	}
+	if e.EnableTelemetry {
+		envVars = append(envVars, Env(EnableTelemetry, "true"))
+	}
+	envVars = AppendIfSet(envVars, TraceParent, e.TraceParent)
+	envVars = AppendIfSet(envVars, TraceState, e.TraceState)
+	envVars = AppendIfSet(envVars, TraceBaggage, e.TraceBaggage)
 	if len(e.Fallbacks) > 0 {
 		envVars = append(envVars, Env(AIFallbackCount, strconv.Itoa(len(e.Fallbacks))))
 		for i, fallback := range e.Fallbacks {
@@ -476,6 +492,10 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		AzureAPIVersion: getenv(AIAzureAPIVersion),
 		Tools:           SplitCSV(getenv(AITools)),
 		Fallbacks:       ParseFallbacks(getenv),
+		EnableTelemetry: IsTrue(getenv(EnableTelemetry)),
+		TraceParent:     getenv(TraceParent),
+		TraceState:      getenv(TraceState),
+		TraceBaggage:    getenv(TraceBaggage),
 	}
 }
 

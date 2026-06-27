@@ -20,6 +20,7 @@ import (
 	"github.com/sozercan/orka/internal/llm"
 	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/redact"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -315,6 +316,7 @@ func authorizeAndStampToolTaskCreate(ctx context.Context, k8sClient client.Clien
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
+	tracing.StampTaskTraceContext(ctx, task)
 	return nil
 }
 
@@ -326,6 +328,7 @@ func authorizeAndStampTaskContext(ctx context.Context, k8sClient client.Client, 
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
+	tracing.StampTaskTraceContext(ctx, task)
 	return nil
 }
 

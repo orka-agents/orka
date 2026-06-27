@@ -93,6 +93,9 @@ const (
 	AnnotationApprovalDecisionStatus        = "orka.ai/approval-decision-status"
 	AnnotationApprovalDecisionSeq           = "orka.ai/approval-decision-seq"
 	AnnotationApprovalResumedSeq            = "orka.ai/approval-resumed-seq"
+	AnnotationTraceParent                   = "orka.ai/traceparent"
+	AnnotationTraceState                    = "orka.ai/tracestate"
+	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
 
 // SelectorValue returns a Kubernetes label-safe value derived from the input.

@@ -44,6 +44,8 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -5067,6 +5069,57 @@ func TestHandleScheduled_CopiesCoordinationToolInjectionDisableAnnotation(t *tes
 	}
 }
 
+func TestHandleScheduled_StampsChildWithSchedulerTrace(t *testing.T) {
+	if shutdown, err := orkatracing.Init("test", false); err == nil {
+		t.Cleanup(func() { _ = shutdown(context.Background()) })
+	} else {
+		t.Fatalf("init tracing: %v", err)
+	}
+	testutil.NewSpanHarness(t)
+	ctx, span := orkatracing.Tracer("test").Start(context.Background(), "scheduler")
+	defer span.End()
+
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())
+	startingDeadlineSeconds := int64(300)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-trace",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ab",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAI,
+			Prompt:                  "hello",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: &startingDeadlineSeconds,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	if _, err := r.handleScheduled(ctx, task); err != nil {
+		t.Fatalf("handleScheduled() error = %v", err)
+	}
+
+	var childList corev1alpha1.TaskList
+	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list child tasks: %v", err)
+	}
+	if len(childList.Items) != 1 {
+		t.Fatalf("expected 1 scheduled child task, got %d", len(childList.Items))
+	}
+	if got := childList.Items[0].Annotations[labels.AnnotationTraceParent]; got == "" {
+		t.Fatalf("scheduled child missing %s annotation", labels.AnnotationTraceParent)
+	}
+}
+
 func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.T) {
 	scheme := newTestScheme()
 	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())
@@ -7614,6 +7667,66 @@ func TestHandleAutonomousIteration_FastApprovalAtMaxIterationResumes(t *testing.
 	}
 	if updated.Annotations[labels.AnnotationApprovalDecidedAt] != "" {
 		t.Fatalf("approval decision nudge was not cleared: %#v", updated.Annotations)
+	}
+}
+
+func TestHandleAutonomousIteration_FastApprovalStatusUpdateFailureKeepsNudge(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "auto-fast-approval-fail-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:        &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"},
+			Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true, MaxIterations: 2},
+		},
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "fast-approval-fail-job", Namespace: "default"}}
+	decisionTime := time.Now().UTC().Format(time.RFC3339Nano)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "auto-fast-approval-fail",
+			Namespace: "default",
+			Annotations: map[string]string{
+				labels.AnnotationApprovalDecidedAt:   decisionTime,
+				labels.AnnotationApprovalDecisionSeq: "7",
+			},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "auto-fast-approval-fail-agent"}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Iteration: 1, JobName: "fast-approval-fail-job"},
+	}
+	r := newUnitReconciler(scheme, task, agent, job)
+	appendApprovalRequestedForControllerTest(t, r, task, "approval-fast-fail")
+	appendApprovalDecisionForControllerTest(t, r, task, "approval-fast-fail")
+
+	statusErr := errors.New("status update failed")
+	base, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatalf("test client does not implement WithWatch: %T", r.Client)
+	}
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subResourceName == "status" {
+				return statusErr
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	_, err := r.handleAutonomousIteration(context.Background(), task)
+	if !errors.Is(err, statusErr) {
+		t.Fatalf("handleAutonomousIteration() error = %v, want %v", err, statusErr)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if got := updated.Annotations[labels.AnnotationApprovalDecidedAt]; got != decisionTime {
+		t.Fatalf("approval decision nudge = %q, want preserved %q; annotations=%#v", got, decisionTime, updated.Annotations)
+	}
+	if got := updated.Annotations[labels.AnnotationApprovalDecisionSeq]; got != "7" {
+		t.Fatalf("approval decision seq = %q, want preserved; annotations=%#v", got, updated.Annotations)
+	}
+	if got := updated.Annotations[labels.AnnotationApprovalResumedSeq]; got != "" {
+		t.Fatalf("approval resumed seq = %q, want unset until resumed status is durable", got)
 	}
 }
 
