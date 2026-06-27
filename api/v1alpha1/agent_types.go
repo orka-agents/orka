@@ -233,7 +233,9 @@ type CoordinationConfig struct {
 	// +optional
 	MaxIterations int32 `json:"maxIterations,omitempty"`
 
-	// ApprovalRequiredTools lists tool names that require a human approval before execution.
+	// ApprovalRequiredTools lists custom tool names that require a human approval before execution.
+	// This field is only honored when coordination is enabled and autonomous mode is true.
+	// Built-in tools such as request_approval, delegate_task, and web_search are rejected.
 	// +optional
 	ApprovalRequiredTools []string `json:"approvalRequiredTools,omitempty"`
 }

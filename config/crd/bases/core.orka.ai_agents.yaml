@@ -77,8 +77,10 @@ spec:
                       type: object
                     type: array
                   approvalRequiredTools:
-                    description: ApprovalRequiredTools lists tool names that require
-                      a human approval before execution.
+                    description: |-
+                      ApprovalRequiredTools lists custom tool names that require a human approval before execution.
+                      This field is only honored when coordination is enabled and autonomous mode is true.
+                      Built-in tools such as request_approval, delegate_task, and web_search are rejected.
                     items:
                       type: string
                     type: array
