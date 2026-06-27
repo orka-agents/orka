@@ -3630,14 +3630,17 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		"targetTool", approval.TargetTool,
 		"iteration", task.Status.Iteration,
 	)
-	task.Status.Message = fmt.Sprintf(
+	waitingMessage := fmt.Sprintf(
 		"waiting for approval %s for %s at iteration %d",
 		approval.ID,
 		target,
 		task.Status.Iteration,
 	)
-	if err := r.Status().Update(ctx, task); err != nil {
-		return ctrl.Result{}, false, err
+	if task.Status.Message != waitingMessage {
+		task.Status.Message = waitingMessage
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, false, err
+		}
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
 }
