@@ -32,6 +32,19 @@ import (
 
 const cliwrapperLocalOutputRef = "cliwrapper-result-v1"
 
+var deprecatedHarnessRuntimeAnnotationKeys = []string{
+	"orka.ai/harness-wrapper-runtime-endpoint",
+	"orka.ai/harness-wrapper-runtime-generation",
+	"orka.ai/harness-wrapper-runtime-auth-secret-name",
+	"orka.ai/harness-wrapper-runtime-auth-secret-key",
+}
+
+func clearDeprecatedHarnessRuntimeAnnotations(annotations map[string]string) {
+	for _, key := range deprecatedHarnessRuntimeAnnotationKeys {
+		delete(annotations, key)
+	}
+}
+
 const (
 	harnessWrapperEndpointEnv             = "ORKA_HARNESS_WRAPPER_ENDPOINT"
 	harnessWrapperAuthValueEnv            = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
@@ -824,10 +837,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	} else {
 		task.Annotations[harnessWrapperContractAnno] = harness.ProtocolVersion
 	}
-	delete(task.Annotations, harnessWrapperRuntimeEndpointAnno)
-	delete(task.Annotations, harnessWrapperRuntimeGenerationAnno)
-	delete(task.Annotations, harnessWrapperRuntimeAuthRefNameAnno)
-	delete(task.Annotations, harnessWrapperRuntimeAuthRefFieldAnno)
+	clearDeprecatedHarnessRuntimeAnnotations(task.Annotations)
 
 	plannedMetadata := make(map[string]string, len(request.Metadata))
 	for key, value := range request.Metadata {
@@ -977,10 +987,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperMetadataAnno)
 		delete(task.Annotations, harnessWrapperRuntimeRefAnno)
 		delete(task.Annotations, harnessWrapperContractAnno)
-		delete(task.Annotations, harnessWrapperRuntimeEndpointAnno)
-		delete(task.Annotations, harnessWrapperRuntimeGenerationAnno)
-		delete(task.Annotations, harnessWrapperRuntimeAuthRefNameAnno)
-		delete(task.Annotations, harnessWrapperRuntimeAuthRefFieldAnno)
+		clearDeprecatedHarnessRuntimeAnnotations(task.Annotations)
 		delete(task.Annotations, harnessWrapperOutputFetchRetriesAnno)
 	}
 	return r.Patch(ctx, task, patch)

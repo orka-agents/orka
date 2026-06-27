@@ -124,7 +124,9 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
 	}
 	frames := []harness.HarnessEventFrame{}
-	if err := client.StreamFrames(ctx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+	streamCtx, cancel := context.WithTimeout(ctx, controlTimeout)
+	defer cancel()
+	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
 		frames = append(frames, frame)
 		return nil
 	}); err != nil {
