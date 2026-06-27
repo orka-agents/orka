@@ -31,9 +31,11 @@ var (
 	managerImage = "ghcr.io/sozercan/orka:latest"
 
 	// Worker and harness images to build and load for e2e testing.
-	aiWorkerImage       = "ghcr.io/sozercan/orka/ai-worker:latest"
-	generalWorkerImage  = "ghcr.io/sozercan/orka/general-worker:latest"
-	harnessWrapperImage = "ghcr.io/sozercan/orka/agent-harness-wrapper:latest"
+	aiWorkerImage                    = "ghcr.io/sozercan/orka/ai-worker:latest"
+	generalWorkerImage               = "ghcr.io/sozercan/orka/general-worker:latest"
+	harnessWrapperImage              = "ghcr.io/sozercan/orka/agent-harness-wrapper:latest"
+	agentRuntimeExternalHarnessImage = "ghcr.io/sozercan/orka/agent-runtime-external-harness:e2e"
+	agentRuntimeExternalE2EEnvVar    = "E2E_AGENTRUNTIME_EXTERNAL"
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
@@ -65,13 +67,25 @@ var _ = BeforeSuite(func() {
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
 
+	if agentRuntimeExternalE2EEnabled() {
+		By("building the AgentRuntime external harness Docker image")
+		cmd = exec.Command("docker", "build", "-t", agentRuntimeExternalHarnessImage,
+			"-f", "examples/harness/echo/Dockerfile", ".")
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build AgentRuntime external harness image")
+	}
+
 	By("loading all images into Kind cluster")
-	for _, img := range []string{
+	images := []string{
 		managerImage,
 		aiWorkerImage,
 		generalWorkerImage,
 		harnessWrapperImage,
-	} {
+	}
+	if agentRuntimeExternalE2EEnabled() {
+		images = append(images, agentRuntimeExternalHarnessImage)
+	}
+	for _, img := range images {
 		err = utils.LoadImageToKindClusterWithName(img)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), fmt.Sprintf("Failed to load image %s into Kind", img))
 	}
@@ -133,6 +147,7 @@ var _ = BeforeSuite(func() {
 		for _, crd := range []string{
 			"tasks.core.orka.ai",
 			"agents.core.orka.ai",
+			"agentruntimes.core.orka.ai",
 			"tools.core.orka.ai",
 			"providers.core.orka.ai",
 			"skills.core.orka.ai",
@@ -288,6 +303,11 @@ func createK8sSecret(name, ns string, data map[string]string) error {
 	cmd.Stdin = strings.NewReader(string(manifest))
 	_, err = utils.Run(cmd)
 	return err
+}
+
+func agentRuntimeExternalE2EEnabled() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(agentRuntimeExternalE2EEnvVar)))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func firstSetEnv(keys ...string) string {
