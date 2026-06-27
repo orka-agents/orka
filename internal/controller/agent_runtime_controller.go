@@ -64,24 +64,25 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	logger.Info("Reconciling AgentRuntime", "agentRuntime", runtime.Name, "mode", runtime.Spec.Deployment.Mode)
-	observed, ready, message := r.probeAgentRuntime(ctx, runtime)
-	return r.updateAgentRuntimeStatus(ctx, runtime, ready, observed, message)
+	observed, ready, authRefResourceVersion, message := r.probeAgentRuntime(ctx, runtime)
+	return r.updateAgentRuntimeStatus(ctx, runtime, ready, observed, authRefResourceVersion, message)
 }
 
 func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	ctx context.Context,
 	runtime *corev1alpha1.AgentRuntime,
-) (*corev1alpha1.AgentRuntimeObservedCapabilities, bool, string) {
+) (*corev1alpha1.AgentRuntimeObservedCapabilities, bool, string, string) {
 	if err := validateAgentRuntimeSpec(runtime); err != nil {
-		return nil, false, err.Error()
+		return nil, false, "", err.Error()
 	}
-	token, err := r.agentRuntimeBearerToken(ctx, runtime)
+	token, authRefResourceVersion, err := r.agentRuntimeBearerToken(ctx, runtime)
 	if err != nil {
-		return nil, false, err.Error()
+		return nil, false, "", err.Error()
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, agentRuntimeProbeTimeout)
 	defer cancel()
-	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready
+	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready ||
+		runtime.Status.ObservedAuthRefResourceVersion != authRefResourceVersion
 	result := conformance.Check(probeCtx, conformance.Target{
 		BaseURL:        runtime.Spec.Deployment.Endpoint,
 		BearerToken:    token,
@@ -91,12 +92,12 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	})
 	observed := observedCapabilitiesFromConformance(result.ObservedCapabilities)
 	if !result.Passed {
-		return observed, false, sanitizeAgentRuntimeStatusMessage(result.Message)
+		return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(result.Message)
 	}
 	if err := validateAgentRuntimeRequiredCapabilities(runtime, result.ObservedCapabilities); err != nil {
-		return observed, false, err.Error()
+		return observed, false, authRefResourceVersion, err.Error()
 	}
-	return observed, true, "AgentRuntime passed Orka harness readiness checks"
+	return observed, true, authRefResourceVersion, "AgentRuntime passed Orka harness readiness checks"
 }
 
 func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
@@ -147,23 +148,23 @@ func validateAgentRuntimeBearerSecretUse(runtimeName string, secret *corev1.Secr
 	return nil
 }
 
-func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, error) {
+func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, string, error) {
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: runtime.Namespace, Name: ref.Name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", fmt.Errorf("bearer token Secret %q not found", ref.Name)
+			return "", "", fmt.Errorf("bearer token Secret %q not found", ref.Name)
 		}
-		return "", fmt.Errorf("read bearer token Secret %q: %w", ref.Name, err)
+		return "", "", fmt.Errorf("read bearer token Secret %q: %w", ref.Name, err)
 	}
 	if err := validateAgentRuntimeBearerSecretUse(runtime.Name, secret); err != nil {
-		return "", err
+		return "", "", err
 	}
 	value := strings.TrimSpace(string(secret.Data[ref.Key]))
 	if value == "" {
-		return "", fmt.Errorf("bearer token Secret %q key %q is empty or missing", ref.Name, ref.Key)
+		return "", "", fmt.Errorf("bearer token Secret %q key %q is empty or missing", ref.Name, ref.Key)
 	}
-	return value, nil
+	return value, strings.TrimSpace(secret.ResourceVersion), nil
 }
 
 func validateAgentRuntimeRequiredCapabilities(
@@ -231,12 +232,14 @@ func (r *AgentRuntimeReconciler) updateAgentRuntimeStatus(
 	runtime *corev1alpha1.AgentRuntime,
 	ready bool,
 	observed *corev1alpha1.AgentRuntimeObservedCapabilities,
+	authRefResourceVersion string,
 	message string,
 ) (ctrl.Result, error) {
 	now := metav1.Now()
 	runtime.Status.Ready = ready
 	runtime.Status.ObservedGeneration = runtime.Generation
 	runtime.Status.ObservedCapabilities = observed
+	runtime.Status.ObservedAuthRefResourceVersion = authRefResourceVersion
 	runtime.Status.LastValidated = &now
 	runtime.Status.Message = sanitizeAgentRuntimeStatusMessage(message)
 	condition := metav1.Condition{

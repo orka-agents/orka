@@ -30,7 +30,7 @@ func TestCheckReadinessPassesForFakeHarness(t *testing.T) {
 }
 
 func TestCheckReadinessPassesForAgentKitOrkaFixture(t *testing.T) {
-	server := newAgentKitOrkaFixture(t, "fibey-agentkit", "x")
+	server := newAgentKitOrkaFixture(t)
 	defer server.Close()
 
 	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
@@ -88,7 +88,7 @@ func TestCheckFailsWhenTerminalFrameOmitted(t *testing.T) {
 }
 
 func TestCheckFailsWhenStartTurnResponseOmitsEventStreamPath(t *testing.T) {
-	server := newAgentKitOrkaFixture(t, "fibey-agentkit", "x")
+	server := newAgentKitOrkaFixture(t)
 	server.omitEventStreamPath = true
 	defer server.Close()
 
@@ -102,7 +102,7 @@ func TestCheckFailsWhenStartTurnResponseOmitsEventStreamPath(t *testing.T) {
 }
 
 func TestCheckFailsWhenFrameTypeUnknown(t *testing.T) {
-	server := newAgentKitOrkaFixture(t, "fibey-agentkit", "x")
+	server := newAgentKitOrkaFixture(t)
 	server.frameType = harness.FrameType("AgentKitProgress")
 	defer server.Close()
 
@@ -125,11 +125,11 @@ type agentKitOrkaFixture struct {
 	turns               map[harness.HarnessTurnID]harness.StartTurnRequest
 }
 
-func newAgentKitOrkaFixture(t *testing.T, runtimeName, authValue string) *agentKitOrkaFixture {
+func newAgentKitOrkaFixture(t *testing.T) *agentKitOrkaFixture {
 	t.Helper()
 	fixture := &agentKitOrkaFixture{
-		runtimeName: runtimeName,
-		authValue:   authValue,
+		runtimeName: "fibey-agentkit",
+		authValue:   "x",
 		frameType:   harness.FrameRuntimeOutput,
 		turns:       map[harness.HarnessTurnID]harness.StartTurnRequest{},
 	}

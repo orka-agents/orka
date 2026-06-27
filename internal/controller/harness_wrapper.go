@@ -130,17 +130,6 @@ func agentHarnessRuntimeRefName(agent *corev1alpha1.Agent) string {
 	return strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
 }
 
-func harnessWrapperPlannedRuntimeRefName(task *corev1alpha1.Task) string {
-	if task == nil || task.Annotations == nil {
-		return ""
-	}
-	if value := strings.TrimSpace(task.Annotations[harnessWrapperRuntimeRefAnno]); value != "" {
-		return value
-	}
-	metadata := harnessWrapperPlannedMetadata(task, "")
-	return strings.TrimSpace(metadata["runtimeRef"])
-}
-
 func harnessRuntimeTargetFromStatus(task *corev1alpha1.Task) (harnessRuntimeTarget, bool) {
 	if task == nil || task.Status.HarnessRuntime == nil {
 		return harnessRuntimeTarget{}, false
@@ -215,7 +204,7 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) (harnessRuntimeTarget, error) {
-	if taskHasHarnessWrapperTurn(task) {
+	if taskHasPlannedHarnessWrapperTurn(task) {
 		if frozen, ok := harnessRuntimeTargetFromStatus(task); ok {
 			token, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.AuthRefName, frozen.AuthRefField)
 			if err != nil {
@@ -226,9 +215,6 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 		}
 	}
 	runtimeRefName := agentHarnessRuntimeRefName(agent)
-	if runtimeRefName == "" {
-		runtimeRefName = harnessWrapperPlannedRuntimeRefName(task)
-	}
 	if runtimeRefName == "" {
 		endpoint := harnessWrapperEndpoint()
 		if endpoint == "" {

@@ -206,6 +206,28 @@ func TestHarnessWrapperRuntimeRefStaleGenerationWaitsBeforeStartTurn(t *testing.
 	}
 }
 
+func TestHarnessWrapperBuiltInRuntimeIgnoresRuntimeRefAnnotation(t *testing.T) {
+	t.Setenv(harnessWrapperEndpointEnv, "http://wrapper.example.invalid")
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{harnessWrapperRuntimeRefAnno: "fibey-agentkit"}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://custom.example.invalid")
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget: %v", err)
+	}
+	if target.RuntimeRefName != "" {
+		t.Fatalf("RuntimeRefName = %q, want built-in wrapper target", target.RuntimeRefName)
+	}
+	if target.Endpoint != "http://wrapper.example.invalid" {
+		t.Fatalf("Endpoint = %q, want shared wrapper endpoint", target.Endpoint)
+	}
+	if target.RuntimeName != string(corev1alpha1.AgentRuntimeCodex) {
+		t.Fatalf("RuntimeName = %q, want codex", target.RuntimeName)
+	}
+}
+
 func TestHarnessWrapperRuntimeRefMissingAgentRuntimeFailsClearly(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "missing-runtime"}}

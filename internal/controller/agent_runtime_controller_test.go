@@ -45,6 +45,46 @@ func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL())
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	var ready corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &ready); err != nil {
+		t.Fatalf("Get ready AgentRuntime: %v", err)
+	}
+	if !ready.Status.Ready {
+		t.Fatalf("Ready = false after first reconcile, message=%q", ready.Status.Message)
+	}
+
+	var changed corev1.Secret
+	if err := r.Get(context.Background(), client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, &changed); err != nil {
+		t.Fatalf("Get Secret: %v", err)
+	}
+	changed.Data["token"] = []byte("wrong")
+	if err := r.Update(context.Background(), &changed); err != nil {
+		t.Fatalf("Update Secret: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get updated AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false after bearer auth changed")
+	}
+	if !strings.Contains(updated.Status.Message, "401") && !strings.Contains(updated.Status.Message, "unauthorized") {
+		t.Fatalf("Message = %q, want auth failure", updated.Status.Message)
+	}
+}
+
 func TestAgentRuntimeReconcilerMarksNotReadyForBadProtocol(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "x"})
 	defer server.Close()

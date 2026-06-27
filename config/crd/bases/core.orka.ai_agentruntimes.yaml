@@ -208,6 +208,12 @@ spec:
               message:
                 description: Message provides sanitized readiness context.
                 type: string
+              observedAuthRefResourceVersion:
+                description: |-
+                  ObservedAuthRefResourceVersion is the resourceVersion of the bearer auth Secret
+                  used for the last readiness probe. It is non-secret metadata used to decide
+                  when token rotation requires a fresh authenticated conformance turn.
+                type: string
               observedCapabilities:
                 description: ObservedCapabilities contains sanitized capabilities
                   from the last probe.

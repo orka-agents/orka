@@ -181,6 +181,12 @@ type AgentRuntimeStatus struct {
 	// +optional
 	LastValidated *metav1.Time `json:"lastValidated,omitempty"`
 
+	// ObservedAuthRefResourceVersion is the resourceVersion of the bearer auth Secret
+	// used for the last readiness probe. It is non-secret metadata used to decide
+	// when token rotation requires a fresh authenticated conformance turn.
+	// +optional
+	ObservedAuthRefResourceVersion string `json:"observedAuthRefResourceVersion,omitempty"`
+
 	// Message provides sanitized readiness context.
 	// +optional
 	Message string `json:"message,omitempty"`

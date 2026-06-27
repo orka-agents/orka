@@ -84,6 +84,8 @@ func Check(ctx context.Context, target Target) Result {
 
 	if target.ProbeTurn {
 		runTurnProbe(ctx, target, &result, baseURL, controlTimeout)
+	} else if target.RequireAuth {
+		result.addFailure("RequireAuth requires ProbeTurn")
 	}
 	result.finalize()
 	return result
