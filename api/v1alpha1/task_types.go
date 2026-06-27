@@ -473,6 +473,10 @@ type HarnessRuntimeStatus struct {
 	// +optional
 	RuntimeRefName string `json:"runtimeRefName,omitempty"`
 
+	// RuntimeName is the runtime name advertised by the harness capabilities and sent in turn metadata.
+	// +optional
+	RuntimeName string `json:"runtimeName,omitempty"`
+
 	// ContractVersion is the Orka harness contract version used for the turn.
 	// +optional
 	ContractVersion string `json:"contractVersion,omitempty"`

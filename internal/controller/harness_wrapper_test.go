@@ -105,6 +105,25 @@ func TestHarnessWrapperTaskRunsAgainstRuntimeRefAgentRuntime(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperRuntimeRefUsesObservedRuntimeName(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "agentkit-fibey-runtime"})
+	defer server.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	runtime.Status.ObservedCapabilities.RuntimeName = "agentkit-fibey-runtime"
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	updated := runHarnessWrapperTaskToCompletion(t, r, task)
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded (message=%s)", updated.Status.Phase, updated.Status.Message)
+	}
+	if updated.Status.HarnessRuntime == nil || updated.Status.HarnessRuntime.RuntimeName != "agentkit-fibey-runtime" {
+		t.Fatalf("HarnessRuntime = %#v, want observed runtime name", updated.Status.HarnessRuntime)
+	}
+}
+
 func TestHarnessWrapperRuntimeRefFreezesEndpointForRunningTurn(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit"})
 	defer server.Close()

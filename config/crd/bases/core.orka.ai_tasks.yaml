@@ -2070,6 +2070,10 @@ spec:
                       selected when the turn started.
                     format: int64
                     type: integer
+                  runtimeName:
+                    description: RuntimeName is the runtime name advertised by the
+                      harness capabilities and sent in turn metadata.
+                    type: string
                   runtimeRefName:
                     description: RuntimeRefName is the AgentRuntime name for custom
                       runtimeRef turns. Empty means built-in CLI wrapper.

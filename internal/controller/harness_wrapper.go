@@ -143,9 +143,13 @@ func harnessRuntimeTargetFromStatus(task *corev1alpha1.Task) (harnessRuntimeTarg
 	if contract == "" {
 		contract = harness.ProtocolVersion
 	}
+	runtimeName := strings.TrimSpace(status.RuntimeName)
+	if runtimeName == "" {
+		runtimeName = strings.TrimSpace(status.RuntimeRefName)
+	}
 	return harnessRuntimeTarget{
 		Endpoint:        strings.TrimSpace(status.Endpoint),
-		RuntimeName:     strings.TrimSpace(status.RuntimeRefName),
+		RuntimeName:     runtimeName,
 		RuntimeRefName:  strings.TrimSpace(status.RuntimeRefName),
 		ContractVersion: contract,
 		Wrapper:         "external-endpoint",
@@ -177,6 +181,7 @@ func harnessRuntimeStatusFromTarget(target harnessRuntimeTarget) *corev1alpha1.H
 	}
 	return &corev1alpha1.HarnessRuntimeStatus{
 		RuntimeRefName:    target.RuntimeRefName,
+		RuntimeName:       target.RuntimeName,
 		ContractVersion:   target.ContractVersion,
 		Endpoint:          target.Endpoint,
 		RuntimeGeneration: target.Generation,

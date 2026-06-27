@@ -83,19 +83,35 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	defer cancel()
 	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready ||
 		runtime.Status.ObservedAuthRefResourceVersion != authRefResourceVersion
-	result := conformance.Check(probeCtx, conformance.Target{
+	preflight := conformance.Check(probeCtx, conformance.Target{
 		BaseURL:        runtime.Spec.Deployment.Endpoint,
 		BearerToken:    token,
 		ControlTimeout: agentRuntimeProbeTimeout,
-		ProbeTurn:      deepProbe,
-		RequireAuth:    deepProbe,
 	})
-	observed := observedCapabilitiesFromConformance(result.ObservedCapabilities)
-	if !result.Passed {
-		return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(result.Message)
+	observed := observedCapabilitiesFromConformance(preflight.ObservedCapabilities)
+	if !preflight.Passed {
+		return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(preflight.Message)
 	}
-	if err := validateAgentRuntimeRequiredCapabilities(runtime, result.ObservedCapabilities); err != nil {
+	if err := validateAgentRuntimeRequiredCapabilities(runtime, preflight.ObservedCapabilities); err != nil {
 		return observed, false, authRefResourceVersion, err.Error()
+	}
+	if deepProbe {
+		turnProbe := conformance.Check(probeCtx, conformance.Target{
+			BaseURL:        runtime.Spec.Deployment.Endpoint,
+			BearerToken:    token,
+			ControlTimeout: agentRuntimeProbeTimeout,
+			ProbeTurn:      true,
+			RequireAuth:    true,
+		})
+		if turnProbe.ObservedCapabilities != nil {
+			if err := validateAgentRuntimeRequiredCapabilities(runtime, turnProbe.ObservedCapabilities); err != nil {
+				return observed, false, authRefResourceVersion, err.Error()
+			}
+			observed = observedCapabilitiesFromConformance(turnProbe.ObservedCapabilities)
+		}
+		if !turnProbe.Passed {
+			return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(turnProbe.Message)
+		}
 	}
 	return observed, true, authRefResourceVersion, "AgentRuntime passed Orka harness readiness checks"
 }

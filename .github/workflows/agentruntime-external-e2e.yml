@@ -1,8 +1,10 @@
 name: AgentRuntime External Endpoint E2E
 
 on:
+  workflow_dispatch:
   push:
     paths:
+      - ".dockerignore"
       - ".github/workflows/agentruntime-external-e2e.yml"
       - "api/**"
       - "cmd/**"
@@ -17,6 +19,7 @@ on:
       - "go.sum"
   pull_request:
     paths:
+      - ".dockerignore"
       - ".github/workflows/agentruntime-external-e2e.yml"
       - "api/**"
       - "cmd/**"
