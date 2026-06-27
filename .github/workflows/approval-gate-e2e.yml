@@ -18,6 +18,7 @@ on:
       - "workers/ai/**"
       - "workers/common/**"
       - "test/e2e/**"
+      - "test/utils/**"
       - "config/**"
   pull_request:
     paths:
@@ -36,6 +37,7 @@ on:
       - "workers/ai/**"
       - "workers/common/**"
       - "test/e2e/**"
+      - "test/utils/**"
       - "config/**"
 
 permissions:
