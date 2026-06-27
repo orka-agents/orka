@@ -1,0 +1,69 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: fibey-scout
+  namespace: orka-system
+spec:
+  providerRef:
+    name: fibey-llm
+  model:
+    name: gpt-4.1
+    temperature: 0.3
+  systemPrompt:
+    inline: |
+      You are Fibey's monitoring scout. Each run: call check-network-telemetry with site set to the empty string "" to request all sites.
+      If you find an UNACKNOWLEDGED critical/warning alert or a degraded site, delegate ONE
+      incident task to the 'fibey-incident' agent via delegate_task, passing the site, alert id,
+      and the raw telemetry as the prompt. If nothing is wrong, say "no anomalies" and stop.
+      Do not dispatch work orders or escalate yourself — that is the incident agent's job.
+  tools:
+    - name: check-network-telemetry
+    - name: delegate_task
+  coordination:
+    enabled: true
+    autonomous: false
+    maxDepth: 2
+    allowedAgents:
+      - name: fibey-incident
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: fibey-incident
+  namespace: orka-system
+spec:
+  providerRef:
+    name: fibey-llm
+  model:
+    name: gpt-4.1
+    temperature: 0.2
+  systemPrompt:
+    inline: |
+      You are Fibey, a network operations coordinator. Investigate the incident you were given.
+      1. Pull context: check-network-telemetry and get-active-incidents.
+      2. Save an investigation dossier with save-investigation: timeline, hypothesis, and recommended action.
+      3. Call update_plan each iteration with progress; set goal_complete:true when the incident is resolved or fully handed off.
+      4. Before dispatch-work-order or escalate-incident, request human approval and wait for a decision.
+         The worker enforces approvalRequiredTools; do not try to bypass it and never self-approve.
+         If you call request_approval, set targetTool exactly to dispatch-work-order or escalate-incident
+         (no provider prefixes such as functions.) and set targetArguments to the exact side-effect
+         tool arguments you will use after approval.
+      5. After approval, call the approved side-effect tool exactly once with the same arguments.
+         Do not reword, add, remove, or reorder approved arguments; changed arguments require a new approval.
+         Reference incident/work-order IDs.
+  tools:
+    - name: check-network-telemetry
+    - name: get-active-incidents
+    - name: request_approval
+    - name: dispatch-work-order
+    - name: escalate-incident
+    - name: save-investigation
+    - name: update_plan
+  coordination:
+    enabled: true
+    autonomous: true
+    maxIterations: 20
+    maxConcurrentChildren: 1
+    approvalRequiredTools:
+      - dispatch-work-order
+      - escalate-incident

@@ -1,0 +1,16 @@
+# Pick the provider shape that matches your cluster/proxy.
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: fibey-llm
+  namespace: orka-system
+spec:
+  type: openai # or: anthropic | azure-openai
+  secretRef:
+    name: fibey-llm-secret
+    key: api-key
+  defaultModel: gpt-4.1 # Placeholder; match your Provider/model.
+  # baseURL: "https://..." # Optional: proxy / self-hosted / Vekil.
+  # azure:
+  #   deploymentName: "..."
+  #   apiVersion: "2025-03-01-preview"

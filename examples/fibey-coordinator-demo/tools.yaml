@@ -1,0 +1,141 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: check-network-telemetry
+  namespace: orka-system
+spec:
+  description: "Check real-time network telemetry, alerts, and metrics for a data-center site. Use before recommending action; do not fabricate metrics."
+  parameters:
+    type: object
+    properties:
+      site:
+        type: string
+        description: "Site name, e.g. 'Quincy North'. Empty for all sites."
+      metric:
+        type: string
+        description: "Optional metric focus, e.g. latency, errors, optical power, temperature."
+  http:
+    url: "http://fibey-mocks.orka-system.svc.cluster.local:8080/telemetry"
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeout: 30s
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: get-active-incidents
+  namespace: orka-system
+spec:
+  description: "List active incidents and their status. Filter by site/severity/status."
+  parameters:
+    type: object
+    properties:
+      site:
+        type: string
+      severity:
+        type: string
+        description: "P1|P2|P3|P4"
+      status:
+        type: string
+        description: "investigating|monitoring|resolved|escalated|waiting-for-vendor"
+      incident_id:
+        type: string
+        description: "Optional exact incident ID, e.g. INC-20260524-001, to fetch full details for one incident."
+  http:
+    url: "http://fibey-mocks.orka-system.svc.cluster.local:8080/incidents"
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeout: 30s
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: save-investigation
+  namespace: orka-system
+spec:
+  description: "Save investigation notes or findings to persistent Fibey demo storage for audit trail. Mirrors the Build26 save_investigation tool."
+  parameters:
+    type: object
+    properties:
+      filename:
+        type: string
+        description: "Name for the file, e.g. 'rack-b14-analysis.md'."
+      content:
+        type: string
+        maxLength: 12000
+        description: "Investigation notes, timeline, findings, or recommended action. Maximum 12,000 characters; saved files are also capped at 64 KiB including generated headers."
+      incident_id:
+        type: string
+        description: "Related incident ID for cross-reference."
+    required:
+      - filename
+      - content
+  http:
+    url: "http://fibey-mocks.orka-system.svc.cluster.local:8080/investigations"
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeout: 30s
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: dispatch-work-order
+  namespace: orka-system
+spec:
+  description: "Create and dispatch a work order to field operations. CONSEQUENTIAL: requires human approval before real use."
+  parameters:
+    type: object
+    properties:
+      title:
+        type: string
+      priority:
+        type: string
+        description: "P1|P2|P3"
+      site:
+        type: string
+      description:
+        type: string
+      assignee:
+        type: string
+        description: "default 'Field Tech On-Site'"
+    required:
+      - title
+      - priority
+      - site
+      - description
+  http:
+    url: "http://fibey-mocks.orka-system.svc.cluster.local:8080/work-order"
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeout: 30s
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: escalate-incident
+  namespace: orka-system
+spec:
+  description: "Escalate an incident to a higher tier. CONSEQUENTIAL: requires human approval before real use."
+  parameters:
+    type: object
+    properties:
+      incident_id:
+        type: string
+      reason:
+        type: string
+      escalate_to:
+        type: string
+        description: "default 'Engineering Lead'"
+    required:
+      - incident_id
+      - reason
+  http:
+    url: "http://fibey-mocks.orka-system.svc.cluster.local:8080/escalate"
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeout: 30s

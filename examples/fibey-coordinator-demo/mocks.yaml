@@ -1,0 +1,893 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fibey-mocks
+  namespace: orka-system
+data:
+  server.py: |
+    import json
+    import os
+    import re
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    fired = {}
+    INVESTIGATIONS_DIR = Path(os.environ.get("FIBEY_HOME", "/fibey")) / "investigations"
+    MAX_REQUEST_BYTES = 1024 * 1024
+    MAX_INVESTIGATION_CHARS = 12_000
+    MAX_INVESTIGATION_BYTES = 64 * 1024
+    MAX_INVESTIGATION_FILES = 50
+
+    TELEMETRY = json.loads(r'''{
+        "quincy_north": {
+            "site": "Quincy North",
+            "overall_status": "degraded",
+            "alerts": [
+                {
+                    "id": "ALT-20260524-001",
+                    "severity": "critical",
+                    "source": "Rack B-14, Port 3/1/12",
+                    "type": "optical_power_low",
+                    "message": "Rx optical power -18.2 dBm (threshold: -14 dBm). CRC error rate 2.3e-6.",
+                    "first_seen": "2026-05-24T07:45:00Z",
+                    "acknowledged": false
+                },
+                {
+                    "id": "ALT-20260524-002",
+                    "severity": "warning",
+                    "source": "Row A Panel 7",
+                    "type": "temperature_elevated",
+                    "message": "Ambient temperature 28.4C (warning threshold: 27C). HVAC unit 3 degraded.",
+                    "first_seen": "2026-05-24T09:30:00Z",
+                    "acknowledged": true
+                }
+            ],
+            "metrics": {
+                "total_ports": 4608,
+                "active_ports": 3847,
+                "error_ports": 3,
+                "avg_latency_ms": 0.42,
+                "packet_loss_pct": 0.001,
+                "uptime_pct": 99.97
+            }
+        },
+        "default": {
+            "site": "All Sites",
+            "overall_status": "healthy",
+            "alerts": [],
+            "metrics": {
+                "total_ports": 12000,
+                "active_ports": 9500,
+                "error_ports": 3,
+                "avg_latency_ms": 0.55,
+                "packet_loss_pct": 0.0005,
+                "uptime_pct": 99.99
+            }
+        }
+    }''')
+
+    INCIDENTS = json.loads(r'''[
+        {
+            "id": "INC-20260524-001",
+            "title": "Optical link degradation Rack B-14",
+            "severity": "P1",
+            "status": "investigating",
+            "type": "optical_degradation",
+            "site": "Quincy North",
+            "created": "2026-05-24T07:50:00Z",
+            "last_update": "2026-05-25T06:15:00Z",
+            "description": "Multiple CRC errors and low Rx power detected on port 3/1/12. Likely failed QSFP-DD transceiver. Work order is pending human approval.",
+            "assigned_to": "NOC Coordinator",
+            "timeline": [
+                "07:45 - Alert triggered: Rx power below threshold",
+                "07:50 - Incident auto-created",
+                "08:00 - Acknowledged by NOC",
+                "08:30 - Transceiver swap recommended; awaiting human approval before dispatch",
+                "12:00 - No field work dispatched yet"
+            ]
+        },
+        {
+            "id": "INC-20260525-014",
+            "title": "Fiber cut detected on inter-DC trunk SE-04",
+            "severity": "P1",
+            "status": "escalated",
+            "type": "fiber_cut",
+            "site": "Singapore South",
+            "created": "2026-05-25T03:22:00Z",
+            "last_update": "2026-05-25T11:40:00Z",
+            "description": "Complete loss of signal on trunk SE-04 between Singapore South and Jakarta POP. Traffic rerouted via SE-02 (60% capacity). Vendor dispatched for emergency splice.",
+            "assigned_to": "Regional Fiber Vendor (SingTel)",
+            "timeline": [
+                "03:22 - LOS alarm on trunk SE-04",
+                "03:23 - Auto-failover to SE-02",
+                "03:30 - NOC confirmed fiber cut via OTDR",
+                "04:00 - Vendor notified \u2014 SLA 6h restore",
+                "11:40 - Splice team on-site, ETA 2h to restore"
+            ]
+        },
+        {
+            "id": "INC-20260522-009",
+            "title": "UPS bank failure \u2014 Generator on load",
+            "severity": "P1",
+            "status": "monitoring",
+            "type": "power",
+            "site": "East US DC-7",
+            "created": "2026-05-22T14:18:00Z",
+            "last_update": "2026-05-25T08:00:00Z",
+            "description": "UPS Bank C failed during routine transfer test. Generator G-2 carrying load. Replacement UPS modules ordered \u2014 48h ETA.",
+            "assigned_to": "Critical Power Team",
+            "timeline": [
+                "14:18 - UPS Bank C offline",
+                "14:19 - Generator G-2 auto-started",
+                "14:25 - NOC confirmed stable on generator",
+                "15:00 - Vendor notified for replacement modules",
+                "May 25 08:00 - Modules in transit, ETA May 26 AM"
+            ]
+        },
+        {
+            "id": "INC-20260523-003",
+            "title": "HVAC Unit 3 degraded performance",
+            "severity": "P2",
+            "status": "waiting-for-vendor",
+            "type": "cooling",
+            "site": "Quincy North",
+            "created": "2026-05-23T16:00:00Z",
+            "last_update": "2026-05-25T09:30:00Z",
+            "description": "HVAC Unit 3 running at 70% capacity. Ambient temp elevated but within operational limits. Vendor dispatched for Monday.",
+            "assigned_to": "Facilities Team",
+            "timeline": [
+                "May 23 16:00 - Performance degradation detected",
+                "May 23 16:30 - Vendor notified",
+                "May 24 09:30 - Temperature warning threshold crossed in Row A",
+                "May 25 09:30 - Vendor confirms Monday AM arrival"
+            ]
+        },
+        {
+            "id": "INC-20260524-005",
+            "title": "Elevated packet loss on spine switch SW-SPINE-03",
+            "severity": "P2",
+            "status": "investigating",
+            "type": "optical_degradation",
+            "site": "Dublin West",
+            "created": "2026-05-24T11:05:00Z",
+            "last_update": "2026-05-25T07:20:00Z",
+            "description": "Intermittent packet loss (0.02%) on SW-SPINE-03 uplinks. Correlates with optics temperature. Suspecting failing fan tray.",
+            "assigned_to": "Network Engineering",
+            "timeline": [
+                "11:05 - Packet loss threshold exceeded",
+                "11:20 - Correlated with optics temp spike",
+                "13:00 - Fan tray inspection scheduled",
+                "May 25 07:20 - Fan 3 confirmed degraded, RMA filed"
+            ]
+        },
+        {
+            "id": "INC-20260523-007",
+            "title": "Capacity planning \u2014 Quincy North nearing 85% port utilization",
+            "severity": "P2",
+            "status": "monitoring",
+            "type": "capacity_planning",
+            "site": "Quincy North",
+            "created": "2026-05-23T09:00:00Z",
+            "last_update": "2026-05-25T06:00:00Z",
+            "description": "Port utilization trending at 83.5% and climbing. Need to plan leaf expansion in rows C-D within 30 days to avoid congestion.",
+            "assigned_to": "Capacity Planning",
+            "timeline": [
+                "May 23 09:00 - Monthly capacity report flagged threshold",
+                "May 23 14:00 - Expansion options reviewed",
+                "May 25 06:00 - Procurement ticket submitted for 48-port leaf switches x8"
+            ]
+        },
+        {
+            "id": "INC-20260524-008",
+            "title": "PDU phase imbalance Hall B",
+            "severity": "P2",
+            "status": "investigating",
+            "type": "power",
+            "site": "East US DC-7",
+            "created": "2026-05-24T19:44:00Z",
+            "last_update": "2026-05-25T10:15:00Z",
+            "description": "Phase C drawing 38% more current than phases A/B on PDU-B-22. Risk of breaker trip if load increases. Load rebalancing in progress.",
+            "assigned_to": "Critical Power Team",
+            "timeline": [
+                "19:44 - Phase imbalance alert triggered",
+                "20:00 - NOC acknowledged",
+                "May 25 10:15 - Load migration started from Phase C"
+            ]
+        },
+        {
+            "id": "INC-20260521-011",
+            "title": "BGP session flapping with upstream peer AS7018",
+            "severity": "P2",
+            "status": "resolved",
+            "type": "optical_degradation",
+            "site": "Dublin West",
+            "created": "2026-05-21T22:15:00Z",
+            "last_update": "2026-05-24T16:00:00Z",
+            "description": "BGP session to AT&T peer (AS7018) flapping every ~4h. Root cause: MTU mismatch after peer-side maintenance. Resolved with peer NOC.",
+            "assigned_to": "Peering Team",
+            "timeline": [
+                "22:15 - BGP session down alarm",
+                "22:16 - Session restored",
+                "May 22 02:00 - Second flap detected",
+                "May 22 10:00 - Pattern identified \u2014 MTU mismatch",
+                "May 24 16:00 - Peer confirmed fix deployed, stable since"
+            ]
+        },
+        {
+            "id": "INC-20260525-016",
+            "title": "Cooling tower water flow sensor fault",
+            "severity": "P2",
+            "status": "waiting-for-vendor",
+            "type": "cooling",
+            "site": "Sweden Central",
+            "created": "2026-05-25T05:10:00Z",
+            "last_update": "2026-05-25T12:00:00Z",
+            "description": "Flow sensor CT-3 reporting 0 L/min despite pump running. Likely sensor failure, not actual flow loss. Vendor dispatched for replacement.",
+            "assigned_to": "Facilities Team",
+            "timeline": [
+                "05:10 - Zero-flow alarm on CT-3",
+                "05:15 - Manual verification confirmed pump running",
+                "05:30 - Sensor fault confirmed",
+                "12:00 - Vendor ETA tomorrow 08:00 local"
+            ]
+        },
+        {
+            "id": "INC-20260524-002",
+            "title": "Optics inventory low \u2014 100G QSFP28 SR4",
+            "severity": "P3",
+            "status": "monitoring",
+            "type": "capacity_planning",
+            "site": "Quincy North",
+            "created": "2026-05-24T08:00:00Z",
+            "last_update": "2026-05-25T06:00:00Z",
+            "description": "Only 12 spare 100G QSFP28 SR4 remaining (threshold: 20). Reorder placed, 5-day lead time.",
+            "assigned_to": "Supply Chain",
+            "timeline": [
+                "08:00 - Inventory threshold alert",
+                "09:00 - Purchase order submitted",
+                "May 25 - Shipment confirmed, ETA May 29"
+            ]
+        },
+        {
+            "id": "INC-20260523-004",
+            "title": "Scheduled firmware upgrade \u2014 Leaf switches Row E",
+            "severity": "P3",
+            "status": "monitoring",
+            "type": "capacity_planning",
+            "site": "East US DC-7",
+            "created": "2026-05-23T10:00:00Z",
+            "last_update": "2026-05-25T02:00:00Z",
+            "description": "Rolling firmware upgrade for 16 leaf switches in Row E. 12/16 complete. Next maintenance window tonight 02:00-06:00 UTC.",
+            "assigned_to": "Network Engineering",
+            "timeline": [
+                "May 23 - Change approved (CR-4412)",
+                "May 24 02:00 - First batch (8 switches) upgraded",
+                "May 25 02:00 - Second batch (4 switches) upgraded",
+                "Tonight - Final 4 switches scheduled"
+            ]
+        },
+        {
+            "id": "INC-20260522-006",
+            "title": "DNS resolution latency spike from DC-7",
+            "severity": "P3",
+            "status": "resolved",
+            "type": "optical_degradation",
+            "site": "East US DC-7",
+            "created": "2026-05-22T03:45:00Z",
+            "last_update": "2026-05-23T14:00:00Z",
+            "description": "DNS queries from DC-7 seeing 15ms latency (normal <2ms). Traced to stale route to DNS anycast. Flushed and stable.",
+            "assigned_to": "Network Engineering",
+            "timeline": [
+                "03:45 - Latency alert triggered",
+                "04:00 - Stale route identified",
+                "04:05 - Route flushed, latency normalized",
+                "May 23 14:00 - 24h stable, closing"
+            ]
+        },
+        {
+            "id": "INC-20260524-010",
+            "title": "Badge reader malfunction \u2014 Loading Dock 2",
+            "severity": "P3",
+            "status": "waiting-for-vendor",
+            "type": "power",
+            "site": "Dublin West",
+            "created": "2026-05-24T13:30:00Z",
+            "last_update": "2026-05-25T09:00:00Z",
+            "description": "Badge reader at Loading Dock 2 intermittently failing. Security using manual log. Vendor scheduled for Tuesday.",
+            "assigned_to": "Physical Security",
+            "timeline": [
+                "13:30 - Reported by security guard",
+                "14:00 - Fallback to manual entry log",
+                "May 25 09:00 - Vendor confirmed Tuesday slot"
+            ]
+        },
+        {
+            "id": "INC-20260525-012",
+            "title": "Fiber patch panel labeling discrepancy Row F",
+            "severity": "P3",
+            "status": "investigating",
+            "type": "fiber_cut",
+            "site": "Quincy North",
+            "created": "2026-05-25T08:30:00Z",
+            "last_update": "2026-05-25T10:00:00Z",
+            "description": "Field tech reported 6 mismatched labels on patch panel F-12 during routine audit. No service impact. Audit and relabeling scheduled.",
+            "assigned_to": "Cabling Team",
+            "timeline": [
+                "08:30 - Discrepancy reported during audit",
+                "10:00 - Full panel audit scheduled for this week"
+            ]
+        },
+        {
+            "id": "INC-20260521-013",
+            "title": "CRAC unit condensation alert \u2014 Row G",
+            "severity": "P3",
+            "status": "resolved",
+            "type": "cooling",
+            "site": "Singapore South",
+            "created": "2026-05-21T04:00:00Z",
+            "last_update": "2026-05-23T10:00:00Z",
+            "description": "Condensation sensor triggered on CRAC unit G-2. Humidity setpoint adjusted. No equipment damage.",
+            "assigned_to": "Facilities Team",
+            "timeline": [
+                "04:00 - Condensation alert",
+                "04:30 - Humidity setpoint lowered from 55% to 48%",
+                "May 23 10:00 - 48h stable, closing"
+            ]
+        },
+        {
+            "id": "INC-20260524-015",
+            "title": "NTP sync drift on management switches",
+            "severity": "P3",
+            "status": "resolved",
+            "type": "optical_degradation",
+            "site": "Sweden Central",
+            "created": "2026-05-24T06:12:00Z",
+            "last_update": "2026-05-24T18:00:00Z",
+            "description": "Management plane switches drifted 340ms from stratum-1. NTP source failover triggered. Stable after primary source recovered.",
+            "assigned_to": "Network Engineering",
+            "timeline": [
+                "06:12 - NTP drift alarm",
+                "06:13 - Failover to secondary NTP source",
+                "12:00 - Primary source recovered",
+                "18:00 - All switches synced within 1ms, closing"
+            ]
+        },
+        {
+            "id": "INC-20260523-017",
+            "title": "Elevated error rate on 400G coherent optics \u2014 Span DUB-LON",
+            "severity": "P3",
+            "status": "monitoring",
+            "type": "optical_degradation",
+            "site": "Dublin West",
+            "created": "2026-05-23T20:45:00Z",
+            "last_update": "2026-05-25T08:00:00Z",
+            "description": "Pre-FEC BER elevated on Dublin-London span. Within correction margin but trending. Monitoring for 72h before fiber cleaning.",
+            "assigned_to": "Optical Engineering",
+            "timeline": [
+                "20:45 - Pre-FEC BER alarm (1.2e-3, threshold 1e-3)",
+                "21:00 - Confirmed post-FEC error-free",
+                "May 25 08:00 - Still elevated but stable. Fiber clean scheduled May 27"
+            ]
+        },
+        {
+            "id": "INC-20260525-018",
+            "title": "Smoke detector test \u2014 Hall C scheduled maintenance",
+            "severity": "P3",
+            "status": "monitoring",
+            "type": "power",
+            "site": "East US DC-7",
+            "created": "2026-05-25T07:00:00Z",
+            "last_update": "2026-05-25T07:30:00Z",
+            "description": "Scheduled quarterly smoke detector testing in Hall C. VESDA suppressed for duration. Expected completion by 11:00 UTC.",
+            "assigned_to": "Facilities Team",
+            "timeline": [
+                "07:00 - Maintenance window opened",
+                "07:30 - Testing in progress, zones 1-4 of 12 complete"
+            ]
+        },
+        {
+            "id": "INC-20260522-019",
+            "title": "Link utilization spike \u2014 Customer peering port",
+            "severity": "P3",
+            "status": "resolved",
+            "type": "capacity_planning",
+            "site": "Singapore South",
+            "created": "2026-05-22T15:00:00Z",
+            "last_update": "2026-05-23T09:00:00Z",
+            "description": "Customer ABC Corp peering port hit 92% utilization during content push. Temporary, resolved after push completed. LAG expansion discussed.",
+            "assigned_to": "Peering Team",
+            "timeline": [
+                "15:00 - 90% utilization alarm",
+                "15:30 - Confirmed planned content push by customer",
+                "May 23 09:00 - Utilization returned to normal 45%. LAG upgrade on roadmap"
+            ]
+        },
+        {
+            "id": "INC-20260524-020",
+            "title": "Backup generator monthly test \u2014 Gen G-4",
+            "severity": "P3",
+            "status": "resolved",
+            "type": "power",
+            "site": "Sweden Central",
+            "created": "2026-05-24T10:00:00Z",
+            "last_update": "2026-05-24T11:30:00Z",
+            "description": "Monthly load test for Generator G-4 completed successfully. All parameters within spec.",
+            "assigned_to": "Critical Power Team",
+            "timeline": [
+                "10:00 - Test initiated",
+                "10:30 - Full load achieved",
+                "11:30 - Test complete, all parameters nominal"
+            ]
+        },
+        {
+            "id": "INC-20260525-021",
+            "title": "Rack power circuit near capacity \u2014 Rack D-22",
+            "severity": "P3",
+            "status": "investigating",
+            "type": "power",
+            "site": "Quincy North",
+            "created": "2026-05-25T09:00:00Z",
+            "last_update": "2026-05-25T11:30:00Z",
+            "description": "Rack D-22 drawing 18.2kW on 20kW circuit (91%). New GPU node install pushed it near limit. Evaluating rebalance options.",
+            "assigned_to": "Critical Power Team",
+            "timeline": [
+                "09:00 - 90% circuit utilization alarm",
+                "09:30 - Traced to new GPU node installed May 24",
+                "11:30 - Options: move 2 nodes to D-23 or upgrade circuit"
+            ]
+        },
+        {
+            "id": "INC-20260523-022",
+            "title": "Cross-connect delivery delayed \u2014 MMR port allocation",
+            "severity": "P3",
+            "status": "waiting-for-vendor",
+            "type": "capacity_planning",
+            "site": "Dublin West",
+            "created": "2026-05-23T11:00:00Z",
+            "last_update": "2026-05-25T08:00:00Z",
+            "description": "New cross-connect to carrier COLT delayed 3 days. Meet-me room port allocation pending facility operator.",
+            "assigned_to": "Supply Chain",
+            "timeline": [
+                "May 23 11:00 - Cross-connect order placed",
+                "May 24 - Facility operator confirmed delay",
+                "May 25 08:00 - New ETA: May 28"
+            ]
+        },
+        {
+            "id": "INC-20260521-023",
+            "title": "Cable management cleanup \u2014 Row A cabling",
+            "severity": "P4",
+            "status": "monitoring",
+            "type": "capacity_planning",
+            "site": "Quincy North",
+            "created": "2026-05-21T12:00:00Z",
+            "last_update": "2026-05-24T16:00:00Z",
+            "description": "Post-expansion cable management in Row A needs tidying. Scheduled for next maintenance window. No operational impact.",
+            "assigned_to": "Cabling Team",
+            "timeline": [
+                "May 21 - Flagged during walkthrough",
+                "May 24 - Scheduled for May 27 maintenance window"
+            ]
+        },
+        {
+            "id": "INC-20260522-024",
+            "title": "DCIM dashboard widget not refreshing \u2014 temperature view",
+            "severity": "P4",
+            "status": "resolved",
+            "type": "cooling",
+            "site": "East US DC-7",
+            "created": "2026-05-22T09:00:00Z",
+            "last_update": "2026-05-22T14:00:00Z",
+            "description": "DCIM temperature dashboard widget stuck on stale data. Root cause: Redis cache TTL misconfigured after upgrade. Fixed.",
+            "assigned_to": "DCIM Admin",
+            "timeline": [
+                "09:00 - Reported by NOC shift lead",
+                "10:00 - Redis TTL issue identified",
+                "14:00 - Fix deployed, dashboard live"
+            ]
+        },
+        {
+            "id": "INC-20260524-025",
+            "title": "Documentation update \u2014 Singapore fiber map",
+            "severity": "P4",
+            "status": "investigating",
+            "type": "fiber_cut",
+            "site": "Singapore South",
+            "created": "2026-05-24T02:00:00Z",
+            "last_update": "2026-05-25T04:00:00Z",
+            "description": "Fiber route map for Singapore South outdated after Q1 expansion. New paths not documented. Update in progress.",
+            "assigned_to": "Documentation Team",
+            "timeline": [
+                "May 24 02:00 - Flagged during INC-20260525-014 response",
+                "May 25 04:00 - First draft of updated map submitted for review"
+            ]
+        },
+        {
+            "id": "INC-20260523-026",
+            "title": "Environmental monitoring sensor battery low \u2014 Zone 3",
+            "severity": "P4",
+            "status": "waiting-for-vendor",
+            "type": "cooling",
+            "site": "Sweden Central",
+            "created": "2026-05-23T14:00:00Z",
+            "last_update": "2026-05-25T06:00:00Z",
+            "description": "Wireless temp/humidity sensor in Zone 3 reporting low battery (12%). Replacement batteries ordered.",
+            "assigned_to": "Facilities Team",
+            "timeline": [
+                "14:00 - Low battery alert",
+                "14:30 - Batteries ordered (3-day delivery)",
+                "May 25 06:00 - Shipment tracking confirms May 26 delivery"
+            ]
+        },
+        {
+            "id": "INC-20260525-027",
+            "title": "Decommission old DWDM shelf \u2014 Rack A-03",
+            "severity": "P4",
+            "status": "monitoring",
+            "type": "capacity_planning",
+            "site": "Dublin West",
+            "created": "2026-05-25T06:00:00Z",
+            "last_update": "2026-05-25T09:00:00Z",
+            "description": "Legacy DWDM shelf in Rack A-03 fully migrated. Decom scheduled for next maintenance window. Power draw 800W that can be reclaimed.",
+            "assigned_to": "Network Engineering",
+            "timeline": [
+                "06:00 - Final circuit migrated off shelf",
+                "09:00 - Decom change request submitted (CR-4498)"
+            ]
+        },
+        {
+            "id": "INC-20260520-028",
+            "title": "Annual fire suppression inspection \u2014 Hall A",
+            "severity": "P4",
+            "status": "resolved",
+            "type": "power",
+            "site": "Quincy North",
+            "created": "2026-05-20T08:00:00Z",
+            "last_update": "2026-05-22T17:00:00Z",
+            "description": "Annual fire suppression system inspection completed. All systems passed. Certificate filed.",
+            "assigned_to": "Facilities Team",
+            "timeline": [
+                "May 20 08:00 - Inspection started",
+                "May 20 12:00 - All zones tested",
+                "May 22 17:00 - Certificate received and filed"
+            ]
+        },
+        {
+            "id": "INC-20260524-029",
+            "title": "Network TAP mirror port reconfiguration",
+            "severity": "P4",
+            "status": "resolved",
+            "type": "capacity_planning",
+            "site": "Singapore South",
+            "created": "2026-05-24T04:30:00Z",
+            "last_update": "2026-05-24T07:00:00Z",
+            "description": "Security team requested TAP mirror port change for new IDS appliance. Completed during maintenance window.",
+            "assigned_to": "Network Engineering",
+            "timeline": [
+                "04:30 - Change request received",
+                "05:00 - Maintenance window opened",
+                "07:00 - Mirror port reconfigured and verified"
+            ]
+        },
+        {
+            "id": "INC-20260525-030",
+            "title": "LED status panel flickering \u2014 NOC wall display",
+            "severity": "P4",
+            "status": "investigating",
+            "type": "power",
+            "site": "East US DC-7",
+            "created": "2026-05-25T10:00:00Z",
+            "last_update": "2026-05-25T11:00:00Z",
+            "description": "NOC wall display panel 3 flickering intermittently. Likely HDMI cable or display driver. Non-critical but annoying for NOC staff.",
+            "assigned_to": "IT Support",
+            "timeline": [
+                "10:00 - Reported by NOC operator",
+                "11:00 - HDMI cable replacement scheduled"
+            ]
+        },
+        {
+            "id": "INC-20260519-031",
+            "title": "Quarterly optics spares audit complete",
+            "severity": "P4",
+            "status": "resolved",
+            "type": "capacity_planning",
+            "site": "Sweden Central",
+            "created": "2026-05-19T09:00:00Z",
+            "last_update": "2026-05-21T15:00:00Z",
+            "description": "Quarterly audit of optics spares inventory. All SKUs within threshold except 400G ZR+ (flagged separately). Report filed.",
+            "assigned_to": "Supply Chain",
+            "timeline": [
+                "May 19 09:00 - Audit initiated",
+                "May 20 - Physical count completed",
+                "May 21 15:00 - Report submitted, 400G ZR+ reorder triggered"
+            ]
+        },
+        {
+            "id": "INC-20260525-032",
+            "title": "Chiller plant efficiency below target \u2014 Building 2",
+            "severity": "P3",
+            "status": "investigating",
+            "type": "cooling",
+            "site": "Quincy North",
+            "created": "2026-05-25T07:00:00Z",
+            "last_update": "2026-05-25T12:30:00Z",
+            "description": "Chiller PUE contribution trending 0.08 above target. Likely due to warmer-than-expected ambient this week. Evaluating economizer mode adjustment.",
+            "assigned_to": "Facilities Engineering",
+            "timeline": [
+                "07:00 - Weekly efficiency report flagged regression",
+                "08:00 - Correlated with ambient temp spike (34C vs 28C seasonal avg)",
+                "12:30 - Economizer setpoint adjustment under review"
+            ]
+        }
+    ]''')
+
+
+    def now_iso():
+        return datetime.now(timezone.utc).isoformat()
+
+
+    def safe_filename(raw):
+        raw = str(raw or "investigation.md").strip() or "investigation.md"
+        raw = raw.split("/")[-1].split("\\")[-1]
+        raw = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip(".-")
+        return (raw or "investigation.md")[:120]
+
+
+    def work_id(prefix, seed):
+        del seed  # IDs are per successful non-idempotent request; idempotent retries reuse stored payloads.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        return f"{prefix}-{stamp}"
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self, status, payload):
+            body = json.dumps(payload, indent=2).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(10)
+
+        def _read(self):
+            n = int(self.headers.get("Content-Length", "0"))
+            if n < 0:
+                raise ValueError("negative Content-Length is invalid")
+            if n > MAX_REQUEST_BYTES:
+                raise ValueError(f"request body too large: {n} bytes")
+            if n == 0:
+                return {}
+            return json.loads(self.rfile.read(n).decode() or "{}")
+
+        def do_GET(self):
+            if self.path == "/healthz":
+                return self._json(200, {"ok": True})
+            if self.path == "/investigations":
+                INVESTIGATIONS_DIR.mkdir(parents=True, exist_ok=True)
+                files = sorted(p.name for p in INVESTIGATIONS_DIR.glob("*"))
+                return self._json(200, {"status": "success", "count": len(files), "files": files})
+            return self._json(404, {"error": "not found"})
+
+        def do_POST(self):
+            try:
+                args = self._read()
+            except ValueError as e:
+                return self._json(413, {"status": "error", "error": str(e)})
+            checked_at = now_iso()
+            if self.path == "/telemetry":
+                site = str(args.get("site") or "")
+                if site.lower() in ("", "all", "all sites", "*"):
+                    telemetry = {
+                        "site": "All Sites",
+                        "overall_status": "degraded",
+                        "sites": [TELEMETRY["quincy_north"], TELEMETRY["default"]],
+                    }
+                else:
+                    key = "quincy_north" if "quincy" in site.lower() else "default"
+                    telemetry = TELEMETRY[key]
+                return self._json(200, {"status": "success", "telemetry": telemetry, "checkedAt": checked_at})
+
+            if self.path == "/incidents":
+                site = str(args.get("site") or "")
+                severity = str(args.get("severity") or "")
+                status_filter = str(args.get("status") or "")
+                incident_id = str(args.get("incident_id") or args.get("incidentId") or "")
+                incidents = INCIDENTS
+                if incident_id:
+                    incidents = [i for i in incidents if incident_id.lower() == i["id"].lower()]
+                if not incident_id and not status_filter:
+                    incidents = [i for i in incidents if i["status"].lower() != "resolved"]
+                if site:
+                    incidents = [i for i in incidents if site.lower() in i["site"].lower()]
+                if severity:
+                    incidents = [i for i in incidents if severity.lower() in i["severity"].lower()]
+                if status_filter:
+                    incidents = [i for i in incidents if status_filter.lower() in i["status"].lower()]
+                if not incident_id and len(incidents) > 5:
+                    incidents = [{
+                        "incident_id": i["id"],
+                        "site": i["site"],
+                        "status": i["status"],
+                        "type": i.get("type", "unknown"),
+                        "priority": i["severity"],
+                        "title": i["title"],
+                        "last_updated": i["last_update"],
+                    } for i in incidents]
+                    return self._json(200, {
+                        "status": "success",
+                        "count": len(incidents),
+                        "summary": "Showing summary table. Ask about a specific incident ID for full details.",
+                        "incidents": incidents,
+                        "checkedAt": checked_at,
+                    })
+                return self._json(200, {"status": "success", "count": len(incidents), "incidents": incidents, "checkedAt": checked_at})
+
+            if self.path == "/investigations":
+                filename = safe_filename(args.get("filename"))
+                content = str(args.get("content") or "")
+                incident_id = str(args.get("incident_id") or args.get("incidentId") or "")
+                if len(content) > MAX_INVESTIGATION_CHARS:
+                    return self._json(413, {"status": "error", "error": f"investigation content exceeds {MAX_INVESTIGATION_CHARS} characters"})
+                INVESTIGATIONS_DIR.mkdir(parents=True, exist_ok=True)
+                target = INVESTIGATIONS_DIR / filename
+                existing_files = [p for p in INVESTIGATIONS_DIR.glob("*") if p.is_file()]
+                if not target.exists() and len(existing_files) >= MAX_INVESTIGATION_FILES:
+                    return self._json(507, {"status": "error", "error": f"investigation file limit {MAX_INVESTIGATION_FILES} reached"})
+                header = "# Investigation: " + filename + "\n"
+                header += "# Saved: " + checked_at + "\n"
+                if incident_id:
+                    header += "# Related Incident: " + incident_id + "\n"
+                header += "---\n\n"
+                body = header + content
+                if len(body.encode()) > MAX_INVESTIGATION_BYTES:
+                    return self._json(413, {"status": "error", "error": f"investigation file exceeds {MAX_INVESTIGATION_BYTES} bytes"})
+                target.write_text(body)
+                return self._json(200, {
+                    "status": "success",
+                    "message": f"Investigation saved to {target}",
+                    "path": str(target),
+                    "size_bytes": target.stat().st_size,
+                })
+
+            if self.path == "/work-order":
+                key = self.headers.get("Idempotency-Key") or args.get("idempotencyKey") or args.get("idempotency_key")
+                if key and key in fired:
+                    prior = dict(fired[key])
+                    prior["duplicate"] = True
+                    return self._json(200, prior)
+                title = str(args.get("title") or "Untitled work order")
+                assignee = str(args.get("assignee") or "Field Tech On-Site")
+                wo_id = work_id("WO", title)
+                payload = {
+                    "status": "success",
+                    "work_order": {
+                        "id": wo_id,
+                        "title": title,
+                        "priority": args.get("priority") or "P2",
+                        "site": args.get("site") or "",
+                        "description": args.get("description") or "",
+                        "assignee": assignee,
+                        "status": "Dispatched",
+                        "createdAt": checked_at,
+                        "received": args,
+                    },
+                    "message": f"Work order {wo_id} created and dispatched to {assignee}.",
+                    "duplicate": False,
+                }
+                if key:
+                    fired[key] = payload
+                return self._json(200, payload)
+
+            if self.path == "/escalate":
+                key = self.headers.get("Idempotency-Key") or args.get("idempotencyKey") or args.get("idempotency_key")
+                if key and key in fired:
+                    prior = dict(fired[key])
+                    prior["duplicate"] = True
+                    return self._json(200, prior)
+                incident_id = str(args.get("incident_id") or args.get("incidentId") or "")
+                reason = str(args.get("reason") or "")
+                escalate_to = str(args.get("escalate_to") or args.get("escalateTo") or "Engineering Lead")
+                esc_id = work_id("ESC", incident_id + reason + escalate_to)
+                payload = {
+                    "status": "success",
+                    "message": f"Incident {incident_id} escalated to {escalate_to}.",
+                    "escalation": {
+                        "id": esc_id,
+                        "status": "Dispatched",
+                        "incident_id": incident_id,
+                        "escalated_to": escalate_to,
+                        "reason": reason,
+                        "createdAt": checked_at,
+                        "escalated_at": checked_at,
+                        "new_severity": "P1",
+                        "sla_response_minutes": 15,
+                        "received": args,
+                    },
+                    "duplicate": False,
+                }
+                if key:
+                    fired[key] = payload
+                return self._json(200, payload)
+
+            return self._json(404, {"error": "not found"})
+
+        def log_message(self, fmt, *args):
+            print("fibey-mocks", self.address_string(), fmt % args)
+
+
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fibey-mocks
+  namespace: orka-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fibey-mocks
+  template:
+    metadata:
+      labels:
+        app: fibey-mocks
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: python:3.12-alpine
+          command: ["python", "/app/server.py"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          env:
+            - name: FIBEY_HOME
+              value: "/fibey"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+            - name: investigations
+              mountPath: "/fibey/investigations"
+      volumes:
+        - name: app
+          configMap:
+            name: fibey-mocks
+        - name: investigations
+          emptyDir:
+            sizeLimit: 10Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fibey-mocks
+  namespace: orka-system
+spec:
+  selector:
+    app: fibey-mocks
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
