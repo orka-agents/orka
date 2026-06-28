@@ -2834,6 +2834,7 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 		return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
 	}
 	hasRuntimeRef := agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
+	hasFrozenRuntimeRef := task != nil && task.Status.HarnessRuntime != nil && strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName) != ""
 	hasBuiltInRuntime := strings.TrimSpace(string(agent.Spec.Runtime.Type)) != ""
 	switch {
 	case hasRuntimeRef && hasBuiltInRuntime:
@@ -2843,6 +2844,12 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 			return err
 		}
 	case hasBuiltInRuntime:
+		if hasFrozenRuntimeRef {
+			if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
+				return err
+			}
+		}
+
 		if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
 			return err
 		}
