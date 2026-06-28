@@ -1149,7 +1149,12 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperCancelDependencyRetriesAnno)
 		delete(task.Annotations, harnessWrapperAuthRetriesAnno)
 	}
-	return r.Patch(ctx, task, patch)
+	if err := r.Patch(ctx, task, patch); err != nil {
+		return err
+	}
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		t.Status.HarnessRuntime = nil
+	})
 }
 
 func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
