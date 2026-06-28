@@ -130,6 +130,11 @@ rules:
     resources: ["subjectaccessreviews"]
     verbs: ["create"]
 
+  # SubjectAccessReview for API request authorization
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+
   # Leader election
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
