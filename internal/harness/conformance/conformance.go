@@ -252,7 +252,14 @@ func isProbeTerminalFrame(frameType harness.FrameType) bool {
 }
 
 func probeStreamStoppedByContext(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "context canceled") || strings.Contains(message, "context deadline exceeded")
 }
 
 func validateProbeFrames(result *Result, request harness.StartTurnRequest, frames []harness.HarnessEventFrame) bool {
