@@ -109,6 +109,7 @@ export const monitorRunSchema = z.object({
   targetKind: z.string().optional(),
   targetNumber: z.number().optional(),
   targetSHA: z.string().optional(),
+  commandEventID: z.string().optional(),
   phase: z.string(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
@@ -126,6 +127,8 @@ export const monitorItemSchema = z.object({
   number: z.number().optional(),
   sha: z.string().optional(),
   title: z.string().optional(),
+  body: z.string().optional(),
+  htmlURL: z.string().optional(),
   author: z.string().optional(),
   state: z.string().optional(),
   labelsJSON: z.string().optional(),
@@ -135,6 +138,9 @@ export const monitorItemSchema = z.object({
   linkedPRNumber: z.number().optional(),
   lastCommandID: z.string().optional(),
   lastCommandIntent: z.string().optional(),
+  lastActionID: z.string().optional(),
+  lastActionKind: z.string().optional(),
+  lastActionTaskName: z.string().optional(),
   baseBranch: z.string().optional(),
   headBranch: z.string().optional(),
   headSHA: z.string().optional(),
@@ -149,6 +155,24 @@ export const monitorItemSchema = z.object({
   lastPublishURL: z.string().optional(),
   updatedAt: z.string(),
   lastSeenAt: z.string(),
+})
+
+export const monitorActionSchema = z.object({
+  id: z.string(),
+  monitorNamespace: z.string(),
+  monitorName: z.string(),
+  kind: z.string(),
+  number: z.number().optional(),
+  actionKind: z.string(),
+  snapshotDigest: z.string().optional(),
+  headSHA: z.string().optional(),
+  taskName: z.string().optional(),
+  commandEventID: z.string().optional(),
+  verdict: z.string().optional(),
+  confidence: z.string().optional(),
+  summary: z.string().optional(),
+  payloadJSON: z.string().optional(),
+  createdAt: z.string(),
 })
 
 export const monitorCommandSchema = z.object({
@@ -175,4 +199,5 @@ export const monitorCommandSchema = z.object({
 export type RepositoryMonitor = z.infer<typeof repositoryMonitorSchema>
 export type MonitorRun = z.infer<typeof monitorRunSchema>
 export type MonitorItem = z.infer<typeof monitorItemSchema>
+export type MonitorAction = z.infer<typeof monitorActionSchema>
 export type MonitorCommand = z.infer<typeof monitorCommandSchema>

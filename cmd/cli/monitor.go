@@ -22,6 +22,7 @@ func newMonitorCmd() *cobra.Command {
 	cmd.AddCommand(newMonitorItemsCmd())
 	cmd.AddCommand(newMonitorIssuesCmd())
 	cmd.AddCommand(newMonitorCommandsCmd())
+	cmd.AddCommand(newMonitorActionsCmd())
 	cmd.AddCommand(newMonitorEventsCmd())
 	return cmd
 }
@@ -181,6 +182,7 @@ func newMonitorCommandsCmd() *cobra.Command {
 	return cmd
 }
 
+//nolint:dupl // Command and action list commands intentionally share CLI plumbing with different filters.
 func newMonitorCommandsListCmd() *cobra.Command {
 	var limit int
 	var cursor, kind, intent, status string
@@ -230,6 +232,77 @@ func newMonitorCommandsGetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
 			path := "/api/v1/monitors/commands/" + url.PathEscape(args[0])
+			result, err := c.DoJSON(context.Background(), http.MethodGet, path, nil, nil)
+			if err != nil {
+				return err
+			}
+			return printStructured(cmd, result)
+		},
+	}
+	addOutputFlag(cmd, outputYAML)
+	return cmd
+}
+
+func newMonitorActionsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "actions",
+		Short: "Inspect repository monitor action records",
+	}
+	cmd.AddCommand(newMonitorActionsListCmd())
+	cmd.AddCommand(newMonitorActionsGetCmd())
+	return cmd
+}
+
+//nolint:dupl // Command and action list commands intentionally share CLI plumbing with different filters.
+func newMonitorActionsListCmd() *cobra.Command {
+	var limit int
+	var cursor, kind, actionKind, taskName string
+	var number int64
+	cmd := &cobra.Command{
+		Use:   "list <name>",
+		Short: "List repository monitor actions",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := mergeQuery(
+				map[string]string{},
+				"name", args[0],
+				"limit", fmt.Sprintf("%d", limit),
+				"cursor", cursor,
+				"continue", cursor,
+				"kind", kind,
+				"actionKind", actionKind,
+				"taskName", taskName,
+			)
+			if number > 0 {
+				q["number"] = fmt.Sprintf("%d", number)
+			}
+			c := newClientFromCmd(cmd)
+			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/actions", q, nil)
+			if err != nil {
+				return err
+			}
+			return printStructured(cmd, result)
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of results")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Cursor token")
+	cmd.Flags().StringVar(&cursor, "continue", "", "Continue token")
+	cmd.Flags().StringVar(&kind, "kind", "", "Filter by target kind")
+	cmd.Flags().Int64Var(&number, "number", 0, "Filter by target number")
+	cmd.Flags().StringVar(&actionKind, "action-kind", "", "Filter by action kind")
+	cmd.Flags().StringVar(&taskName, "task-name", "", "Filter by task name")
+	return cmd
+}
+
+func newMonitorActionsGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <action-id>",
+		Short: "Get a repository monitor action",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			path := "/api/v1/monitors/actions/" + url.PathEscape(args[0])
 			result, err := c.DoJSON(context.Background(), http.MethodGet, path, nil, nil)
 			if err != nil {
 				return err

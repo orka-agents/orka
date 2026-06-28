@@ -312,3 +312,35 @@ Inspect command intake with:
 orka monitor commands list orka-main --namespace default
 orka monitor commands get <command-id> --namespace default
 ```
+
+## Issue Triage, Research, Planning, and Implementation
+
+When issue command labels are enabled, accepted issue commands now drive monitor-owned task phases:
+
+- `orka:triage` creates a read-only issue triage task and stores an `issue_triage` action record.
+- `orka:research` creates a read-only issue research task and stores an `issue_research` action record.
+- `orka:plan` creates a read-only planning task and stores an `issue_plan` action record. Plans that require approval move the issue to `approval_required`.
+- `orka:approve-plan` records an approval action and moves the issue to `approved`.
+- `orka:implement` creates an implementation task only when policy permits it. By default, implementation requires an approved plan; otherwise Orka queues planning first.
+
+Issue action tasks are bound to the issue snapshot digest. Result payloads with mismatched issue numbers or stale digests are recorded as stale/failed action records instead of advancing workflow state.
+
+Implementation tasks use a controller-selected push branch (`spec.issueWorkflow.implementation.branchPrefix`, default `orka/issue`) and Orka's workspace push handling. After a successful pushed implementation result, the controller creates a pull request with a deterministic Orka-rendered body and records a `mutate_to_pr` action record.
+
+Inspect action records with:
+
+```bash
+orka monitor actions list orka-main --namespace default --kind issue --number 123
+orka monitor actions get <action-id> --namespace default
+```
+
+## PR Repair and Readiness
+
+Pull request command labels can start bounded controller-tracked repair tasks:
+
+- `orka:review` queues an exact-head review run.
+- `orka:fix` queues a repair task on the current same-repository PR head branch.
+- `orka:fix-ci` queues a CI repair task using the same repair path.
+- `orka:update-branch` queues a base-update repair task and allows empty push-branch updates.
+
+Repair jobs are stored durably and linked to monitor items. Successful repairs clear stale review state so the next exact-head review can recompute readiness. A PR with a passed exact-head review and no active repair is surfaced as merge-ready state for humans to merge; Orka still does not merge automatically.

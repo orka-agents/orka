@@ -104,6 +104,13 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			return selected, createdTasks, skipped, err
 		}
 		item := repositoryMonitorItemFromPullRequest(monitor, pr, existing)
+		if handled, created, err := r.tryProcessPullRequestCommandRun(ctx, monitor, run, owner, repository, pr, item); err != nil {
+			return selected, createdTasks, skipped, err
+		} else if handled {
+			selected++
+			createdTasks += created
+			continue
+		}
 		skipExisting := existing
 		if repositoryMonitorPendingReviewCandidate(existing, pr) {
 			taskState, err := r.repositoryMonitorReviewTaskState(ctx, monitor.Namespace, existing.LastReviewID)
@@ -763,6 +770,8 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 		ItemKey:          fmt.Sprintf("%d", pr.Number),
 		Number:           pr.Number,
 		Title:            pr.Title,
+		Body:             "",
+		HTMLURL:          "",
 		Author:           pr.Author,
 		State:            pr.State,
 		LabelsJSON:       string(labelsJSON),

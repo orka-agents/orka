@@ -102,6 +102,7 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 
 	maxPerRun := repositoryMonitorMaxIssuesPerRun(monitor.Spec)
 	selected := 0
+	createdTasks := 0
 	skipped := 0
 	for _, issue := range issues {
 		if issue.IsPR {
@@ -110,20 +111,37 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 		}
 		existing, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorIssueKind, fmt.Sprintf("%d", issue.Number))
 		if err != nil && !errorsIsStoreNotFound(err) {
-			return selected, 0, skipped, err
+			return selected, createdTasks, skipped, err
 		}
 		item := repositoryMonitorItemFromIssue(monitor, issue, existing)
-		skipReason := repositoryMonitorIssueSkipReason(monitor.Spec, issue, selected, maxPerRun)
+		skipReason := ""
+		if strings.TrimSpace(run.CommandEventID) != "" {
+			skipReason = repositoryMonitorIssueCommandSkipReason(monitor.Spec, issue)
+		} else {
+			skipReason = repositoryMonitorIssueSkipReason(monitor.Spec, issue, selected, maxPerRun)
+		}
 		if skipReason != "" {
 			skipped++
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = skipReason
 			item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-				return selected, 0, skipped, err
+				return selected, createdTasks, skipped, err
 			}
 			if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_skipped", fmt.Sprintf("Issue #%d skipped: %s", issue.Number, skipReason), map[string]any{"reason": skipReason, "labels": issue.Labels}); err != nil {
-				return selected, 0, skipped, err
+				return selected, createdTasks, skipped, err
+			}
+			continue
+		}
+		created, err := r.processIssueCommandRun(ctx, monitor, run, item, owner, repository)
+		if err != nil {
+			return selected, createdTasks, skipped, err
+		}
+		createdTasks += created
+		if item.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && !repositoryMonitorIssueInventoryBlockCanClear(item.SkipReason) {
+			skipped++
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return selected, createdTasks, skipped, err
 			}
 			continue
 		}
@@ -134,18 +152,18 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			item.WorkflowPhase = repositoryMonitorIssuePhaseDiscovered
 		}
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-			return selected, 0, skipped, err
+			return selected, createdTasks, skipped, err
 		}
 		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, issue.Number, item.SnapshotDigest, "item_selected", fmt.Sprintf("Issue #%d recorded in inventory", issue.Number), nil); err != nil {
-			return selected, 0, skipped, err
+			return selected, createdTasks, skipped, err
 		}
 	}
 	if repositoryMonitorRunCoversFullInventory(run) {
 		if err := r.retireMissingRepositoryMonitorIssues(ctx, monitor, run, seenIssueKeys); err != nil {
-			return selected, 0, skipped, err
+			return selected, createdTasks, skipped, err
 		}
 	}
-	return selected, 0, skipped, nil
+	return selected, createdTasks, skipped, nil
 }
 
 func repositoryMonitorIssueKeys(issues []repositoryMonitorIssue) map[string]struct{} {
@@ -202,6 +220,15 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorIssues(ctx c
 	return nil
 }
 
+func repositoryMonitorIssueInventoryBlockCanClear(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case repositoryMonitorSkipReasonOverLimit, repositoryMonitorSkipReasonExcluded, repositoryMonitorSkipReasonMissingLabel, repositoryMonitorSkipReasonBlockedLabel, repositoryMonitorSkipReasonMissing, "":
+		return true
+	default:
+		return false
+	}
+}
+
 func repositoryMonitorMaxIssuesPerRun(spec corev1alpha1.RepositoryMonitorSpec) int {
 	if spec.Targets.Issues.MaxPerRun == nil || *spec.Targets.Issues.MaxPerRun <= 0 {
 		return 10
@@ -221,6 +248,22 @@ func filterRepositoryMonitorTargetIssues(issues []repositoryMonitorIssue, run *s
 		}
 	}
 	return filtered
+}
+
+func repositoryMonitorIssueCommandSkipReason(spec corev1alpha1.RepositoryMonitorSpec, issue repositoryMonitorIssue) string {
+	if issue.IsPR {
+		return repositoryMonitorSkipReasonPullRequest
+	}
+	if repositoryMonitorBlockedLabel(spec, issue.Labels) != "" {
+		return repositoryMonitorSkipReasonBlockedLabel
+	}
+	if repositoryMonitorMatchingLabel(spec.Targets.Issues.ExcludeLabels, issue.Labels) != "" {
+		return repositoryMonitorSkipReasonExcluded
+	}
+	if len(spec.Targets.Issues.IncludeLabels) > 0 && repositoryMonitorMatchingLabel(spec.Targets.Issues.IncludeLabels, issue.Labels) == "" {
+		return repositoryMonitorSkipReasonMissingLabel
+	}
+	return ""
 }
 
 func repositoryMonitorIssueSkipReason(spec corev1alpha1.RepositoryMonitorSpec, issue repositoryMonitorIssue, selected, maxPerRun int) string {
@@ -268,6 +311,8 @@ func repositoryMonitorItemFromIssue(monitor *corev1alpha1.RepositoryMonitor, iss
 		ItemKey:          fmt.Sprintf("%d", issue.Number),
 		Number:           issue.Number,
 		Title:            issue.Title,
+		Body:             issue.Body,
+		HTMLURL:          issue.HTMLURL,
 		Author:           issue.Author,
 		State:            issue.State,
 		LabelsJSON:       string(labelsJSON),
@@ -276,11 +321,21 @@ func repositoryMonitorItemFromIssue(monitor *corev1alpha1.RepositoryMonitor, iss
 		WorkflowPhase:    repositoryMonitorIssuePhaseDiscovered,
 	}
 	if existing != nil {
+		if existing.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && !repositoryMonitorIssueInventoryBlockCanClear(existing.SkipReason) {
+			item.WorkflowPhase = existing.WorkflowPhase
+			item.SkipReason = existing.SkipReason
+			item.LastVerdict = existing.LastVerdict
+		}
 		item.LastCommandID = existing.LastCommandID
 		item.LastCommandIntent = existing.LastCommandIntent
 		item.LinkedPRNumber = existing.LinkedPRNumber
 		if existing.SnapshotDigest == digest {
 			item.WorkflowPhase = existing.WorkflowPhase
+			item.LastActionID = existing.LastActionID
+			item.LastActionKind = existing.LastActionKind
+			item.LastActionTaskName = existing.LastActionTaskName
+			item.LastVerdict = existing.LastVerdict
+			item.SkipReason = existing.SkipReason
 		}
 	}
 	return item
@@ -396,7 +451,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorGitHubJSON(ctx conte
 		return err
 	}
 	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+		req.Header.Set("Authorization", strings.Join([]string{"Bearer", strings.TrimSpace(token)}, " "))
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")

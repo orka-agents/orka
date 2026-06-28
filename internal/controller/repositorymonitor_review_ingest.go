@@ -437,6 +437,11 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 			item.LastReviewedHeadSHA = ""
 		}
 	}
+	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed {
+		item.AutomergeState = "merge_ready"
+	} else if record.Verdict != repositoryMonitorReviewVerdictPassed {
+		item.AutomergeState = ""
+	}
 	return r.Store.UpsertMonitorItem(ctx, item)
 }
 

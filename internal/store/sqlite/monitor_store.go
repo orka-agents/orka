@@ -192,6 +192,7 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 	for _, stmt := range []string{
 		`DELETE FROM monitor_runs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_items WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM action_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM review_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM review_publish_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM command_events WHERE monitor_namespace = ? AND monitor_name = ?`,
@@ -225,11 +226,11 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO monitor_runs
-		 (id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, phase,
+		 (id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id, phase,
 		  started_at, completed_at, selected_count, created_task_count, skipped_count, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.MonitorNamespace, run.MonitorName, run.Trigger, run.TargetKind, run.TargetNumber,
-		run.TargetSHA, run.Phase, run.StartedAt, run.CompletedAt, run.SelectedCount, run.CreatedTaskCount,
+		run.TargetSHA, run.CommandEventID, run.Phase, run.StartedAt, run.CompletedAt, run.SelectedCount, run.CreatedTaskCount,
 		run.SkippedCount, run.Error,
 	)
 	if err != nil && isSQLiteConstraintError(err) {
@@ -242,11 +243,11 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 func (s *Store) UpdateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE monitor_runs
-		 SET trigger = ?, target_kind = ?, target_number = ?, target_sha = ?, phase = ?,
+		 SET trigger = ?, target_kind = ?, target_number = ?, target_sha = ?, command_event_id = ?, phase = ?,
 		     started_at = ?, completed_at = ?, selected_count = ?, created_task_count = ?,
 		     skipped_count = ?, error = ?
 		 WHERE monitor_namespace = ? AND id = ?`,
-		run.Trigger, run.TargetKind, run.TargetNumber, run.TargetSHA, run.Phase, run.StartedAt,
+		run.Trigger, run.TargetKind, run.TargetNumber, run.TargetSHA, run.CommandEventID, run.Phase, run.StartedAt,
 		run.CompletedAt, run.SelectedCount, run.CreatedTaskCount, run.SkippedCount, run.Error,
 		run.MonitorNamespace, run.ID,
 	)
@@ -261,14 +262,14 @@ func (s *Store) GetMonitorRun(ctx context.Context, namespace, id string) (*store
 	var run store.MonitorRun
 	var completedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha,
+		`SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id,
 		        phase, started_at, completed_at, selected_count, created_task_count, skipped_count, error
 		 FROM monitor_runs
 		 WHERE monitor_namespace = ? AND id = ?`,
 		namespace, id,
 	).Scan(
 		&run.ID, &run.MonitorNamespace, &run.MonitorName, &run.Trigger, &run.TargetKind, &run.TargetNumber,
-		&run.TargetSHA, &run.Phase, &run.StartedAt, &completedAt, &run.SelectedCount,
+		&run.TargetSHA, &run.CommandEventID, &run.Phase, &run.StartedAt, &completedAt, &run.SelectedCount,
 		&run.CreatedTaskCount, &run.SkippedCount, &run.Error,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -291,7 +292,7 @@ func (s *Store) ListMonitorRuns(ctx context.Context, filter store.MonitorRunFilt
 	}
 	limit := defaultMonitorLimit(filter.Limit)
 	query := strings.Builder{}
-	query.WriteString(`SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha,
+	query.WriteString(`SELECT id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id,
 	        phase, started_at, completed_at, selected_count, created_task_count, skipped_count, error
 		 FROM monitor_runs WHERE monitor_namespace = ?`)
 	args := []any{filter.Namespace}
@@ -338,7 +339,7 @@ func (s *Store) ListMonitorRuns(ctx context.Context, filter store.MonitorRunFilt
 		var completedAt sql.NullTime
 		if err := rows.Scan(
 			&run.ID, &run.MonitorNamespace, &run.MonitorName, &run.Trigger, &run.TargetKind, &run.TargetNumber,
-			&run.TargetSHA, &run.Phase, &run.StartedAt, &completedAt, &run.SelectedCount,
+			&run.TargetSHA, &run.CommandEventID, &run.Phase, &run.StartedAt, &completedAt, &run.SelectedCount,
 			&run.CreatedTaskCount, &run.SkippedCount, &run.Error,
 		); err != nil {
 			return nil, "", err
@@ -386,16 +387,18 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO monitor_items
-		 (monitor_namespace, monitor_name, kind, item_key, number, sha, title, author, state, labels_json,
+		 (monitor_namespace, monitor_name, kind, item_key, number, sha, title, body, html_url, author, state, labels_json,
 		  snapshot_digest, github_updated_at, workflow_phase, linked_pr_number, last_command_id, last_command_intent,
-		  base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
+		  last_action_id, last_action_kind, last_action_task_name, base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
 		  last_review_id, last_reviewed_head_sha, last_verdict, repair_state, automerge_state, status_comment_id,
 		  status_comment_url, last_publish_id, last_publish_phase, last_publish_reason, last_publish_url, updated_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(monitor_namespace, monitor_name, kind, item_key) DO UPDATE SET
 		   number = excluded.number,
 		   sha = excluded.sha,
 		   title = excluded.title,
+		   body = excluded.body,
+		   html_url = excluded.html_url,
 		   author = excluded.author,
 		   state = excluded.state,
 		   labels_json = excluded.labels_json,
@@ -405,6 +408,9 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		   linked_pr_number = excluded.linked_pr_number,
 		   last_command_id = excluded.last_command_id,
 		   last_command_intent = excluded.last_command_intent,
+		   last_action_id = excluded.last_action_id,
+		   last_action_kind = excluded.last_action_kind,
+		   last_action_task_name = excluded.last_action_task_name,
 		   base_branch = excluded.base_branch,
 		   head_branch = excluded.head_branch,
 		   head_sha = excluded.head_sha,
@@ -427,8 +433,9 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		   updated_at = excluded.updated_at,
 		   last_seen_at = excluded.last_seen_at`,
 		item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey, item.Number, item.SHA,
-		item.Title, item.Author, item.State, item.LabelsJSON, item.SnapshotDigest, item.GitHubUpdatedAt,
-		item.WorkflowPhase, item.LinkedPRNumber, item.LastCommandID, item.LastCommandIntent, item.BaseBranch, item.HeadBranch,
+		item.Title, item.Body, item.HTMLURL, item.Author, item.State, item.LabelsJSON, item.SnapshotDigest, item.GitHubUpdatedAt,
+		item.WorkflowPhase, item.LinkedPRNumber, item.LastCommandID, item.LastCommandIntent,
+		item.LastActionID, item.LastActionKind, item.LastActionTaskName, item.BaseBranch, item.HeadBranch,
 		item.HeadSHA, item.BaseSHA, item.Draft, item.MergeableState, item.CIState, item.SkipReason,
 		item.LastReviewID, item.LastReviewedHeadSHA, item.LastVerdict, item.RepairState, item.AutomergeState,
 		item.StatusCommentID, item.StatusCommentURL, item.LastPublishID, item.LastPublishPhase, item.LastPublishReason,
@@ -454,9 +461,9 @@ func (s *Store) GetMonitorItem(ctx context.Context, namespace, monitorName, kind
 }
 
 func monitorItemSelectSQL() string {
-	return `SELECT monitor_namespace, monitor_name, kind, item_key, number, sha, title, author, state, labels_json,
+	return `SELECT monitor_namespace, monitor_name, kind, item_key, number, sha, title, body, html_url, author, state, labels_json,
 	        snapshot_digest, github_updated_at, workflow_phase, linked_pr_number, last_command_id, last_command_intent,
-	        base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
+	        last_action_id, last_action_kind, last_action_task_name, base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
 	        last_review_id, last_reviewed_head_sha, last_verdict, repair_state, automerge_state, status_comment_id,
 	        status_comment_url, last_publish_id, last_publish_phase, last_publish_reason, last_publish_url,
 	        updated_at, last_seen_at FROM monitor_items`
@@ -465,8 +472,9 @@ func monitorItemSelectSQL() string {
 func monitorItemScanDest(item *store.MonitorItem) []any {
 	return []any{
 		&item.MonitorNamespace, &item.MonitorName, &item.Kind, &item.ItemKey, &item.Number, &item.SHA,
-		&item.Title, &item.Author, &item.State, &item.LabelsJSON, &item.SnapshotDigest, &item.GitHubUpdatedAt,
-		&item.WorkflowPhase, &item.LinkedPRNumber, &item.LastCommandID, &item.LastCommandIntent, &item.BaseBranch, &item.HeadBranch,
+		&item.Title, &item.Body, &item.HTMLURL, &item.Author, &item.State, &item.LabelsJSON, &item.SnapshotDigest, &item.GitHubUpdatedAt,
+		&item.WorkflowPhase, &item.LinkedPRNumber, &item.LastCommandID, &item.LastCommandIntent,
+		&item.LastActionID, &item.LastActionKind, &item.LastActionTaskName, &item.BaseBranch, &item.HeadBranch,
 		&item.HeadSHA, &item.BaseSHA, &item.Draft, &item.MergeableState, &item.CIState, &item.SkipReason,
 		&item.LastReviewID, &item.LastReviewedHeadSHA, &item.LastVerdict, &item.RepairState, &item.AutomergeState,
 		&item.StatusCommentID, &item.StatusCommentURL, &item.LastPublishID, &item.LastPublishPhase, &item.LastPublishReason,
@@ -530,6 +538,114 @@ func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFi
 		return nil, "", err
 	}
 	return items, nextOffsetCursor(offset, len(items), limit), nil
+}
+
+// CreateActionRecord inserts an immutable action record.
+func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionRecord) error {
+	if record == nil {
+		return store.ValidationErrorf("action record is required")
+	}
+	if record.ID == "" || record.MonitorNamespace == "" || record.MonitorName == "" || record.Kind == "" || record.ActionKind == "" {
+		return store.ValidationErrorf("action record id, monitor namespace, monitor name, kind, and action kind are required")
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+	if record.PayloadJSON == "" {
+		record.PayloadJSON = "{}"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO action_records
+		 (id, monitor_namespace, monitor_name, kind, number, action_kind, snapshot_digest, head_sha,
+		  task_name, command_event_id, work_action_id, monitor_generation, verdict, confidence, summary,
+		  payload_json, payload_digest, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID, record.MonitorNamespace, record.MonitorName, record.Kind, record.Number, record.ActionKind,
+		record.SnapshotDigest, record.HeadSHA, record.TaskName, record.CommandEventID, record.WorkActionID,
+		record.MonitorGeneration, record.Verdict, record.Confidence, record.Summary, record.PayloadJSON,
+		record.PayloadDigest, record.CreatedAt,
+	)
+	return err
+}
+
+// GetActionRecord fetches an action record by ID.
+func (s *Store) GetActionRecord(ctx context.Context, namespace, id string) (*store.ActionRecord, error) {
+	var record store.ActionRecord
+	err := s.db.QueryRowContext(ctx, actionRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(actionRecordScanDest(&record)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func actionRecordSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, kind, number, action_kind, snapshot_digest, head_sha,
+	        task_name, command_event_id, work_action_id, monitor_generation, verdict, confidence, summary,
+	        payload_json, payload_digest, created_at FROM action_records`
+}
+
+func actionRecordScanDest(record *store.ActionRecord) []any {
+	return []any{
+		&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.Kind, &record.Number,
+		&record.ActionKind, &record.SnapshotDigest, &record.HeadSHA, &record.TaskName, &record.CommandEventID,
+		&record.WorkActionID, &record.MonitorGeneration, &record.Verdict, &record.Confidence, &record.Summary,
+		&record.PayloadJSON, &record.PayloadDigest, &record.CreatedAt,
+	}
+}
+
+// ListActionRecords lists action records ordered newest first.
+func (s *Store) ListActionRecords(ctx context.Context, filter store.ActionRecordFilter) ([]store.ActionRecord, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit := defaultMonitorLimit(filter.Limit)
+	query := strings.Builder{}
+	query.WriteString(actionRecordSelectSQL())
+	query.WriteString(" WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	if filter.MonitorName != "" {
+		query.WriteString(" AND monitor_name = ?")
+		args = append(args, filter.MonitorName)
+	}
+	if filter.Kind != "" {
+		query.WriteString(" AND kind = ?")
+		args = append(args, filter.Kind)
+	}
+	if filter.Number != 0 {
+		query.WriteString(" AND number = ?")
+		args = append(args, filter.Number)
+	}
+	if filter.ActionKind != "" {
+		query.WriteString(" AND action_kind = ?")
+		args = append(args, filter.ActionKind)
+	}
+	if filter.TaskName != "" {
+		query.WriteString(" AND task_name = ?")
+		args = append(args, filter.TaskName)
+	}
+	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+	var records []store.ActionRecord
+	for rows.Next() {
+		var record store.ActionRecord
+		if err := rows.Scan(actionRecordScanDest(&record)...); err != nil {
+			return nil, "", err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return records, nextOffsetCursor(offset, len(records), limit), nil
 }
 
 // CreateReviewRecord inserts an immutable review record.

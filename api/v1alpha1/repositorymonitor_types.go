@@ -66,6 +66,10 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Agents RepositoryMonitorAgents `json:"agents,omitempty"`
 
+	// IssueWorkflow controls issue triage, research, planning, and implementation behavior.
+	// +optional
+	IssueWorkflow RepositoryMonitorIssueWorkflowSpec `json:"issueWorkflow,omitempty"`
+
 	// Review controls pull-request review behavior.
 	// +optional
 	Review RepositoryMonitorReviewSpec `json:"review,omitempty"`
@@ -258,6 +262,59 @@ type RepositoryMonitorAgents struct {
 	// Implementer is the agent used for guarded issue implementation tasks.
 	// +optional
 	Implementer *AgentReference `json:"implementer,omitempty"`
+}
+
+// RepositoryMonitorIssueWorkflowSpec configures issue workflow phases.
+type RepositoryMonitorIssueWorkflowSpec struct {
+	// Triage controls read-only issue classification.
+	// +optional
+	Triage RepositoryMonitorIssueWorkflowPhaseSpec `json:"triage,omitempty"`
+
+	// Research controls read-only issue research.
+	// +optional
+	Research RepositoryMonitorIssueWorkflowPhaseSpec `json:"research,omitempty"`
+
+	// Planning controls read-only implementation plan generation.
+	// +optional
+	Planning RepositoryMonitorIssuePlanningSpec `json:"planning,omitempty"`
+
+	// Implementation controls bounded implementation tasks.
+	// +optional
+	Implementation RepositoryMonitorIssueImplementationSpec `json:"implementation,omitempty"`
+}
+
+// RepositoryMonitorIssueWorkflowPhaseSpec configures a read-only issue phase.
+type RepositoryMonitorIssueWorkflowPhaseSpec struct {
+	// Enabled enables this phase. Defaults to true when the corresponding agent is configured and a command requests it.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// RepositoryMonitorIssuePlanningSpec configures planning behavior.
+type RepositoryMonitorIssuePlanningSpec struct {
+	// Enabled enables planning. Defaults to true when a planner agent is configured and a command requests it.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// RequireHumanApprovalFor names risk categories that require explicit approval.
+	// +listType=set
+	// +optional
+	RequireHumanApprovalFor []string `json:"requireHumanApprovalFor,omitempty"`
+}
+
+// RepositoryMonitorIssueImplementationSpec configures implementation behavior.
+type RepositoryMonitorIssueImplementationSpec struct {
+	// Enabled enables implementation. Defaults to true when an implementer agent is configured and a command requests it.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// RequireApprovedPlan blocks implementation unless the latest plan was approved.
+	// +optional
+	RequireApprovedPlan *bool `json:"requireApprovedPlan,omitempty"`
+
+	// BranchPrefix is the branch prefix for implementation push branches. Defaults to orka/issue.
+	// +optional
+	BranchPrefix string `json:"branchPrefix,omitempty"`
 }
 
 // RepositoryMonitorReviewSpec configures review behavior.

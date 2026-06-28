@@ -863,3 +863,79 @@ func (h *Handlers) GetRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	}
 	return c.JSON(event)
 }
+
+// ListRepositoryMonitorActionRecords lists durable monitor action records.
+func (h *Handlers) ListRepositoryMonitorActionRecords(c fiber.Ctx) error {
+	if err := h.ensureRepositoryMonitorStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listRepositoryMonitorActionRecords", h.contextTokenAuthorization.MonitorReadScopes); err != nil {
+		return err
+	}
+	monitorName := c.Query("name")
+	if monitorName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name query parameter is required")
+	}
+	monitor, err := h.fetchRepositoryMonitor(c, namespace, monitorName)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenRepositoryMonitor(c, "listRepositoryMonitorActionRecords", monitor); err != nil {
+		return err
+	}
+	limit, err := strconv.Atoi(c.Query("limit", "50"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid limit")
+	}
+	number, err := parseOptionalInt64Query(c.Query("number"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid number")
+	}
+	records, next, err := h.repositoryMonitorStore.ListActionRecords(c.Context(), store.ActionRecordFilter{
+		Namespace:   namespace,
+		MonitorName: monitor.Name,
+		Kind:        c.Query("kind"),
+		Number:      number,
+		ActionKind:  c.Query("actionKind"),
+		TaskName:    c.Query("taskName"),
+		Limit:       limit,
+		Cursor:      monitorListCursor(c),
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor actions: %v", err))
+	}
+	return c.JSON(fiber.Map{"items": records, "metadata": fiber.Map{"continue": next}})
+}
+
+// GetRepositoryMonitorActionRecord fetches one durable action record.
+func (h *Handlers) GetRepositoryMonitorActionRecord(c fiber.Ctx) error {
+	if err := h.ensureRepositoryMonitorStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getRepositoryMonitorActionRecord", h.contextTokenAuthorization.MonitorReadScopes); err != nil {
+		return err
+	}
+	record, err := h.repositoryMonitorStore.GetActionRecord(c.Context(), namespace, c.Params("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		return fiber.NewError(fiber.StatusNotFound, "monitor action not found")
+	}
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get monitor action: %v", err))
+	}
+	monitor, err := h.fetchRepositoryMonitor(c, namespace, record.MonitorName)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenRepositoryMonitor(c, "getRepositoryMonitorActionRecord", monitor); err != nil {
+		return err
+	}
+	return c.JSON(record)
+}

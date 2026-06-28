@@ -275,9 +275,20 @@ func repositoryMonitorGitSecretHasToken(secret *corev1.Secret) bool {
 	return false
 }
 
+//nolint:gocyclo // Reconcile run processing is intentionally linear across durable queues.
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, state repositoryMonitorReconcileState) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
 
+	ingestedRepairs, err := r.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to ingest completed repository monitor repair task")
+		return ctrl.Result{}, err
+	}
+	ingestedIssueActions, err := r.ingestCompletedRepositoryMonitorIssueTasks(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to ingest completed repository monitor issue task")
+		return ctrl.Result{}, err
+	}
 	ingestedReviews, err := r.ingestCompletedRepositoryMonitorReviewTasks(ctx, monitor)
 	if err != nil {
 		logger.Error(err, "failed to ingest completed repository monitor review task")
@@ -286,6 +297,11 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 	publishedReviews, err := r.publishPendingRepositoryMonitorReviewRecords(ctx, monitor)
 	if err != nil {
 		logger.Error(err, "failed to publish pending repository monitor review")
+		return ctrl.Result{}, err
+	}
+	queuedCommands, err := r.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to enqueue accepted repository monitor commands")
 		return ctrl.Result{}, err
 	}
 
@@ -324,7 +340,7 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		requeueAfter = next
 	}
 
-	if ingestedReviews || publishedReviews {
+	if queuedCommands || ingestedRepairs || ingestedIssueActions || ingestedReviews || publishedReviews {
 		latestRun, err := r.latestCompletedMonitorRun(ctx, monitor)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -645,6 +661,8 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 		m.Status.OpenIssues = counts.openIssues
 		m.Status.PendingIssueActions = counts.pendingIssueActions
 		m.Status.BlockedIssues = counts.blockedIssues
+		m.Status.ActiveRepairs = counts.activeRepairs
+		m.Status.MergeReadyItems = counts.mergeReadyItems
 		m.Status.ObservedGeneration = m.Generation
 
 		condition := metav1.Condition{
@@ -671,6 +689,8 @@ type repositoryMonitorStatusCounts struct {
 	openPullRequests    int32
 	pendingReviews      int32
 	blockedItems        int32
+	activeRepairs       int32
+	mergeReadyItems     int32
 	openIssues          int32
 	pendingIssueActions int32
 	blockedIssues       int32
@@ -691,6 +711,12 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 			continue
 		}
 		counts.openPullRequests++
+		if item.LastVerdict == repositoryMonitorReviewVerdictPassed && item.RepairState == "" && item.SkipReason == "" {
+			counts.mergeReadyItems++
+		}
+		if item.RepairState == repositoryMonitorRepairPhaseQueued {
+			counts.activeRepairs++
+		}
 		switch item.LastVerdict {
 		case repositoryMonitorRunPhaseQueued:
 			counts.pendingReviews++
@@ -708,7 +734,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 		switch item.WorkflowPhase {
 		case "triage_queued", "research_queued", "plan_queued", "implementation_queued", "mutation_queued":
 			counts.pendingIssueActions++
-		case repositoryMonitorIssuePhaseBlocked:
+		case repositoryMonitorIssuePhaseBlocked, repositoryMonitorIssuePhaseApprovalRequired:
 			counts.blockedIssues++
 		default:
 			if repositoryMonitorItemVerdictBlocked(item.LastVerdict) {

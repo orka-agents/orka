@@ -1349,3 +1349,15 @@ func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
 		t.Fatalf("runs = %#v, want missing run repaired for duplicate command", runs)
 	}
 }
+
+func TestRepositoryMonitorPermissionAllowedEnforcesMinimumAndPolicy(t *testing.T) {
+	monitor := githubWebhookRepositoryMonitor("permission-policy", false)
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = "admin"
+	monitor.Spec.Policy.AllowedRepositoryPermissions = []string{"write", "admin"}
+	if repositoryMonitorPermissionAllowed(monitor, "write") {
+		t.Fatal("write permission satisfied policy despite admin minimum")
+	}
+	if !repositoryMonitorPermissionAllowed(monitor, "admin") {
+		t.Fatal("admin permission rejected despite satisfying minimum and policy")
+	}
+}

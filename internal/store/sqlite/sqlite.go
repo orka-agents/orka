@@ -368,6 +368,7 @@ func migrate(db *sql.DB) error {
 			target_kind        TEXT NOT NULL DEFAULT '',
 			target_number      INTEGER NOT NULL DEFAULT 0,
 			target_sha         TEXT NOT NULL DEFAULT '',
+			command_event_id   TEXT NOT NULL DEFAULT '',
 			phase              TEXT NOT NULL,
 			started_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			completed_at       TIMESTAMP,
@@ -393,6 +394,8 @@ func migrate(db *sql.DB) error {
 			number                INTEGER NOT NULL DEFAULT 0,
 			sha                   TEXT NOT NULL DEFAULT '',
 			title                 TEXT NOT NULL DEFAULT '',
+			body                  TEXT NOT NULL DEFAULT '',
+			html_url              TEXT NOT NULL DEFAULT '',
 			author                TEXT NOT NULL DEFAULT '',
 			state                 TEXT NOT NULL DEFAULT '',
 			labels_json           TEXT NOT NULL DEFAULT '[]',
@@ -402,6 +405,9 @@ func migrate(db *sql.DB) error {
 			linked_pr_number      INTEGER NOT NULL DEFAULT 0,
 			last_command_id       TEXT NOT NULL DEFAULT '',
 			last_command_intent   TEXT NOT NULL DEFAULT '',
+			last_action_id        TEXT NOT NULL DEFAULT '',
+			last_action_kind      TEXT NOT NULL DEFAULT '',
+			last_action_task_name TEXT NOT NULL DEFAULT '',
 			base_branch           TEXT NOT NULL DEFAULT '',
 			head_branch           TEXT NOT NULL DEFAULT '',
 			head_sha              TEXT NOT NULL DEFAULT '',
@@ -427,6 +433,28 @@ func migrate(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_monitor_items_queue
 			ON monitor_items(monitor_namespace, monitor_name, kind, state, last_verdict, repair_state, automerge_state, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS action_records (
+			id                 TEXT PRIMARY KEY,
+			monitor_namespace  TEXT NOT NULL,
+			monitor_name       TEXT NOT NULL,
+			kind               TEXT NOT NULL,
+			number             INTEGER NOT NULL DEFAULT 0,
+			action_kind        TEXT NOT NULL,
+			snapshot_digest    TEXT NOT NULL DEFAULT '',
+			head_sha           TEXT NOT NULL DEFAULT '',
+			task_name          TEXT NOT NULL DEFAULT '',
+			command_event_id   TEXT NOT NULL DEFAULT '',
+			work_action_id     TEXT NOT NULL DEFAULT '',
+			monitor_generation INTEGER NOT NULL DEFAULT 0,
+			verdict            TEXT NOT NULL DEFAULT '',
+			confidence         TEXT NOT NULL DEFAULT '',
+			summary            TEXT NOT NULL DEFAULT '',
+			payload_json       TEXT NOT NULL DEFAULT '{}',
+			payload_digest     TEXT NOT NULL DEFAULT '',
+			created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_action_records_monitor
+			ON action_records(monitor_namespace, monitor_name, kind, number, action_kind, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS review_records (
 			id                 TEXT PRIMARY KEY,
 			monitor_namespace  TEXT NOT NULL,
@@ -597,7 +625,14 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
+	if err := ensureSQLiteColumns(db, "monitor_runs", []sqliteColumnMigration{
+		{Name: "command_event_id", Definition: "command_event_id TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSQLiteColumns(db, "monitor_items", []sqliteColumnMigration{
+		{Name: "body", Definition: "body TEXT NOT NULL DEFAULT ''"},
+		{Name: "html_url", Definition: "html_url TEXT NOT NULL DEFAULT ''"},
 		{Name: "skip_reason", Definition: "skip_reason TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_id", Definition: "last_publish_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_phase", Definition: "last_publish_phase TEXT NOT NULL DEFAULT ''"},
@@ -609,6 +644,9 @@ func migrate(db *sql.DB) error {
 		{Name: "linked_pr_number", Definition: "linked_pr_number INTEGER NOT NULL DEFAULT 0"},
 		{Name: "last_command_id", Definition: "last_command_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_command_intent", Definition: "last_command_intent TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_action_id", Definition: "last_action_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_action_kind", Definition: "last_action_kind TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_action_task_name", Definition: "last_action_task_name TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
 	}

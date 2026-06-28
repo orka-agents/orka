@@ -59,7 +59,7 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 			result.Duplicate++
 		}
 		result.CommandIDs = append(result.CommandIDs, command.ID)
-		if command.Status != githubCommandStatusAccepted || repositoryMonitorCommandDoesNotQueueRun(intent) {
+		if command.Status != githubCommandStatusAccepted {
 			continue
 		}
 		run, queued, err := h.queueRepositoryMonitorCommandRun(c, monitor, command, target)
@@ -152,9 +152,9 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 	status := githubCommandStatusAccepted
 	errorMessage := ""
 	if permissionErr != nil {
-		status = githubCommandStatusRejected
-		errorMessage = permissionErr.Error()
-	} else if !repositoryMonitorPermissionAllowed(monitor, permission) {
+		return nil, false, fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("failed to verify GitHub actor permission: %v", permissionErr))
+	}
+	if !repositoryMonitorPermissionAllowed(monitor, permission) {
 		status = githubCommandStatusRejected
 		errorMessage = fmt.Sprintf("sender %q has GitHub permission %q, which is not allowed for RepositoryMonitor commands", payload.Sender.Login, permission)
 	} else if guard := repositoryMonitorCommandGuardLabel(monitor, target.Labels); guard != "" {
@@ -228,7 +228,7 @@ func (h *Handlers) consumeRepositoryMonitorCommandLabel(ctx context.Context, mon
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -256,6 +256,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 		TargetKind:       target.Kind,
 		TargetNumber:     int64(target.Number),
 		TargetSHA:        target.HeadSHA,
+		CommandEventID:   command.ID,
 		Phase:            repositoryMonitorRunPhaseQueued,
 		StartedAt:        time.Now(),
 	}
@@ -264,9 +265,6 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 			return existing, false, nil
 		}
 		if errors.Is(err, store.ErrConflict) {
-			command.Status = githubCommandStatusBlocked
-			command.Error = "repository monitor already has an active run"
-			_ = h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command)
 			return run, false, nil
 		}
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor command run: %v", err))
@@ -278,15 +276,6 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 		return nil, false, err
 	}
 	return run, true, nil
-}
-
-func repositoryMonitorCommandDoesNotQueueRun(intent string) bool {
-	switch intent {
-	case commandIntentStop, commandIntentResume, commandIntentApprovePlan:
-		return true
-	default:
-		return false
-	}
 }
 
 func repositoryMonitorCommandGuardLabel(monitor *corev1alpha1.RepositoryMonitor, labels []string) string {
@@ -330,7 +319,7 @@ func (h *Handlers) repositoryMonitorCommandActorPermission(ctx context.Context, 
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -379,10 +368,15 @@ func (h *Handlers) repositoryMonitorGitHubToken(ctx context.Context, monitor *co
 
 func repositoryMonitorPermissionAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
 	permission = strings.ToLower(strings.TrimSpace(permission))
-	allowed := monitor.Spec.Policy.AllowedRepositoryPermissions
-	if len(allowed) == 0 {
-		allowed = repositoryMonitorPermissionsAtLeast(monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission)
+	minimumAllowed := repositoryMonitorPermissionsAtLeast(monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission)
+	if !repositoryMonitorPermissionInList(permission, minimumAllowed) {
+		return false
 	}
+	policyAllowed := monitor.Spec.Policy.AllowedRepositoryPermissions
+	return len(policyAllowed) == 0 || repositoryMonitorPermissionInList(permission, policyAllowed)
+}
+
+func repositoryMonitorPermissionInList(permission string, allowed []string) bool {
 	for _, candidate := range allowed {
 		if strings.EqualFold(strings.TrimSpace(candidate), permission) {
 			return true
@@ -441,7 +435,12 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 		labels = append(labels, trimmed)
 	}
 	slicesSortStringsFold(labels)
-	payload := map[string]any{"number": target.Number, "title": target.Title, "body": target.Body, "labels": labels}
+	payload := struct {
+		Number int      `json:"number"`
+		Title  string   `json:"title"`
+		Body   string   `json:"body"`
+		Labels []string `json:"labels"`
+	}{Number: target.Number, Title: target.Title, Body: target.Body, Labels: labels}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])

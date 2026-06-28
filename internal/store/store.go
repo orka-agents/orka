@@ -148,6 +148,10 @@ type RepositoryMonitorStore interface {
 	GetMonitorItem(ctx context.Context, namespace, monitorName, kind, itemKey string) (*MonitorItem, error)
 	ListMonitorItems(ctx context.Context, filter MonitorItemFilter) ([]MonitorItem, string, error)
 
+	CreateActionRecord(ctx context.Context, record *ActionRecord) error
+	GetActionRecord(ctx context.Context, namespace, id string) (*ActionRecord, error)
+	ListActionRecords(ctx context.Context, filter ActionRecordFilter) ([]ActionRecord, string, error)
+
 	CreateReviewRecord(ctx context.Context, record *ReviewRecord) error
 	GetReviewRecord(ctx context.Context, namespace, id string) (*ReviewRecord, error)
 	ListReviewRecords(ctx context.Context, filter ReviewRecordFilter) ([]ReviewRecord, string, error)

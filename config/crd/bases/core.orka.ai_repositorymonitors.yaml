@@ -191,6 +191,61 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              issueWorkflow:
+                description: IssueWorkflow controls issue triage, research, planning,
+                  and implementation behavior.
+                properties:
+                  implementation:
+                    description: Implementation controls bounded implementation tasks.
+                    properties:
+                      branchPrefix:
+                        description: BranchPrefix is the branch prefix for implementation
+                          push branches. Defaults to orka/issue.
+                        type: string
+                      enabled:
+                        description: Enabled enables implementation. Defaults to true
+                          when an implementer agent is configured and a command requests
+                          it.
+                        type: boolean
+                      requireApprovedPlan:
+                        description: RequireApprovedPlan blocks implementation unless
+                          the latest plan was approved.
+                        type: boolean
+                    type: object
+                  planning:
+                    description: Planning controls read-only implementation plan generation.
+                    properties:
+                      enabled:
+                        description: Enabled enables planning. Defaults to true when
+                          a planner agent is configured and a command requests it.
+                        type: boolean
+                      requireHumanApprovalFor:
+                        description: RequireHumanApprovalFor names risk categories
+                          that require explicit approval.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                  research:
+                    description: Research controls read-only issue research.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                  triage:
+                    description: Triage controls read-only issue classification.
+                    properties:
+                      enabled:
+                        description: Enabled enables this phase. Defaults to true
+                          when the corresponding agent is configured and a command
+                          requests it.
+                        type: boolean
+                    type: object
+                type: object
               owner:
                 description: Owner is the repository owner or organization.
                 type: string

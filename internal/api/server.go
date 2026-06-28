@@ -305,6 +305,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/monitors/repositories/:name/items", s.handlers.ListRepositoryMonitorItems)
 	api.Get("/monitors/commands", s.handlers.ListRepositoryMonitorCommandEvents)
 	api.Get("/monitors/commands/:id", s.handlers.GetRepositoryMonitorCommandEvent)
+	api.Get("/monitors/actions", s.handlers.ListRepositoryMonitorActionRecords)
+	api.Get("/monitors/actions/:id", s.handlers.GetRepositoryMonitorActionRecord)
 	api.Get("/monitors/events", s.handlers.ListRepositoryMonitorEvents)
 
 	// Substrate actor-pool endpoints

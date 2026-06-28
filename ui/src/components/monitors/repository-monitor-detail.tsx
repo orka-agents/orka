@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
-import { useRepositoryMonitor, useRepositoryMonitorCommands, useRepositoryMonitorItems, useRepositoryMonitorRuns, useRunRepositoryMonitor } from '@/hooks/use-monitors'
+import { useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorItems, useRepositoryMonitorRuns, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 
 function shortSHA(value?: string) {
@@ -37,6 +37,7 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
   const runs = useRepositoryMonitorRuns(monitorName)
   const items = useRepositoryMonitorItems(monitorName)
   const issueItems = useRepositoryMonitorItems(monitorName, 'issue')
+  const actions = useRepositoryMonitorActions(monitorName)
   const commands = useRepositoryMonitorCommands(monitorName)
   const runMonitor = useRunRepositoryMonitor(monitorName)
 
@@ -152,7 +153,7 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       <TableCell>#{item.number ?? item.itemKey}</TableCell>
                       <TableCell className="max-w-[360px] truncate">{item.title || '-'}</TableCell>
                       <TableCell><Badge variant="secondary">{item.workflowPhase || 'discovered'}</Badge></TableCell>
-                      <TableCell><Badge variant="outline">{item.lastCommandIntent || 'none'}</Badge></TableCell>
+                      <TableCell><Badge variant="outline">{item.lastActionKind || item.lastCommandIntent || 'none'}</Badge></TableCell>
                       <TableCell>{item.skipReason || '-'}</TableCell>
                     </TableRow>
                   ))}
@@ -188,6 +189,30 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
           </Card>
 
 
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Actions</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(actions.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No actions recorded yet.</div>
+              ) : (
+                (actions.data?.items ?? []).slice(0, 8).map((action) => (
+                  <div key={action.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{action.id}</span>
+                      <Badge variant={action.verdict === 'failed' ? 'destructive' : 'secondary'}>{action.actionKind}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {action.kind} #{action.number} · {action.verdict || 'recorded'} · {formatTime(action.createdAt)}
+                    </div>
+                    {action.summary ? <div className="mt-1 text-xs">{action.summary}</div> : null}
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>

@@ -25,6 +25,7 @@ type MonitorRun struct {
 	TargetKind       string     `json:"targetKind,omitempty"`
 	TargetNumber     int64      `json:"targetNumber,omitempty"`
 	TargetSHA        string     `json:"targetSHA,omitempty"`
+	CommandEventID   string     `json:"commandEventID,omitempty"`
 	Phase            string     `json:"phase"`
 	StartedAt        time.Time  `json:"startedAt"`
 	CompletedAt      *time.Time `json:"completedAt,omitempty"`
@@ -57,6 +58,8 @@ type MonitorItem struct {
 	Number              int64     `json:"number,omitempty"`
 	SHA                 string    `json:"sha,omitempty"`
 	Title               string    `json:"title,omitempty"`
+	Body                string    `json:"body,omitempty"`
+	HTMLURL             string    `json:"htmlURL,omitempty"`
 	Author              string    `json:"author,omitempty"`
 	State               string    `json:"state,omitempty"`
 	LabelsJSON          string    `json:"labelsJSON,omitempty"`
@@ -66,6 +69,9 @@ type MonitorItem struct {
 	LinkedPRNumber      int64     `json:"linkedPRNumber,omitempty"`
 	LastCommandID       string    `json:"lastCommandID,omitempty"`
 	LastCommandIntent   string    `json:"lastCommandIntent,omitempty"`
+	LastActionID        string    `json:"lastActionID,omitempty"`
+	LastActionKind      string    `json:"lastActionKind,omitempty"`
+	LastActionTaskName  string    `json:"lastActionTaskName,omitempty"`
 	BaseBranch          string    `json:"baseBranch,omitempty"`
 	HeadBranch          string    `json:"headBranch,omitempty"`
 	HeadSHA             string    `json:"headSHA,omitempty"`
@@ -100,6 +106,40 @@ type MonitorItemFilter struct {
 	AutomergeState string
 	Limit          int
 	Cursor         string
+}
+
+// ActionRecord stores one generic typed result from an agent or deterministic controller action.
+type ActionRecord struct {
+	ID                string    `json:"id"`
+	MonitorNamespace  string    `json:"monitorNamespace"`
+	MonitorName       string    `json:"monitorName"`
+	Kind              string    `json:"kind"`
+	Number            int64     `json:"number,omitempty"`
+	ActionKind        string    `json:"actionKind"`
+	SnapshotDigest    string    `json:"snapshotDigest,omitempty"`
+	HeadSHA           string    `json:"headSHA,omitempty"`
+	TaskName          string    `json:"taskName,omitempty"`
+	CommandEventID    string    `json:"commandEventID,omitempty"`
+	WorkActionID      string    `json:"workActionID,omitempty"`
+	MonitorGeneration int64     `json:"monitorGeneration,omitempty"`
+	Verdict           string    `json:"verdict,omitempty"`
+	Confidence        string    `json:"confidence,omitempty"`
+	Summary           string    `json:"summary,omitempty"`
+	PayloadJSON       string    `json:"payloadJSON,omitempty"`
+	PayloadDigest     string    `json:"payloadDigest,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+}
+
+// ActionRecordFilter constrains action record list queries.
+type ActionRecordFilter struct {
+	Namespace   string
+	MonitorName string
+	Kind        string
+	Number      int64
+	ActionKind  string
+	TaskName    string
+	Limit       int
+	Cursor      string
 }
 
 // ReviewRecord stores one immutable typed review result.

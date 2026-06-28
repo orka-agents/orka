@@ -34,7 +34,7 @@ const (
 )
 
 func repositoryMonitorTestBearerHeader() string {
-	return "Bearer " + "test" + "-" + "token"
+	return strings.Join([]string{"Bearer", "test" + "-" + "token"}, " ")
 }
 
 func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
@@ -4231,5 +4231,175 @@ func TestRepositoryMonitorReconcileInventoriesIssues(t *testing.T) {
 	}
 	if current.Status.OpenIssues != 1 {
 		t.Fatalf("OpenIssues = %d, want 1", current.Status.OpenIssues)
+	}
+}
+
+func TestRepositoryMonitorIssueTriageTaskQueuesAndIngestsActionRecord(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/sozercan/orka/issues/22" {
+			t.Fatalf("request path = %q, want targeted issue path", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"number":22,"title":"Needs triage","body":"Classify me","state":"open","updated_at":"2026-06-01T00:00:00Z","html_url":"https://github.com/sozercan/orka/issues/22","user":{"login":"alice"},"labels":[{"name":"bug"}]}`))
+	}))
+	t.Cleanup(server.Close)
+	pullRequestsEnabled := false
+	monitor, secret := repositoryMonitorInventoryTestObjects("issue-triage")
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Agents.Triager = &corev1alpha1.AgentReference{Name: "triager"}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	processedAt := time.Now()
+	command := &store.CommandEvent{ID: "cmd-triage-22", MonitorNamespace: "default", MonitorName: "issue-triage", Repo: "sozercan/orka", Kind: repositoryMonitorIssueKind, Number: 22, Intent: "triage", Status: "accepted", CreatedAt: processedAt, ProcessedAt: &processedAt}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-triage-22", MonitorNamespace: "default", MonitorName: "issue-triage", Trigger: "github_label_command", TargetKind: repositoryMonitorIssueKind, TargetNumber: 22, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "issue-triage"}}); err != nil {
+		t.Fatalf("Reconcile(queue) error = %v", err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "issue-triage", repositoryMonitorIssueKind, "22")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.WorkflowPhase != repositoryMonitorIssuePhaseTriageQueued || item.LastActionTaskName == "" {
+		t.Fatalf("item after queue = %#v, want triage queued with task", item)
+	}
+	result := fmt.Appendf(nil, `{"schemaVersion":"orka.issueTriage.v1","repo":"sozercan/orka","issueNumber":22,"snapshotDigest":%q,"verdict":"actionable","confidence":"high","category":"bug","priority":"P2","recommendedLane":"research_then_plan","risk":"medium","summary":"Ready to research."}`, item.SnapshotDigest)
+	if err := monitorStore.SaveResult(ctx, "default", item.LastActionTaskName, result); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: item.LastActionTaskName}, &task); err != nil {
+		t.Fatalf("Get task() error = %v", err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	if err := cl.Status().Update(ctx, &task); err != nil {
+		t.Fatalf("Status().Update(task) error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "issue-triage"}}); err != nil {
+		t.Fatalf("Reconcile(ingest) error = %v", err)
+	}
+	item, err = monitorStore.GetMonitorItem(ctx, "default", "issue-triage", repositoryMonitorIssueKind, "22")
+	if err != nil {
+		t.Fatalf("GetMonitorItem(after ingest) error = %v", err)
+	}
+	if item.WorkflowPhase != repositoryMonitorIssuePhaseTriaged || item.LastActionID == "" || item.LastVerdict != "actionable" {
+		t.Fatalf("item after ingest = %#v, want triaged actionable", item)
+	}
+	records, _, err := monitorStore.ListActionRecords(ctx, store.ActionRecordFilter{Namespace: "default", MonitorName: "issue-triage", Kind: repositoryMonitorIssueKind, Number: 22, ActionKind: repositoryMonitorIssueActionTriage, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListActionRecords() error = %v", err)
+	}
+	if len(records) != 1 || records[0].Summary != "Ready to research." {
+		t.Fatalf("records = %#v, want one triage record", records)
+	}
+}
+
+func TestRepositoryMonitorPullRequestFixCommandQueuesRepairTask(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 31, `{"number":31,"title":"Fix me","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base31","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature-fix","sha":"head31","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}`)
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("pr-fix")
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	processedAt := time.Now()
+	command := &store.CommandEvent{ID: "cmd-fix-31", MonitorNamespace: "default", MonitorName: "pr-fix", Repo: "sozercan/orka", Kind: repositoryMonitorPullRequestKind, Number: 31, Intent: "fix", Status: "accepted", CreatedAt: processedAt, ProcessedAt: &processedAt}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-fix-31", MonitorNamespace: "default", MonitorName: "pr-fix", Trigger: "github_label_command", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31", CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pr-fix"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "pr-fix", repositoryMonitorPullRequestKind, "31")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.RepairState != repositoryMonitorRepairPhaseQueued {
+		t.Fatalf("item = %#v, want queued repair", item)
+	}
+	jobs, _, err := monitorStore.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: "default", MonitorName: "pr-fix", PRNumber: 31, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRepairJobs() error = %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].TaskName == "" {
+		t.Fatalf("jobs = %#v, want one repair job with task", jobs)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: jobs[0].TaskName}, &task); err != nil {
+		t.Fatalf("Get repair task() error = %v", err)
+	}
+	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.AgentRuntime == nil || task.Spec.AgentRuntime.Workspace == nil || task.Spec.AgentRuntime.Workspace.PushBranch != "feature-fix" {
+		t.Fatalf("repair task spec = %#v, want repairer push to feature branch", task.Spec)
+	}
+}
+
+func TestRepositoryMonitorIssueWorkflowPolicyHelpers(t *testing.T) {
+	triageEnabled := false
+	implEnabled := false
+	monitor := &corev1alpha1.RepositoryMonitor{Spec: corev1alpha1.RepositoryMonitorSpec{IssueWorkflow: corev1alpha1.RepositoryMonitorIssueWorkflowSpec{
+		Triage:         corev1alpha1.RepositoryMonitorIssueWorkflowPhaseSpec{Enabled: &triageEnabled},
+		Implementation: corev1alpha1.RepositoryMonitorIssueImplementationSpec{Enabled: &implEnabled},
+		Planning:       corev1alpha1.RepositoryMonitorIssuePlanningSpec{RequireHumanApprovalFor: []string{"high", "database-migration"}},
+	}}}
+	if repositoryMonitorIssuePhaseEnabled(monitor, repositoryMonitorIssueActionTriage) {
+		t.Fatal("triage phase enabled despite explicit false")
+	}
+	if repositoryMonitorIssuePhaseEnabled(monitor, repositoryMonitorIssueActionImplementation) {
+		t.Fatal("implementation phase enabled despite explicit false")
+	}
+	if !repositoryMonitorPlanRiskRequiresApproval(monitor, `{"risk":"high","requiresHumanApproval":false}`) {
+		t.Fatal("high risk plan did not require approval")
+	}
+	if repositoryMonitorPlanReadyVerdict("") || repositoryMonitorPlanReadyVerdict(repositoryMonitorReviewVerdictStale) {
+		t.Fatal("empty or stale plan verdict considered ready")
+	}
+	if !repositoryMonitorPlanReadyVerdict("ready") {
+		t.Fatal("ready plan verdict not considered ready")
+	}
+	if repositoryMonitorIssueInventoryBlockCanClear("stopped_by_command") {
+		t.Fatal("stopped issue block can be cleared by inventory")
+	}
+	if !repositoryMonitorIssueInventoryBlockCanClear(repositoryMonitorSkipReasonOverLimit) {
+		t.Fatal("transient over-limit block cannot be cleared by inventory")
+	}
+	if repositoryMonitorImplementationReadyVerdict("blocked") || repositoryMonitorImplementationReadyVerdict("needs_human") {
+		t.Fatal("blocked implementation verdict considered ready")
+	}
+	if !repositoryMonitorImplementationReadyVerdict("patch_ready") {
+		t.Fatal("patch_ready implementation verdict not considered ready")
 	}
 }

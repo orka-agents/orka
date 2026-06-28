@@ -105,3 +105,5 @@ The `orka:*` path differs from direct `agent:*` labels:
 - duplicate GitHub deliveries reuse the same command event.
 
 Use `agent:*` when you explicitly want a direct one-off agent task. Use `orka:*` when the RepositoryMonitor should own durable state, policy, auditability, and follow-up workflow decisions.
+
+RepositoryMonitor command labels are one-shot intents. For custom labels, configure them under `spec.triggers.github.labels`; Orka excludes both default `orka:*` labels and configured custom command labels from issue snapshot digests so consuming a command label does not stale the issue workflow.

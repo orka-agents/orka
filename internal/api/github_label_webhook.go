@@ -153,6 +153,7 @@ type githubRepositoryMonitorEventResult struct {
 	CommandIDs    []string
 }
 
+//nolint:gocyclo // GitHub webhook routing is intentionally linear across event families.
 func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	body := append([]byte(nil), c.Body()...)
 	secret := strings.TrimSpace(os.Getenv(githubWebhookSecretEnv))
@@ -208,6 +209,14 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		return err
 	}
 	if handledCommand {
+		if event == githubEventPullRequest {
+			var err error
+			delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
+			monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
+			if err != nil {
+				return err
+			}
+		}
 		return githubRepositoryMonitorEventResponse(c, mergeGitHubRepositoryMonitorEventResults(monitorResult, commandResult))
 	}
 	if event == githubEventPullRequest {
@@ -300,6 +309,9 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 	}
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
+		if _, isCommand := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name); isCommand && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target) {
+			continue
+		}
 		if !repositoryMonitorAcceptsPullRequestEvent(monitor, payload.Repository, target) {
 			continue
 		}
