@@ -141,6 +141,15 @@ spec:
   timeZone: "UTC"               # optional IANA time zone
   historyDays: 30                # optional initial history window
   validationMode: light          # off, light, or full
+  validationMaxFindingsPerRun: 8 # optional auto-validation task cap for light mode
+  validationMinSeverity: medium  # optional auto-validation severity threshold
+  validationMinConfidence: medium # optional auto-validation confidence threshold
+  customScanInstructionsRef:     # optional ConfigMap-backed additive scanner instructions
+    name: repo-security-policy
+    key: policy                  # optional; defaults to policy
+  falsePositivePolicyRef:        # optional ConfigMap-backed false-positive policy
+    name: repo-security-policy
+    key: false-positives
   analysisAgentRef:
     name: security-reviewer
   patchAgentRef:                 # optional; defaults to the analysis agent when omitted
@@ -167,10 +176,17 @@ spec:
 | `timeZone` | string | No | IANA time zone used by `schedule`. |
 | `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
 | `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
+| `validationMaxFindingsPerRun` | int32 | No | Maximum automatic validation tasks to enqueue per scan run in `light` mode. |
+| `validationMinSeverity` | string | No | Minimum severity eligible for automatic validation. Defaults are mode-dependent. |
+| `validationMinConfidence` | string | No | Minimum confidence eligible for automatic validation. Defaults are mode-dependent. |
+| `customScanInstructionsRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive scanner instructions. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
+| `falsePositivePolicyRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive false-positive policy text. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
 | `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
 | `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
-| `maxFindingsPerRun` | int32 | No | Bounds scan output volume. |
+| `maxFindingsPerRun` | int32 | No | Bounds accepted scan findings per run after validation and deterministic dropped-finding filters. |
 | `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
+
+`PolicyConfigMapKeyRef` uses `name` plus optional `key`; when `key` is omitted, Orka reads the `policy` key. Policy ConfigMap values are capped at 32 KiB and rejected if they look like they contain secrets, tokens, private keys, or credentials. Custom policy text is additive only; it cannot disable Orka's default evidence, no-secret, or finding-quality rules.
 
 **Status fields:**
 
