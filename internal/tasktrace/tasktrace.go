@@ -213,7 +213,7 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 		}
 		te := toTraceEvent(event)
 		trace.Timeline = append(trace.Timeline, te)
-		if isTerminal(event.Type) {
+		if events.IsTerminalTaskEventType(event.Type) {
 			copy := te
 			trace.TerminalEvent = &copy
 		}
@@ -327,7 +327,7 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 				createdAt := event.CreatedAt
 				child.StartedAt = &createdAt
 			}
-			if isTerminal(event.Type) || strings.Contains(strings.ToLower(event.Type), "completed") || strings.Contains(strings.ToLower(event.Type), "failed") {
+			if events.IsTerminalTaskEventType(event.Type) || strings.Contains(strings.ToLower(event.Type), "completed") || strings.Contains(strings.ToLower(event.Type), "failed") {
 				child.EndSeq = event.Seq
 				endedAt := event.CreatedAt
 				child.EndedAt = &endedAt
@@ -432,16 +432,6 @@ func issueMessage(event store.ExecutionEvent) string {
 	}
 	return event.Type
 }
-
-func isTerminal(eventType string) bool {
-	switch eventType {
-	case events.ExecutionEventTypeTaskSucceeded, events.ExecutionEventTypeTaskFailed, events.ExecutionEventTypeTaskCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
 func isFailureLike(eventType string) bool {
 	return strings.HasSuffix(eventType, "Failed") || strings.HasSuffix(eventType, "Cancelled") || strings.HasSuffix(eventType, "Declined") || strings.HasSuffix(eventType, "Expired")
 }

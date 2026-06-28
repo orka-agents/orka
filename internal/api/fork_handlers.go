@@ -27,6 +27,7 @@ import (
 	forkcontext "github.com/sozercan/orka/internal/fork"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 type ForkTaskRequest struct {
@@ -150,7 +151,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		Spec: spec,
 	}
 	stampTaskRequesterFromUserInfo(forked, GetUserInfo(c))
+	tracing.StampTaskTraceContext(c.Context(), forked)
 	if err := h.authorizeContextTokenTaskCreate(c, createTaskRequestFromTask(forked), namespace); err != nil {
+		return err
+	}
+	if err := h.authorizeTaskCreate(c.Context(), c, forked); err != nil {
 		return err
 	}
 
@@ -423,23 +428,7 @@ func taskEventSeqExists(
 	seq,
 	latestSeq int64,
 ) (bool, error) {
-	if seq == 0 || seq == latestSeq {
-		return true, nil
-	}
-	if seq < 0 || seq > latestSeq {
-		return false, nil
-	}
-	listed, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace:  namespace,
-		StreamType: events.ExecutionEventStreamTypeTask,
-		StreamID:   taskName,
-		AfterSeq:   seq - 1,
-		Limit:      1,
-	})
-	if err != nil {
-		return false, err
-	}
-	return len(listed) == 1 && listed[0].Seq == seq, nil
+	return newTaskTimelineReader(eventStore, namespace, taskName).seqExists(ctx, seq, latestSeq)
 }
 
 func listTaskEventsThrough(
@@ -449,36 +438,5 @@ func listTaskEventsThrough(
 	taskName string,
 	throughSeq int64,
 ) ([]store.ExecutionEvent, error) {
-	if throughSeq == 0 {
-		return nil, nil
-	}
-	readLimit := forkcontext.DefaultMaxEvents + 1
-	after := max(throughSeq-int64(readLimit), 0)
-	out := make([]store.ExecutionEvent, 0, readLimit)
-	for {
-		batch, err := eventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  namespace,
-			StreamType: events.ExecutionEventStreamTypeTask,
-			StreamID:   taskName,
-			AfterSeq:   after,
-			Limit:      min(store.MaxExecutionEventLimit, readLimit-len(out)),
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, event := range batch {
-			if event.Seq > throughSeq || len(out) >= readLimit {
-				return out, nil
-			}
-			out = append(out, event)
-			after = event.Seq
-		}
-		if after >= throughSeq || len(out) >= readLimit || len(batch) < store.MaxExecutionEventLimit {
-			break
-		}
-	}
-	return out, nil
+	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
 }

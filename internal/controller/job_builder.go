@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/netip"
+	"net/url"
 	"os"
 	"path"
 	"reflect"
@@ -98,6 +100,7 @@ type JobBuilder struct {
 	ContextTokenOutboundScope    string
 	ContextTokenChildTokenTTL    string
 	ContextTokenToolTokenTTL     string
+	EnableTelemetry              bool
 	directSecrets                directRuntimeSecretPolicy
 }
 
@@ -276,6 +279,7 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 type JobBuildOptions struct {
 	AgentSandboxWorkspace *AgentSandboxWorkspaceRequest
 	ExecutionWorkspace    *ExecutionWorkspaceRequest
+	ResolvedApprovalsJSON string
 }
 
 // Build creates a Job for the given Task.
@@ -566,18 +570,41 @@ func (b *JobBuilder) buildEnvVars(ctx context.Context, task *corev1alpha1.Task, 
 
 // buildEnvVarsWithOptions builds the environment variables for the container using additional options.
 func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) []corev1.EnvVar {
-	envVars := workerenv.BaseEnv{
+	baseEnv := workerenv.BaseEnv{
 		TaskName:       task.Name,
 		TaskNamespace:  task.Namespace,
+		TaskUID:        string(task.UID),
 		ResultEndpoint: fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name),
 		ControllerURL:  b.ControllerURL,
-	}.EnvVars()
+	}
+	if agent != nil {
+		baseEnv.AgentName = agent.Name
+	}
+	envVars := baseEnv.EnvVars()
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
+	envVars = b.addTelemetryEnvVars(envVars, task)
 
-	// Add task-level env vars
-	envVars = append(envVars, task.Spec.Env...)
+	// Add task-level env vars. AI worker telemetry env vars are reserved for
+	// controller injection so workload authors cannot bypass default-off telemetry
+	// policy or redirect GenAI metadata to arbitrary collectors. Restore
+	// controller-owned identity and approval env vars so task authors cannot
+	// spoof execution identity or approval state.
+	envVars = appendTaskEnvVars(envVars, task)
+	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
+	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
+	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
+	if agent != nil {
+		envVars = setControllerEnv(envVars, workerenv.AgentName, agent.Name)
+	}
+	envVars = setControllerEnv(envVars, workerenv.ResultEndpoint, fmt.Sprintf("%s/internal/v1/results/%s/%s", b.ControllerURL, task.Namespace, task.Name))
+	envVars = setControllerEnv(envVars, workerenv.ControllerURL, b.ControllerURL)
+	envVars = setControllerEnvValue(envVars, workerenv.AITools, "")
+	envVars = setControllerEnvValue(envVars, workerenv.CoordinationEnabled, "")
+	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
+	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
+	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
 	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
 
 	// Add prior task env vars for iterative coordination
@@ -622,6 +649,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 	}
+	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
@@ -718,6 +746,119 @@ func (b *JobBuilder) addExecutionWorkspaceEnvVars(envVars []corev1.EnvVar, task 
 		ClaimTimeout:      request.ClaimTimeout,
 		CommandTimeout:    request.CommandTimeout,
 	}.EnvVars()...)
+}
+
+func (b *JobBuilder) addTelemetryEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
+	if task != nil && task.Annotations != nil {
+		envVars = setControllerEnv(envVars, workerenv.TraceParent, task.Annotations[labels.AnnotationTraceParent])
+		envVars = setControllerEnv(envVars, workerenv.TraceState, task.Annotations[labels.AnnotationTraceState])
+	}
+	if !b.EnableTelemetry || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
+		return envVars
+	}
+	if !workerReachableOTLPEndpointConfigured(os.Getenv) {
+		return envVars
+	}
+	envVars = setControllerEnv(envVars, workerenv.EnableTelemetry, scheduledRunLabelValue)
+	unreachableSignalOverrides := unreachableWorkerOTLPSignalEndpoints(os.Getenv)
+	// Copy only non-secret scalar OTLP settings. Header env vars carry
+	// credentials, and certificate env vars are file paths whose source files are
+	// not mounted into worker Pods by the controller.
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_INSECURE",
+		"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+		"OTEL_EXPORTER_OTLP_METRICS_INSECURE",
+		"OTEL_EXPORTER_OTLP_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+	} {
+		if signal := otlpSignalFromEnvName(name); signal != "" && unreachableSignalOverrides[signal] {
+			continue
+		}
+		value := os.Getenv(name)
+		if strings.HasSuffix(name, "_ENDPOINT") && !isWorkerReachableOTLPEndpoint(value) {
+			value = ""
+		}
+		envVars = setControllerEnv(envVars, name, safeWorkerOTLPEnvValue(name, value))
+	}
+	return envVars
+}
+
+func unreachableWorkerOTLPSignalEndpoints(getenv func(string) string) map[string]bool {
+	out := map[string]bool{}
+	for _, signal := range []string{"TRACES", "METRICS"} {
+		name := "OTEL_EXPORTER_OTLP_" + signal + "_ENDPOINT"
+		if strings.TrimSpace(getenv(name)) != "" && !isWorkerReachableOTLPEndpoint(getenv(name)) {
+			out[signal] = true
+		}
+	}
+	return out
+}
+
+func otlpSignalFromEnvName(name string) string {
+	for _, signal := range []string{"TRACES", "METRICS"} {
+		if strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_"+signal+"_") {
+			return signal
+		}
+	}
+	return ""
+}
+
+func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
+	if task == nil {
+		return envVars
+	}
+	for _, envVar := range task.Spec.Env {
+		if isReservedTaskTelemetryEnv(task, envVar.Name) {
+			continue
+		}
+		envVars = append(envVars, envVar)
+	}
+	return envVars
+}
+
+func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {
+	if task == nil {
+		return false
+	}
+	switch task.Spec.Type {
+	case corev1alpha1.TaskTypeAI:
+		return isReservedAIWorkerTelemetryEnv(name)
+	case corev1alpha1.TaskTypeAgent:
+		return isReservedTraceContextEnv(name)
+	default:
+		return false
+	}
+}
+
+func isReservedAIWorkerTelemetryEnv(name string) bool {
+	if isReservedTraceContextEnv(name) {
+		return true
+	}
+	switch name {
+	case workerenv.EnableTelemetry, "OTEL_RESOURCE_ATTRIBUTES":
+		return true
+	default:
+		return strings.HasPrefix(name, "OTEL_EXPORTER_OTLP")
+	}
+}
+
+func isReservedTraceContextEnv(name string) bool {
+	switch name {
+	case workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage:
+		return true
+	default:
+		return false
+	}
 }
 
 func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
@@ -827,7 +968,7 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		depth = d
 	}
 
-	return append(envVars, workerenv.CoordinationEnv{
+	for _, envVar := range (workerenv.CoordinationEnv{
 		Enabled:                 true,
 		MaxDepth:                int(agent.Spec.Coordination.MaxDepth),
 		MaxChildren:             int(agent.Spec.Coordination.MaxConcurrentChildren),
@@ -836,7 +977,10 @@ func (b *JobBuilder) addCoordinationEnvVars(envVars []corev1.EnvVar, task *corev
 		AutonomousMode:          agent.Spec.Coordination.Autonomous,
 		AutonomousIteration:     int(task.Status.Iteration),
 		AutonomousMaxIterations: int(agent.Spec.Coordination.MaxIterations),
-	}.EnvVars()...)
+	}).EnvVars() {
+		envVars = setControllerEnvValue(envVars, envVar.Name, envVar.Value)
+	}
+	return setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, workerenv.JoinCSV(agent.Spec.Coordination.ApprovalRequiredTools))
 }
 
 // addAIEnvVars adds AI-specific environment variables
@@ -890,6 +1034,9 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 				cfg.tools = append(cfg.tools, ct)
 			}
 		}
+		if agent.Spec.Coordination.Autonomous && !slices.Contains(cfg.tools, "request_approval") {
+			cfg.tools = append(cfg.tools, "request_approval")
+		}
 	}
 
 	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
@@ -904,7 +1051,7 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	}
 
 	if len(cfg.tools) > 0 {
-		envVars = append(envVars, corev1.EnvVar{Name: workerenv.AITools, Value: strings.Join(cfg.tools, ",")})
+		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
 	}
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
@@ -1179,6 +1326,12 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 				},
 			},
 		)
+		switch task.Spec.Type {
+		case corev1alpha1.TaskTypeAI:
+			job.Spec.Template.Spec.Containers[0].Env = reserveAIWorkerTelemetryEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
+		case corev1alpha1.TaskTypeAgent:
+			job.Spec.Template.Spec.Containers[0].Env = reserveTraceContextEnvFromKeys(job.Spec.Template.Spec.Containers[0].Env)
+		}
 		// Also mount as files for tools that read from filesystem
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "agent-secrets",
@@ -1199,6 +1352,61 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	return nil
+}
+
+func reserveTraceContextEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
+	for _, name := range []string{workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage} {
+		if !envVarExists(envVars, name) {
+			envVars = append(envVars, corev1.EnvVar{Name: name})
+		}
+	}
+	return envVars
+}
+
+func reserveAIWorkerTelemetryEnvFromKeys(envVars []corev1.EnvVar) []corev1.EnvVar {
+	for _, name := range reservedAIWorkerTelemetryEnvNames() {
+		if !envVarExists(envVars, name) {
+			envVars = append(envVars, corev1.EnvVar{Name: name})
+		}
+	}
+	return envVars
+}
+
+func reservedAIWorkerTelemetryEnvNames() []string {
+	return []string{
+		workerenv.EnableTelemetry,
+		workerenv.TraceParent,
+		workerenv.TraceState,
+		workerenv.TraceBaggage,
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+		"OTEL_EXPORTER_OTLP_INSECURE",
+		"OTEL_EXPORTER_OTLP_TRACES_INSECURE",
+		"OTEL_EXPORTER_OTLP_METRICS_INSECURE",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+		"OTEL_EXPORTER_OTLP_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
+		"OTEL_EXPORTER_OTLP_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_METRICS_COMPRESSION",
+		"OTEL_EXPORTER_OTLP_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE",
+		"OTEL_EXPORTER_OTLP_CLIENT_KEY",
+		"OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
+		"OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY",
+		"OTEL_RESOURCE_ATTRIBUTES",
+	}
 }
 
 func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -1390,6 +1598,98 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 		job.Spec.Template.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: workerenv.SessionName, Value: sessionName},
 	)
+}
+
+func workerReachableOTLPEndpointConfigured(getenv func(string) string) bool {
+	for _, name := range []string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+	} {
+		if isWorkerReachableOTLPEndpoint(getenv(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isWorkerReachableOTLPEndpoint(value string) bool {
+	host := otlpEndpointHost(value)
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return false
+	}
+	hostWithoutZone, _, _ := strings.Cut(host, "%")
+	if ip, err := netip.ParseAddr(hostWithoutZone); err == nil {
+		ip = ip.Unmap()
+		return !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	return true
+}
+
+func otlpEndpointHost(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parseValue := value
+	if !strings.Contains(value, "://") {
+		parseValue = "//" + value
+	}
+	parsed, err := url.Parse(parseValue)
+	if err != nil {
+		return ""
+	}
+	host := parsed.Hostname()
+	return strings.ToLower(strings.Trim(host, "[]"))
+}
+
+func safeWorkerOTLPEnvValue(name, value string) string {
+	if !strings.HasSuffix(name, "_ENDPOINT") {
+		return value
+	}
+	value = strings.TrimSpace(value)
+	parseValue := value
+	schemeLess := !strings.Contains(value, "://")
+	if schemeLess {
+		parseValue = "//" + value
+	}
+	parsed, err := url.Parse(parseValue)
+	if err != nil {
+		return value
+	}
+	if parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" {
+		return value
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	sanitized := parsed.String()
+	if schemeLess {
+		return strings.TrimPrefix(sanitized, "//")
+	}
+	return sanitized
+}
+
+func setControllerEnvValue(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	out := make([]corev1.EnvVar, 0, len(envVars)+1)
+	set := false
+	for _, envVar := range envVars {
+		if envVar.Name != name {
+			out = append(out, envVar)
+			continue
+		}
+		if !set {
+			out = append(out, corev1.EnvVar{Name: name, Value: value})
+			set = true
+		}
+	}
+	if !set {
+		out = append(out, corev1.EnvVar{Name: name, Value: value})
+	}
+	return out
 }
 
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {

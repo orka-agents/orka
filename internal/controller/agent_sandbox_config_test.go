@@ -19,7 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -1084,12 +1084,12 @@ func TestResolveExecutionWorkspaceRequestValidatesResolvedTemplateNamespace(t *t
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
 	}
-	if err := sandboxextv1alpha1.AddToScheme(scheme); err != nil {
+	if err := sandboxextv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add sandbox scheme: %v", err)
 	}
 
 	r := &TaskReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1alpha1.SandboxTemplate{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: testSandboxTemplatesNamespace},
 		}).Build(),
 		AgentSandboxEnabled: true,
@@ -1122,12 +1122,12 @@ func TestResolveExecutionWorkspaceRequestControllerNamespaceDefault(t *testing.T
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
 	}
-	if err := sandboxextv1alpha1.AddToScheme(scheme); err != nil {
+	if err := sandboxextv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add sandbox scheme: %v", err)
 	}
 
 	r := &TaskReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1alpha1.SandboxTemplate{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "default-template", Namespace: "orka-system"},
 		}).Build(),
 		AgentSandboxEnabled: true,

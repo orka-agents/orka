@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,8 +19,12 @@ import (
 
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -254,7 +259,8 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := validateTurnPathSegment(request.TurnID); err != nil {
+	eventStreamPath, err := harness.EventStreamPath(request.TurnID)
+	if err != nil {
 		writeSafeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -290,7 +296,7 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
-		EventStreamPath:  harness.TurnsPath + "/" + path.Clean(string(request.TurnID)) + "/events",
+		EventStreamPath:  eventStreamPath,
 	})
 }
 
@@ -298,15 +304,13 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(w, r) {
 		return
 	}
-	trimmed := strings.TrimPrefix(r.URL.Path, harness.TurnsPath+"/")
-	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
-	if len(parts) != 2 {
-		writeSafeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	turnID := harness.HarnessTurnID(parts[0])
-	if err := validateTurnPathSegment(turnID); err != nil {
-		writeSafeError(w, http.StatusBadRequest, err.Error())
+	turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+	if err != nil {
+		if errors.Is(err, harness.ErrTurnPathNotFound) {
+			writeSafeError(w, http.StatusNotFound, "not found")
+		} else {
+			writeSafeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 	s.mu.RLock()
@@ -316,7 +320,7 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		writeSafeError(w, http.StatusNotFound, "turn not found")
 		return
 	}
-	switch parts[1] {
+	switch resource {
 	case "events":
 		if r.Method != http.MethodGet {
 			writeSafeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -418,12 +422,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turn
 
 func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	defer s.finishTurn(turn)
-	ctx := turn.ctx
+	ctx := extractHarnessTurnTraceContext(turn.ctx, turn.request)
 	if !turn.request.Deadline.IsZero() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, turn.request.Deadline)
 		defer cancel()
 	}
+	agentName := strings.TrimSpace(turn.request.Metadata["agentName"])
+	if agentName == "" {
+		agentName = s.adapter.Name()
+	}
+	ctx, taskSpan := tracing.Tracer("orka.harness").Start(ctx, "task.run", trace.WithAttributes(
+		tracing.TaskAttributes(turn.request.TaskName, turn.request.Namespace, turn.request.Namespace, agentName, "")...,
+	))
+	defer func() {
+		if failed, errType := turnTerminalFailure(turn); failed {
+			taskSpan.SetStatus(codes.Error, errType)
+			taskSpan.SetAttributes(attribute.String("error.type", errType))
+		}
+		taskSpan.End()
+	}()
 	turnCtx := turnContextFromRequest(s.adapter.Name(), s.config, turn.request)
 	if eventing, ok := s.adapter.(EventingAdapter); ok {
 		_, err := eventing.RunTurn(ctx, turnCtx, func(frame harness.HarnessEventFrame) error {
@@ -656,6 +674,32 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 	}
+}
+
+func extractHarnessTurnTraceContext(ctx context.Context, request harness.StartTurnRequest) context.Context {
+	carrier := tracing.MapCarrier{}
+	if request.Metadata != nil {
+		carrier["traceparent"] = request.Metadata["traceparent"]
+		carrier["tracestate"] = request.Metadata["tracestate"]
+	}
+	if carrier["traceparent"] == "" {
+		return ctx
+	}
+	return tracing.ExtractContext(ctx, carrier)
+}
+
+func turnTerminalFailure(turn *turnState) (bool, string) {
+	if turn == nil {
+		return false, ""
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	for i := len(turn.frames) - 1; i >= 0; i-- {
+		if turn.frames[i].Type == harness.FrameTurnFailed {
+			return true, "turn_failed"
+		}
+	}
+	return false, ""
 }
 
 func (s *Server) failedTurnPartialResult(ctx context.Context, turnCtx TurnContext, run CommandResult) (string, bool) {
@@ -1016,17 +1060,6 @@ func removeTurnEnv(env []string, names ...string) []string {
 
 func writeSafeError(w http.ResponseWriter, status int, message string) {
 	harness.WriteError(w, status, events.RedactExecutionEventText(message))
-}
-
-func validateTurnPathSegment(turnID harness.HarnessTurnID) error {
-	value := strings.TrimSpace(string(turnID))
-	if value == "" {
-		return fmt.Errorf("turn id is required")
-	}
-	if value == "." || value == ".." || strings.Contains(value, "/") || strings.Contains(value, "\\") {
-		return fmt.Errorf("turn id must be a single safe path segment")
-	}
-	return nil
 }
 
 type turnState struct {

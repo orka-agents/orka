@@ -55,85 +55,98 @@ const (
 	ExecutionEventStreamTypeSession = "session"
 )
 
-var validExecutionEventTypes = map[string]struct{}{
-	ExecutionEventTypeTaskCreated:                   {},
-	ExecutionEventTypeTaskPhaseChanged:              {},
-	ExecutionEventTypeTaskJobCreated:                {},
-	ExecutionEventTypeTaskStarted:                   {},
-	ExecutionEventTypeTaskSucceeded:                 {},
-	ExecutionEventTypeTaskFailed:                    {},
-	ExecutionEventTypeTaskCancelled:                 {},
-	ExecutionEventTypeWorkerStarted:                 {},
-	ExecutionEventTypeWorkerCompleted:               {},
-	ExecutionEventTypeWorkerFailed:                  {},
-	ExecutionEventTypeModelRequestStarted:           {},
-	ExecutionEventTypeModelRequestCompleted:         {},
-	ExecutionEventTypeModelRequestFailed:            {},
-	ExecutionEventTypeModelMessage:                  {},
-	ExecutionEventTypeContextTruncated:              {},
-	ExecutionEventTypeToolCallStarted:               {},
-	ExecutionEventTypeToolCallCompleted:             {},
-	ExecutionEventTypeToolCallFailed:                {},
-	ExecutionEventTypeWorkspacePreparationStarted:   {},
-	ExecutionEventTypeWorkspacePreparationCompleted: {},
-	ExecutionEventTypeWorkspacePreparationFailed:    {},
-	ExecutionEventTypeAgentRuntimeStarted:           {},
-	ExecutionEventTypeAgentRuntimeCommandStarted:    {},
-	ExecutionEventTypeAgentRuntimeCompleted:         {},
-	ExecutionEventTypeAgentRuntimeFailed:            {},
-	ExecutionEventTypeAgentRuntimeCancelled:         {},
-	ExecutionEventTypeResultSubmitted:               {},
-	ExecutionEventTypeArtifactUploadCompleted:       {},
-	ExecutionEventTypeArtifactUploadFailed:          {},
-	ExecutionEventTypeTaskForkRequested:             {},
-	ExecutionEventTypeTaskForkCreated:               {},
-	ExecutionEventTypeApprovalRequested:             {},
-	ExecutionEventTypeApprovalApproved:              {},
-	ExecutionEventTypeApprovalDeclined:              {},
-	ExecutionEventTypeApprovalExpired:               {},
-	ExecutionEventTypeApprovalCancelled:             {},
+var executionEventTypes = []string{
+	ExecutionEventTypeTaskCreated,
+	ExecutionEventTypeTaskPhaseChanged,
+	ExecutionEventTypeTaskJobCreated,
+	ExecutionEventTypeTaskStarted,
+	ExecutionEventTypeTaskSucceeded,
+	ExecutionEventTypeTaskFailed,
+	ExecutionEventTypeTaskCancelled,
+	ExecutionEventTypeWorkerStarted,
+	ExecutionEventTypeWorkerCompleted,
+	ExecutionEventTypeWorkerFailed,
+	ExecutionEventTypeModelRequestStarted,
+	ExecutionEventTypeModelRequestCompleted,
+	ExecutionEventTypeModelRequestFailed,
+	ExecutionEventTypeModelMessage,
+	ExecutionEventTypeContextTruncated,
+	ExecutionEventTypeToolCallStarted,
+	ExecutionEventTypeToolCallCompleted,
+	ExecutionEventTypeToolCallFailed,
+	ExecutionEventTypeWorkspacePreparationStarted,
+	ExecutionEventTypeWorkspacePreparationCompleted,
+	ExecutionEventTypeWorkspacePreparationFailed,
+	ExecutionEventTypeAgentRuntimeStarted,
+	ExecutionEventTypeAgentRuntimeCommandStarted,
+	ExecutionEventTypeAgentRuntimeCompleted,
+	ExecutionEventTypeAgentRuntimeFailed,
+	ExecutionEventTypeAgentRuntimeCancelled,
+	ExecutionEventTypeResultSubmitted,
+	ExecutionEventTypeArtifactUploadCompleted,
+	ExecutionEventTypeArtifactUploadFailed,
+	ExecutionEventTypeTaskForkRequested,
+	ExecutionEventTypeTaskForkCreated,
+	ExecutionEventTypeApprovalRequested,
+	ExecutionEventTypeApprovalApproved,
+	ExecutionEventTypeApprovalDeclined,
+	ExecutionEventTypeApprovalExpired,
+	ExecutionEventTypeApprovalCancelled,
+}
+
+var validExecutionEventTypes = stringSet(executionEventTypes)
+
+var terminalTaskEventTypes = []string{
+	ExecutionEventTypeTaskSucceeded,
+	ExecutionEventTypeTaskFailed,
+	ExecutionEventTypeTaskCancelled,
+}
+
+var terminalTaskEventTypeSet = stringSet(terminalTaskEventTypes)
+
+var terminalApprovalEventTypes = []string{
+	ExecutionEventTypeApprovalApproved,
+	ExecutionEventTypeApprovalDeclined,
+	ExecutionEventTypeApprovalExpired,
+	ExecutionEventTypeApprovalCancelled,
+}
+
+var terminalApprovalEventTypeSet = stringSet(terminalApprovalEventTypes)
+
+func stringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
 }
 
 // ExecutionEventTypes returns the stable Wave 0 execution event taxonomy.
 func ExecutionEventTypes() []string {
-	return []string{
-		ExecutionEventTypeTaskCreated,
-		ExecutionEventTypeTaskPhaseChanged,
-		ExecutionEventTypeTaskJobCreated,
-		ExecutionEventTypeTaskStarted,
-		ExecutionEventTypeTaskSucceeded,
-		ExecutionEventTypeTaskFailed,
-		ExecutionEventTypeTaskCancelled,
-		ExecutionEventTypeWorkerStarted,
-		ExecutionEventTypeWorkerCompleted,
-		ExecutionEventTypeWorkerFailed,
-		ExecutionEventTypeModelRequestStarted,
-		ExecutionEventTypeModelRequestCompleted,
-		ExecutionEventTypeModelRequestFailed,
-		ExecutionEventTypeModelMessage,
-		ExecutionEventTypeContextTruncated,
-		ExecutionEventTypeToolCallStarted,
-		ExecutionEventTypeToolCallCompleted,
-		ExecutionEventTypeToolCallFailed,
-		ExecutionEventTypeWorkspacePreparationStarted,
-		ExecutionEventTypeWorkspacePreparationCompleted,
-		ExecutionEventTypeWorkspacePreparationFailed,
-		ExecutionEventTypeAgentRuntimeStarted,
-		ExecutionEventTypeAgentRuntimeCommandStarted,
-		ExecutionEventTypeAgentRuntimeCompleted,
-		ExecutionEventTypeAgentRuntimeFailed,
-		ExecutionEventTypeAgentRuntimeCancelled,
-		ExecutionEventTypeResultSubmitted,
-		ExecutionEventTypeArtifactUploadCompleted,
-		ExecutionEventTypeArtifactUploadFailed,
-		ExecutionEventTypeTaskForkRequested,
-		ExecutionEventTypeTaskForkCreated,
-		ExecutionEventTypeApprovalRequested,
-		ExecutionEventTypeApprovalApproved,
-		ExecutionEventTypeApprovalDeclined,
-		ExecutionEventTypeApprovalExpired,
-		ExecutionEventTypeApprovalCancelled,
-	}
+	return append([]string(nil), executionEventTypes...)
+}
+
+// TerminalTaskEventTypes returns task-level terminal events that complete a task
+// execution stream.
+func TerminalTaskEventTypes() []string {
+	return append([]string(nil), terminalTaskEventTypes...)
+}
+
+// IsTerminalTaskEventType reports whether value is a task-level terminal event.
+func IsTerminalTaskEventType(value string) bool {
+	_, ok := terminalTaskEventTypeSet[strings.TrimSpace(value)]
+	return ok
+}
+
+// TerminalApprovalEventTypes returns approval terminal events that close an approval request.
+func TerminalApprovalEventTypes() []string {
+	return append([]string(nil), terminalApprovalEventTypes...)
+}
+
+// IsTerminalApprovalEventType reports whether value is an approval terminal event.
+func IsTerminalApprovalEventType(value string) bool {
+	_, ok := terminalApprovalEventTypeSet[strings.TrimSpace(value)]
+	return ok
 }
 
 // IsValidExecutionEventType reports whether value is one of the Wave 0 event types.

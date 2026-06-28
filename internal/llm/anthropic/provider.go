@@ -16,7 +16,14 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing/genai"
 )
+
+type streamUsageState struct {
+	InputTokens int
+	Model       string
+	Provider    string
+}
 
 func init() {
 	llm.RegisterProvider("anthropic", func(config llm.ProviderConfig) (llm.Provider, error) {
@@ -59,6 +66,10 @@ func (p *Provider) Name() string {
 	return "anthropic"
 }
 
+func (p *Provider) TelemetryProviderName() string {
+	return genai.ProviderAnthropic
+}
+
 // Complete sends a completion request
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	messages := buildMessages(req.Messages)
@@ -72,6 +83,8 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 
 	// Convert response
 	resp := &llm.CompletionResponse{
+		Provider:     p.TelemetryProviderName(),
+		ID:           message.ID,
 		Model:        message.Model,
 		StopReason:   string(message.StopReason),
 		InputTokens:  int(message.Usage.InputTokens),
@@ -195,8 +208,15 @@ func handleStreamEvent(
 	currentToolCall **llm.ToolCall,
 	toolCallArgs *[]byte,
 	hasToolCalls *bool,
+	usage *streamUsageState,
 ) bool {
 	switch e := event.AsAny().(type) {
+	case anthropic.MessageStartEvent:
+		if usage != nil {
+			usage.InputTokens = int(e.Message.Usage.InputTokens)
+			usage.Model = e.Message.Model
+			usage.Provider = genai.ProviderAnthropic
+		}
 	case anthropic.ContentBlockStartEvent:
 		cb := e.ContentBlock
 		if cb.Type == "tool_use" {
@@ -236,7 +256,26 @@ func handleStreamEvent(
 		if *hasToolCalls && stopReason == "" {
 			stopReason = "tool_use"
 		}
-		if !send(llm.StreamChunk{Done: true, StopReason: stopReason}) {
+		inputTokens := int(e.Usage.InputTokens)
+		model := ""
+		provider := genai.ProviderAnthropic
+		if usage != nil {
+			if inputTokens == 0 {
+				inputTokens = usage.InputTokens
+			}
+			model = usage.Model
+			if usage.Provider != "" {
+				provider = usage.Provider
+			}
+		}
+		if !send(llm.StreamChunk{
+			Done:         true,
+			StopReason:   stopReason,
+			InputTokens:  inputTokens,
+			OutputTokens: int(e.Usage.OutputTokens),
+			Model:        model,
+			Provider:     provider,
+		}) {
 			return false
 		}
 	case anthropic.MessageStopEvent:
@@ -268,9 +307,10 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		var currentToolCall *llm.ToolCall
 		var toolCallArgs []byte
 		hasToolCalls := false
+		usage := streamUsageState{}
 
 		for stream.Next() {
-			if !handleStreamEvent(stream.Current(), send, &currentToolCall, &toolCallArgs, &hasToolCalls) {
+			if !handleStreamEvent(stream.Current(), send, &currentToolCall, &toolCallArgs, &hasToolCalls, &usage) {
 				return
 			}
 		}

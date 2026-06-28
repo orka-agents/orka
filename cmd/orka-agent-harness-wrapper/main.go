@@ -9,7 +9,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/harness/cliwrapper"
 )
 
@@ -91,6 +94,19 @@ func run(args []string) error {
 		cfg.Claude.WorkDir = cfg.WorkDir
 		cfg.Copilot.WorkDir = cfg.WorkDir
 	}
+	telemetryEnabled := workerenv.IsTrue(os.Getenv(workerenv.EnableTelemetry))
+	tracingShutdown, err := tracing.Init("orka-agent-harness-wrapper", telemetryEnabled)
+	if err != nil {
+		return fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := tracingShutdown(shutdownCtx); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to shutdown telemetry: %v\n", shutdownErr)
+		}
+	}()
+
 	adapter, err := cliwrapper.NewRuntimeAdapter(cfg)
 	if err != nil {
 		return err

@@ -8,13 +8,10 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 
-	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/workspace"
 )
 
@@ -184,49 +180,15 @@ func (r *SubstrateActorPoolReconciler) finalizeSubstrateActorPool(
 	return ctrl.Result{}, nil
 }
 
-func (r *SubstrateActorPoolReconciler) activeSubstratePoolActorLeaseCount(
-	ctx context.Context,
-	namespace string,
-	prefix string,
-	target int,
-) (int, error) {
-	var leases coordinationv1.LeaseList
-	if err := r.List(ctx, &leases, client.InNamespace(namespace), client.MatchingLabels{
-		labels.LabelPurpose: substratePoolActorLeasePurpose,
-	}); err != nil {
-		return 0, err
-	}
-
-	active := 0
-	for i := range leases.Items {
-		lease := &leases.Items[i]
-		actorID := substratePoolActorLeaseActorID(lease)
-		ordinal, ok := substratePoolActorOrdinalFromID(actorID, prefix)
-		if !ok || ordinal < target {
-			continue
-		}
-		busy, err := substratePoolActorLeaseHasActiveHolder(ctx, r.Client, lease)
-		if err != nil {
-			return active, err
-		}
-		if busy {
-			active++
-		}
-	}
-	return active, nil
-}
-
 func (r *SubstrateActorPoolReconciler) substratePoolExecutor() (SubstratePoolExecutor, error) {
 	cfg := r.SubstrateConfig.WithDefaults()
 	if r.SubstrateExecutorFactory != nil {
 		return r.SubstrateExecutorFactory(cfg)
 	}
-	return workspace.NewSubstrateExecutor(workspace.SubstrateConfig{
+	return workspace.NewSubstrateActorPoolExecutor(workspace.SubstrateConfig{
 		APIEndpoint:           cfg.APIEndpoint,
 		APICAFile:             cfg.APICAFile,
 		APIInsecureSkipVerify: cfg.APIInsecureSkipVerify,
-		RouterURL:             cfg.RouterURL,
-		ActorDNSSuffix:        cfg.ActorDNSSuffix,
 	})
 }
 
@@ -275,11 +237,6 @@ func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolStatus(
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
-}
-
-func deterministicSubstratePoolActorPrefix(namespace, name string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(name)))
-	return fmt.Sprintf("orka-p-%s", hex.EncodeToString(sum[:])[:24])
 }
 
 func sanitizeSubstrateActorPoolMessage(message string) string {

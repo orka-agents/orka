@@ -1,0 +1,101 @@
+name: Approval Gate E2E
+
+on:
+  push:
+    paths:
+      - ".github/workflows/approval-gate-e2e.yml"
+      - "Makefile"
+      - "api/**"
+      - "internal/approvals/**"
+      - "internal/api/**"
+      - "internal/controller/**"
+      - "internal/events/**"
+      - "internal/labels/**"
+      - "internal/store/**"
+      - "internal/tools/**"
+      - "internal/workerenv/**"
+      - "internal/worker/**"
+      - "workers/ai/**"
+      - "workers/common/**"
+      - "test/e2e/**"
+      - "test/utils/**"
+      - "config/**"
+  pull_request:
+    paths:
+      - ".github/workflows/approval-gate-e2e.yml"
+      - "Makefile"
+      - "api/**"
+      - "internal/approvals/**"
+      - "internal/api/**"
+      - "internal/controller/**"
+      - "internal/events/**"
+      - "internal/labels/**"
+      - "internal/store/**"
+      - "internal/tools/**"
+      - "internal/workerenv/**"
+      - "internal/worker/**"
+      - "workers/ai/**"
+      - "workers/common/**"
+      - "test/e2e/**"
+      - "test/utils/**"
+      - "config/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: approval-gate-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  approval-gate-e2e:
+    name: Approval Gate E2E
+    runs-on: ubuntu-latest
+    env:
+      KIND_CLUSTER: orka-approval-gate-e2e
+      KIND_VERSION: v0.31.0
+      E2E_GO_TEST_TIMEOUT: 20m
+      E2E_GINKGO_FOCUS: Human Approval Gate
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Free disk space for Docker-heavy E2E
+        run: |
+          set -euxo pipefail
+          echo "Disk usage before cleanup"
+          df -h
+          docker system df || true
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift
+
+          docker system prune -af || true
+          docker builder prune -af || true
+
+          echo "Disk usage after cleanup"
+          df -h
+          docker system df || true
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify kind installation
+        run: kind version
+
+      - name: Run approval gate e2e
+        run: |
+          go mod tidy
+          make test-e2e

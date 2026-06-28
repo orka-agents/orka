@@ -355,12 +355,15 @@ func contextTokenToUserInfo(token *ContextToken) *UserInfo {
 		username = token.RequestingWorkload
 	}
 
+	namespace, _ := contextString(token.TransactionContext, "namespace")
+
 	return &UserInfo{
 		Username:     username,
 		AuthType:     AuthTypeContextToken,
 		Subject:      token.Subject,
 		Issuer:       token.Issuer,
 		Roles:        append([]string{}, token.Scopes...),
+		Namespace:    namespace,
 		ContextToken: token,
 	}
 }

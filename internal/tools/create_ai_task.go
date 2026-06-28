@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 // CreateAITaskTool creates an AI-type Task CR.
@@ -104,6 +105,7 @@ func (t *CreateAITaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
 		return result, nil
 	}
+	tracing.StampTaskTraceContext(ctx, task)
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}

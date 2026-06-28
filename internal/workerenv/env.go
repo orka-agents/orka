@@ -66,6 +66,12 @@ const (
 	AITools           = "ORKA_AI_TOOLS"
 	AIFallbackCount   = "ORKA_AI_FALLBACK_COUNT"
 
+	// Telemetry env vars.
+	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
+	TraceParent     = "ORKA_TRACEPARENT"
+	TraceState      = "ORKA_TRACESTATE"
+	TraceBaggage    = "ORKA_BAGGAGE"
+
 	// Coordination/autonomous env vars used by AI worker and coordination tools.
 	CoordinationEnabled       = "ORKA_COORDINATION_ENABLED"
 	CoordinationMaxDepth      = "ORKA_COORDINATION_MAX_DEPTH"
@@ -75,6 +81,9 @@ const (
 	AutonomousMode            = "ORKA_AUTONOMOUS_MODE"
 	AutonomousIteration       = "ORKA_AUTONOMOUS_ITERATION"
 	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
+	TaskUID                   = "ORKA_TASK_UID"
+	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
+	ResolvedApprovals         = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
 	Prompt                      = "ORKA_PROMPT"
@@ -307,8 +316,10 @@ func JoinCSV(values []string) string {
 type BaseEnv struct {
 	TaskName           string
 	TaskNamespace      string
+	TaskUID            string
 	ResultEndpoint     string
 	ControllerURL      string
+	AgentName          string
 	TransactionID      string
 	TransactionProfile string
 }
@@ -321,6 +332,8 @@ func (e BaseEnv) EnvVars() []corev1.EnvVar {
 		Env(ResultEndpoint, e.ResultEndpoint),
 		Env(ControllerURL, e.ControllerURL),
 	}
+	envVars = AppendIfSet(envVars, TaskUID, e.TaskUID)
+	envVars = AppendIfSet(envVars, AgentName, e.AgentName)
 	envVars = AppendIfSet(envVars, TransactionID, e.TransactionID)
 	envVars = AppendIfSet(envVars, TransactionProfile, e.TransactionProfile)
 	return envVars
@@ -331,8 +344,10 @@ func ParseBaseEnv(getenv func(string) string) BaseEnv {
 	return BaseEnv{
 		TaskName:           getenv(TaskName),
 		TaskNamespace:      getenv(TaskNamespace),
+		TaskUID:            getenv(TaskUID),
 		ResultEndpoint:     getenv(ResultEndpoint),
 		ControllerURL:      getenv(ControllerURL),
+		AgentName:          getenv(AgentName),
 		TransactionID:      getenv(TransactionID),
 		TransactionProfile: getenv(TransactionProfile),
 	}
@@ -429,6 +444,10 @@ type AIWorkerEnv struct {
 	AzureAPIVersion string
 	Tools           []string
 	Fallbacks       []FallbackProviderEnv
+	EnableTelemetry bool
+	TraceParent     string
+	TraceState      string
+	TraceBaggage    string
 }
 
 // EnvVars renders AI worker env vars. Fallback API keys are included only when
@@ -449,6 +468,12 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
 	}
+	if e.EnableTelemetry {
+		envVars = append(envVars, Env(EnableTelemetry, "true"))
+	}
+	envVars = AppendIfSet(envVars, TraceParent, e.TraceParent)
+	envVars = AppendIfSet(envVars, TraceState, e.TraceState)
+	envVars = AppendIfSet(envVars, TraceBaggage, e.TraceBaggage)
 	if len(e.Fallbacks) > 0 {
 		envVars = append(envVars, Env(AIFallbackCount, strconv.Itoa(len(e.Fallbacks))))
 		for i, fallback := range e.Fallbacks {
@@ -470,6 +495,10 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		AzureAPIVersion: getenv(AIAzureAPIVersion),
 		Tools:           SplitCSV(getenv(AITools)),
 		Fallbacks:       ParseFallbacks(getenv),
+		EnableTelemetry: IsTrue(getenv(EnableTelemetry)),
+		TraceParent:     getenv(TraceParent),
+		TraceState:      getenv(TraceState),
+		TraceBaggage:    getenv(TraceBaggage),
 	}
 }
 
@@ -692,6 +721,7 @@ type CoordinationEnv struct {
 	AutonomousMode          bool
 	AutonomousIteration     int
 	AutonomousMaxIterations int
+	ApprovalRequiredTools   []string
 }
 
 // EnvVars renders coordination/autonomous env vars.
@@ -719,6 +749,9 @@ func (e CoordinationEnv) EnvVars() []corev1.EnvVar {
 			envVars = append(envVars, Env(AutonomousMaxIterations, strconv.Itoa(e.AutonomousMaxIterations)))
 		}
 	}
+	if len(e.ApprovalRequiredTools) > 0 {
+		envVars = append(envVars, Env(ApprovalRequiredTools, JoinCSV(e.ApprovalRequiredTools)))
+	}
 	return envVars
 }
 
@@ -733,6 +766,7 @@ func ParseCoordinationEnv(getenv func(string) string) CoordinationEnv {
 		AutonomousMode:          IsTrue(getenv(AutonomousMode)),
 		AutonomousIteration:     parsePositiveInt(getenv(AutonomousIteration)),
 		AutonomousMaxIterations: parsePositiveInt(getenv(AutonomousMaxIterations)),
+		ApprovalRequiredTools:   SplitCSV(getenv(ApprovalRequiredTools)),
 	}
 }
 

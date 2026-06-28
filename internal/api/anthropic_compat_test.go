@@ -1016,10 +1016,12 @@ func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T
 // --- Mock provider for tool loop tests ---
 
 type mockAnthropicProvider struct {
-	responses []*llm.CompletionResponse
-	errors    []error
-	requests  []*llm.CompletionRequest
-	callIdx   int
+	responses    []*llm.CompletionResponse
+	errors       []error
+	requests     []*llm.CompletionRequest
+	callIdx      int
+	streamChunks []llm.StreamChunk
+	streamErr    error
 }
 
 func (m *mockAnthropicProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
@@ -1041,11 +1043,80 @@ func (m *mockAnthropicProvider) Complete(_ context.Context, req *llm.CompletionR
 }
 
 func (m *mockAnthropicProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
-	return nil, fmt.Errorf("streaming not supported by mock")
+	if m.streamErr != nil {
+		return nil, m.streamErr
+	}
+	if m.streamChunks == nil {
+		return nil, fmt.Errorf("streaming not supported by mock")
+	}
+	ch := make(chan llm.StreamChunk, len(m.streamChunks))
+	for _, chunk := range m.streamChunks {
+		ch <- chunk
+	}
+	close(ch)
+	return ch, nil
 }
 
 func (m *mockAnthropicProvider) Name() string {
 	return "mock-anthropic"
+}
+
+func TestHandleStreamingMessages_ForwardsTerminalUsage(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{
+			{Content: "hello"},
+			{Done: true, StopReason: oaiStopReasonEndTurn, OutputTokens: 11},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514", nil,
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"usage":{"input_tokens":0,"output_tokens":11`) {
+		t.Fatalf("expected streamed tool-loop usage in body, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_ForwardsTerminalUsage(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{
+			{Content: "hello"},
+			{Done: true, StopReason: oaiStopReasonEndTurn, OutputTokens: 9},
+		},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"usage":{"input_tokens":0,"output_tokens":9`) {
+		t.Fatalf("expected streamed usage in body, got: %s", bodyStr)
+	}
 }
 
 func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *testing.T) {
@@ -1076,13 +1147,13 @@ func TestHandleStreamingMessages_StripsSentinelAndStreamsSafeToolProgress(t *tes
 	handler, app := setupTestAnthropicHandler()
 	app.Post("/test", func(c fiber.Ctx) error {
 		return handler.handleStreamingMessages(
-			c, mock,
+			c, context.Background(), mock,
 			&llm.CompletionRequest{
 				Model:    "claude-sonnet-4-20250514",
 				Messages: []llm.Message{{Role: testRoleUser, Content: "read then report"}},
 				Tools:    []llm.Tool{{Name: "file_read"}},
 			},
-			"claude-sonnet-4-20250514", 0, nil,
+			"claude-sonnet-4-20250514", nil,
 		)
 	})
 
@@ -1134,12 +1205,12 @@ func TestHandleStreamingMessages_DoesNotStreamPrematureCoordinatorText(t *testin
 	handler.config.MaxPrematureEndRetries = 1
 	app.Post("/test", func(c fiber.Ctx) error {
 		return handler.handleStreamingMessages(
-			c, mock,
+			c, context.Background(), mock,
 			&llm.CompletionRequest{
 				Model:    "claude-sonnet-4-20250514",
 				Messages: []llm.Message{{Role: testRoleUser, Content: "ship"}},
 			},
-			"claude-sonnet-4-20250514", 0, nil,
+			"claude-sonnet-4-20250514", nil,
 		)
 	})
 

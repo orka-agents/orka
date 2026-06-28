@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,22 +40,29 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	execevents "github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
+	"github.com/sozercan/orka/internal/workspace/statusrules"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const (
-	taskTransactionTokenPendingTimeout = 2 * time.Minute
-	failedMountEventStaleAfter         = 2 * time.Minute
-	podLogLimitBytes                   = int64(5 << 20)
-	stdoutResultLogLimitBytes          = int64(15 << 20)
+	taskTransactionTokenPendingTimeout            = 2 * time.Minute
+	failedMountEventStaleAfter                    = 2 * time.Minute
+	podLogLimitBytes                              = int64(5 << 20)
+	stdoutResultLogLimitBytes                     = int64(15 << 20)
+	maxResolvedApprovalsJSONForWorkerEnvBytes     = 32 * 1024
+	maxRecentResolvedApprovalsForWorkerEnv        = 32
+	maxResolvedApprovalWorkerEnvFieldBytes        = 512
+	resolvedApprovalWorkerEnvJSONOverheadEstimate = 128
 
 	eventInvolvedObjectNameField = "involvedObject.name"
 	eventReasonField             = "reason"
@@ -78,18 +86,12 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
-
-	substratePoolActorLeasePurpose        = "substrate-actor-pool-lease"
-	substratePoolActorLeaseActorIDLabel   = "orka.ai/substrate-pool-actor-id"
-	substratePoolActorLeaseHolderUIDLabel = "orka.ai/substrate-pool-holder-uid"
-	substratePoolActorLeaseTaskNSAnno     = "orka.ai/substrate-pool-task-namespace"
-	substratePoolActorLeaseTaskNameAnno   = "orka.ai/substrate-pool-task-name"
-	substratePoolActorLeaseTaskUIDAnno    = "orka.ai/substrate-pool-task-uid"
 )
 
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
+	APIReader                          client.Reader
 	Scheme                             *runtime.Scheme
 	JobBuilder                         *JobBuilder
 	SessionManager                     *SessionManager
@@ -128,7 +130,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
@@ -144,7 +146,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
@@ -235,6 +239,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
+	if task.Spec.Schedule == "" {
+		ctx = tracing.ExtractTaskTraceContext(ctx, task)
+	}
 	tracer := tracing.Tracer("orka.controller")
 	ctx, span := tracer.Start(ctx, "task.reconcile",
 		trace.WithAttributes(spanAttributes...),
@@ -521,6 +528,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 // handlePending handles Tasks in Pending phase
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
+		log.Error(err, "failed to clear durable approval decision nudge")
+		return ctrl.Result{}, err
+	}
 
 	if taskTransactionTokenPending(task) {
 		return r.handleTransactionTokenPending(ctx, task)
@@ -901,6 +913,247 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	return provider, nil
 }
 
+func taskNeedsApprovalState(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	return task != nil &&
+		task.Spec.Type == corev1alpha1.TaskTypeAI &&
+		agent != nil &&
+		agent.Spec.Coordination != nil &&
+		agent.Spec.Coordination.Autonomous
+}
+
+func (r *TaskReconciler) resolvedApprovalsJSONForTask(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return "", nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return "", err
+	}
+	// Match parking semantics: only explicit terminal approval events are injected.
+	// V1 does not persist consumed-action markers in Orka; workers pass the
+	// approval ID as the downstream idempotency key, so cross-Job duplicate
+	// suppression remains the downstream service's responsibility.
+	resolved := approvals.Resolved(approvals.Derive(
+		approvals.FilterEventsForTaskUID(listed, string(task.UID)),
+		time.Time{},
+	))
+	return resolvedApprovalsJSONForWorkerEnv(resolved)
+}
+
+func resolvedApprovalsJSONForWorkerEnv(values []approvals.ResolvedApproval) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+
+	if resolvedApprovalsLikelyFitWorkerEnv(values, resolvedApprovalWorkerEnvFullPayload) {
+		bounded := append([]approvals.ResolvedApproval(nil), values...)
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(bounded); err != nil || ok {
+			return data, err
+		}
+	}
+
+	if resolvedApprovalsLikelyFitWorkerEnv(values, resolvedApprovalWorkerEnvNoPreviewPayload) {
+		withoutPreviews := append([]approvals.ResolvedApproval(nil), values...)
+		for i := range withoutPreviews {
+			withoutPreviews[i].TargetArgsPreview = nil
+		}
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(withoutPreviews); err != nil || ok {
+			return data, err
+		}
+	}
+
+	compact := compactResolvedApprovalsForWorkerEnv(values)
+	if resolvedApprovalsLikelyFitWorkerEnv(compact, resolvedApprovalWorkerEnvCompactPayload) {
+		if data, ok, err := marshalResolvedApprovalsForWorkerEnv(compact); err != nil || ok {
+			return data, err
+		}
+	}
+
+	selected, err := selectResolvedApprovalsForWorkerEnv(compact)
+	if err != nil || len(selected) == 0 {
+		return "", err
+	}
+	data, ok, err := marshalResolvedApprovalsForWorkerEnv(selected)
+	if err != nil || !ok {
+		return "", err
+	}
+	return data, nil
+}
+
+func marshalResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) (string, bool, error) {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", false, err
+	}
+	if len(data) > maxResolvedApprovalsJSONForWorkerEnvBytes {
+		return "", false, nil
+	}
+	return string(data), true, nil
+}
+
+type resolvedApprovalWorkerEnvPayload int
+
+const (
+	resolvedApprovalWorkerEnvFullPayload resolvedApprovalWorkerEnvPayload = iota
+	resolvedApprovalWorkerEnvNoPreviewPayload
+	resolvedApprovalWorkerEnvCompactPayload
+)
+
+func resolvedApprovalsLikelyFitWorkerEnv(
+	values []approvals.ResolvedApproval,
+	payload resolvedApprovalWorkerEnvPayload,
+) bool {
+	estimated := 2
+	for _, approval := range values {
+		estimated += resolvedApprovalWorkerEnvJSONOverheadEstimate
+		estimated += len(approval.ID) + len(approval.TaskUID) + len(approval.TargetTool)
+		estimated += len(approval.TargetArgsDigest) + len(approval.TargetSpecDigest) + len(approval.Status)
+		if payload != resolvedApprovalWorkerEnvCompactPayload {
+			estimated += len(approval.Actor) + len(approval.DecisionTime) + len(approval.Reason)
+			estimated += len(approval.Action) + len(approval.RiskSummary) + len(approval.Severity)
+		}
+		if payload == resolvedApprovalWorkerEnvFullPayload {
+			estimated += len(approval.TargetArgsPreview)
+		}
+		if estimated > maxResolvedApprovalsJSONForWorkerEnvBytes {
+			return false
+		}
+	}
+	return true
+}
+
+func resolvedApprovalWorkerEnvField(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxResolvedApprovalWorkerEnvFieldBytes {
+		return value
+	}
+	return value[:maxResolvedApprovalWorkerEnvFieldBytes]
+}
+
+func compactResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) []approvals.ResolvedApproval {
+	compact := make([]approvals.ResolvedApproval, 0, len(values))
+	for _, approval := range values {
+		compact = append(compact, approvals.ResolvedApproval{
+			ID:               resolvedApprovalWorkerEnvField(approval.ID),
+			TaskUID:          resolvedApprovalWorkerEnvField(approval.TaskUID),
+			TargetTool:       resolvedApprovalWorkerEnvField(approval.TargetTool),
+			TargetArgsDigest: resolvedApprovalWorkerEnvField(approval.TargetArgsDigest),
+			TargetSpecDigest: resolvedApprovalWorkerEnvField(approval.TargetSpecDigest),
+			Status:           resolvedApprovalWorkerEnvField(approval.Status),
+		})
+	}
+	return compact
+}
+
+func selectResolvedApprovalsForWorkerEnv(values []approvals.ResolvedApproval) ([]approvals.ResolvedApproval, error) {
+	selected := make([]approvals.ResolvedApproval, 0, min(len(values), maxRecentResolvedApprovalsForWorkerEnv))
+	selectedIndexes := make(map[int]struct{}, min(len(values), maxRecentResolvedApprovalsForWorkerEnv))
+
+	// Always reserve space for the newest decisions first so recent approvals can
+	// resume required tool calls even when a long history contains many old denials.
+	for i := len(values) - 1; i >= 0 && len(selectedIndexes) < maxRecentResolvedApprovalsForWorkerEnv; i-- {
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, values[i])
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+
+	// Add older blocking terminal decisions before older approvals. Dropping an
+	// old approval can re-request approval; dropping an old decline/expiry can
+	// allow a previously denied target to execute.
+	omittedBlocking := false
+	for i, approval := range values {
+		if !resolvedApprovalBlocksExecution(approval) {
+			continue
+		}
+		if _, ok := selectedIndexes[i]; ok {
+			continue
+		}
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, approval)
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		} else {
+			omittedBlocking = true
+		}
+	}
+	if omittedBlocking {
+		var err error
+		selected, err = ensureBlockingOverflowSentinelFitsWorkerEnv(selected)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for i := len(values) - 1; i >= 0; i-- {
+		if _, ok := selectedIndexes[i]; ok {
+			continue
+		}
+		if resolvedApprovalBlocksExecution(values[i]) {
+			continue
+		}
+		var added bool
+		var err error
+		selected, added, err = appendResolvedApprovalIfWorkerEnvFits(selected, values[i])
+		if err != nil {
+			return nil, err
+		}
+		if added {
+			selectedIndexes[i] = struct{}{}
+		}
+	}
+	return selected, nil
+}
+
+func ensureBlockingOverflowSentinelFitsWorkerEnv(
+	selected []approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, error) {
+	sentinel := approvals.BlockingOverflowResolvedApproval()
+	if slices.ContainsFunc(selected, approvals.IsResolvedApprovalBlockingOverflow) {
+		return selected, nil
+	}
+	for {
+		candidate := append([]approvals.ResolvedApproval{sentinel}, selected...)
+		if _, ok, err := marshalResolvedApprovalsForWorkerEnv(candidate); err != nil {
+			return nil, err
+		} else if ok {
+			return candidate, nil
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("blocking approval overflow sentinel does not fit worker env budget")
+		}
+		drop := len(selected) - 1
+		selected = append(selected[:drop], selected[drop+1:]...)
+	}
+}
+
+func appendResolvedApprovalIfWorkerEnvFits(
+	selected []approvals.ResolvedApproval,
+	approval approvals.ResolvedApproval,
+) ([]approvals.ResolvedApproval, bool, error) {
+	candidate := append(append([]approvals.ResolvedApproval(nil), selected...), approval)
+	if _, ok, err := marshalResolvedApprovalsForWorkerEnv(candidate); err != nil {
+		return nil, false, err
+	} else if ok {
+		return candidate, true, nil
+	}
+	return selected, false, nil
+}
+
+func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
+	status := strings.TrimSpace(approval.Status)
+	return status != "" && status != approvals.StatusApproved
+}
+
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -951,9 +1204,24 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		reservedPoolActor = true
 	}
 
+	resolvedApprovalsJSON := ""
+	if taskNeedsApprovalState(task, agent) {
+		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
+		if err != nil {
+			log.Error(err, "failed to derive resolved approvals")
+			if reservedPoolActor {
+				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+					return ctrl.Result{}, releaseErr
+				}
+			}
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
-		ExecutionWorkspace: workspaceRequest,
+		ExecutionWorkspace:    workspaceRequest,
+		ResolvedApprovalsJSON: resolvedApprovalsJSON,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
@@ -1159,61 +1427,6 @@ func (r *TaskReconciler) tryReserveSubstratePoolActor(
 	return true, nil
 }
 
-func substratePoolActorLeaseHasActiveHolder(ctx context.Context, reader client.Reader, lease *coordinationv1.Lease) (bool, error) {
-	if lease == nil || lease.Annotations == nil {
-		return true, nil
-	}
-	taskNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskNSAnno])
-	taskName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskNameAnno])
-	taskUID := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseTaskUIDAnno])
-	if taskNamespace == "" || taskName == "" || taskUID == "" {
-		toolNamespace := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNSAnno])
-		toolName := strings.TrimSpace(lease.Annotations[substratePoolActorLeaseToolNameAnno])
-		if toolNamespace != "" && toolName != "" {
-			return substratePoolActorLeaseHasActiveToolHolder(ctx, reader, toolNamespace, toolName, lease.Annotations[substratePoolActorLeaseToolUIDAnno])
-		}
-		return true, nil
-	}
-	task := &corev1alpha1.Task{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: taskNamespace, Name: taskName}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return true, err
-	}
-	if string(task.UID) != taskUID {
-		return true, nil
-	}
-	if !task.DeletionTimestamp.IsZero() {
-		return true, nil
-	}
-	if substratePoolActorLeaseActiveTaskPhase(task.Status.Phase) {
-		return true, nil
-	}
-	return taskSubstratePoolActorCleanupRequired(task), nil
-}
-
-func substratePoolActorLeaseHasActiveToolHolder(
-	ctx context.Context,
-	reader client.Reader,
-	toolNamespace string,
-	toolName string,
-	toolUID string,
-) (bool, error) {
-	tool := &corev1alpha1.Tool{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: toolNamespace, Name: toolName}, tool); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return true, err
-	}
-	toolUID = strings.TrimSpace(toolUID)
-	if toolUID != "" && string(tool.UID) != toolUID {
-		return true, nil
-	}
-	return true, nil
-}
-
 func (r *TaskReconciler) releaseSubstratePoolActorLeases(ctx context.Context, task *corev1alpha1.Task) error {
 	leases, err := r.substratePoolActorLeasesForTask(ctx, task)
 	if err != nil {
@@ -1251,44 +1464,6 @@ func (r *TaskReconciler) deleteSubstratePoolActorLeasesForTask(ctx context.Conte
 		}
 	}
 	return nil
-}
-
-func deleteCurrentObjectPreconditions(obj client.Object) []client.DeleteOption {
-	if obj == nil {
-		return nil
-	}
-	preconditions := &metav1.Preconditions{}
-	if obj.GetUID() != "" {
-		uid := obj.GetUID()
-		preconditions.UID = &uid
-	}
-	if obj.GetResourceVersion() != "" {
-		resourceVersion := obj.GetResourceVersion()
-		preconditions.ResourceVersion = &resourceVersion
-	}
-	if preconditions.UID == nil && preconditions.ResourceVersion == nil {
-		return nil
-	}
-	return []client.DeleteOption{&client.DeleteOptions{Preconditions: preconditions}}
-}
-
-func substrateLeaseStillMatchesAfterDeleteConflict(
-	ctx context.Context,
-	reader client.Reader,
-	lease *coordinationv1.Lease,
-	matches func(*coordinationv1.Lease) bool,
-) (bool, error) {
-	if lease == nil || matches == nil {
-		return false, nil
-	}
-	latest := &coordinationv1.Lease{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: lease.Namespace, Name: lease.Name}, latest); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return matches(latest), nil
 }
 
 func (r *TaskReconciler) releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
@@ -1394,98 +1569,6 @@ func (r *TaskReconciler) taskHasSubstratePoolActorLeases(ctx context.Context, ta
 	return len(leases) > 0, nil
 }
 
-func newSubstratePoolActorLease(
-	task *corev1alpha1.Task,
-	namespace string,
-	name string,
-	actorID string,
-) *coordinationv1.Lease {
-	lease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-		},
-	}
-	setSubstratePoolActorLeaseHolder(lease, task, actorID)
-	return lease
-}
-
-func setSubstratePoolActorLeaseHolder(lease *coordinationv1.Lease, task *corev1alpha1.Task, actorID string) {
-	if lease.Labels == nil {
-		lease.Labels = map[string]string{}
-	}
-	lease.Labels[labels.LabelManaged] = managedLabelValue
-	lease.Labels[labels.LabelPurpose] = substratePoolActorLeasePurpose
-	lease.Labels[substratePoolActorLeaseActorIDLabel] = labels.SelectorValue(actorID)
-	lease.Labels[substratePoolActorLeaseHolderUIDLabel] = labels.SelectorValue(string(task.UID))
-	if lease.Annotations == nil {
-		lease.Annotations = map[string]string{}
-	}
-	lease.Annotations[substratePoolActorLeaseTaskNSAnno] = task.Namespace
-	lease.Annotations[substratePoolActorLeaseTaskNameAnno] = task.Name
-	lease.Annotations[substratePoolActorLeaseTaskUIDAnno] = string(task.UID)
-	now := metav1.NewMicroTime(time.Now())
-	holder := fmt.Sprintf("%s/%s/%s", task.Namespace, task.Name, task.UID)
-	lease.Spec.HolderIdentity = &holder
-	lease.Spec.AcquireTime = &now
-	lease.Spec.RenewTime = &now
-}
-
-func substratePoolActorLeaseHeldByTask(lease *coordinationv1.Lease, task *corev1alpha1.Task) bool {
-	if lease == nil || task == nil || task.UID == "" || lease.Annotations == nil {
-		return false
-	}
-	return lease.Annotations[substratePoolActorLeaseTaskNSAnno] == task.Namespace &&
-		lease.Annotations[substratePoolActorLeaseTaskNameAnno] == task.Name &&
-		lease.Annotations[substratePoolActorLeaseTaskUIDAnno] == string(task.UID)
-}
-
-func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
-	if lease == nil {
-		return ""
-	}
-	if lease.Labels != nil {
-		if actorID := strings.TrimSpace(lease.Labels[substratePoolActorLeaseActorIDLabel]); actorID != "" {
-			return actorID
-		}
-	}
-	return strings.TrimSpace(lease.Name)
-}
-
-func substratePoolActorLeaseName(actorID string) string {
-	return strings.TrimSpace(actorID)
-}
-
-func substratePoolActorLeaseActiveTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseScheduled, corev1alpha1.TaskPhaseRunning:
-		return true
-	default:
-		return false
-	}
-}
-
-func taskExecutionWorkspaceCleanupSucceeded(task *corev1alpha1.Task) bool {
-	if task == nil || task.Status.ExecutionWorkspace == nil {
-		return false
-	}
-	status := task.Status.ExecutionWorkspace
-	switch status.Reason {
-	case corev1alpha1.ExecutionWorkspaceReasonRetained:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseRetained
-	case corev1alpha1.ExecutionWorkspaceReasonDeleted:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseDeleted
-	case corev1alpha1.ExecutionWorkspaceReasonReleased:
-		return status.Phase == corev1alpha1.ExecutionWorkspacePhaseReleased
-	default:
-		return false
-	}
-}
-
-func taskSubstratePoolActorCleanupRequired(task *corev1alpha1.Task) bool {
-	return task != nil && !taskExecutionWorkspaceCleanupSucceeded(task)
-}
-
 func taskExecutionWorkspacePhase(task *corev1alpha1.Task) corev1alpha1.ExecutionWorkspacePhase {
 	if task == nil || task.Status.ExecutionWorkspace == nil {
 		return ""
@@ -1500,23 +1583,6 @@ func taskExecutionWorkspaceReason(task *corev1alpha1.Task) corev1alpha1.Executio
 	return task.Status.ExecutionWorkspace.Reason
 }
 
-func substratePoolActorOrdinalFromID(actorID string, prefix string) (int, bool) {
-	actorID = strings.TrimSpace(actorID)
-	prefix = strings.Trim(strings.TrimSpace(prefix), "-")
-	suffix, ok := strings.CutPrefix(actorID, prefix+"-")
-	if !ok || len(suffix) != 5 {
-		return 0, false
-	}
-	ordinal := 0
-	for _, ch := range suffix {
-		if ch < '0' || ch > '9' {
-			return 0, false
-		}
-		ordinal = ordinal*10 + int(ch-'0')
-	}
-	return ordinal, true
-}
-
 // handleRunning handles Tasks in Running phase
 func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:gocyclo
 	log := logf.FromContext(ctx)
@@ -1525,6 +1591,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if elapsed > task.Spec.Timeout.Duration {
+			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+				return result, err
+			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
 				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
@@ -1601,6 +1670,29 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		Namespace: task.Namespace,
 	}, job); err != nil {
 		if apierrors.IsNotFound(err) {
+			if r.isAutonomousTask(ctx, task) {
+				oldJob := task.Status.JobName
+				latest := &corev1alpha1.Task{}
+				reader := r.APIReader
+				if reader == nil {
+					reader = r.Client
+				}
+				if latestErr := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); latestErr != nil {
+					return ctrl.Result{}, latestErr
+				}
+				if latest.Status.JobName != oldJob || latest.Status.Phase != corev1alpha1.TaskPhaseRunning {
+					task.Status = latest.Status
+					log.Info("job not found for stale autonomous task state; requeueing with latest status",
+						"oldJob", oldJob,
+						"latestJob", latest.Status.JobName,
+						"latestPhase", latest.Status.Phase)
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				task = latest
+				if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+					return result, err
+				}
+			}
 			if r.isWithinJobCreationVisibilityGracePeriod(task) {
 				log.Info("job not found shortly after creation, waiting for cache visibility",
 					"job", task.Status.JobName,
@@ -1630,6 +1722,9 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if job.Status.Failed > 0 {
+		if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+			return result, err
+		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
@@ -2586,15 +2681,11 @@ func (r *TaskReconciler) validateExecutionWorkspaceProviderConfig(
 }
 
 func validateExecutionWorkspacePolicies(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
-	switch ws.ReusePolicy {
-	case "", corev1alpha1.WorkspaceReusePolicyNone, corev1alpha1.WorkspaceReusePolicySession:
-	default:
+	if !statusrules.IsOptionalReusePolicy(ws.ReusePolicy) {
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
 
-	switch ws.CleanupPolicy {
-	case "", corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-	default:
+	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
 		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
 	}
 	if ws.PoolRef != nil && ws.CleanupPolicy == corev1alpha1.WorkspaceCleanupPolicyRetain {
@@ -2616,26 +2707,25 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 	now := metav1.Now()
 	message := ""
 	if validationErr != nil {
-		message = strings.TrimSpace(validationErr.Error())
-	}
-	status := &corev1alpha1.ExecutionWorkspaceStatus{
-		Phase:          corev1alpha1.ExecutionWorkspacePhaseFailed,
-		Reason:         corev1alpha1.ExecutionWorkspaceReasonValidationFailed,
-		Message:        message,
-		LastUpdateTime: &now,
+		message = validationErr.Error()
 	}
 	ws := task.Spec.Execution.Workspace
 	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
+	failure := statusrules.ValidationFailure{
+		Message:    message,
+		ObservedAt: &now,
+	}
 	if supportedWorkspaceProvider(provider) {
-		status.Provider = provider
-		status.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
+		failure.Provider = provider
+		failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
 	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
-		status.ReusePolicy = reusePolicy
+		failure.ReusePolicy = reusePolicy
 	}
 	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
-		status.CleanupPolicy = cleanupPolicy
+		failure.CleanupPolicy = cleanupPolicy
 	}
+	status := statusrules.ValidationFailedStatus(failure)
 
 	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.ExecutionWorkspace = status
@@ -2700,12 +2790,7 @@ func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.
 }
 
 func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	switch cleanupPolicy {
-	case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-		return cleanupPolicy, true
-	default:
-		return "", false
-	}
+	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
@@ -2747,6 +2832,9 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
 			return err
 		}
+		if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
+			return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
+		}
 		// Prompt is required for agent tasks
 		if task.Spec.Prompt == "" {
 			return fmt.Errorf("prompt is required for type: agent tasks")
@@ -2756,10 +2844,69 @@ func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task,
 		if agent != nil && agent.Spec.Runtime != nil {
 			return fmt.Errorf("agent %q has runtime configured (use type: agent instead of type: ai)", agent.Name)
 		}
+		if aiTaskRequestsApprovalTooling(task, agent) && !agentHasAutonomousCoordination(agent) {
+			return fmt.Errorf("request_approval requires enabled autonomous coordination mode")
+		}
+		if agent != nil && agent.Spec.Coordination != nil {
+			approvalRequiredTools := agent.Spec.Coordination.ApprovalRequiredTools
+			if len(approvalRequiredTools) > 0 &&
+				(!agent.Spec.Coordination.Enabled || !agent.Spec.Coordination.Autonomous) {
+				return fmt.Errorf("agent %q approvalRequiredTools requires enabled autonomous coordination mode", agent.Name)
+			}
+			if invalidTool := invalidApprovalRequiredBuiltInTool(approvalRequiredTools); invalidTool != "" {
+				return fmt.Errorf("agent %q approvalRequiredTools cannot include built-in tool %q", agent.Name, invalidTool)
+			}
+		}
 	case corev1alpha1.TaskTypeContainer:
 		// Container tasks don't use agents, no validation needed
 	}
 	return nil
+}
+
+func aiTaskRequestsApprovalTooling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if agent != nil {
+		for _, toolRef := range agent.Spec.Tools {
+			if toolRef.Enabled != nil && !*toolRef.Enabled {
+				continue
+			}
+			if strings.TrimSpace(toolRef.Name) == "request_approval" {
+				return true
+			}
+		}
+	}
+	if task != nil && task.Spec.AI != nil {
+		for _, toolName := range task.Spec.AI.Tools {
+			if strings.TrimSpace(toolName) == "request_approval" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func agentHasAutonomousCoordination(agent *corev1alpha1.Agent) bool {
+	return agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && agent.Spec.Coordination.Autonomous
+}
+
+func invalidApprovalRequiredBuiltInTool(values []string) string {
+	builtIns := approvalRequiredBuiltInToolSet()
+	for _, value := range values {
+		toolName := strings.TrimSpace(value)
+		if builtIns[toolName] {
+			return toolName
+		}
+	}
+	return ""
+}
+
+func approvalRequiredBuiltInToolSet() map[string]bool {
+	builtIns := map[string]bool{}
+	for _, name := range tools.KnownBuiltInToolNames() {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			builtIns[trimmed] = true
+		}
+	}
+	return builtIns
 }
 
 // handleScheduled manages the scheduling loop for recurring tasks.
@@ -2882,6 +3029,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	child.Spec.SuccessfulRunsHistoryLimit = nil
 	child.Spec.FailedRunsHistoryLimit = nil
 	child.Spec.Suspend = nil
+	tracing.StampTaskTraceContext(ctx, child)
 
 	// Set owner reference
 	if err := ctrl.SetControllerReference(task, child, r.Scheme); err != nil {
@@ -2977,6 +3125,9 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex); err != nil {
 		return err
 	}
@@ -3057,13 +3208,23 @@ func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 	return fmt.Sprintf("%s-%s", name[:prefixLength], suffix)
 }
 
-// ensureWorkerRBAC ensures each worker ServiceAccount and ClusterRoleBinding
+// ensureWorkerRBAC ensures each worker ServiceAccount and worker role binding
 // exists in the given namespace so that task jobs have trust-tiered permissions.
 func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
 		}
+		if r.EnforceNamespaceIsolation {
+			if err := r.ensureWorkerRoleBinding(ctx, namespace, spec); err != nil {
+				return err
+			}
+			if err := r.deleteLegacyWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
+				return err
+			}
+			continue
+		}
+
 		if err := r.ensureWorkerClusterRoleBinding(ctx, namespace, spec); err != nil {
 			return err
 		}
@@ -3113,6 +3274,135 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 		log.Info("Updated worker ServiceAccount", "namespace", namespace, "serviceAccount", name)
 	}
 
+	return nil
+}
+
+func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+	desired := workerRoleBinding(namespace, spec)
+
+	rb := &rbacv1.RoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb)
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, desired); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("creating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+			}
+			if err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, rb); err != nil {
+				return fmt.Errorf("getting worker RoleBinding %s/%s after create conflict: %w", namespace, spec.clusterRoleBindingName, err)
+			}
+		} else {
+			log.Info("Created worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+			return nil
+		}
+	} else if err != nil {
+		return fmt.Errorf("getting worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+	}
+
+	if rb.RoleRef != desired.RoleRef {
+		recreated, err := r.recreateWorkerRoleBinding(ctx, namespace, spec, rb, desired)
+		if err != nil {
+			return err
+		}
+		rb = recreated
+	}
+
+	changed := false
+	if rb.Labels == nil {
+		rb.Labels = map[string]string{}
+	}
+	if rb.Labels[managedByLabelKey] != managedByLabelValue {
+		rb.Labels[managedByLabelKey] = managedByLabelValue
+		changed = true
+	}
+	if !subjectsEqual(rb.Subjects, desired.Subjects) {
+		rb.Subjects = desired.Subjects
+		changed = true
+	}
+
+	if changed {
+		if err := r.Update(ctx, rb); err != nil {
+			return fmt.Errorf("updating worker RoleBinding %s/%s: %w", namespace, spec.clusterRoleBindingName, err)
+		}
+		log.Info("Updated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+	}
+
+	return nil
+}
+
+func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
+	log := logf.FromContext(ctx)
+	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.clusterRoleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
+
+	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+	}
+
+	var recreated *rbacv1.RoleBinding
+	err := wait.PollUntilContextTimeout(ctx, workerClusterRoleBindingRecreateInterval, workerClusterRoleBindingRecreateTimeout, true, func(ctx context.Context) (bool, error) {
+		latest := &rbacv1.RoleBinding{}
+		err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName, Namespace: namespace}, latest)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("getting worker RoleBinding %s/%s while waiting for stale RoleRef deletion: %w", namespace, spec.clusterRoleBindingName, err)
+		}
+
+		if err == nil {
+			if latest.RoleRef == desired.RoleRef {
+				recreated = latest
+				return true, nil
+			}
+
+			// The API server may still be serving the stale object while deletion is
+			// propagating, or another actor may have recreated it with the stale
+			// immutable RoleRef. Keep deleting/retrying until the name is available.
+			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.clusterRoleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
+			}
+			return false, nil
+		}
+
+		create := desired.DeepCopy()
+		if err := r.Create(ctx, create); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("recreating worker RoleBinding %s/%s with RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, desired.RoleRef.Kind, desired.RoleRef.Name, err)
+		}
+
+		recreated = create
+		return true, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("recreating worker RoleBinding %s/%s after stale RoleRef %s/%s: %w", namespace, spec.clusterRoleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
+	}
+
+	log.Info("Recreated worker RoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
+	return recreated, nil
+}
+
+func (r *TaskReconciler) deleteLegacyWorkerClusterRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec) error {
+	log := logf.FromContext(ctx)
+	legacy := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: spec.clusterRoleBindingName}, legacy)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
+	}
+
+	desiredLegacy := workerClusterRoleBinding(namespace, spec)
+	managed := legacy.Labels[managedByLabelKey] == managedByLabelValue
+	bindsWorkerServiceAccount := len(desiredLegacy.Subjects) == 1 && subjectsContain(legacy.Subjects, desiredLegacy.Subjects[0])
+	if !managed && !bindsWorkerServiceAccount {
+		log.Info("Skipping unmanaged legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName)
+		return nil
+	}
+
+	if err := r.Delete(ctx, legacy); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting legacy worker ClusterRoleBinding %s: %w", spec.clusterRoleBindingName, err)
+	}
+	log.Info("Deleted legacy worker ClusterRoleBinding", "namespace", namespace, "binding", spec.clusterRoleBindingName, "serviceAccount", spec.serviceAccountName, "clusterRole", spec.clusterRoleName)
 	return nil
 }
 
@@ -3219,6 +3509,30 @@ func (r *TaskReconciler) recreateWorkerClusterRoleBinding(ctx context.Context, n
 	return recreated, nil
 }
 
+func workerRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.RoleBinding {
+	return &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      spec.clusterRoleBindingName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				managedByLabelKey: managedByLabelValue,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     spec.clusterRoleName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      spec.serviceAccountName,
+				Namespace: namespace,
+			},
+		},
+	}
+}
+
 func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.ClusterRoleBinding {
 	return &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -3240,6 +3554,10 @@ func workerClusterRoleBinding(namespace string, spec workerRBACSpec) *rbacv1.Clu
 			},
 		},
 	}
+}
+
+func subjectsContain(subjects []rbacv1.Subject, want rbacv1.Subject) bool {
+	return slices.Contains(subjects, want)
 }
 
 // subjectsEqual is intentionally order-sensitive; desired worker bindings
@@ -3274,6 +3592,145 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous
 }
 
+func (r *TaskReconciler) pendingApprovalsForTask(ctx context.Context, task *corev1alpha1.Task) ([]approvals.Approval, error) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return nil, nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return nil, err
+	}
+	// Use zero time intentionally: v1 approval parking resolves only by
+	// explicit terminal approval events. There is no expiry producer yet, so
+	// passive expiresAt evaluation would silently resume consequential work.
+	return approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Time{}), nil
+}
+
+func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+	pending, err := r.pendingApprovalsForTask(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to derive pending approvals")
+		return ctrl.Result{}, false, err
+	}
+	if len(pending) == 0 {
+		return ctrl.Result{}, false, nil
+	}
+	approval := pending[0]
+	target := approval.TargetTool
+	if target == "" {
+		target = approval.Action
+	}
+	if target == "" {
+		target = "requested action"
+	}
+	log.Info(
+		"autonomous task waiting for approval",
+		"approvalID", approval.ID,
+		"targetTool", approval.TargetTool,
+		"iteration", task.Status.Iteration,
+	)
+	waitingMessage := fmt.Sprintf(
+		"waiting for approval %s for %s at iteration %d",
+		approval.ID,
+		target,
+		task.Status.Iteration,
+	)
+	if task.Status.Message != waitingMessage {
+		task.Status.Message = waitingMessage
+		if err := r.Status().Update(ctx, task); err != nil {
+			return ctrl.Result{}, false, err
+		}
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if !r.isAutonomousTask(ctx, task) {
+		return ctrl.Result{}, false, nil
+	}
+	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		return result, true, err
+	}
+	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if resumingAfterApproval {
+		result, err := r.handleAutonomousIteration(ctx, task)
+		return result, true, err
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func parseAnnotationInt64(value string) int64 {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
+}
+
+func (r *TaskReconciler) resumingAfterApprovalDecision(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	waitingStatus := strings.HasPrefix(task.Status.Message, "waiting for approval ")
+	decisionNudge := task.Annotations != nil && task.Annotations[labels.AnnotationApprovalDecidedAt] != ""
+	if decisionNudge && task.Annotations != nil {
+		decisionSeq := parseAnnotationInt64(task.Annotations[labels.AnnotationApprovalDecisionSeq])
+		resumedSeq := parseAnnotationInt64(task.Annotations[labels.AnnotationApprovalResumedSeq])
+		decisionNudge = decisionSeq == 0 || decisionSeq > resumedSeq
+	}
+	if !waitingStatus && !decisionNudge {
+		return false, nil
+	}
+	if r == nil || r.ExecutionEventStore == nil {
+		return false, nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return false, err
+	}
+	resolved := approvals.Resolved(approvals.Derive(
+		approvals.FilterEventsForTaskUID(listed, string(task.UID)),
+		time.Time{},
+	))
+	return len(resolved) > 0, nil
+}
+
+func (r *TaskReconciler) clearApprovalDecisionNudge(ctx context.Context, task *corev1alpha1.Task) error {
+	if r == nil || task == nil || task.Annotations == nil || task.Annotations[labels.AnnotationApprovalDecidedAt] == "" {
+		return nil
+	}
+	var updated *corev1alpha1.Task
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, current); err != nil {
+			return err
+		}
+		if seq := strings.TrimSpace(current.Annotations[labels.AnnotationApprovalDecisionSeq]); seq != "" {
+			current.Annotations[labels.AnnotationApprovalResumedSeq] = seq
+		}
+		delete(current.Annotations, labels.AnnotationApprovalDecidedAt)
+		delete(current.Annotations, labels.AnnotationApprovalDecisionID)
+		delete(current.Annotations, labels.AnnotationApprovalDecisionStatus)
+		delete(current.Annotations, labels.AnnotationApprovalDecisionSeq)
+		if err := r.Update(ctx, current); err != nil {
+			return err
+		}
+		updated = current
+		return nil
+	}); err != nil {
+		return err
+	}
+	if updated != nil {
+		task.ResourceVersion = updated.ResourceVersion
+		task.Annotations = updated.Annotations
+	}
+	return nil
+}
+
 // handleAutonomousIteration handles the completion of one autonomous loop iteration.
 // It saves plan state, checks termination conditions, and creates a new Job if needed.
 func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
@@ -3285,10 +3742,19 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		log.Error(err, "failed to collect iteration result")
 	}
 
+	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
+		return result, err
+	}
+
+	resumingAfterApproval, err := r.resumingAfterApprovalDecision(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Check plan state for termination signals
 	if r.PlanStore != nil {
 		plan, err := r.PlanStore.GetPlan(ctx, task.Namespace, task.Name)
-		if err == nil && plan.GoalComplete {
+		if err == nil && plan.GoalComplete && !resumingAfterApproval {
 			log.Info("autonomous task goal complete", "iteration", task.Status.Iteration, "summary", plan.Summary)
 			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
 				fmt.Sprintf("goal complete after %d iterations: %s", task.Status.Iteration+1, plan.Summary))
@@ -3310,7 +3776,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	maxIter := agent.Spec.Coordination.MaxIterations
-	if maxIter > 0 && task.Status.Iteration+1 >= maxIter {
+	if maxIter > 0 && task.Status.Iteration+1 >= maxIter && !resumingAfterApproval {
 		log.Info("autonomous task reached max iterations", "maxIterations", maxIter)
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
 			fmt.Sprintf("reached max iterations (%d)", maxIter))
@@ -3357,6 +3823,11 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	if err := r.Status().Update(ctx, task); err != nil {
 		log.Error(err, "failed to update status for autonomous iteration")
 		return ctrl.Result{}, err
+	}
+	if resumingAfterApproval {
+		if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	log.Info("autonomous task advancing to next iteration", "nextIteration", task.Status.Iteration)

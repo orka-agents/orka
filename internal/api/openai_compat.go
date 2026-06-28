@@ -234,7 +234,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+	ctx, cancel := context.WithTimeout(c.Context(), h.config.MaxDuration)
 	defer cancel()
 
 	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
@@ -260,6 +260,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
 		return openAIContextTokenAuthorizationError(c, err)
 	}
+	provider = llm.NewTracingProvider(provider)
 
 	compReq, errDetail := buildOpenAICompletionRequest(req, model)
 	if errDetail != nil {
@@ -307,7 +308,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
 			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-					return authorizeAndStampToolTaskCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
+					return authorizeAndStampToolTaskCreate(ctx, h.client, h.kubeClient, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
 				}
 				return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
 			},
@@ -479,7 +480,7 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 // bytes during multi-minute coordinator workflows.
 func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	c fiber.Ctx,
-	_ context.Context,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -495,9 +496,10 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	capturedProvider := provider
 	capturedReq := req
 	capturedToolCtx := toolCtx
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		// Send role chunk
@@ -661,7 +663,7 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 // handleStreamingCompletion handles a streaming chat completion request.
 func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c fiber.Ctx,
-	_ context.Context,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -676,9 +678,10 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 	// Capture for closure
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
@@ -869,6 +872,21 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					}},
 				}
 				_ = writeStreamChunk(w, finishChunk)
+				if streamOpts != nil && streamOpts.IncludeUsage && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
+					usageChunk := OAIResponse{
+						ID:      completionID,
+						Object:  "chat.completion.chunk",
+						Created: created,
+						Model:   model,
+						Choices: []OAIChoice{},
+						Usage: &OAIUsage{
+							PromptTokens:     chunk.InputTokens,
+							CompletionTokens: chunk.OutputTokens,
+							TotalTokens:      chunk.InputTokens + chunk.OutputTokens,
+						},
+					}
+					_ = writeStreamChunk(w, usageChunk)
+				}
 			}
 		}
 

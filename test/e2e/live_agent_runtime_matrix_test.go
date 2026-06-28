@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		controllerPFCmd    *exec.Cmd
 		token              string
 		gptModel           string
+		gptModelSkipReason string
 		claudeModel        string
 		geminiModel        string
 		claudeSessionName  string
@@ -85,12 +87,23 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			liveCopilotProxyServicePort(),
 		)
 		Expect(err).NotTo(HaveOccurred())
-		gptModel = firstPreferredProxyModelSupportingEndpoint(
-			runtimeCatalog,
-			"/responses",
-			liveCopilotProxyGPTModelPreferences,
-			liveCopilotProxyGPTModelPrefixes...,
-		)
+		gptModel = strings.TrimSpace(os.Getenv("E2E_LIVE_CODEX_RUNTIME_MODEL"))
+		if gptModel != "" {
+			if !runtimeCatalog.modelSupportsEndpoint(gptModel, "/responses") {
+				gptModelSkipReason = "configured E2E_LIVE_CODEX_RUNTIME_MODEL does not advertise /responses support"
+				gptModel = ""
+			}
+		} else {
+			gptModel = firstPreferredProxyCodexModelSupportingEndpoint(
+				runtimeCatalog,
+				"/responses",
+				liveCopilotProxyCodexModelPreferences,
+				liveCopilotProxyCodexModelPrefixes...,
+			)
+			if gptModel == "" {
+				gptModelSkipReason = "no Codex-family GPT model with /responses support exposed"
+			}
+		}
 		claudeModel = firstPreferredProxyModel(
 			runtimeCatalog,
 			liveCopilotProxyClaudeModelPreferences,
@@ -123,7 +136,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 
 	It("should let codex consume priorTaskRef state on a git workspace", func() {
 		if gptModel == "" {
-			Skip("Skipping Codex runtime live proxy check: no GPT model with /responses support exposed")
+			Skip("Skipping Codex runtime live proxy check: " + gptModelSkipReason)
 		}
 
 		DeferCleanup(func() {
@@ -170,7 +183,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		)
 
 		By("waiting for the prior task to succeed and emit a structured diff result")
-		Expect(waitForTaskCompletion(codexTaskWriteName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, codexTaskWriteName, liveRuntimeTimeout)
 		verifyResultAvailable(codexTaskWriteName)
 		firstResult := workercommon.ParseStructuredResult(fetchTaskResultViaAPI(apiBaseURL, token, codexTaskWriteName))
 		Expect(strings.TrimSpace(firstResult.Summary)).To(ContainSubstring("CREATED"))
@@ -204,7 +217,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("waiting for the Codex task to return the exact marker from the prior diff")
-		Expect(waitForTaskCompletion(codexTaskReadName, liveRuntimeTimeout)).To(Equal("Succeeded"))
+		waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, codexTaskReadName, liveRuntimeTimeout)
 		verifyResultAvailable(codexTaskReadName)
 		// Harness-wrapper-backed agent tasks do not create a worker Job. The result
 		// assertion below verifies the priorTaskRef workspace diff was consumed.
@@ -304,6 +317,25 @@ func shellSingleQuote(value string) string {
 type runtimeWorkspaceConfig struct {
 	GitRepo string
 	Ref     string
+}
+
+func waitForCodexRuntimeTaskOrSkip(apiBaseURL, token, taskName string, timeout time.Duration) {
+	phase := waitForTaskCompletion(taskName, timeout)
+	if phase == "Succeeded" {
+		return
+	}
+	result := fetchTaskResultViaAPI(apiBaseURL, token, taskName)
+	summary := workercommon.ParseStructuredResult(result).Summary
+	if isLiveCopilotCodexModelUnavailable(result) || isLiveCopilotCodexModelUnavailable(summary) {
+		Skip("Skipping Codex runtime live proxy check: selected model is unavailable for copilot-language-server integrator")
+	}
+	Expect(phase).To(Equal("Succeeded"), "Codex runtime task failed: %s", summary)
+}
+
+func isLiveCopilotCodexModelUnavailable(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "model_not_available_for_integrator") ||
+		(strings.Contains(lower, "requested model is not available") && strings.Contains(lower, "copilot-language-server"))
 }
 
 func runtimeAgentManifest(name, runtimeType, secretName, modelName string, defaultMaxTurns int, defaultAllowBash bool) map[string]any {

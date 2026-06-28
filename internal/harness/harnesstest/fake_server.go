@@ -3,6 +3,7 @@ package harnesstest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -142,6 +143,11 @@ func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Reque
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	eventStreamPath, err := harness.EventStreamPath(request.TurnID)
+	if err != nil {
+		harness.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	turn := &fakeTurn{request: request, cancelled: make(chan struct{})}
 	s.mu.Lock()
 	s.turns[request.TurnID] = turn
@@ -152,18 +158,20 @@ func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Reque
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
-		EventStreamPath:  "/v1/turns/" + string(request.TurnID) + "/events",
+		EventStreamPath:  eventStreamPath,
 	})
 }
 
 func (s *FakeHarnessServer) handleTurn(w http.ResponseWriter, r *http.Request) {
-	trimmed := strings.TrimPrefix(r.URL.Path, harness.TurnsPath+"/")
-	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
-	if len(parts) != 2 {
-		harness.WriteError(w, http.StatusNotFound, "not found")
+	turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+	if err != nil {
+		if errors.Is(err, harness.ErrTurnPathNotFound) {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+		} else {
+			harness.WriteError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
-	turnID := harness.HarnessTurnID(parts[0])
 	s.mu.Lock()
 	turn := s.turns[turnID]
 	s.mu.Unlock()
@@ -171,7 +179,7 @@ func (s *FakeHarnessServer) handleTurn(w http.ResponseWriter, r *http.Request) {
 		harness.WriteError(w, http.StatusNotFound, "turn not found")
 		return
 	}
-	switch parts[1] {
+	switch resource {
 	case "events":
 		if r.Method != http.MethodGet {
 			harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")

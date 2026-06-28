@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,6 +554,118 @@ func TestNewAuthMiddleware_OIDCInvalidTokenFallsBackToTokenReview(t *testing.T) 
 	}
 	if capturedUserInfo.Namespace != "ns1" {
 		t.Fatalf("Namespace = %q, want ns1", capturedUserInfo.Namespace)
+	}
+}
+
+func TestNewAuthMiddleware_OIDCAuthorizationFailureSkipsTokenReviewFallback(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = []string{"repo:trusted-org/trusted-repo:*"}
+	token := provider.issueToken(t, testOIDCTokenOptions{Subject: "repo:untrusted-org/untrusted-repo:ref:refs/heads/main"})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					createCalls++
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{Username: "github:untrusted"}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	_, err := authenticateToken(context.Background(), fakeClient, token, AuthConfig{OIDC: cfg})
+	if err == nil || !errors.Is(err, errOIDCAuthorization) {
+		t.Fatalf("authenticateToken error = %v, want OIDC authorization error", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("TokenReview Create calls = %d, want 0 for terminal OIDC authorization failure", createCalls)
+	}
+}
+
+func TestNewAuthMiddleware_OIDCValidationFailureSkipsTokenReviewFallback(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	token := provider.issueToken(t, testOIDCTokenOptions{Audience: "kubernetes"})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					createCalls++
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{Username: "github:wrong-audience"}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	_, err := authenticateToken(context.Background(), fakeClient, token, AuthConfig{OIDC: cfg})
+	if err == nil || !strings.Contains(err.Error(), "audience") {
+		t.Fatalf("authenticateToken error = %v, want audience error", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("TokenReview Create calls = %d, want 0 for configured-issuer OIDC validation failure", createCalls)
+	}
+}
+
+func TestNewAuthMiddleware_OIDCUnsupportedAlgorithmSkipsTokenReviewFallback(t *testing.T) {
+	tokenCache.Range(func(key, _ any) bool {
+		tokenCache.Delete(key)
+		return true
+	})
+
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	token := provider.issueToken(t, testOIDCTokenOptions{Algorithm: "ES256"})
+
+	scheme := runtime.NewScheme()
+	_ = authenticationv1.AddToScheme(scheme)
+
+	createCalls := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if tr, ok := obj.(*authenticationv1.TokenReview); ok {
+					createCalls++
+					tr.Status.Authenticated = true
+					tr.Status.User = authenticationv1.UserInfo{Username: "github:unsupported-alg"}
+				}
+				return nil
+			},
+		}).
+		Build()
+
+	_, err := authenticateToken(context.Background(), fakeClient, token, AuthConfig{OIDC: cfg})
+	if err == nil || !strings.Contains(err.Error(), "unsupported JWT signing algorithm") {
+		t.Fatalf("authenticateToken error = %v, want unsupported algorithm error", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("TokenReview Create calls = %d, want 0 for configured-issuer unsupported OIDC algorithm", createCalls)
 	}
 }
 

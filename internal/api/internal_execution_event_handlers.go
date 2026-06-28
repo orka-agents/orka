@@ -75,7 +75,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	if isWorkerTerminalEventType(event.Type) {
+	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) {
 		return fiber.NewError(fiber.StatusForbidden, "terminal task and approval events must use controller-owned paths")
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
@@ -110,21 +110,6 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 		Seq:       appended.Seq,
 		CreatedAt: appended.CreatedAt,
 	})
-}
-
-func isWorkerTerminalEventType(eventType string) bool {
-	switch eventType {
-	case events.ExecutionEventTypeTaskSucceeded,
-		events.ExecutionEventTypeTaskFailed,
-		events.ExecutionEventTypeTaskCancelled,
-		events.ExecutionEventTypeApprovalApproved,
-		events.ExecutionEventTypeApprovalDeclined,
-		events.ExecutionEventTypeApprovalExpired,
-		events.ExecutionEventTypeApprovalCancelled:
-		return true
-	default:
-		return false
-	}
 }
 
 func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {

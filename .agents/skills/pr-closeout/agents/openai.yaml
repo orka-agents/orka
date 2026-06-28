@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Closeout"
+  short_description: "Drive PRs to green and review-clean"
+  default_prompt: "Use $pr-closeout to drive this PR to green CI with no unresolved actionable review comments."

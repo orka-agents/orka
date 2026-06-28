@@ -298,7 +298,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			return fmt.Errorf("harness frame identity does not match running turn")
 		}
 		result.Frames = append(result.Frames, frame)
-		key := harnessFrameKey(frame)
+		key := harness.MappedFrameKey(frame)
 		_, alreadyAppended := existingFrameKeys[key]
 		if !alreadyAppended {
 			mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
@@ -436,38 +436,17 @@ func (r *TaskReconciler) existingHarnessFrameKeys(ctx context.Context, task *cor
 			if event.Seq > afterSeq {
 				afterSeq = event.Seq
 			}
-			var content struct {
-				Harness struct {
-					RuntimeSessionID string `json:"runtimeSessionID"`
-					TurnID           string `json:"turnID"`
-					CorrelationID    string `json:"correlationID"`
-					Seq              int64  `json:"seq"`
-				} `json:"harness"`
-			}
-			if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+			identity, ok := harness.MappedFrameIdentityFromEvent(event)
+			if !ok {
 				continue
 			}
-			keys[strings.Join([]string{
-				content.Harness.RuntimeSessionID,
-				content.Harness.TurnID,
-				content.Harness.CorrelationID,
-				strconv.FormatInt(content.Harness.Seq, 10),
-			}, "\x00")] = struct{}{}
+			keys[identity.Key()] = struct{}{}
 		}
 		if len(eventsList) < store.MaxExecutionEventLimit {
 			break
 		}
 	}
 	return keys, nil
-}
-
-func harnessFrameKey(frame harness.HarnessEventFrame) string {
-	return strings.Join([]string{
-		string(frame.RuntimeSessionID),
-		string(frame.TurnID),
-		frame.CorrelationID,
-		strconv.FormatInt(frame.Seq, 10),
-	}, "\x00")
 }
 
 // harnessWrapperTurnHasPersistedFrames reports whether the event store already
@@ -504,15 +483,11 @@ func (r *TaskReconciler) harnessWrapperTurnHasPersistedFrames(ctx context.Contex
 			if event.Seq > afterSeq {
 				afterSeq = event.Seq
 			}
-			var content struct {
-				Harness struct {
-					TurnID string `json:"turnID"`
-				} `json:"harness"`
-			}
-			if len(event.Content) == 0 || json.Unmarshal(event.Content, &content) != nil {
+			identity, ok := harness.MappedFrameIdentityFromEvent(event)
+			if !ok {
 				continue
 			}
-			if strings.TrimSpace(content.Harness.TurnID) == wantTurnID {
+			if identity.HasTurnID(turnID) {
 				return true, nil
 			}
 		}
@@ -584,6 +559,20 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 	patch := ctrlclient.MergeFrom(latest.DeepCopy())
 	if latest.Annotations == nil {
 		latest.Annotations = map[string]string{}
+	}
+	for _, key := range []string{
+		harnessWrapperTurnIDAnnotation,
+		harnessWrapperRuntimeAnnotation,
+		harnessWrapperCorrelationIDAnno,
+		harnessWrapperLastFrameSeqAnno,
+		harnessWrapperPlannedAtAnno,
+		harnessWrapperMetadataAnno,
+	} {
+		if strings.TrimSpace(latest.Annotations[key]) == "" && task != nil && task.Annotations != nil {
+			if value := task.Annotations[key]; strings.TrimSpace(value) != "" {
+				latest.Annotations[key] = value
+			}
+		}
 	}
 	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
 	if err := r.Patch(ctx, latest, patch); err != nil {
@@ -863,7 +852,16 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		"wrapper":  "cli",
 		"maxTurns": "50",
 	}
+	if task != nil && task.Annotations != nil {
+		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
+			metadata["traceparent"] = traceparent
+		}
+		if tracestate := strings.TrimSpace(task.Annotations[labels.AnnotationTraceState]); tracestate != "" {
+			metadata["tracestate"] = tracestate
+		}
+	}
 	if agent != nil {
+		metadata["agentName"] = agent.Name
 		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
 			metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
 		}
@@ -1147,6 +1145,11 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(ctx context.Context, task *co
 			priorNS = task.Namespace
 		}
 		env = append(env, harness.TurnEnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
+	}
+	if task.Annotations != nil {
+		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
+			env = setHarnessTurnEnv(env, workerenv.TraceParent, traceparent)
+		}
 	}
 	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		env = append(env, harness.TurnEnvVar{Name: workerenv.ParentTask, Value: parentTask})

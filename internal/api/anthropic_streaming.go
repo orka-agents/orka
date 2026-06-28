@@ -24,10 +24,10 @@ import (
 // The full Anthropic SSE envelope (message_start → ... → message_stop) spans all iterations.
 func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 	c fiber.Ctx,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	model string,
-	inputTokens int,
 	toolCtx *tools.ToolContext,
 ) error {
 	c.Set("Content-Type", "text/event-stream")
@@ -37,15 +37,16 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		msgID := "msg_" + uuid.New().String()
 
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		// Emit message_start once for the entire tool loop
-		if err := writeMessageStart(w, msgID, model, inputTokens); err != nil {
+		if err := writeMessageStart(w, msgID, model, 0); err != nil {
 			anthropicLog.Error(err, "failed to write message_start")
 			return
 		}
@@ -143,7 +144,11 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					}
 
 					if chunk.Done {
-						totalOutputTokens += estimateTokens(textContent)
+						if chunk.OutputTokens > 0 {
+							totalOutputTokens += chunk.OutputTokens
+						} else {
+							totalOutputTokens += estimateTokens(textContent)
+						}
 						break
 					}
 				}
@@ -325,6 +330,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 // It streams the LLM response directly to the client without executing tools server-side.
 func (h *AnthropicCompatHandler) handleStreamingProxy(
 	c fiber.Ctx,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	model string,
@@ -336,11 +342,12 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		msgID := "msg_" + uuid.New().String()
 
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		if err := writeMessageStart(w, msgID, model, 0); err != nil {
@@ -358,6 +365,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		blockIndex := 0
 		inTextBlock := false
 		hasToolCalls := false
+		outputTokens := 0
 
 		for chunk := range streamCh {
 			if chunk.Error != nil {
@@ -401,6 +409,10 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 				}
 			}
 
+			if chunk.OutputTokens > 0 {
+				outputTokens = chunk.OutputTokens
+			}
+
 			if chunk.Done {
 				if inTextBlock {
 					_ = writeContentBlockStop(w, blockIndex)
@@ -419,7 +431,7 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 		if hasToolCalls {
 			stopReason = oaiStopReasonToolUse
 		}
-		_ = writeMessageDelta(w, stopReason, 0)
+		_ = writeMessageDelta(w, stopReason, outputTokens)
 		_ = writeMessageStop(w)
 	})
 }

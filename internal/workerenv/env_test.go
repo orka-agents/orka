@@ -21,6 +21,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 			TaskNamespace:      "default",
 			ResultEndpoint:     "http://controller/results/default/task-1",
 			ControllerURL:      "http://controller",
+			AgentName:          "agent-a",
 			TransactionID:      "txn-123",
 			TransactionProfile: "kontxt",
 		},
@@ -31,6 +32,10 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 		BaseURL:         "https://example.test/v1",
 		AzureAPIVersion: "2024-10-21",
 		Tools:           []string{"delegate_task", "wait_for_tasks"},
+		EnableTelemetry: true,
+		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:      "vendor=value",
+		TraceBaggage:    "tenant=acme",
 		Fallbacks: []FallbackProviderEnv{{
 			Provider:        "anthropic",
 			APIKey:          "secret",
@@ -57,6 +62,9 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tools) != 2 || parsed.Tools[0] != "delegate_task" || parsed.Tools[1] != "wait_for_tasks" {
 		t.Fatalf("tools = %#v", parsed.Tools)
+	}
+	if !parsed.EnableTelemetry || parsed.TraceParent != env.TraceParent || parsed.TraceState != env.TraceState || parsed.TraceBaggage != env.TraceBaggage {
+		t.Fatalf("telemetry env mismatch: got %#v, want parent=%q state=%q baggage=%q", parsed, env.TraceParent, env.TraceState, env.TraceBaggage)
 	}
 	if len(parsed.Fallbacks) != 1 {
 		t.Fatalf("fallback count = %d, want 1", len(parsed.Fallbacks))
@@ -343,5 +351,63 @@ func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
 	}
 	if strings.Contains(got, "\n") {
 		t.Fatalf("TransactionLogFields() contains a literal newline: %q", got)
+	}
+}
+
+func TestCoordinationEnvRoundTripIncludesApprovalRequiredTools(t *testing.T) {
+	env := CoordinationEnv{
+		Enabled:               true,
+		MaxDepth:              3,
+		MaxChildren:           5,
+		AllowedAgents:         []string{"incident"},
+		Depth:                 "1",
+		AutonomousMode:        true,
+		AutonomousIteration:   2,
+		ApprovalRequiredTools: []string{"dispatch_work_order", "escalate_incident"},
+	}
+	values := map[string]string{}
+	for _, envVar := range env.EnvVars() {
+		values[envVar.Name] = envVar.Value
+	}
+	parsed := ParseCoordinationEnv(func(name string) string { return values[name] })
+	if strings.Join(parsed.ApprovalRequiredTools, ",") != "dispatch_work_order,escalate_incident" {
+		t.Fatalf("ApprovalRequiredTools = %#v", parsed.ApprovalRequiredTools)
+	}
+}
+
+func TestAIWorkerEnvTelemetryEnablement(t *testing.T) {
+	env := map[string]string{
+		AIProvider:      "openai",
+		AIModel:         "gpt-4o",
+		AIPrompt:        "hello",
+		EnableTelemetry: "true",
+		TraceParent:     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+		TraceState:      "vendor=value",
+	}
+	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
+	if !got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = false, want true")
+	}
+	if got.TraceParent != env[TraceParent] {
+		t.Fatalf("TraceParent = %q, want %q", got.TraceParent, env[TraceParent])
+	}
+	if got.TraceState != env[TraceState] {
+		t.Fatalf("TraceState = %q, want %q", got.TraceState, env[TraceState])
+	}
+	if got.TraceBaggage != env[TraceBaggage] {
+		t.Fatalf("TraceBaggage = %q, want %q", got.TraceBaggage, env[TraceBaggage])
+	}
+}
+
+func TestAIWorkerEnvTelemetryDoesNotAutoEnableFromOTLPEndpoint(t *testing.T) {
+	env := map[string]string{
+		AIProvider:                    "openai",
+		AIModel:                       "gpt-4o",
+		AIPrompt:                      "hello",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "otel-collector:4317",
+	}
+	got := ParseAIWorkerEnv(func(key string) string { return env[key] })
+	if got.EnableTelemetry {
+		t.Fatal("EnableTelemetry = true, want false without ORKA_ENABLE_TELEMETRY")
 	}
 }

@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -14,6 +15,12 @@ const defaultDetachedEventTimeout = 250 * time.Millisecond
 // EventRecorder records worker-side execution events.
 type EventRecorder interface {
 	Record(ctx context.Context, typ string, opts ...EventOption)
+}
+
+// StrictEventRecorder records events synchronously and returns transport or
+// validation errors to callers that cannot safely continue without persistence.
+type StrictEventRecorder interface {
+	RecordStrict(ctx context.Context, typ string, opts ...EventOption) error
 }
 
 // EventOption customizes a worker execution event before it is recorded.
@@ -43,6 +50,12 @@ var _ EventRecorder = NoopEventRecorder{}
 // Record implements EventRecorder.
 func (NoopEventRecorder) Record(context.Context, string, ...EventOption) {}
 
+// RecordStrict implements StrictEventRecorder and fails closed because a no-op
+// recorder cannot prove that a required event was persisted.
+func (NoopEventRecorder) RecordStrict(context.Context, string, ...EventOption) error {
+	return fmt.Errorf("strict execution event recorder is not configured")
+}
+
 // RecordEvent emits a best-effort worker execution event.
 // Event recording must never change worker task behavior, so nil recorders and
 // recorder implementation panics are ignored.
@@ -66,6 +79,24 @@ func RecordEventWithTimeout(recorder EventRecorder, typ string, timeout time.Dur
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	RecordEvent(ctx, recorder, typ, opts...)
+}
+
+// RecordEventStrict emits an execution event through a strict recorder. Unlike
+// RecordEvent, errors are returned so approval requests can fail closed.
+func RecordEventStrict(ctx context.Context, recorder EventRecorder, typ string, opts ...EventOption) (err error) {
+	if recorder == nil {
+		return fmt.Errorf("strict execution event recorder is not configured")
+	}
+	strict, ok := recorder.(StrictEventRecorder)
+	if !ok {
+		return fmt.Errorf("execution event recorder %T does not support strict recording", recorder)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("strict execution event recorder panicked: %v", recovered)
+		}
+	}()
+	return strict.RecordStrict(ctx, typ, opts...)
 }
 
 // FakeEventRecorder captures worker events in memory for tests.
@@ -125,6 +156,15 @@ func (r *FakeEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, cloneRecordedEvent(event))
+}
+
+// RecordStrict captures the event synchronously and returns context errors.
+func (r *FakeEventRecorder) RecordStrict(ctx context.Context, typ string, opts ...EventOption) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	r.Record(ctx, typ, opts...)
+	return nil
 }
 
 // Events returns a snapshot of recorded events.
