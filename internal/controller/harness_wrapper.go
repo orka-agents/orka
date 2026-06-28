@@ -223,7 +223,7 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 			if err != nil {
 				return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
 			}
-			if !taskHasHarnessWrapperTurn(task) && strings.TrimSpace(frozen.AuthRefResourceVersion) != authRefResourceVersion {
+			if strings.TrimSpace(frozen.AuthRefResourceVersion) != authRefResourceVersion {
 				if err := r.validateFrozenRuntimeAuthObserved(ctx, task, frozen.RuntimeRefName, authRefResourceVersion); err != nil {
 					return harnessRuntimeTarget{}, err
 				}
@@ -962,6 +962,9 @@ func harnessWrapperPlannedTurnMatchesTask(task *corev1alpha1.Task, agent *corev1
 		return false
 	}
 	runtimeName := agentHarnessRuntimeName(agent)
+	if plannedRuntime := strings.TrimSpace(harnessWrapperPlannedMetadata(task, "")["runtime"]); plannedRuntime != "" {
+		runtimeName = plannedRuntime
+	}
 	if task != nil && task.Status.HarnessRuntime != nil && strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName) != "" {
 		runtimeName = strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName)
 	}
@@ -995,7 +998,7 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 		}
 	}
 	if !runtimeMatches {
-		return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
+		return fmt.Errorf("harness runtime %q does not match task runtime %q", sanitizeAgentRuntimeCapabilityValue(capabilities.RuntimeName), sanitizeAgentRuntimeCapabilityValue(wantRuntime))
 	}
 	if strings.TrimSpace(request.Metadata["runtimeRef"]) != "" {
 		if err := validateObservedHarnessCapabilities(capabilities); err != nil {

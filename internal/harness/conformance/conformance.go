@@ -159,6 +159,9 @@ func assertUnauthenticatedStartRejected(
 	probe.TurnID = harness.HarnessTurnID(string(request.TurnID) + "-unauth")
 	probe.CorrelationID = request.CorrelationID + "-unauth"
 	if _, err := unauth.StartTurn(ctx, probe); err == nil {
+		if client, clientErr := newClient(baseURL, target.BearerToken, target.HTTPClient, controlTimeout); clientErr == nil {
+			cancelProbeTurn(ctx, client, result, probe, "unauthenticated conformance start was accepted")
+		}
 		result.addFailure("unauthenticated start turn was accepted")
 		return false
 	} else if !isAuthRequiredError(err) {
@@ -232,6 +235,7 @@ func validateProbeFrames(result *Result, request harness.StartTurnRequest, frame
 		return
 	}
 	terminal := 0
+	completed := 0
 	for i, frame := range frames {
 		if err := frame.ValidateRequired(); err != nil {
 			result.addFailure(fmt.Sprintf("frame %d is invalid: %v", i, err))
@@ -243,12 +247,18 @@ func validateProbeFrames(result *Result, request harness.StartTurnRequest, frame
 			result.addFailure(fmt.Sprintf("frame %d identity does not match requested turn", i))
 		}
 		switch frame.Type {
-		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+		case harness.FrameTurnCompleted:
+			terminal++
+			completed++
+		case harness.FrameTurnFailed, harness.FrameTurnCancelled:
 			terminal++
 		}
 	}
 	if terminal != 1 {
 		result.addFailure(fmt.Sprintf("terminal frame count = %d, want exactly 1", terminal))
+	}
+	if completed != 1 {
+		result.addFailure(fmt.Sprintf("completed terminal frame count = %d, want exactly 1", completed))
 	}
 }
 
