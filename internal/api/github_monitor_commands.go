@@ -151,6 +151,13 @@ func repositoryMonitorDefaultCommandLabel(intent string) string {
 }
 
 func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, intent, delivery string) (*store.CommandEvent, bool, error) {
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery)
+	commandID := repositoryMonitorCommandID(dedupe)
+	if existing, err := h.repositoryMonitorStore.GetCommandEvent(c.Context(), monitor.Namespace, commandID); err == nil {
+		return existing, true, nil
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor command: %v", err))
+	}
 	permission, permissionErr := h.repositoryMonitorCommandActorPermission(c.Context(), monitor, payload.Repository, payload.Sender.Login)
 	status := githubCommandStatusAccepted
 	errorMessage := ""
@@ -165,10 +172,9 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 		errorMessage = fmt.Sprintf("target has guard label %q", guard)
 	}
 
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery)
 	processedAt := time.Now()
 	command := &store.CommandEvent{
-		ID:                  repositoryMonitorCommandID(dedupe),
+		ID:                  commandID,
 		MonitorNamespace:    monitor.Namespace,
 		MonitorName:         monitor.Name,
 		Repo:                payload.Repository.FullName,

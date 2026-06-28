@@ -18,21 +18,31 @@ import (
 )
 
 const (
-	repositoryMonitorActionAutomerge       = "pr_automerge"
-	repositoryMonitorAutomergeStateMerged  = "merged"
-	repositoryMonitorAutomergeStateBlocked = "blocked"
-	repositoryMonitorAutomergeStateFailed  = "failed"
-	repositoryMonitorAutomergeStateStarted = "started"
-	repositoryMonitorAutomergeGateEnv      = "ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE"
-	repositoryMonitorAutomergeMethodSquash = "squash"
+	repositoryMonitorActionAutomerge        = "pr_automerge"
+	repositoryMonitorAutomergeStateMerged   = "merged"
+	repositoryMonitorAutomergeStateBlocked  = "blocked"
+	repositoryMonitorAutomergeStateFailed   = "failed"
+	repositoryMonitorAutomergeStateStarted  = "started"
+	repositoryMonitorAutomergeStatePending  = repositoryMonitorReviewTaskStatePending
+	repositoryMonitorCommandIntentAutomerge = "automerge"
+	repositoryMonitorAutomergeGateEnv       = "ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE"
+	repositoryMonitorAutomergeMethodSquash  = "squash"
 )
 
 func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
-	if command.Intent != "automerge" {
+	if command.Intent != repositoryMonitorCommandIntentAutomerge {
 		return false, nil
 	}
 	verdict, reason := r.repositoryMonitorAutomergeGate(ctx, monitor, command, pr, item)
 	if verdict != repositoryMonitorIssueVerdictReady {
+		if reason == "ci_pending" {
+			item.AutomergeState = repositoryMonitorAutomergeStatePending
+			item.SkipReason = reason
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return true, err
+			}
+			return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStatePending, "waiting for CI checks", map[string]any{"reason": reason})
+		}
 		item.AutomergeState = repositoryMonitorAutomergeStateBlocked
 		item.SkipReason = reason
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
@@ -188,14 +198,21 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if len(checks) < total {
 		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
 	}
-	var pendingOrFailed []string
+	var pending, failed []string
 	for _, check := range checks {
-		if check.Status != "completed" || check.Conclusion != "success" {
-			pendingOrFailed = append(pendingOrFailed, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
+		if check.Status != "completed" {
+			pending = append(pending, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
+			continue
+		}
+		if check.Conclusion != "success" {
+			failed = append(failed, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
 		}
 	}
-	if len(pendingOrFailed) > 0 {
+	if len(failed) > 0 {
 		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
+	}
+	if len(pending) > 0 {
+		return repositoryMonitorCIResult{reason: "ci_pending"}, nil
 	}
 	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
 	if err != nil {
@@ -222,10 +239,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 	if len(response.Statuses) == 0 {
 		return repositoryMonitorCIResult{reason: "ci_checks_missing"}, nil
 	}
-	if response.State == "success" {
+	switch response.State {
+	case "success":
 		return repositoryMonitorCIResult{passed: true}, nil
+	case repositoryMonitorAutomergeStatePending:
+		return repositoryMonitorCIResult{reason: "ci_pending"}, nil
+	default:
+		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
 	}
-	return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx context.Context, endpoint, token string, out any) error {

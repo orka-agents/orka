@@ -73,6 +73,19 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 		if run.CommandEventID != command.ID {
 			continue
 		}
+		if run.Phase == repositoryMonitorRunPhaseSucceeded && command.Intent == repositoryMonitorCommandIntentAutomerge {
+			if item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, command.Kind, fmt.Sprintf("%d", command.Number)); err == nil && item.AutomergeState == repositoryMonitorAutomergeStatePending {
+				now := time.Now()
+				run.Phase = repositoryMonitorRunPhaseQueued
+				run.StartedAt = now
+				run.CompletedAt = nil
+				run.Error = ""
+				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
+					return false, false, err
+				}
+				return true, true, nil
+			}
+		}
 		if run.Phase != repositoryMonitorRunPhaseFailed {
 			return true, false, nil
 		}

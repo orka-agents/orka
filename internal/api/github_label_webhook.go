@@ -219,7 +219,7 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		}
 		return githubRepositoryMonitorEventResponse(c, mergeGitHubRepositoryMonitorEventResults(monitorResult, commandResult))
 	}
-	if event == githubEventPullRequest {
+	if event == githubEventPullRequest && !handledCommand {
 		var err error
 		delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
 		monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)

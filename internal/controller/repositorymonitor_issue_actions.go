@@ -461,7 +461,7 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 	if verdict == "" && boolField(payload, "needsHuman") {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 	}
-	if verdict == "" && repositoryMonitorIssueActionMissingRequiredResult(actionKind, body) {
+	if repositoryMonitorIssueActionMissingRequiredResult(actionKind, body) {
 		verdict = "failed"
 		summary = firstNonEmptyIssueAction(summary, "issue action result missing required fields")
 	}
@@ -804,7 +804,16 @@ func repositoryMonitorIssueActionMissingRequiredResult(actionKind string, body m
 	switch actionKind {
 	case repositoryMonitorIssueActionTriage:
 		return stringField(body, "verdict") == ""
-	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionImplementation, repositoryMonitorIssueActionDecompose:
+	case repositoryMonitorIssueActionPlan:
+		if stringField(body, "status") == "" && stringField(body, "verdict") == "" {
+			return true
+		}
+		if stringField(body, "risk") == "" {
+			return true
+		}
+		_, ok := body["requiresHumanApproval"].(bool)
+		return !ok
+	case repositoryMonitorIssueActionImplementation, repositoryMonitorIssueActionDecompose:
 		return stringField(body, "status") == "" && stringField(body, "verdict") == ""
 	case repositoryMonitorIssueActionResearch:
 		return stringField(body, "confidence") == "" && stringField(body, "problemStatement") == "" && !boolFieldFromMap(body, "needsHuman")

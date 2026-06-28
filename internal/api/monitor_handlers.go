@@ -860,7 +860,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if err := h.repositoryMonitorStore.CreateCommandEvent(c.Context(), event); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor command: %v", err))
 	}
-	run := &store.MonitorRun{ID: "monrun-" + id[len("cmd-api-"):], MonitorNamespace: namespace, MonitorName: monitor.Name, Trigger: githubMonitorTriggerLabelCommand, TargetKind: req.Kind, TargetNumber: req.Number, TargetSHA: req.TargetSHA, CommandEventID: event.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}
+	run := &store.MonitorRun{ID: "monrun-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(event.ID+"|run"))), MonitorNamespace: namespace, MonitorName: monitor.Name, Trigger: githubMonitorTriggerLabelCommand, TargetKind: req.Kind, TargetNumber: req.Number, TargetSHA: req.TargetSHA, CommandEventID: event.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}
 	if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err == nil {
 		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
 			if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
