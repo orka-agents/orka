@@ -139,7 +139,9 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		result.addFailure(fmt.Sprintf("stream frames failed: %v", err))
 		return
 	}
-	validateProbeFrames(result, request, frames)
+	if !validateProbeFrames(result, request, frames) {
+		cancelProbeTurn(ctx, client, result, request, "conformance probe did not complete")
+	}
 }
 
 func assertUnauthenticatedStartRejected(
@@ -229,10 +231,10 @@ func cancelProbeTurn(ctx context.Context, client *harness.Client, result *Result
 	}
 }
 
-func validateProbeFrames(result *Result, request harness.StartTurnRequest, frames []harness.HarnessEventFrame) {
+func validateProbeFrames(result *Result, request harness.StartTurnRequest, frames []harness.HarnessEventFrame) bool {
 	if len(frames) == 0 {
 		result.addFailure("stream returned no frames")
-		return
+		return false
 	}
 	terminal := 0
 	completed := 0
@@ -260,6 +262,7 @@ func validateProbeFrames(result *Result, request harness.StartTurnRequest, frame
 	if completed != 1 {
 		result.addFailure(fmt.Sprintf("completed terminal frame count = %d, want exactly 1", completed))
 	}
+	return terminal == 1 && completed == 1
 }
 
 func newClient(baseURL, token string, httpClient *http.Client, timeout time.Duration) (*harness.Client, error) {

@@ -58,6 +58,10 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	By("loading e2e environment file")
+	earlyEnvProjectDir, _ := utils.GetProjectDir()
+	loadEnvFile(filepath.Join(earlyEnvProjectDir, "test", "e2e", ".env"))
+
 	By("building all Docker images")
 	cmd := exec.Command("make", "docker-build-all",
 		fmt.Sprintf("IMG=%s", managerImage),

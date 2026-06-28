@@ -241,8 +241,14 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 		return nil
 	}
 	modes := make([]corev1alpha1.AgentRuntimeToolExecutionMode, 0, len(caps.ToolExecutionModes))
+	seenModes := map[corev1alpha1.AgentRuntimeToolExecutionMode]struct{}{}
 	for _, mode := range caps.ToolExecutionModes {
-		modes = append(modes, corev1alpha1.AgentRuntimeToolExecutionMode(mode))
+		converted := corev1alpha1.AgentRuntimeToolExecutionMode(mode)
+		if _, seen := seenModes[converted]; seen {
+			continue
+		}
+		seenModes[converted] = struct{}{}
+		modes = append(modes, converted)
 	}
 	return &corev1alpha1.AgentRuntimeObservedCapabilities{
 		ProtocolVersion:           sanitizeAgentRuntimeCapabilityValue(caps.ProtocolVersion),
