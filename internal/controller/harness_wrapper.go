@@ -925,6 +925,9 @@ func harnessWrapperPlannedTurnMatchesTask(task *corev1alpha1.Task, agent *corev1
 		return false
 	}
 	runtimeName := agentHarnessRuntimeName(agent)
+	if task != nil && task.Status.HarnessRuntime != nil && strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName) != "" {
+		runtimeName = strings.TrimSpace(task.Status.HarnessRuntime.RuntimeRefName)
+	}
 	correlationID := string(task.UID)
 	if strings.TrimSpace(correlationID) == "" {
 		correlationID = task.Namespace + "/" + task.Name
@@ -945,15 +948,24 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 		return fmt.Errorf("read harness runtime capabilities: %w", err)
 	}
 	wantRuntime := strings.TrimSpace(request.Metadata["runtime"])
-	if wantRuntime == "" || capabilities.RuntimeName == wantRuntime {
-		return nil
-	}
-	for runtime := range strings.SplitSeq(capabilities.Metadata["supportedRuntimes"], ",") {
-		if strings.TrimSpace(runtime) == wantRuntime {
-			return nil
+	runtimeMatches := wantRuntime == "" || capabilities.RuntimeName == wantRuntime
+	if !runtimeMatches {
+		for runtime := range strings.SplitSeq(capabilities.Metadata["supportedRuntimes"], ",") {
+			if strings.TrimSpace(runtime) == wantRuntime {
+				runtimeMatches = true
+				break
+			}
 		}
 	}
-	return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
+	if !runtimeMatches {
+		return fmt.Errorf("harness runtime %q does not match task runtime %q", capabilities.RuntimeName, wantRuntime)
+	}
+	if strings.TrimSpace(request.Metadata["runtimeRef"]) != "" {
+		if err := validateObservedHarnessCapabilities(capabilities); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func harnessWrapperStartTurnErrorIsRetryable(err error) bool {

@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/harness/harnesstest"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
@@ -323,6 +324,50 @@ func TestHarnessWrapperRuntimeRefMissingAgentRuntimeFailsClearly(t *testing.T) {
 	}
 	if !strings.Contains(updated.Status.Message, `AgentRuntime "missing-runtime" not found`) {
 		t.Fatalf("message = %q, want missing AgentRuntime context", updated.Status.Message)
+	}
+}
+
+func TestHarnessWrapperPlannedTurnMatchesFrozenRuntimeRefAfterAgentChange(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "changed-runtime"}}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "fibey-agentkit"}
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, "fibey-agentkit")),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	if !harnessWrapperPlannedTurnMatchesTask(task, agent, 1) {
+		t.Fatal("planned turn should match frozen runtimeRef even after Agent runtimeRef changes")
+	}
+}
+
+func TestHarnessWrapperCapabilitiesRequireObservedRuntimeRefCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != harness.CapabilitiesPath {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+			Version:                 harness.ProtocolVersion,
+			ProtocolVersion:         harness.ProtocolVersion,
+			Transport:               harness.HTTPTransport,
+			RuntimeName:             "fibey-agentkit",
+			ProviderKind:            harness.ProviderKindKubernetesService,
+			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+			SupportsCancel:          false,
+			SupportsRuntimeSessions: true,
+		})
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	err = (&TaskReconciler{}).validateHarnessWrapperCapabilities(context.Background(), client, harness.StartTurnRequest{
+		Metadata: map[string]string{"runtime": "fibey-agentkit", "runtimeRef": "fibey-agentkit"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "supportsCancel") {
+		t.Fatalf("validateHarnessWrapperCapabilities() error = %v, want supportsCancel requirement", err)
 	}
 }
 

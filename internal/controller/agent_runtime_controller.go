@@ -183,10 +183,7 @@ func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, ru
 	return value, strings.TrimSpace(secret.ResourceVersion), nil
 }
 
-func validateAgentRuntimeRequiredCapabilities(
-	runtime *corev1alpha1.AgentRuntime,
-	caps *harness.CapabilitiesResponse,
-) error {
+func validateObservedHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
 	if caps == nil {
 		return fmt.Errorf("observed capabilities are missing")
 	}
@@ -198,6 +195,16 @@ func validateAgentRuntimeRequiredCapabilities(
 	}
 	if !caps.SupportsRuntimeSessions {
 		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
+	}
+	return nil
+}
+
+func validateAgentRuntimeRequiredCapabilities(
+	runtime *corev1alpha1.AgentRuntime,
+	caps *harness.CapabilitiesResponse,
+) error {
+	if err := validateObservedHarnessCapabilities(caps); err != nil {
+		return err
 	}
 	required := runtime.Spec.Capabilities
 	if required == nil {
