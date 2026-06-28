@@ -64,6 +64,35 @@ describe('use-execution-events hooks', () => {
     expect(result.current.data?.events).toHaveLength(1)
   })
 
+  it('useTaskEvents scopes its cache by task uid so a recreated same-name task does not inherit stale events', async () => {
+    // Same name+namespace, different uid (a delete+recreate). Each uid must hit
+    // the server and get its own cache entry — the recreated task must not show
+    // the prior task's latestSeq/events.
+    let calls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () => {
+        calls += 1
+        // First fetch (uid-old) reports a high sequence; second fetch (uid-new)
+        // reports the restarted low sequence. If the second hook were served from
+        // the first's cache, it would never fetch and would show latestSeq 9.
+        const latestSeq = calls === 1 ? 9 : 1
+        return HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq, events: [],
+        })
+      }),
+    )
+    const wrapper = createWrapper()
+    const first = renderHook(() => useTaskEvents('tk', true, 'uid-old'), { wrapper })
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
+    expect(first.result.current.data?.latestSeq).toBe(9)
+    // A different uid under the same name must NOT return the cached uid-old entry —
+    // it issues its own fetch and gets the recreated task's sequence.
+    const second = renderHook(() => useTaskEvents('tk', true, 'uid-new'), { wrapper })
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true))
+    expect(second.result.current.data?.latestSeq).toBe(1)
+    expect(calls).toBe(2)
+  })
+
   it('useSessionEvents hits the session events endpoint', async () => {
     let capturedPath = ''
     server.use(

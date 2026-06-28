@@ -298,18 +298,19 @@ export function TaskDetail({ taskId }: { taskId: string }) {
 
         <TabsContent value="timeline">
           <TaskEventTimeline
-            key={`${task.metadata.namespace ?? ''}/${taskId}`}
+            key={`${task.metadata.namespace ?? ''}/${taskId}/${task.metadata.uid ?? ''}`}
             taskId={taskId}
             taskPhase={task.status?.phase}
+            taskUid={task.metadata.uid}
           />
         </TabsContent>
 
         <TabsContent value="trace">
-          <TaskTracePanel taskId={taskId} />
+          <TaskTracePanel taskId={taskId} taskUid={task.metadata.uid} />
         </TabsContent>
 
         <TabsContent value="approvals">
-          <TaskApprovalPanel taskId={taskId} taskPhase={task.status?.phase} />
+          <TaskApprovalPanel taskId={taskId} taskPhase={task.status?.phase} taskUid={task.metadata.uid} />
         </TabsContent>
 
         <TabsContent value="logs">

@@ -187,7 +187,7 @@ function ApprovalCard({
   )
 }
 
-export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskPhase?: TaskPhase }) {
+export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: string; taskPhase?: TaskPhase; taskUid?: string }) {
   // Poll while approvals are pending or the task is still running, so a live
   // ApprovalRequested surfaces even if the panel opened before any existed.
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
@@ -195,7 +195,7 @@ export function TaskApprovalPanel({ taskId, taskPhase }: { taskId: string; taskP
   // render read-only — and polling them is pointless since no event will flip
   // their status. Gate both on taskTerminal.
   const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
-  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal)
+  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal, taskUid)
   const approvals = data?.approvals ?? []
   const pending = approvals.filter((a) => a.status === 'pending')
 

@@ -7,8 +7,8 @@ import { TaskTraceView } from '@/components/events/task-trace-view'
 import { useTaskTrace } from '@/hooks/use-execution-events'
 import { ApiError } from '@/lib/api-client'
 
-export function TaskTracePanel({ taskId }: { taskId: string }) {
-  const { data: trace, isLoading, error, refetch, isFetching } = useTaskTrace(taskId)
+export function TaskTracePanel({ taskId, taskUid }: { taskId: string; taskUid?: string }) {
+  const { data: trace, isLoading, error, refetch, isFetching } = useTaskTrace(taskId, true, taskUid)
 
   if (isLoading) {
     return (

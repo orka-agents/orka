@@ -33,10 +33,15 @@ const TERMINAL_REFETCH_INTERVAL_MS = 800
 export interface TaskEventTimelineProps {
   taskId: string
   taskPhase?: TaskPhase
+  // The owning Task's metadata.uid. Threaded into the events query key so a Task
+  // deleted and recreated with the same name doesn't inherit the prior task's
+  // cached events/latestSeq. The mount site also keys this component by uid, which
+  // resets the grow-only stream cursors and terminal-catch-up state on recreate.
+  taskUid?: string
 }
 
-export function TaskEventTimeline({ taskId, taskPhase }: TaskEventTimelineProps) {
-  const initial = useTaskEvents(taskId)
+export function TaskEventTimeline({ taskId, taskPhase, taskUid }: TaskEventTimelineProps) {
+  const initial = useTaskEvents(taskId, true, taskUid)
   // Explicit user choice for following, or null for "auto". When auto, we follow
   // whenever the task is in a running phase — so a task that polls into Running
   // after mount (e.g. just after creation, before status.phase was populated)

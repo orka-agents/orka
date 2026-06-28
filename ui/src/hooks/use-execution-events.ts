@@ -21,10 +21,16 @@ const INITIAL_EVENT_PAGE_LIMIT = '1000'
 // List the initial (replay) page of a task's execution events. Live updates are
 // layered on top by the streaming hook; this query provides the static history
 // and a refetchable fallback when streaming is unavailable.
-export function useTaskEvents(taskId: string, enabled = true) {
+//
+// taskUid scopes the cache to a specific Task object. A Task deleted and
+// recreated with the same name+namespace gets a new metadata.uid; threading it
+// into the query key means the replacement task starts from a clean cache entry
+// instead of inheriting the prior task's latestSeq/events. Mirrors the uid-keyed
+// task events hook in use-tasks.ts.
+export function useTaskEvents(taskId: string, enabled = true, taskUid?: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
-    queryKey: ['taskEvents', taskId, namespace],
+    queryKey: ['taskEvents', taskId, namespace, taskUid ?? ''],
     queryFn: () =>
       api.get<ListExecutionEventsResponse>(executionEventApiPath.taskEvents(taskId), {
         namespace,
@@ -49,10 +55,10 @@ export function useSessionEvents(sessionId: string, enabled = true) {
   })
 }
 
-export function useTaskTrace(taskId: string, enabled = true) {
+export function useTaskTrace(taskId: string, enabled = true, taskUid?: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
-    queryKey: ['taskTrace', taskId, namespace],
+    queryKey: ['taskTrace', taskId, namespace, taskUid ?? ''],
     queryFn: () =>
       api.get<TaskTrace>(executionEventApiPath.taskTrace(taskId), { namespace }),
     enabled: enabled && !!taskId,
@@ -73,10 +79,11 @@ export function useTaskApprovals(
   pollIntervalMs?: number,
   taskRunning = false,
   taskTerminal = false,
+  taskUid?: string,
 ) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
-    queryKey: ['taskApprovals', taskId, namespace],
+    queryKey: ['taskApprovals', taskId, namespace, taskUid ?? ''],
     queryFn: () =>
       api.get<ListTaskApprovalsResponse>(executionEventApiPath.taskApprovals(taskId), {
         namespace,
