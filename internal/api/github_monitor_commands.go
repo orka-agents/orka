@@ -57,8 +57,6 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 		}
 		if duplicate {
 			result.Duplicate++
-			result.CommandIDs = append(result.CommandIDs, command.ID)
-			continue
 		}
 		result.CommandIDs = append(result.CommandIDs, command.ID)
 		if command.Status != githubCommandStatusAccepted || repositoryMonitorCommandDoesNotQueueRun(intent) {
@@ -262,14 +260,14 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 		StartedAt:        time.Now(),
 	}
 	if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err != nil {
+		if existing, getErr := h.repositoryMonitorStore.GetMonitorRun(c.Context(), run.MonitorNamespace, run.ID); getErr == nil {
+			return existing, false, nil
+		}
 		if errors.Is(err, store.ErrConflict) {
 			command.Status = githubCommandStatusBlocked
 			command.Error = "repository monitor already has an active run"
 			_ = h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command)
 			return run, false, nil
-		}
-		if existing, getErr := h.repositoryMonitorStore.GetMonitorRun(c.Context(), run.MonitorNamespace, run.ID); getErr == nil {
-			return existing, false, nil
 		}
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor command run: %v", err))
 	}

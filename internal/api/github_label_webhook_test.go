@@ -1281,3 +1281,71 @@ func TestGitHubWebhook_CustomOrkaPRLabelDoesNotAlsoQueueExactEventRun(t *testing
 		t.Fatalf("runs = %#v, want exactly one durable command run", runs)
 	}
 }
+
+func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("dedupe-run", false)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:plan"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":21,"title":"Plan it","body":"Please plan.","html_url":"https://github.com/sozercan/vekil/issues/21","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	target, ok := githubLabelWebhookPayload{
+		Action:     "labeled",
+		Label:      githubWebhookLabel{Name: "orka:plan"},
+		Repository: githubWebhookRepository{FullName: "sozercan/vekil"},
+		Issue:      &githubWebhookIssue{Number: 21, Title: "Plan it", Body: "Please plan.", Labels: []githubWebhookLabel{{Name: "orka:plan"}}},
+	}.target()
+	if !ok {
+		t.Fatal("target() failed")
+	}
+	delivery := "delivery-preexisting-command"
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	processedAt := time.Now()
+	if err := monitorStore.CreateCommandEvent(t.Context(), &store.CommandEvent{
+		ID:               repositoryMonitorCommandID(dedupe),
+		MonitorNamespace: "default",
+		MonitorName:      "dedupe-run",
+		Repo:             "sozercan/vekil",
+		Kind:             "issue",
+		Number:           21,
+		Source:           githubCommandEventSourceLabel,
+		DeliveryID:       delivery,
+		Label:            "orka:plan",
+		DedupeKey:        dedupe,
+		IdempotencyKey:   dedupe,
+		Intent:           "plan",
+		Status:           githubCommandStatusAccepted,
+		CreatedAt:        processedAt,
+		ProcessedAt:      &processedAt,
+	}); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want created; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "dedupe-run", TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 21, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Trigger != githubMonitorTriggerLabelCommand {
+		t.Fatalf("runs = %#v, want missing run repaired for duplicate command", runs)
+	}
+}
