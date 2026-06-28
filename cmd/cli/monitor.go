@@ -179,6 +179,7 @@ func newMonitorCommandsCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newMonitorCommandsListCmd())
 	cmd.AddCommand(newMonitorCommandsGetCmd())
+	cmd.AddCommand(newMonitorCommandsCreateCmd())
 	return cmd
 }
 
@@ -240,6 +241,34 @@ func newMonitorCommandsGetCmd() *cobra.Command {
 		},
 	}
 	addOutputFlag(cmd, outputYAML)
+	return cmd
+}
+
+func newMonitorCommandsCreateCmd() *cobra.Command {
+	var kind, intent, targetSHA string
+	var number int64
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a repository monitor command",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body, _ := json.Marshal(map[string]any{"kind": kind, "number": number, "intent": intent, "targetSHA": targetSHA})
+			c := newClientFromCmd(cmd)
+			path := "/api/v1/monitors/repositories/" + url.PathEscape(args[0]) + "/commands"
+			result, err := c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
+			if err != nil {
+				return err
+			}
+			return printStructured(cmd, result)
+		},
+	}
+	addOutputFlag(cmd, outputYAML)
+	cmd.Flags().StringVar(&kind, "kind", "issue", "Target kind (issue or pull_request)")
+	cmd.Flags().Int64Var(&number, "number", 0, "Target issue or pull request number")
+	cmd.Flags().StringVar(&intent, "intent", "", "Command intent")
+	cmd.Flags().StringVar(&targetSHA, "target-sha", "", "Target head SHA for pull request commands")
+	_ = cmd.MarkFlagRequired("number")
+	_ = cmd.MarkFlagRequired("intent")
 	return cmd
 }
 

@@ -74,6 +74,28 @@ export function useRepositoryMonitorCommands(name: string) {
   })
 }
 
+
+export interface CreateRepositoryMonitorCommandBody {
+  kind: string
+  number: number
+  intent: string
+  targetSHA?: string
+}
+
+export function useCreateRepositoryMonitorCommand(name: string) {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: (body: CreateRepositoryMonitorCommandBody) => api.post<MonitorCommand>(`/monitors/repositories/${name}/commands`, body, { namespace }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'commands', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'runs', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'items', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'repository', namespace, name] })
+    },
+  })
+}
+
 export function useCreateRepositoryMonitor() {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)

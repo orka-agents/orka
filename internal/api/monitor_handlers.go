@@ -37,6 +37,14 @@ type CreateRepositoryMonitorRunRequest struct {
 	TargetSHA    string `json:"targetSHA,omitempty"`
 }
 
+// CreateRepositoryMonitorCommandRequest records an explicit monitor command from the Orka API.
+type CreateRepositoryMonitorCommandRequest struct {
+	Kind      string `json:"kind"`
+	Number    int64  `json:"number"`
+	Intent    string `json:"intent"`
+	TargetSHA string `json:"targetSHA,omitempty"`
+}
+
 const (
 	repositoryMonitorRunRequestAnnotation  = "orka.ai/repository-monitor-run-requested-at"
 	repositoryMonitorTargetKindPullRequest = "pull_request"
@@ -786,6 +794,121 @@ func parseOptionalInt64Query(value string) (int64, error) {
 		return 0, nil
 	}
 	return strconv.ParseInt(value, 10, 64)
+}
+
+// CreateRepositoryMonitorCommandEvent records an API-created monitor command and best-effort queues its run.
+func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
+	if err := h.ensureRepositoryMonitorStore(); err != nil {
+		return err
+	}
+	var req CreateRepositoryMonitorCommandRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "createRepositoryMonitorCommandEvent", h.contextTokenAuthorization.MonitorOperateScopes); err != nil {
+		return err
+	}
+	monitor, err := h.fetchRepositoryMonitor(c, namespace, c.Params("name"))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenRepositoryMonitor(c, "createRepositoryMonitorCommandEvent", monitor); err != nil {
+		return err
+	}
+	req.Intent = strings.TrimSpace(req.Intent)
+	if err := validateRepositoryMonitorCommandRequest(req); err != nil {
+		return err
+	}
+	if err := validateRepositoryMonitorCommandTargetEnabled(monitor.Spec, req.Kind); err != nil {
+		return err
+	}
+	item, _ := h.repositoryMonitorStore.GetMonitorItem(c.Context(), namespace, monitor.Name, req.Kind, strconv.FormatInt(req.Number, 10))
+	if req.TargetSHA == "" && item != nil && req.Kind == repositoryMonitorTargetKindPullRequest {
+		req.TargetSHA = item.HeadSHA
+	}
+	snapshot := ""
+	if item != nil && req.Kind == repositoryMonitorTargetKindIssue {
+		snapshot = item.SnapshotDigest
+	}
+	now := time.Now()
+	id := fmt.Sprintf("cmd-api-%d", now.UTC().UnixNano())
+	event := &store.CommandEvent{
+		ID:                  id,
+		MonitorNamespace:    namespace,
+		MonitorName:         monitor.Name,
+		Repo:                monitor.Spec.Owner + "/" + monitor.Spec.Repository,
+		Kind:                req.Kind,
+		Number:              req.Number,
+		Source:              "api",
+		MonitorGeneration:   monitor.Generation,
+		DedupeKey:           id,
+		IdempotencyKey:      id,
+		Author:              "orka-api",
+		Permission:          "orka:monitors:operate",
+		Command:             req.Intent,
+		Intent:              req.Intent,
+		HeadSHA:             req.TargetSHA,
+		IssueSnapshotDigest: snapshot,
+		Status:              "accepted",
+		CreatedAt:           now,
+		ProcessedAt:         &now,
+	}
+	if err := h.repositoryMonitorStore.CreateCommandEvent(c.Context(), event); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor command: %v", err))
+	}
+	run := &store.MonitorRun{ID: "monrun-" + id[len("cmd-api-"):], MonitorNamespace: namespace, MonitorName: monitor.Name, Trigger: githubMonitorTriggerLabelCommand, TargetKind: req.Kind, TargetNumber: req.Number, TargetSHA: req.TargetSHA, CommandEventID: event.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}
+	if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err == nil {
+		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
+			if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
+			}
+			return err
+		}
+	} else if !errors.Is(err, store.ErrConflict) {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to queue monitor command run: %v", err))
+	}
+	return c.Status(fiber.StatusCreated).JSON(event)
+}
+
+func validateRepositoryMonitorCommandTargetEnabled(spec corev1alpha1.RepositoryMonitorSpec, kind string) error {
+	switch kind {
+	case repositoryMonitorTargetKindIssue:
+		if spec.Targets.Issues.Enabled {
+			return nil
+		}
+	case repositoryMonitorTargetKindPullRequest:
+		if repositoryMonitorPullRequestsEnabled(spec) {
+			return nil
+		}
+	}
+	return fiber.NewError(fiber.StatusBadRequest, "command target kind is not enabled for this monitor")
+}
+
+func validateRepositoryMonitorCommandRequest(req CreateRepositoryMonitorCommandRequest) error {
+	if req.Kind != repositoryMonitorTargetKindIssue && req.Kind != repositoryMonitorTargetKindPullRequest {
+		return fiber.NewError(fiber.StatusBadRequest, "kind must be issue or pull_request")
+	}
+	if req.Number <= 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "number is required")
+	}
+	intent := strings.TrimSpace(req.Intent)
+	switch req.Kind {
+	case repositoryMonitorTargetKindIssue:
+		switch intent {
+		case "triage", "research", "plan", "approve_plan", "implement", "decompose", finishReasonStop, "resume":
+			return nil
+		}
+	case repositoryMonitorTargetKindPullRequest:
+		switch intent {
+		case "review", "fix", "fix_ci", "update_branch", "automerge", finishReasonStop, "resume":
+			return nil
+		}
+	}
+	return fiber.NewError(fiber.StatusBadRequest, "unsupported command intent for target kind")
 }
 
 // ListRepositoryMonitorCommandEvents lists durable label/API command events.

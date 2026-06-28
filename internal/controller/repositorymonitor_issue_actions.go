@@ -221,7 +221,10 @@ func repositoryMonitorRequireApprovedPlan(monitor *corev1alpha1.RepositoryMonito
 }
 
 func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, item *store.MonitorItem, owner, repository, actionKind, phase string, agent *corev1alpha1.AgentReference) (string, bool, error) {
-	priorActions, _, _ := r.Store.ListActionRecords(ctx, store.ActionRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Limit: 10})
+	priorActions, _, err := r.Store.ListActionRecords(ctx, store.ActionRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Limit: 10})
+	if err != nil {
+		return "", false, err
+	}
 	taskName := repositoryMonitorIssueActionTaskName(monitor, run, item, actionKind)
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	priority := int32(750)
@@ -457,6 +460,10 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 	verdict := firstNonEmptyIssueAction(stringField(body, "verdict"), stringField(body, "status"), sr.Verdict)
 	if verdict == "" && boolField(payload, "needsHuman") {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
+	}
+	if verdict == "" && repositoryMonitorIssueActionMissingRequiredResult(actionKind, body) {
+		verdict = "failed"
+		summary = firstNonEmptyIssueAction(summary, "issue action result missing required fields")
 	}
 	if reason := repositoryMonitorIssueActionResultMismatch(item, body); reason != "" {
 		verdict = repositoryMonitorReviewVerdictStale
@@ -788,6 +795,30 @@ func (r *RepositoryMonitorReconciler) createIssueApprovalActionRecord(ctx contex
 		PayloadJSON:       string(payloadJSON),
 		CreatedAt:         time.Now(),
 	})
+}
+
+func repositoryMonitorIssueActionMissingRequiredResult(actionKind string, body map[string]any) bool {
+	if body == nil {
+		return true
+	}
+	switch actionKind {
+	case repositoryMonitorIssueActionTriage:
+		return stringField(body, "verdict") == ""
+	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionImplementation, repositoryMonitorIssueActionDecompose:
+		return stringField(body, "status") == "" && stringField(body, "verdict") == ""
+	case repositoryMonitorIssueActionResearch:
+		return stringField(body, "confidence") == "" && stringField(body, "problemStatement") == "" && !boolFieldFromMap(body, "needsHuman")
+	default:
+		return false
+	}
+}
+
+func boolFieldFromMap(body map[string]any, key string) bool {
+	if body == nil {
+		return false
+	}
+	v, _ := body[key].(bool)
+	return v
 }
 
 func repositoryMonitorIssueActionResultMismatch(item *store.MonitorItem, body map[string]any) string {

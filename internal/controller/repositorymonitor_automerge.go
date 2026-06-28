@@ -71,7 +71,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, "automerge_disabled"
 	case repositoryMonitorAutomergeRequiresGlobalGate(monitor) && !strings.EqualFold(os.Getenv(repositoryMonitorAutomergeGateEnv), "true"):
 		return repositoryMonitorIssuePhaseBlocked, "global_merge_gate_disabled"
-	case !repositoryMonitorAutomergeActorAllowed(monitor, command.Permission):
+	case !repositoryMonitorAutomergeActorAllowed(monitor, command.Source, command.Permission):
 		return repositoryMonitorIssuePhaseBlocked, "actor_permission_insufficient"
 	case command.HeadSHA == "" || command.HeadSHA != pr.HeadSHA:
 		return repositoryMonitorIssuePhaseBlocked, "stale_head_sha"
@@ -98,7 +98,10 @@ func repositoryMonitorAutomergeRequiresGlobalGate(monitor *corev1alpha1.Reposito
 	return monitor.Spec.Automerge.RequireGlobalMergeGate == nil || *monitor.Spec.Automerge.RequireGlobalMergeGate
 }
 
-func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
+func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMonitor, source, permission string) bool {
+	if strings.EqualFold(strings.TrimSpace(source), "api") && strings.EqualFold(strings.TrimSpace(permission), "orka:monitors:operate") {
+		return true
+	}
 	permission = strings.ToLower(strings.TrimSpace(permission))
 	policy := monitor.Spec.Policy.AllowedRepositoryPermissions
 	if len(policy) > 0 && !repositoryMonitorAutomergePermissionInList(permission, policy) {

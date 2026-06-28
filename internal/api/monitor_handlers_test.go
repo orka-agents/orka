@@ -65,6 +65,7 @@ func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenCon
 	app.Post("/monitors/repositories/:name/runs", handlers.CreateRepositoryMonitorRun)
 	app.Get("/monitors/repositories/:name/runs", handlers.ListRepositoryMonitorRuns)
 	app.Get("/monitors/repositories/:name/items", handlers.ListRepositoryMonitorItems)
+	app.Post("/monitors/repositories/:name/commands", handlers.CreateRepositoryMonitorCommandEvent)
 	app.Get("/monitors/events", handlers.ListRepositoryMonitorEvents)
 	return app, handlers
 }
@@ -627,4 +628,27 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeAuthorizesBeforeReviewerL
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	require.NotContains(t, readRespBody(t, resp), "missing-reviewer")
+}
+
+func TestCreateRepositoryMonitorCommandEventQueuesRun(t *testing.T) {
+	app, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	body := fmt.Sprintf(`{"name":"repo-monitor","namespace":"demo","spec":{"repoURL":%q,"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},"agents":{}}}`, monitorTestRepoURL)
+	createReq := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp, err := app.Test(createReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, createResp.StatusCode)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/commands?namespace=demo", strings.NewReader(`{"kind":"issue","number":7,"intent":"plan"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var command store.CommandEvent
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&command))
+	require.Equal(t, "api", command.Source)
+	require.Equal(t, "plan", command.Intent)
+	runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", TargetKind: "issue", TargetNumber: 7, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.Equal(t, command.ID, runs[0].CommandEventID)
 }
