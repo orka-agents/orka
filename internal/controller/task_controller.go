@@ -2813,84 +2813,102 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAgent:
-		// Agent tasks require an agentRef
-		if agent == nil {
-			return fmt.Errorf("type: agent tasks require an agentRef")
-		}
-		// Agent must have runtime configured
-		if agent.Spec.Runtime == nil {
-			return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
-		}
-		hasRuntimeRef := agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
-		hasBuiltInRuntime := strings.TrimSpace(string(agent.Spec.Runtime.Type)) != ""
-		switch {
-		case hasRuntimeRef && hasBuiltInRuntime:
-			return fmt.Errorf("agent %q sets both runtime.type and runtime.runtimeRef; set exactly one", agent.Name)
-		case hasRuntimeRef:
-			// Custom runtimes are resolved through AgentRuntime readiness before StartTurn.
-		case hasBuiltInRuntime:
-			switch agent.Spec.Runtime.Type {
-			case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
-			default:
-				return fmt.Errorf("agent runtime %q does not have a harness adapter configured", agent.Spec.Runtime.Type)
-			}
-		default:
-			return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
-		}
-		if hasRuntimeRef {
-			if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
-				return err
-			}
-		}
-		if taskRequestsReadOnlyAgent(task) && hasBuiltInRuntime {
-			switch agent.Spec.Runtime.Type {
-			case corev1alpha1.AgentRuntimeCodex:
-				return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
-			case corev1alpha1.AgentRuntimeCopilot:
-				return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
-			}
-		}
-		if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
-			return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
-		}
-		// Agent with runtime must not have providerRef (mutually exclusive)
-		if agent.Spec.ProviderRef != nil {
-			return fmt.Errorf("agent %q has both runtime and providerRef set (mutually exclusive)", agent.Name)
-		}
-		// Agent with runtime must not have a model provider set
-		if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
-			return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
-		}
-		if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
+		return r.validateAgentRuntimeTaskCompatibility(task, agent)
+	case corev1alpha1.TaskTypeAI:
+		return validateAITaskAgentCompatibility(task, agent)
+	case corev1alpha1.TaskTypeContainer:
+		return nil
+	default:
+		return nil
+	}
+}
+
+func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent == nil {
+		return fmt.Errorf("type: agent tasks require an agentRef")
+	}
+	if agent.Spec.Runtime == nil {
+		return fmt.Errorf("agent %q does not have a runtime configured (required for type: agent tasks)", agent.Name)
+	}
+	hasRuntimeRef := agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != ""
+	hasBuiltInRuntime := strings.TrimSpace(string(agent.Spec.Runtime.Type)) != ""
+	switch {
+	case hasRuntimeRef && hasBuiltInRuntime:
+		return fmt.Errorf("agent %q sets both runtime.type and runtime.runtimeRef; set exactly one", agent.Name)
+	case hasRuntimeRef:
+		if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
 			return err
 		}
-		if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
-			return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
+	case hasBuiltInRuntime:
+		if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
+			return err
 		}
-		// Prompt is required for agent tasks
-		if task.Spec.Prompt == "" {
-			return fmt.Errorf("prompt is required for type: agent tasks")
+		if err := validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type); err != nil {
+			return err
 		}
-	case corev1alpha1.TaskTypeAI:
-		// AI tasks must not reference an agent with runtime set
-		if agent != nil && agent.Spec.Runtime != nil {
-			return fmt.Errorf("agent %q has runtime configured (use type: agent instead of type: ai)", agent.Name)
-		}
-		if aiTaskRequestsApprovalTooling(task, agent) && !agentHasAutonomousCoordination(agent) {
-			return fmt.Errorf("request_approval requires enabled autonomous coordination mode")
-		}
-		if agent != nil && agent.Spec.Coordination != nil {
-			approvalRequiredTools := agent.Spec.Coordination.ApprovalRequiredTools
-			if len(approvalRequiredTools) > 0 &&
-				(!agent.Spec.Coordination.Enabled || !agent.Spec.Coordination.Autonomous) {
-				return fmt.Errorf("agent %q approvalRequiredTools requires enabled autonomous coordination mode", agent.Name)
-			}
-			if invalidTool := invalidApprovalRequiredBuiltInTool(approvalRequiredTools); invalidTool != "" {
-				return fmt.Errorf("agent %q approvalRequiredTools cannot include built-in tool %q", agent.Name, invalidTool)
-			}
-		}
-	case corev1alpha1.TaskTypeContainer:
-		// Container tasks don't use agents, no validation needed
+	default:
+		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
+	}
+	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
+		return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
+	}
+	if agent.Spec.ProviderRef != nil {
+		return fmt.Errorf("agent %q has both runtime and providerRef set (mutually exclusive)", agent.Name)
+	}
+	if agent.Spec.Model != nil && agent.Spec.Model.Provider != "" {
+		return fmt.Errorf("agent %q has both runtime and model.provider set (mutually exclusive for agent tasks)", agent.Name)
+	}
+	if err := validateHarnessWrapperTaskEnv(task.Spec.Env); err != nil {
+		return err
+	}
+	if agent.Spec.Coordination != nil && len(agent.Spec.Coordination.ApprovalRequiredTools) > 0 {
+		return fmt.Errorf("agent %q approvalRequiredTools is only supported for type: ai autonomous tasks", agent.Name)
+	}
+	if task.Spec.Prompt == "" {
+		return fmt.Errorf("prompt is required for type: agent tasks")
+	}
+	return nil
+}
+
+func validateBuiltInAgentRuntime(runtimeType corev1alpha1.AgentRuntimeType) error {
+	switch runtimeType {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+		return nil
+	default:
+		return fmt.Errorf("agent runtime %q does not have a harness adapter configured", runtimeType)
+	}
+}
+
+func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType corev1alpha1.AgentRuntimeType) error {
+	if !taskRequestsReadOnlyAgent(task) {
+		return nil
+	}
+	switch runtimeType {
+	case corev1alpha1.AgentRuntimeCodex:
+		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
+	case corev1alpha1.AgentRuntimeCopilot:
+		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
+	default:
+		return nil
+	}
+}
+
+func validateAITaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent != nil && agent.Spec.Runtime != nil {
+		return fmt.Errorf("agent %q has runtime configured (use type: agent instead of type: ai)", agent.Name)
+	}
+	if aiTaskRequestsApprovalTooling(task, agent) && !agentHasAutonomousCoordination(agent) {
+		return fmt.Errorf("request_approval requires enabled autonomous coordination mode")
+	}
+	if agent == nil || agent.Spec.Coordination == nil {
+		return nil
+	}
+	approvalRequiredTools := agent.Spec.Coordination.ApprovalRequiredTools
+	if len(approvalRequiredTools) > 0 && (!agent.Spec.Coordination.Enabled || !agent.Spec.Coordination.Autonomous) {
+		return fmt.Errorf("agent %q approvalRequiredTools requires enabled autonomous coordination mode", agent.Name)
+	}
+	if invalidTool := invalidApprovalRequiredBuiltInTool(approvalRequiredTools); invalidTool != "" {
+		return fmt.Errorf("agent %q approvalRequiredTools cannot include built-in tool %q", agent.Name, invalidTool)
 	}
 	return nil
 }
