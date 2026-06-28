@@ -37,7 +37,7 @@ commands=(
   "models" "models list"
   "status"
   "audit" "audit trace"
-  "task" "task create" "task list" "task get" "task logs" "task result" "task plan" "task children" "task wait" "task delete" "task artifacts" "task download"
+  "task" "task create" "task list" "task get" "task logs" "task result" "task plan" "task children" "task events" "task follow" "task trace" "task approvals" "task approve" "task decline" "task fork" "task wait" "task delete" "task artifacts" "task download"
   "workspace" "workspace status"
   "provider" "provider list" "provider get" "provider create" "provider update" "provider delete"
   "agent" "agent list" "agent get" "agent create" "agent update" "agent delete"

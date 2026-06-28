@@ -14,8 +14,8 @@ OpenTelemetry no-op providers and does not configure OTLP exporters.
 
 ## Enable telemetry
 
-Start the controller with telemetry enabled and point it at an OTLP gRPC
-endpoint:
+Start the controller with telemetry enabled and point it at an OTLP endpoint.
+gRPC is the default exporter protocol:
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
@@ -26,15 +26,70 @@ OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
 metrics. Existing Prometheus metrics on `--metrics-bind-address` continue to
 work independently.
 
+For an existing Kubernetes Deployment, set both the controller flag and the
+collector environment. Setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone does not
+enable telemetry:
+
+```bash
+kubectl patch deployment orka-controller -n orka-system --type=json -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-telemetry"},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"otel-collector.otel.svc:4317"}},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OTEL_EXPORTER_OTLP_INSECURE","value":"true"}}
+]'
+```
+
+Use `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (or signal-specific
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`)
+for HTTP/protobuf collectors. Signal-specific endpoints are also supported:
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`.
+
 When controller telemetry is enabled and a worker-reachable OTLP endpoint is configured, AI worker Jobs receive:
 
 - `ORKA_ENABLE_TELEMETRY=true`
 - `OTEL_EXPORTER_OTLP_ENDPOINT` and related standard non-secret OTLP environment variables
 - `ORKA_TRACEPARENT` when a Task was created from an already-traced API/chat/tool request
 
+The controller copies only worker-safe OTLP settings into AI worker Pods:
+
+| Copied when set | Not copied |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `OTEL_EXPORTER_OTLP_HEADERS` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `OTEL_EXPORTER_OTLP_TRACES_HEADERS` / `OTEL_EXPORTER_OTLP_METRICS_HEADERS` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` and signal-specific protocol vars | OTLP certificate and client-key env vars |
+| `OTEL_EXPORTER_OTLP_INSECURE` and signal-specific insecure vars | `OTEL_RESOURCE_ATTRIBUTES` |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` and signal-specific timeout vars | `ORKA_BAGGAGE` |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` and signal-specific compression vars | |
+
+Worker endpoint values must be reachable from the worker Pod. Empty,
+loopback, and unspecified hosts such as `localhost`, `127.0.0.1`, `::1`, and
+`::` are not copied into worker Jobs. If a signal-specific endpoint is
+unreachable, its signal-specific overrides are dropped instead of sending a
+broken per-signal configuration to the worker.
+
+Telemetry environment for AI workers is controller-owned: task-supplied
+`ORKA_ENABLE_TELEMETRY`, `ORKA_TRACEPARENT`, `ORKA_TRACESTATE`, and
+`OTEL_EXPORTER_OTLP*` values in `spec.env` are ignored. Generic container Tasks
+preserve user-supplied telemetry env, because Orka does not instrument arbitrary
+container processes.
+
 Harness-wrapper and agent-runtime worker telemetry is explicit opt-in: set
 `ORKA_ENABLE_TELEMETRY=true` and OTLP exporter configuration on those workloads
 when you want their process-local spans exported.
+
+For the singleton CLI harness wrapper Deployment, opt in explicitly:
+
+```bash
+kubectl set env deployment/orka-agent-harness-wrapper -n orka-system \
+  ORKA_ENABLE_TELEMETRY=true \
+  OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector.otel.svc:4317 \
+  OTEL_EXPORTER_OTLP_INSECURE=true
+```
+
+For per-Task agent runtime Jobs, set telemetry env in the Task `spec.env` where
+you intentionally want that runtime process to export spans. Orka reserves and
+overwrites trace-context env (`ORKA_TRACEPARENT`, `ORKA_TRACESTATE`,
+`ORKA_BAGGAGE`) so user-supplied values cannot forge parentage.
 
 Credential-bearing OTLP header environment variables are not copied from the
 controller into task workloads. Use an in-cluster collector endpoint or a
@@ -74,6 +129,14 @@ so the child `task.run` span is linked to the parent tool call.
 Outbound HTTP and MCP Tool CRD requests receive W3C `traceparent` headers. If a
 Tool config supplies its own `traceparent` header, the active Orka trace context
 wins.
+
+### OpenTelemetry traces vs Task trace read model
+
+OpenTelemetry traces are exported to your collector/backend and are queried in
+that backend. Orka's Task trace API (`GET /api/v1/tasks/:id/trace`) and CLI
+(`orka task trace`) are different: they build an execution read model from
+stored Orka events for UI/CLI troubleshooting. The two systems share task and
+tool terminology, but the Task trace API does not read from the OTel backend.
 
 ## Orka query attributes
 
@@ -122,7 +185,8 @@ Key attributes include:
 Tool calls executed through the built-in registry are emitted as spans named
 `execute_tool {tool.name}` with `gen_ai.tool.*` and `orka.tool.*` attributes and
 a duration metric. External HTTP/MCP tools use the same span name and
-`orka.tool.kind=http`.
+`orka.tool.kind=http`. OpenAI-compatible and Anthropic-compatible API requests
+emit the same GenAI model-call spans as native Orka chat and AI worker calls.
 
 ## GenAI metrics
 
@@ -133,7 +197,7 @@ Orka records these OTLP histograms when model/tool calls run:
 | `gen_ai.client.operation.duration` | `s` | One datapoint per model call |
 | `gen_ai.client.token.usage` | `{token}` | Separate datapoints for `gen_ai.token.type=input` and `output` |
 | `gen_ai.client.operation.time_to_first_chunk` | `s` | Streaming calls |
-| `gen_ai.execute_tool.duration` | `s` | Built-in registry tool calls |
+| `gen_ai.execute_tool.duration` | `s` | Built-in registry and external HTTP/MCP tool calls |
 
 Metric dimensions are intentionally low-cardinality: operation, provider, model, token
 type, tool name/type, and error type when applicable. High-cardinality fields such
