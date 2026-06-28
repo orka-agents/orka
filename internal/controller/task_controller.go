@@ -2803,6 +2803,9 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 	if ws := effectiveWorkspace(task); ws != nil && ws.GitSecretRef != nil && strings.TrimSpace(ws.GitSecretRef.Name) != "" {
 		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support workspace gitSecretRef credential delivery")
 	}
+	if task != nil && task.Spec.PriorTaskRef != nil {
+		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support priorTaskRef workspace handoff")
+	}
 	if taskRequestsReadOnlyAgent(task) {
 		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes in observed mode because Orka cannot enforce remote tool side effects")
 	}

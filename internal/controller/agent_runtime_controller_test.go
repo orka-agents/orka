@@ -237,6 +237,44 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 	return runtime, secret
 }
 
+func TestValidateAgentRuntimeRequiredCapabilitiesRequiresCancelAndSessions(t *testing.T) {
+	runtime := &corev1alpha1.AgentRuntime{}
+	err := validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+		SupportsRuntimeSessions: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "supportsCancel") {
+		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v, want supportsCancel requirement", err)
+	}
+	err = validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{
+		ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+		SupportsCancel:     true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "supportsRuntimeSessions") {
+		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v, want supportsRuntimeSessions requirement", err)
+	}
+}
+
+func TestObservedCapabilitiesFromConformanceRedactsStrings(t *testing.T) {
+	leaked := "sk-" + strings.Repeat("a", 20)
+	got := observedCapabilitiesFromConformance(&harness.CapabilitiesResponse{
+		ProtocolVersion:         harness.ProtocolVersion,
+		Transport:               harness.HTTPTransport,
+		RuntimeName:             "runtime " + leaked,
+		RuntimeVersion:          "Authorization: Bearer " + leaked,
+		ProviderKind:            harness.ProviderKindKubernetesService,
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+		SupportsCancel:          true,
+		SupportsRuntimeSessions: true,
+	})
+	if got == nil {
+		t.Fatal("observed = nil")
+	}
+	if strings.Contains(got.RuntimeName, leaked) || strings.Contains(got.RuntimeVersion, leaked) {
+		t.Fatalf("observed capabilities leaked secret-like values: %#v", got)
+	}
+}
+
 func TestValidateAgentRuntimeRequiredCapabilitiesRequiresObservedMode(t *testing.T) {
 	runtime := &corev1alpha1.AgentRuntime{}
 	err := validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{

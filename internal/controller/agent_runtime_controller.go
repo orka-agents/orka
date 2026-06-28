@@ -193,6 +193,12 @@ func validateAgentRuntimeRequiredCapabilities(
 	if !capabilityHasToolMode(caps, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
 		return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", corev1alpha1.AgentRuntimeToolExecutionModeObserved)
 	}
+	if !caps.SupportsCancel {
+		return fmt.Errorf("runtime does not advertise required supportsCancel capability")
+	}
+	if !caps.SupportsRuntimeSessions {
+		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
+	}
 	required := runtime.Spec.Capabilities
 	if required == nil {
 		return nil
@@ -229,11 +235,11 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 		modes = append(modes, corev1alpha1.AgentRuntimeToolExecutionMode(mode))
 	}
 	return &corev1alpha1.AgentRuntimeObservedCapabilities{
-		ProtocolVersion:           caps.ProtocolVersion,
-		Transport:                 caps.Transport,
-		RuntimeName:               caps.RuntimeName,
-		RuntimeVersion:            caps.RuntimeVersion,
-		ProviderKind:              string(caps.ProviderKind),
+		ProtocolVersion:           sanitizeAgentRuntimeCapabilityValue(caps.ProtocolVersion),
+		Transport:                 sanitizeAgentRuntimeCapabilityValue(caps.Transport),
+		RuntimeName:               sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName),
+		RuntimeVersion:            sanitizeAgentRuntimeCapabilityValue(caps.RuntimeVersion),
+		ProviderKind:              sanitizeAgentRuntimeCapabilityValue(string(caps.ProviderKind)),
 		ToolExecutionModes:        modes,
 		SupportsCancel:            caps.SupportsCancel,
 		SupportsRuntimeSessions:   caps.SupportsRuntimeSessions,
@@ -284,6 +290,14 @@ func sanitizeAgentRuntimeStatusMessage(message string) string {
 		return message[:1024]
 	}
 	return message
+}
+
+func sanitizeAgentRuntimeCapabilityValue(value string) string {
+	value = events.RedactExecutionEventText(strings.TrimSpace(value))
+	if len(value) > 256 {
+		return value[:256]
+	}
+	return value
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -221,7 +221,7 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 		if frozen, ok := harnessRuntimeTargetFromStatus(task); ok {
 			token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.AuthRefName, frozen.AuthRefField)
 			if err != nil {
-				return harnessRuntimeTarget{}, err
+				return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
 			}
 			if !taskHasHarnessWrapperTurn(task) && strings.TrimSpace(frozen.AuthRefResourceVersion) != authRefResourceVersion {
 				return r.resolveReadyAgentRuntimeTarget(ctx, task, frozen.RuntimeRefName)
@@ -281,7 +281,7 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 	}
 	token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerToken(ctx, runtime)
 	if err != nil {
-		return harnessRuntimeTarget{}, err
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", runtimeRefName, err)}
 	}
 	if strings.TrimSpace(runtime.Status.ObservedAuthRefResourceVersion) != authRefResourceVersion {
 		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: bearer token Secret version changed since runtime readiness", runtimeRefName)}

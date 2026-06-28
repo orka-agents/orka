@@ -556,6 +556,27 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 	}
 }
 
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsPriorTaskRef(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Type:         corev1alpha1.TaskTypeAgent,
+			Prompt:       "do stuff",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "priorTaskRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want priorTaskRef rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
