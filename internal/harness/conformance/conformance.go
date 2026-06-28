@@ -14,11 +14,10 @@ import (
 )
 
 const (
-	defaultProbeTimeout = 30 * time.Second
-	cleanupProbeTimeout = 10 * time.Second
+	defaultProbeTimeout      = 30 * time.Second
+	cleanupProbeTimeout      = 10 * time.Second
+	postTerminalDrainTimeout = 100 * time.Millisecond
 )
-
-var errProbeTerminalFrameSeen = errors.New("probe terminal frame seen")
 
 // Target identifies a harness endpoint to probe. BearerToken is used only for
 // authenticated control-plane endpoints and is never included in Result.
@@ -134,15 +133,19 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	frames := []harness.HarnessEventFrame{}
 	streamCtx, cancel := context.WithTimeout(ctx, controlTimeout)
 	defer cancel()
+	terminalSeen := false
+	terminalDrainScheduled := false
 	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
 		frames = append(frames, frame)
-		switch frame.Type {
-		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
-			return errProbeTerminalFrameSeen
-		default:
-			return nil
+		if isProbeTerminalFrame(frame.Type) {
+			terminalSeen = true
+			if !terminalDrainScheduled {
+				terminalDrainScheduled = true
+				time.AfterFunc(postTerminalDrainTimeout, cancel)
+			}
 		}
-	}); err != nil && !errors.Is(err, errProbeTerminalFrameSeen) {
+		return nil
+	}); err != nil && (!terminalSeen || !probeStreamStoppedByContext(err)) {
 		cancelProbeTurn(ctx, client, result, request, "conformance stream failed")
 		result.addFailure(fmt.Sprintf("stream frames failed: %v", err))
 		return
@@ -237,6 +240,19 @@ func cancelProbeTurn(ctx context.Context, client *harness.Client, result *Result
 	if err != nil {
 		result.addFailure(fmt.Sprintf("cancel probe turn failed: %v", err))
 	}
+}
+
+func isProbeTerminalFrame(frameType harness.FrameType) bool {
+	switch frameType {
+	case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func probeStreamStoppedByContext(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func validateProbeFrames(result *Result, request harness.StartTurnRequest, frames []harness.HarnessEventFrame) bool {
