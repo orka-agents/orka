@@ -40,6 +40,7 @@ type CreateRepositoryMonitorRunRequest struct {
 const (
 	repositoryMonitorRunRequestAnnotation  = "orka.ai/repository-monitor-run-requested-at"
 	repositoryMonitorTargetKindPullRequest = "pull_request"
+	repositoryMonitorTargetKindIssue       = "issue"
 	repositoryMonitorRunPhaseQueued        = "queued"
 	repositoryMonitorRunPhaseRunning       = "running"
 	repositoryMonitorRunPhaseFailed        = "failed"
@@ -222,14 +223,11 @@ func repositoryMonitorClaudeSecretHasCredential(secret *corev1.Secret) bool {
 }
 
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
-	if spec.Targets.Issues.Enabled {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.issues is not supported; only pull request monitoring is supported")
-	}
 	if spec.Targets.Commits.Enabled {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.commits is not supported; only pull request monitoring is supported")
+		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.commits is not supported; only pull request and issue monitoring are supported")
 	}
-	if !repositoryMonitorPullRequestsEnabled(spec) {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.pullRequests.enabled must be true; only pull request monitoring is supported")
+	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
+		return fiber.NewError(fiber.StatusBadRequest, "at least one repository monitor target must be enabled")
 	}
 	if spec.Review.RequireGreenCI {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.review.requireGreenCI is not supported until repository monitor CI state collection is available")
@@ -238,10 +236,12 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 }
 
 func validateRepositoryMonitorRunRequest(req CreateRepositoryMonitorRunRequest) error {
-	if strings.TrimSpace(req.TargetKind) == "" || req.TargetKind == repositoryMonitorTargetKindPullRequest {
+	switch strings.TrimSpace(req.TargetKind) {
+	case "", repositoryMonitorTargetKindPullRequest, repositoryMonitorTargetKindIssue:
 		return nil
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "targetKind must be pull_request or issue")
 	}
-	return fiber.NewError(fiber.StatusBadRequest, "targetKind must be pull_request")
 }
 
 func parseRepositoryMonitorGitHubURL(repoURL string) (string, string, error) {
@@ -786,4 +786,80 @@ func parseOptionalInt64Query(value string) (int64, error) {
 		return 0, nil
 	}
 	return strconv.ParseInt(value, 10, 64)
+}
+
+// ListRepositoryMonitorCommandEvents lists durable label/API command events.
+func (h *Handlers) ListRepositoryMonitorCommandEvents(c fiber.Ctx) error {
+	if err := h.ensureRepositoryMonitorStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "listRepositoryMonitorCommandEvents", h.contextTokenAuthorization.MonitorReadScopes); err != nil {
+		return err
+	}
+	monitorName := c.Query("name")
+	if monitorName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name query parameter is required")
+	}
+	monitor, err := h.fetchRepositoryMonitor(c, namespace, monitorName)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenRepositoryMonitor(c, "listRepositoryMonitorCommandEvents", monitor); err != nil {
+		return err
+	}
+	limit, err := strconv.Atoi(c.Query("limit", "50"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid limit")
+	}
+	number, err := parseOptionalInt64Query(c.Query("number"))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid number")
+	}
+	events, next, err := h.repositoryMonitorStore.ListCommandEvents(c.Context(), store.CommandEventFilter{
+		Namespace:   namespace,
+		MonitorName: monitor.Name,
+		Kind:        c.Query("kind"),
+		Number:      number,
+		Intent:      c.Query("intent"),
+		Status:      c.Query("status"),
+		Limit:       limit,
+		Cursor:      monitorListCursor(c),
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list monitor commands: %v", err))
+	}
+	return c.JSON(fiber.Map{"items": events, "metadata": fiber.Map{"continue": next}})
+}
+
+// GetRepositoryMonitorCommandEvent fetches one durable command event.
+func (h *Handlers) GetRepositoryMonitorCommandEvent(c fiber.Ctx) error {
+	if err := h.ensureRepositoryMonitorStore(); err != nil {
+		return err
+	}
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getRepositoryMonitorCommandEvent", h.contextTokenAuthorization.MonitorReadScopes); err != nil {
+		return err
+	}
+	event, err := h.repositoryMonitorStore.GetCommandEvent(c.Context(), namespace, c.Params("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		return fiber.NewError(fiber.StatusNotFound, "monitor command not found")
+	}
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get monitor command: %v", err))
+	}
+	monitor, err := h.fetchRepositoryMonitor(c, namespace, event.MonitorName)
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenRepositoryMonitor(c, "getRepositoryMonitorCommandEvent", monitor); err != nil {
+		return err
+	}
+	return c.JSON(event)
 }

@@ -396,6 +396,12 @@ func migrate(db *sql.DB) error {
 			author                TEXT NOT NULL DEFAULT '',
 			state                 TEXT NOT NULL DEFAULT '',
 			labels_json           TEXT NOT NULL DEFAULT '[]',
+			snapshot_digest       TEXT NOT NULL DEFAULT '',
+			github_updated_at     TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z',
+			workflow_phase        TEXT NOT NULL DEFAULT '',
+			linked_pr_number      INTEGER NOT NULL DEFAULT 0,
+			last_command_id       TEXT NOT NULL DEFAULT '',
+			last_command_intent   TEXT NOT NULL DEFAULT '',
 			base_branch           TEXT NOT NULL DEFAULT '',
 			head_branch           TEXT NOT NULL DEFAULT '',
 			head_sha              TEXT NOT NULL DEFAULT '',
@@ -484,6 +490,12 @@ func migrate(db *sql.DB) error {
 			repo                  TEXT NOT NULL DEFAULT '',
 			kind                  TEXT NOT NULL DEFAULT '',
 			number                INTEGER NOT NULL DEFAULT 0,
+			source                TEXT NOT NULL DEFAULT '',
+			delivery_id           TEXT NOT NULL DEFAULT '',
+			label                 TEXT NOT NULL DEFAULT '',
+			monitor_generation    INTEGER NOT NULL DEFAULT 0,
+			dedupe_key            TEXT NOT NULL DEFAULT '',
+			idempotency_key       TEXT NOT NULL DEFAULT '',
 			comment_id            TEXT NOT NULL DEFAULT '',
 			comment_url           TEXT NOT NULL DEFAULT '',
 			author                TEXT NOT NULL DEFAULT '',
@@ -492,6 +504,7 @@ func migrate(db *sql.DB) error {
 			command               TEXT NOT NULL DEFAULT '',
 			intent                TEXT NOT NULL DEFAULT '',
 			head_sha              TEXT NOT NULL DEFAULT '',
+			issue_snapshot_digest TEXT NOT NULL DEFAULT '',
 			status                TEXT NOT NULL DEFAULT '',
 			status_comment_id     TEXT NOT NULL DEFAULT '',
 			created_repair_job_id TEXT NOT NULL DEFAULT '',
@@ -590,8 +603,33 @@ func migrate(db *sql.DB) error {
 		{Name: "last_publish_phase", Definition: "last_publish_phase TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_reason", Definition: "last_publish_reason TEXT NOT NULL DEFAULT ''"},
 		{Name: "last_publish_url", Definition: "last_publish_url TEXT NOT NULL DEFAULT ''"},
+		{Name: "snapshot_digest", Definition: "snapshot_digest TEXT NOT NULL DEFAULT ''"},
+		{Name: "github_updated_at", Definition: "github_updated_at TIMESTAMP NOT NULL DEFAULT '0001-01-01T00:00:00Z'"},
+		{Name: "workflow_phase", Definition: "workflow_phase TEXT NOT NULL DEFAULT ''"},
+		{Name: "linked_pr_number", Definition: "linked_pr_number INTEGER NOT NULL DEFAULT 0"},
+		{Name: "last_command_id", Definition: "last_command_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "last_command_intent", Definition: "last_command_intent TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if _, err := db.Exec(`UPDATE monitor_items SET github_updated_at = updated_at WHERE github_updated_at IS NULL`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if err := ensureSQLiteColumns(db, "command_events", []sqliteColumnMigration{
+		{Name: "source", Definition: "source TEXT NOT NULL DEFAULT ''"},
+		{Name: "delivery_id", Definition: "delivery_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "label", Definition: "label TEXT NOT NULL DEFAULT ''"},
+		{Name: "monitor_generation", Definition: "monitor_generation INTEGER NOT NULL DEFAULT 0"},
+		{Name: "dedupe_key", Definition: "dedupe_key TEXT NOT NULL DEFAULT ''"},
+		{Name: "idempotency_key", Definition: "idempotency_key TEXT NOT NULL DEFAULT ''"},
+		{Name: "issue_snapshot_digest", Definition: "issue_snapshot_digest TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_events_dedupe
+		ON command_events(monitor_namespace, monitor_name, dedupe_key)
+		WHERE dedupe_key <> ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if err := ensureSQLiteColumns(db, "security_scan_runs", []sqliteColumnMigration{
 		{Name: "slice_count", Definition: "slice_count INTEGER NOT NULL DEFAULT 0"},

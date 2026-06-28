@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
-import { useRepositoryMonitor, useRepositoryMonitorItems, useRepositoryMonitorRuns, useRunRepositoryMonitor } from '@/hooks/use-monitors'
+import { useRepositoryMonitor, useRepositoryMonitorCommands, useRepositoryMonitorItems, useRepositoryMonitorRuns, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 
 function shortSHA(value?: string) {
@@ -36,6 +36,8 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
   const { data: monitor, isLoading } = useRepositoryMonitor(monitorName)
   const runs = useRepositoryMonitorRuns(monitorName)
   const items = useRepositoryMonitorItems(monitorName)
+  const issueItems = useRepositoryMonitorItems(monitorName, 'issue')
+  const commands = useRepositoryMonitorCommands(monitorName)
   const runMonitor = useRunRepositoryMonitor(monitorName)
 
   if (isLoading) {
@@ -70,11 +72,12 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
         }
       />
 
-      <div className="grid gap-4 md:grid-cols-5">
+      <div className="grid gap-4 md:grid-cols-6">
         <MetricCard title="Open PRs" value={status?.openPullRequests ?? 0} />
+        <MetricCard title="Open Issues" value={status?.openIssues ?? 0} />
         <MetricCard title="Pending Reviews" value={status?.pendingReviews ?? 0} />
-        <MetricCard title="Active Repairs" value={status?.activeRepairs ?? 0} />
-        <MetricCard title="Blocked" value={status?.blockedItems ?? 0} />
+        <MetricCard title="Pending Issue Actions" value={status?.pendingIssueActions ?? 0} />
+        <MetricCard title="Blocked" value={(status?.blockedItems ?? 0) + (status?.blockedIssues ?? 0)} />
         <MetricCard title="Merge Ready" value={status?.mergeReadyItems ?? 0} />
       </div>
 
@@ -125,6 +128,41 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
           </CardContent>
         </Card>
 
+        <Card>
+          <CardHeader>
+            <CardTitle>Issue Inventory</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(issueItems.data?.items ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">No issues recorded yet.</div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Issue</TableHead>
+                    <TableHead>Title</TableHead>
+                    <TableHead>Phase</TableHead>
+                    <TableHead>Command</TableHead>
+                    <TableHead>Skip reason</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(issueItems.data?.items ?? []).map((item) => (
+                    <TableRow key={item.itemKey}>
+                      <TableCell>#{item.number ?? item.itemKey}</TableCell>
+                      <TableCell className="max-w-[360px] truncate">{item.title || '-'}</TableCell>
+                      <TableCell><Badge variant="secondary">{item.workflowPhase || 'discovered'}</Badge></TableCell>
+                      <TableCell><Badge variant="outline">{item.lastCommandIntent || 'none'}</Badge></TableCell>
+                      <TableCell>{item.skipReason || '-'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+
+
         <div className="space-y-4">
           <Card>
             <CardHeader>
@@ -146,6 +184,32 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                 <span>{monitor.spec.review?.publish?.event || 'COMMENT'}</span>
               </div>
               <p className="text-xs text-muted-foreground">V1 publishes neutral COMMENT reviews only. APPROVE and REQUEST_CHANGES are not exposed.</p>
+            </CardContent>
+          </Card>
+
+
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Commands</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(commands.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No commands recorded yet.</div>
+              ) : (
+                (commands.data?.items ?? []).slice(0, 8).map((command) => (
+                  <div key={command.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{command.id}</span>
+                      <Badge variant={command.status === 'accepted' ? 'default' : command.status === 'rejected' ? 'destructive' : 'secondary'}>{command.status || 'unknown'}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {command.kind} #{command.number} · {command.intent || command.label} · {formatTime(command.createdAt)}
+                    </div>
+                    {command.error ? <div className="mt-1 text-xs text-destructive">{command.error}</div> : null}
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
 

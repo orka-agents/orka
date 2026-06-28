@@ -558,7 +558,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 		return &run, 0, nil
 	}
 
-	selected, createdTasks, skipped, processErr := r.processPullRequestInventoryRun(ctx, monitor, &run, owner, repository)
+	selected, createdTasks, skipped, processErr := r.processRepositoryMonitorInventoryRun(ctx, monitor, &run, owner, repository)
 	completedAt := time.Now()
 	run.CompletedAt = &completedAt
 	run.SelectedCount = selected
@@ -642,6 +642,9 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 		m.Status.OpenPullRequests = counts.openPullRequests
 		m.Status.PendingReviews = counts.pendingReviews
 		m.Status.BlockedItems = counts.blockedItems
+		m.Status.OpenIssues = counts.openIssues
+		m.Status.PendingIssueActions = counts.pendingIssueActions
+		m.Status.BlockedIssues = counts.blockedIssues
 		m.Status.ObservedGeneration = m.Generation
 
 		condition := metav1.Condition{
@@ -665,18 +668,25 @@ func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Co
 }
 
 type repositoryMonitorStatusCounts struct {
-	openPullRequests int32
-	pendingReviews   int32
-	blockedItems     int32
+	openPullRequests    int32
+	pendingReviews      int32
+	blockedItems        int32
+	openIssues          int32
+	pendingIssueActions int32
+	blockedIssues       int32
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (repositoryMonitorStatusCounts, error) {
-	items, err := r.listRepositoryMonitorPullRequestItems(ctx, monitor)
+	prItems, err := r.listRepositoryMonitorPullRequestItems(ctx, monitor)
+	if err != nil {
+		return repositoryMonitorStatusCounts{}, err
+	}
+	issueItems, err := r.listRepositoryMonitorIssueItems(ctx, monitor)
 	if err != nil {
 		return repositoryMonitorStatusCounts{}, err
 	}
 	var counts repositoryMonitorStatusCounts
-	for _, item := range items {
+	for _, item := range prItems {
 		if item.State != repositoryMonitorItemStateOpen {
 			continue
 		}
@@ -687,6 +697,22 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 		default:
 			if repositoryMonitorItemVerdictBlocked(item.LastVerdict) {
 				counts.blockedItems++
+			}
+		}
+	}
+	for _, item := range issueItems {
+		if item.State != repositoryMonitorItemStateOpen {
+			continue
+		}
+		counts.openIssues++
+		switch item.WorkflowPhase {
+		case "triage_queued", "research_queued", "plan_queued", "implementation_queued", "mutation_queued":
+			counts.pendingIssueActions++
+		case repositoryMonitorIssuePhaseBlocked:
+			counts.blockedIssues++
+		default:
+			if repositoryMonitorItemVerdictBlocked(item.LastVerdict) {
+				counts.blockedIssues++
 			}
 		}
 	}

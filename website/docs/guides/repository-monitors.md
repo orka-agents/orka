@@ -13,6 +13,7 @@ This is the durable successor path for prompt-orchestrated PR monitor tasks crea
 A repository monitor can:
 
 - list open pull requests for one GitHub repository and base branch
+- inventory open GitHub issues, excluding pull-request-shaped issues
 - skip drafts unless explicitly configured to include them
 - skip PRs blocked by configured protected or pause labels
 - skip PR heads that already have a fresh review result
@@ -30,9 +31,9 @@ The review task is bound to the exact PR head SHA. It runs as a `type: agent` ta
 The first implementation is intentionally narrow:
 
 - GitHub is the only supported provider.
-- Pull requests are the only supported target type.
-- `spec.targets.issues.enabled` and `spec.targets.commits.enabled` are rejected.
-- `spec.targets.pullRequests.enabled` must be true or omitted.
+- Pull requests and issues are supported target types; commit monitoring is still rejected.
+- Pull request monitoring is enabled by default when no target is specified.
+- Issue-only monitors can set `spec.targets.pullRequests.enabled: false` and `spec.targets.issues.enabled: true`.
 - `spec.review.requireGreenCI` is rejected until CI state collection is available.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
 - Repair, automerge, maintainer command routing, and public review comment updates are represented in the API/store shape but are not active workflows in this slice.
@@ -265,3 +266,49 @@ For compatibility, Orka also recognizes legacy markers and markers signed before
 - [GitHub Label Triggers](github-label-triggers.md) create one-off agent tasks from labels such as `agent:review` or `agent:implement`.
 - [Repository Security Scanning](repository-security-scanning.md) scans repository history for security findings and supports patch proposal workflows.
 - `create_pr_monitor` remains available for prompt-orchestrated scheduled PR monitor tasks, but it does not provide the durable per-PR run, item, review, publish, and event records described here.
+
+## Issue Inventory and Label Commands
+
+Repository monitors can also inventory open GitHub issues when `spec.targets.issues.enabled: true`. Issue inventory excludes GitHub issues that represent pull requests, stores the item as `monitor_items.kind = issue`, and records an issue content digest over human-controlled inputs: issue number, title, body, and non-`orka:*` / non-`orka-state:*` labels. Orka-authored command labels and state labels therefore do not stale issue plans or future issue workflow artifacts.
+
+A monitor can be run against one exact issue without retiring unrelated inventory:
+
+```bash
+orka monitor run orka-main --target-kind issue --target-number 123 --namespace default
+orka monitor issues list orka-main --namespace default
+```
+
+Durable `orka:*` label command intake is enabled per monitor:
+
+```yaml
+spec:
+  targets:
+    pullRequests:
+      enabled: false
+    issues:
+      enabled: true
+      maxPerRun: 10
+      excludeLabels:
+        - blocked
+        - waiting-external
+  triggers:
+    github:
+      labels:
+        enabled: true
+        requireActorPermission: write
+        issues:
+          plan: orka:plan
+          implement: orka:implement
+        pullRequests:
+          review: orka:review
+          fix: orka:fix
+```
+
+When a matching label webhook arrives, Orka verifies the webhook signature, matches the repository monitor by repository and target kind, checks the sender's current GitHub repository permission using `spec.gitSecretRef`, records a durable command event, and queues a targeted monitor run for accepted commands. Replayed deliveries are idempotent. Guard labels from `spec.policy.protectedLabels` and `spec.policy.pauseLabels` record blocked commands and do not queue work.
+
+Inspect command intake with:
+
+```bash
+orka monitor commands list orka-main --namespace default
+orka monitor commands get <command-id> --namespace default
+```

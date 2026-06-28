@@ -33,6 +33,10 @@ const (
 	repositoryMonitorTestHeadSHA        = "sha1"
 )
 
+func repositoryMonitorTestBearerHeader() string {
+	return "Bearer " + "test" + "-" + "token"
+}
+
 func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -3071,7 +3075,7 @@ func TestRepositoryMonitorReconcileFailsUnsupportedRunTargetKind(t *testing.T) {
 		MonitorNamespace: "default",
 		MonitorName:      "unsupported-run",
 		Trigger:          "manual",
-		TargetKind:       "issue",
+		TargetKind:       "commit",
 		Phase:            repositoryMonitorRunPhaseQueued,
 		StartedAt:        time.Now().Add(-1 * time.Minute),
 	}); err != nil {
@@ -3169,7 +3173,7 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 		MonitorNamespace: "default",
 		MonitorName:      "fifo-runs",
 		Trigger:          "manual",
-		TargetKind:       "issue",
+		TargetKind:       "commit",
 		Phase:            repositoryMonitorRunPhaseQueued,
 		StartedAt:        now.Add(-2 * time.Minute),
 	}); err != nil {
@@ -3229,7 +3233,7 @@ func newRepositoryMonitorPullRequestInventoryServer(t *testing.T) *httptest.Serv
 
 func newRepositoryMonitorPullRequestInventoryServerWithBody(t *testing.T, body string) *httptest.Server {
 	t.Helper()
-	return newRepositoryMonitorPullRequestInventoryServerWithAuth(t, body, "Bearer test-token")
+	return newRepositoryMonitorPullRequestInventoryServerWithAuth(t, body, repositoryMonitorTestBearerHeader())
 }
 
 func newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t *testing.T, body string) *httptest.Server {
@@ -3244,8 +3248,8 @@ func newRepositoryMonitorSinglePullRequestServerWithBody(t *testing.T, number in
 		if r.URL.Path != wantPath {
 			t.Fatalf("request path = %q, want single pull request path %q", r.URL.Path, wantPath)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Fatalf("Authorization header = %q, want %q", got, "Bearer test-token")
+		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
+			t.Fatalf("Authorization header = %q, want %q", got, repositoryMonitorTestBearerHeader())
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
@@ -3450,8 +3454,8 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 	}
 	testServer := &repositoryMonitorPublishTestServer{}
 	testServer.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			t.Fatalf("Authorization header = %q, want Bearer test-token", got)
+		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
+			t.Fatalf("Authorization header = %q, want %q", got, repositoryMonitorTestBearerHeader())
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -3746,7 +3750,7 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 			RepoURL: "https://github.com/sozercan/orka",
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{Enabled: &pullRequestsEnabled},
-				Issues:       corev1alpha1.RepositoryMonitorIssueTarget{Enabled: true},
+				Commits:      corev1alpha1.RepositoryMonitorCommitTarget{Enabled: true},
 			},
 		},
 	}
@@ -4148,4 +4152,84 @@ type statusPatchCountingWriter struct {
 func (w *statusPatchCountingWriter) Patch(ctx context.Context, obj crclient.Object, patch crclient.Patch, opts ...crclient.SubResourcePatchOption) error {
 	*w.statusPatchCount++
 	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
+func TestRepositoryMonitorIssueContentDigestIgnoresOrkaLabels(t *testing.T) {
+	base := repositoryMonitorIssue{Number: 12, Title: "Bug", Body: "Fix me", Labels: []string{"bug", "orka:plan", "orka-state:planning"}}
+	withOrkaNoise := base
+	withOrkaNoise.Labels = []string{"orka:implement", "bug", "orka-state:ready"}
+	if got, want := repositoryMonitorIssueContentDigest(withOrkaNoise), repositoryMonitorIssueContentDigest(base); got != want {
+		t.Fatalf("digest changed for Orka-owned labels: got %s want %s", got, want)
+	}
+	customCommand := base
+	customCommand.Labels = []string{"bug", "bot:plan"}
+	if got, want := repositoryMonitorIssueContentDigest(customCommand, "bot:plan"), repositoryMonitorIssueContentDigest(base, "bot:plan"); got != want {
+		t.Fatalf("digest changed for configured command label: got %s want %s", got, want)
+	}
+	changed := base
+	changed.Labels = []string{"bug", "priority:p1"}
+	if got, want := repositoryMonitorIssueContentDigest(changed), repositoryMonitorIssueContentDigest(base); got == want {
+		t.Fatalf("digest did not change for human-controlled label: %s", got)
+	}
+}
+
+func TestRepositoryMonitorReconcileInventoriesIssues(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/sozercan/orka/issues" {
+			t.Fatalf("request path = %q, want issue inventory path", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
+			t.Fatalf("Authorization header = %q, want bearer token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"number":11,"title":"Open issue","body":"Implement this","state":"open","updated_at":"2026-06-01T00:00:00Z","html_url":"https://github.com/sozercan/orka/issues/11","user":{"login":"alice"},"labels":[{"name":"bug"},{"name":"orka:plan"}]},
+			{"number":12,"title":"PR-shaped issue","body":"","state":"open","updated_at":"2026-06-01T00:00:00Z","html_url":"https://github.com/sozercan/orka/pull/12","user":{"login":"bob"},"pull_request":{"html_url":"https://github.com/sozercan/orka/pull/12"},"labels":[]}
+		]`))
+	}))
+	t.Cleanup(server.Close)
+
+	pullRequestsEnabled := false
+	monitor, secret := repositoryMonitorInventoryTestObjects("issue-inventory")
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-issues", MonitorNamespace: "default", MonitorName: "issue-inventory", Trigger: "manual", Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "issue-inventory"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "issue-inventory", repositoryMonitorIssueKind, "11")
+	if err != nil {
+		t.Fatalf("GetMonitorItem(issue) error = %v", err)
+	}
+	if item.SnapshotDigest == "" || item.WorkflowPhase != repositoryMonitorIssuePhaseDiscovered || item.State != repositoryMonitorItemStateOpen {
+		t.Fatalf("issue item = %#v, want digest/discovered/open", item)
+	}
+	if _, err := monitorStore.GetMonitorItem(ctx, "default", "issue-inventory", repositoryMonitorIssueKind, "12"); err != store.ErrNotFound {
+		t.Fatalf("PR-shaped issue item error = %v, want ErrNotFound", err)
+	}
+	var current corev1alpha1.RepositoryMonitor
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: "issue-inventory"}, &current); err != nil {
+		t.Fatalf("Get monitor() error = %v", err)
+	}
+	if current.Status.OpenIssues != 1 {
+		t.Fatalf("OpenIssues = %d, want 1", current.Status.OpenIssues)
+	}
 }

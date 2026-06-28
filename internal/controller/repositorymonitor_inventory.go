@@ -578,14 +578,11 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 }
 
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
-	if spec.Targets.Issues.Enabled {
-		return fmt.Errorf("spec.targets.issues is not supported; only pull request monitoring is supported")
-	}
 	if spec.Targets.Commits.Enabled {
-		return fmt.Errorf("spec.targets.commits is not supported; only pull request monitoring is supported")
+		return fmt.Errorf("spec.targets.commits is not supported; only pull request and issue monitoring are supported")
 	}
-	if !repositoryMonitorPullRequestsEnabled(spec) {
-		return fmt.Errorf("spec.targets.pullRequests.enabled must be true; only pull request monitoring is supported")
+	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
+		return fmt.Errorf("at least one repository monitor target must be enabled")
 	}
 	if spec.Review.RequireGreenCI {
 		return fmt.Errorf("spec.review.requireGreenCI is not supported until repository monitor CI state collection is available")
@@ -594,10 +591,15 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 }
 
 func validateRepositoryMonitorRunTargetKind(run *store.MonitorRun) error {
-	if run == nil || strings.TrimSpace(run.TargetKind) == "" || run.TargetKind == repositoryMonitorPullRequestKind {
+	if run == nil {
 		return nil
 	}
-	return fmt.Errorf("targetKind %q is not supported; only pull_request monitor runs are supported", run.TargetKind)
+	switch strings.TrimSpace(run.TargetKind) {
+	case "", repositoryMonitorPullRequestKind, repositoryMonitorIssueKind:
+		return nil
+	default:
+		return fmt.Errorf("targetKind %q is not supported; supported values are pull_request and issue", run.TargetKind)
+	}
 }
 
 func repositoryMonitorPullRequestsEnabled(spec corev1alpha1.RepositoryMonitorSpec) bool {

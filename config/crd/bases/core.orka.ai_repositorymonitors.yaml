@@ -59,12 +59,25 @@ spec:
             description: RepositoryMonitorSpec defines the desired state of RepositoryMonitor.
             properties:
               agents:
-                description: Agents configures the agents used by monitor review and
-                  repair tasks.
+                description: Agents configures the agents used by monitor review,
+                  issue, and repair tasks.
                 properties:
                   implementer:
                     description: Implementer is the agent used for guarded issue implementation
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  planner:
+                    description: Planner is the agent used for issue planning tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -89,9 +102,35 @@ spec:
                     required:
                     - name
                     type: object
+                  researcher:
+                    description: Researcher is the agent used for issue research tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
                   reviewer:
                     description: Reviewer is the agent used for pull-request review
                       tasks.
+                    properties:
+                      name:
+                        description: Name is the name of the Agent
+                        type: string
+                      namespace:
+                        description: Namespace is the namespace of the Agent (defaults
+                          to Task namespace)
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  triager:
+                    description: Triager is the agent used for issue triage tasks.
                     properties:
                       name:
                         description: Name is the name of the Agent
@@ -389,6 +428,20 @@ spec:
                       enabled:
                         description: Enabled enables issue monitoring.
                         type: boolean
+                      excludeLabels:
+                        description: ExcludeLabels excludes matching issues from actionable
+                          inventory.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                      includeLabels:
+                        description: IncludeLabels optionally restricts issue inventory
+                          to issues with any of these labels.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                       maxPerRun:
                         description: MaxPerRun limits issues selected by one background
                           run.
@@ -421,6 +474,77 @@ spec:
               timeZone:
                 description: TimeZone is the IANA time zone for the schedule.
                 type: string
+              triggers:
+                description: Triggers configures external events that create durable
+                  monitor commands.
+                properties:
+                  github:
+                    description: GitHub configures GitHub webhook triggers.
+                    properties:
+                      labels:
+                        description: Labels maps GitHub labels to durable RepositoryMonitor
+                          commands.
+                        properties:
+                          consumeCommandLabels:
+                            description: ConsumeCommandLabels removes accepted one-shot
+                              command labels after durable intake.
+                            type: boolean
+                          enabled:
+                            description: Enabled enables durable command intake for
+                              configured GitHub labels.
+                            type: boolean
+                          issues:
+                            description: Issues maps issue command intents to label
+                              names. Empty fields use the default orka:* labels.
+                            properties:
+                              approvePlan:
+                                type: string
+                              decompose:
+                                type: string
+                              implement:
+                                type: string
+                              plan:
+                                type: string
+                              research:
+                                type: string
+                              resume:
+                                type: string
+                              stop:
+                                type: string
+                              triage:
+                                type: string
+                            type: object
+                          pullRequests:
+                            description: PullRequests maps pull-request command intents
+                              to label names. Empty fields use the default orka:*
+                              labels.
+                            properties:
+                              fix:
+                                type: string
+                              fixCI:
+                                type: string
+                              resume:
+                                type: string
+                              review:
+                                type: string
+                              stop:
+                                type: string
+                              updateBranch:
+                                type: string
+                            type: object
+                          requireActorPermission:
+                            default: write
+                            description: |-
+                              RequireActorPermission is the minimum GitHub permission for mutating/code-executing commands.
+                              Supported values are write, maintain, and admin. Defaults to write.
+                            enum:
+                            - write
+                            - maintain
+                            - admin
+                            type: string
+                        type: object
+                    type: object
+                type: object
               validation:
                 description: Validation configures deterministic validation commands
                   for repair.
@@ -448,6 +572,11 @@ spec:
             properties:
               activeRepairs:
                 description: ActiveRepairs is the count of repair jobs currently active.
+                format: int32
+                type: integer
+              blockedIssues:
+                description: BlockedIssues is the count of issues blocked by guard
+                  labels or workflow policy.
                 format: int32
                 type: integer
               blockedItems:
@@ -539,9 +668,19 @@ spec:
                   in status.
                 format: int64
                 type: integer
+              openIssues:
+                description: OpenIssues is the current count of open issues seen by
+                  the monitor.
+                format: int32
+                type: integer
               openPullRequests:
                 description: OpenPullRequests is the current count of open pull requests
                   seen by the monitor.
+                format: int32
+                type: integer
+              pendingIssueActions:
+                description: PendingIssueActions is the count of issues waiting for
+                  a queued workflow action.
                 format: int32
                 type: integer
               pendingReviews:

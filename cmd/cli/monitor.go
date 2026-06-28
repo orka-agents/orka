@@ -20,6 +20,8 @@ func newMonitorCmd() *cobra.Command {
 	cmd.AddCommand(newMonitorRunCmd())
 	cmd.AddCommand(newMonitorRunsCmd())
 	cmd.AddCommand(newMonitorItemsCmd())
+	cmd.AddCommand(newMonitorIssuesCmd())
+	cmd.AddCommand(newMonitorCommandsCmd())
 	cmd.AddCommand(newMonitorEventsCmd())
 	return cmd
 }
@@ -47,7 +49,7 @@ func newMonitorRunCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&targetKind, "target-kind", "", "Target kind (e.g. pull_request)")
+	cmd.Flags().StringVar(&targetKind, "target-kind", "", "Target kind (pull_request or issue)")
 	cmd.Flags().Int64Var(&targetNumber, "target-number", 0, "Target number")
 	cmd.Flags().StringVar(&targetSHA, "target-sha", "", "Target commit SHA")
 	return cmd
@@ -124,6 +126,118 @@ func newMonitorItemsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&verdict, "verdict", "", "Filter by review verdict")
 	cmd.Flags().StringVar(&repairState, "repair-state", "", "Filter by repair state")
 	cmd.Flags().StringVar(&automergeState, "automerge-state", "", "Filter by automerge state")
+	return cmd
+}
+
+func newMonitorIssuesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "issues",
+		Short: "Inspect repository monitor issue inventory",
+	}
+	cmd.AddCommand(newMonitorIssuesListCmd())
+	return cmd
+}
+
+func newMonitorIssuesListCmd() *cobra.Command {
+	var limit int
+	var cursor, state string
+	cmd := &cobra.Command{
+		Use:   "list <name>",
+		Short: "List repository monitor issues",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := mergeQuery(
+				map[string]string{},
+				"limit", fmt.Sprintf("%d", limit),
+				"cursor", cursor,
+				"continue", cursor,
+				"kind", "issue",
+				"state", state,
+			)
+			c := newClientFromCmd(cmd)
+			path := "/api/v1/monitors/repositories/" + url.PathEscape(args[0]) + "/items"
+			result, err := c.DoJSON(context.Background(), http.MethodGet, path, q, nil)
+			if err != nil {
+				return err
+			}
+			return printStructured(cmd, result)
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of results")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Cursor token")
+	cmd.Flags().StringVar(&cursor, "continue", "", "Continue token")
+	cmd.Flags().StringVar(&state, "state", "", "Filter by state")
+	return cmd
+}
+
+func newMonitorCommandsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "commands",
+		Short: "Inspect repository monitor command events",
+	}
+	cmd.AddCommand(newMonitorCommandsListCmd())
+	cmd.AddCommand(newMonitorCommandsGetCmd())
+	return cmd
+}
+
+func newMonitorCommandsListCmd() *cobra.Command {
+	var limit int
+	var cursor, kind, intent, status string
+	var number int64
+	cmd := &cobra.Command{
+		Use:   "list <name>",
+		Short: "List repository monitor commands",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := mergeQuery(
+				map[string]string{},
+				"name", args[0],
+				"limit", fmt.Sprintf("%d", limit),
+				"cursor", cursor,
+				"continue", cursor,
+				"kind", kind,
+				"intent", intent,
+				"status", status,
+			)
+			if number > 0 {
+				q["number"] = fmt.Sprintf("%d", number)
+			}
+			c := newClientFromCmd(cmd)
+			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/commands", q, nil)
+			if err != nil {
+				return err
+			}
+			return printStructured(cmd, result)
+		},
+	}
+	addOutputFlag(cmd, outputTable)
+	cmd.Flags().IntVar(&limit, "limit", 50, "Maximum number of results")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Cursor token")
+	cmd.Flags().StringVar(&cursor, "continue", "", "Continue token")
+	cmd.Flags().StringVar(&kind, "kind", "", "Filter by target kind")
+	cmd.Flags().Int64Var(&number, "number", 0, "Filter by target number")
+	cmd.Flags().StringVar(&intent, "intent", "", "Filter by command intent")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by command status")
+	return cmd
+}
+
+func newMonitorCommandsGetCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get <command-id>",
+		Short: "Get a repository monitor command",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClientFromCmd(cmd)
+			path := "/api/v1/monitors/commands/" + url.PathEscape(args[0])
+			result, err := c.DoJSON(context.Background(), http.MethodGet, path, nil, nil)
+			if err != nil {
+				return err
+			}
+			return printStructured(cmd, result)
+		},
+	}
+	addOutputFlag(cmd, outputYAML)
 	return cmd
 }
 

@@ -387,10 +387,11 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO monitor_items
 		 (monitor_namespace, monitor_name, kind, item_key, number, sha, title, author, state, labels_json,
+		  snapshot_digest, github_updated_at, workflow_phase, linked_pr_number, last_command_id, last_command_intent,
 		  base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
 		  last_review_id, last_reviewed_head_sha, last_verdict, repair_state, automerge_state, status_comment_id,
 		  status_comment_url, last_publish_id, last_publish_phase, last_publish_reason, last_publish_url, updated_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(monitor_namespace, monitor_name, kind, item_key) DO UPDATE SET
 		   number = excluded.number,
 		   sha = excluded.sha,
@@ -398,6 +399,12 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		   author = excluded.author,
 		   state = excluded.state,
 		   labels_json = excluded.labels_json,
+		   snapshot_digest = excluded.snapshot_digest,
+		   github_updated_at = excluded.github_updated_at,
+		   workflow_phase = excluded.workflow_phase,
+		   linked_pr_number = excluded.linked_pr_number,
+		   last_command_id = excluded.last_command_id,
+		   last_command_intent = excluded.last_command_intent,
 		   base_branch = excluded.base_branch,
 		   head_branch = excluded.head_branch,
 		   head_sha = excluded.head_sha,
@@ -420,7 +427,8 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 		   updated_at = excluded.updated_at,
 		   last_seen_at = excluded.last_seen_at`,
 		item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey, item.Number, item.SHA,
-		item.Title, item.Author, item.State, item.LabelsJSON, item.BaseBranch, item.HeadBranch,
+		item.Title, item.Author, item.State, item.LabelsJSON, item.SnapshotDigest, item.GitHubUpdatedAt,
+		item.WorkflowPhase, item.LinkedPRNumber, item.LastCommandID, item.LastCommandIntent, item.BaseBranch, item.HeadBranch,
 		item.HeadSHA, item.BaseSHA, item.Draft, item.MergeableState, item.CIState, item.SkipReason,
 		item.LastReviewID, item.LastReviewedHeadSHA, item.LastVerdict, item.RepairState, item.AutomergeState,
 		item.StatusCommentID, item.StatusCommentURL, item.LastPublishID, item.LastPublishPhase, item.LastPublishReason,
@@ -447,6 +455,7 @@ func (s *Store) GetMonitorItem(ctx context.Context, namespace, monitorName, kind
 
 func monitorItemSelectSQL() string {
 	return `SELECT monitor_namespace, monitor_name, kind, item_key, number, sha, title, author, state, labels_json,
+	        snapshot_digest, github_updated_at, workflow_phase, linked_pr_number, last_command_id, last_command_intent,
 	        base_branch, head_branch, head_sha, base_sha, draft, mergeable_state, ci_state, skip_reason,
 	        last_review_id, last_reviewed_head_sha, last_verdict, repair_state, automerge_state, status_comment_id,
 	        status_comment_url, last_publish_id, last_publish_phase, last_publish_reason, last_publish_url,
@@ -456,7 +465,8 @@ func monitorItemSelectSQL() string {
 func monitorItemScanDest(item *store.MonitorItem) []any {
 	return []any{
 		&item.MonitorNamespace, &item.MonitorName, &item.Kind, &item.ItemKey, &item.Number, &item.SHA,
-		&item.Title, &item.Author, &item.State, &item.LabelsJSON, &item.BaseBranch, &item.HeadBranch,
+		&item.Title, &item.Author, &item.State, &item.LabelsJSON, &item.SnapshotDigest, &item.GitHubUpdatedAt,
+		&item.WorkflowPhase, &item.LinkedPRNumber, &item.LastCommandID, &item.LastCommandIntent, &item.BaseBranch, &item.HeadBranch,
 		&item.HeadSHA, &item.BaseSHA, &item.Draft, &item.MergeableState, &item.CIState, &item.SkipReason,
 		&item.LastReviewID, &item.LastReviewedHeadSHA, &item.LastVerdict, &item.RepairState, &item.AutomergeState,
 		&item.StatusCommentID, &item.StatusCommentURL, &item.LastPublishID, &item.LastPublishPhase, &item.LastPublishReason,
@@ -784,13 +794,15 @@ func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEven
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO command_events
-		 (id, monitor_namespace, monitor_name, repo, kind, number, comment_id, comment_url, author,
-		  author_association, permission, command, intent, head_sha, status, status_comment_id,
+		 (id, monitor_namespace, monitor_name, repo, kind, number, source, delivery_id, label, monitor_generation,
+		  dedupe_key, idempotency_key, comment_id, comment_url, author, author_association, permission,
+		  command, intent, head_sha, issue_snapshot_digest, status, status_comment_id,
 		  created_repair_job_id, created_at, processed_at, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ID, event.MonitorNamespace, event.MonitorName, event.Repo, event.Kind, event.Number,
+		event.Source, event.DeliveryID, event.Label, event.MonitorGeneration, event.DedupeKey, event.IdempotencyKey,
 		event.CommentID, event.CommentURL, event.Author, event.AuthorAssociation, event.Permission,
-		event.Command, event.Intent, event.HeadSHA, event.Status, event.StatusCommentID,
+		event.Command, event.Intent, event.HeadSHA, event.IssueSnapshotDigest, event.Status, event.StatusCommentID,
 		event.CreatedRepairJobID, event.CreatedAt, event.ProcessedAt, event.Error,
 	)
 	return err
@@ -800,12 +812,14 @@ func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEven
 func (s *Store) UpdateCommandEvent(ctx context.Context, event *store.CommandEvent) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE command_events
-		 SET repo = ?, kind = ?, number = ?, comment_id = ?, comment_url = ?, author = ?,
-		     author_association = ?, permission = ?, command = ?, intent = ?, head_sha = ?,
+		 SET repo = ?, kind = ?, number = ?, source = ?, delivery_id = ?, label = ?, monitor_generation = ?,
+		     dedupe_key = ?, idempotency_key = ?, comment_id = ?, comment_url = ?, author = ?,
+		     author_association = ?, permission = ?, command = ?, intent = ?, head_sha = ?, issue_snapshot_digest = ?,
 		     status = ?, status_comment_id = ?, created_repair_job_id = ?, processed_at = ?, error = ?
 		 WHERE monitor_namespace = ? AND id = ?`,
-		event.Repo, event.Kind, event.Number, event.CommentID, event.CommentURL, event.Author,
-		event.AuthorAssociation, event.Permission, event.Command, event.Intent, event.HeadSHA,
+		event.Repo, event.Kind, event.Number, event.Source, event.DeliveryID, event.Label, event.MonitorGeneration,
+		event.DedupeKey, event.IdempotencyKey, event.CommentID, event.CommentURL, event.Author,
+		event.AuthorAssociation, event.Permission, event.Command, event.Intent, event.HeadSHA, event.IssueSnapshotDigest,
 		event.Status, event.StatusCommentID, event.CreatedRepairJobID, event.ProcessedAt, event.Error,
 		event.MonitorNamespace, event.ID,
 	)
@@ -816,18 +830,7 @@ func (s *Store) UpdateCommandEvent(ctx context.Context, event *store.CommandEven
 func (s *Store) GetCommandEvent(ctx context.Context, namespace, id string) (*store.CommandEvent, error) {
 	var event store.CommandEvent
 	var processedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, monitor_namespace, monitor_name, repo, kind, number, comment_id, comment_url,
-		        author, author_association, permission, command, intent, head_sha, status,
-		        status_comment_id, created_repair_job_id, created_at, processed_at, error
-		 FROM command_events WHERE monitor_namespace = ? AND id = ?`,
-		namespace, id,
-	).Scan(
-		&event.ID, &event.MonitorNamespace, &event.MonitorName, &event.Repo, &event.Kind, &event.Number,
-		&event.CommentID, &event.CommentURL, &event.Author, &event.AuthorAssociation, &event.Permission,
-		&event.Command, &event.Intent, &event.HeadSHA, &event.Status, &event.StatusCommentID,
-		&event.CreatedRepairJobID, &event.CreatedAt, &processedAt, &event.Error,
-	)
+	err := s.db.QueryRowContext(ctx, commandEventSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(commandEventScanDest(&event, &processedAt)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -838,6 +841,79 @@ func (s *Store) GetCommandEvent(ctx context.Context, namespace, id string) (*sto
 		event.ProcessedAt = &processedAt.Time
 	}
 	return &event, nil
+}
+
+func commandEventSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, repo, kind, number, source, delivery_id, label, monitor_generation,
+	        dedupe_key, idempotency_key, comment_id, comment_url, author, author_association, permission,
+	        command, intent, head_sha, issue_snapshot_digest, status, status_comment_id, created_repair_job_id,
+	        created_at, processed_at, error FROM command_events`
+}
+
+func commandEventScanDest(event *store.CommandEvent, processedAt *sql.NullTime) []any {
+	return []any{
+		&event.ID, &event.MonitorNamespace, &event.MonitorName, &event.Repo, &event.Kind, &event.Number,
+		&event.Source, &event.DeliveryID, &event.Label, &event.MonitorGeneration, &event.DedupeKey, &event.IdempotencyKey,
+		&event.CommentID, &event.CommentURL, &event.Author, &event.AuthorAssociation, &event.Permission,
+		&event.Command, &event.Intent, &event.HeadSHA, &event.IssueSnapshotDigest, &event.Status, &event.StatusCommentID,
+		&event.CreatedRepairJobID, &event.CreatedAt, processedAt, &event.Error,
+	}
+}
+
+// ListCommandEvents lists command intake events.
+func (s *Store) ListCommandEvents(ctx context.Context, filter store.CommandEventFilter) ([]store.CommandEvent, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit := defaultMonitorLimit(filter.Limit)
+	query := strings.Builder{}
+	query.WriteString(commandEventSelectSQL())
+	query.WriteString(" WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	if filter.MonitorName != "" {
+		query.WriteString(" AND monitor_name = ?")
+		args = append(args, filter.MonitorName)
+	}
+	if filter.Kind != "" {
+		query.WriteString(" AND kind = ?")
+		args = append(args, filter.Kind)
+	}
+	if filter.Number != 0 {
+		query.WriteString(" AND number = ?")
+		args = append(args, filter.Number)
+	}
+	if filter.Intent != "" {
+		query.WriteString(" AND intent = ?")
+		args = append(args, filter.Intent)
+	}
+	if filter.Status != "" {
+		query.WriteString(" AND status = ?")
+		args = append(args, filter.Status)
+	}
+	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+	var events []store.CommandEvent
+	for rows.Next() {
+		var event store.CommandEvent
+		var processedAt sql.NullTime
+		if err := rows.Scan(commandEventScanDest(&event, &processedAt)...); err != nil {
+			return nil, "", err
+		}
+		if processedAt.Valid {
+			event.ProcessedAt = &processedAt.Time
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return events, nextOffsetCursor(offset, len(events), limit), nil
 }
 
 // CreateRepairJob inserts a repair job.

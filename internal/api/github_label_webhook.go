@@ -54,6 +54,11 @@ const (
 	githubActionToIssues                       = "to-issues"
 	githubActionUpdateBranch                   = "update-branch"
 	githubMonitorTriggerPullRequestEvent       = "pull_request_event"
+	githubMonitorTriggerLabelCommand           = "github_label_command"
+	githubCommandEventSourceLabel              = "github_label"
+	githubCommandStatusAccepted                = "accepted"
+	githubCommandStatusRejected                = "rejected"
+	githubCommandStatusBlocked                 = "blocked"
 	githubMonitorEventTypeExactRunQueued       = "exact_event_run_queued"
 	githubWebhookDefaultTimeout                = 30 * time.Minute
 	githubWebhookDefaultMaxTurns         int32 = 100
@@ -90,7 +95,9 @@ type githubWebhookIssue struct {
 	Title       string                    `json:"title"`
 	Body        string                    `json:"body"`
 	HTMLURL     string                    `json:"html_url"`
+	UpdatedAt   time.Time                 `json:"updated_at"`
 	PullRequest *githubIssuePullRequestID `json:"pull_request,omitempty"`
+	Labels      []githubWebhookLabel      `json:"labels"`
 }
 
 type githubIssuePullRequestID struct {
@@ -114,6 +121,7 @@ type githubWebhookPullRequest struct {
 		SHA  string                  `json:"sha"`
 		Repo githubWebhookRepository `json:"repo"`
 	} `json:"head"`
+	Labels []githubWebhookLabel `json:"labels"`
 }
 
 type githubLabelTarget struct {
@@ -132,6 +140,8 @@ type githubLabelTarget struct {
 	Repo         githubWebhookRepository
 	BaseRepo     githubWebhookRepository
 	HeadRepo     githubWebhookRepository
+	Labels       []string
+	UpdatedAt    time.Time
 }
 
 type githubRepositoryMonitorEventResult struct {
@@ -140,6 +150,7 @@ type githubRepositoryMonitorEventResult struct {
 	Duplicate     int
 	SkippedActive int
 	RunIDs        []string
+	CommandIDs    []string
 }
 
 func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
@@ -169,6 +180,36 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 	}
 
 	var monitorResult githubRepositoryMonitorEventResult
+	if payload.Action != "labeled" {
+		if event == githubEventPullRequest {
+			var err error
+			delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
+			monitorResult, err = h.enqueueRepositoryMonitorPullRequestEventRuns(c, body, delivery, payload)
+			if err != nil {
+				return err
+			}
+		}
+		if monitorResult.Matched > 0 {
+			return githubRepositoryMonitorEventResponse(c, monitorResult)
+		}
+		return githubWebhookIgnored(c, fmt.Sprintf("ignored action %q", payload.Action))
+	}
+
+	target, ok := payload.target()
+	if !ok {
+		return fiber.NewError(fiber.StatusBadRequest, "GitHub webhook payload has no issue or pull request target")
+	}
+	if target.IncompletePR {
+		return githubWebhookIgnored(c, "issues webhook payload for pull request lacks base/head details; configure pull_request events for PR labels")
+	}
+
+	commandResult, handledCommand, err := h.handleRepositoryMonitorLabelCommand(c, body, strings.TrimSpace(c.Get(githubDeliveryHeader)), payload, target)
+	if err != nil {
+		return err
+	}
+	if handledCommand {
+		return githubRepositoryMonitorEventResponse(c, mergeGitHubRepositoryMonitorEventResults(monitorResult, commandResult))
+	}
 	if event == githubEventPullRequest {
 		var err error
 		delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
@@ -178,27 +219,12 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 		}
 	}
 
-	if payload.Action != "labeled" {
-		if monitorResult.Matched > 0 {
-			return githubRepositoryMonitorEventResponse(c, monitorResult)
-		}
-		return githubWebhookIgnored(c, fmt.Sprintf("ignored action %q", payload.Action))
-	}
-
 	action, ok := githubLabelAction(payload.Label.Name)
 	if !ok {
 		if monitorResult.Matched > 0 {
 			return githubRepositoryMonitorEventResponse(c, monitorResult)
 		}
 		return githubWebhookIgnored(c, "label is not an Orka agent trigger")
-	}
-
-	target, ok := payload.target()
-	if !ok {
-		return fiber.NewError(fiber.StatusBadRequest, "GitHub webhook payload has no issue or pull request target")
-	}
-	if target.IncompletePR {
-		return githubWebhookIgnored(c, "issues webhook payload for pull request lacks base/head details; configure pull_request events for PR labels")
 	}
 	if actionRequiresPullRequest(action) && !target.IsPR {
 		return githubWebhookIgnored(c, fmt.Sprintf("agent:%s requires a pull request target", action))
@@ -464,7 +490,19 @@ func githubRepositoryMonitorEventResponse(c fiber.Ctx, result githubRepositoryMo
 		"monitorRunsSkipped": result.SkippedActive,
 		"matchedMonitors":    result.Matched,
 		"runIDs":             result.RunIDs,
+		"commandIDs":         result.CommandIDs,
 	})
+}
+
+func mergeGitHubRepositoryMonitorEventResults(a, b githubRepositoryMonitorEventResult) githubRepositoryMonitorEventResult {
+	return githubRepositoryMonitorEventResult{
+		Matched:       a.Matched + b.Matched,
+		Queued:        a.Queued + b.Queued,
+		Duplicate:     a.Duplicate + b.Duplicate,
+		SkippedActive: a.SkippedActive + b.SkippedActive,
+		RunIDs:        append(append([]string{}, a.RunIDs...), b.RunIDs...),
+		CommandIDs:    append(append([]string{}, a.CommandIDs...), b.CommandIDs...),
+	}
 }
 
 func validGitHubSignature(body []byte, signatureHeader, secret string) bool {
@@ -548,6 +586,7 @@ func (p githubLabelWebhookPayload) target() (githubLabelTarget, bool) {
 			Repo:       repo,
 			BaseRepo:   baseRepo,
 			HeadRepo:   headRepo,
+			Labels:     githubWebhookLabelNames(pr.Labels),
 		}, true
 	}
 
@@ -568,21 +607,35 @@ func (p githubLabelWebhookPayload) target() (githubLabelTarget, bool) {
 				Repo:         p.Repository,
 				BaseRepo:     p.Repository,
 				HeadRepo:     p.Repository,
+				Labels:       githubWebhookLabelNames(p.Issue.Labels),
+				UpdatedAt:    p.Issue.UpdatedAt,
 			}, true
 		}
 		return githubLabelTarget{
-			Kind:     "issue",
-			Number:   p.Issue.Number,
-			Title:    p.Issue.Title,
-			Body:     p.Issue.Body,
-			HTMLURL:  htmlURL,
-			Repo:     p.Repository,
-			BaseRepo: p.Repository,
-			HeadRepo: p.Repository,
+			Kind:      "issue",
+			Number:    p.Issue.Number,
+			Title:     p.Issue.Title,
+			Body:      p.Issue.Body,
+			HTMLURL:   htmlURL,
+			Repo:      p.Repository,
+			BaseRepo:  p.Repository,
+			HeadRepo:  p.Repository,
+			Labels:    githubWebhookLabelNames(p.Issue.Labels),
+			UpdatedAt: p.Issue.UpdatedAt,
 		}, true
 	}
 
 	return githubLabelTarget{}, false
+}
+
+func githubWebhookLabelNames(webhookLabels []githubWebhookLabel) []string {
+	names := make([]string, 0, len(webhookLabels))
+	for _, label := range webhookLabels {
+		if strings.TrimSpace(label.Name) != "" {
+			names = append(names, label.Name)
+		}
+	}
+	return names
 }
 
 func (h *Handlers) githubWebhookNamespace() string {

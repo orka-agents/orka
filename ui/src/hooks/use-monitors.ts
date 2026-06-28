@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { MonitorItem, MonitorRun, RepositoryMonitor } from '@/schemas/monitor'
+import type { MonitorCommand, MonitorItem, MonitorRun, RepositoryMonitor } from '@/schemas/monitor'
 
 interface ListResponse<T> {
   items: T[]
@@ -49,6 +49,16 @@ export function useRepositoryMonitorItems(name: string, kind = 'pull_request') {
   return useQuery({
     queryKey: ['monitors', 'items', namespace, name, kind],
     queryFn: () => api.get<ListResponse<MonitorItem>>(`/monitors/repositories/${name}/items`, { namespace, kind }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorCommands(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'commands', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorCommand>>('/monitors/commands', { namespace, name }),
     enabled: !!name,
     refetchInterval: 10000,
   })

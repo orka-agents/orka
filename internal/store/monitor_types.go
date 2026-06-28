@@ -60,6 +60,12 @@ type MonitorItem struct {
 	Author              string    `json:"author,omitempty"`
 	State               string    `json:"state,omitempty"`
 	LabelsJSON          string    `json:"labelsJSON,omitempty"`
+	SnapshotDigest      string    `json:"snapshotDigest,omitempty"`
+	GitHubUpdatedAt     time.Time `json:"githubUpdatedAt,omitempty"`
+	WorkflowPhase       string    `json:"workflowPhase,omitempty"`
+	LinkedPRNumber      int64     `json:"linkedPRNumber,omitempty"`
+	LastCommandID       string    `json:"lastCommandID,omitempty"`
+	LastCommandIntent   string    `json:"lastCommandIntent,omitempty"`
 	BaseBranch          string    `json:"baseBranch,omitempty"`
 	HeadBranch          string    `json:"headBranch,omitempty"`
 	HeadSHA             string    `json:"headSHA,omitempty"`
@@ -169,28 +175,47 @@ type ReviewPublishRecordFilter struct {
 	Cursor         string
 }
 
+// CommandEventFilter constrains command event list queries.
+type CommandEventFilter struct {
+	Namespace   string
+	MonitorName string
+	Kind        string
+	Number      int64
+	Intent      string
+	Status      string
+	Limit       int
+	Cursor      string
+}
+
 // CommandEvent stores one maintainer command intake event.
 type CommandEvent struct {
-	ID                 string     `json:"id"`
-	MonitorNamespace   string     `json:"monitorNamespace"`
-	MonitorName        string     `json:"monitorName"`
-	Repo               string     `json:"repo,omitempty"`
-	Kind               string     `json:"kind,omitempty"`
-	Number             int64      `json:"number,omitempty"`
-	CommentID          string     `json:"commentID,omitempty"`
-	CommentURL         string     `json:"commentURL,omitempty"`
-	Author             string     `json:"author,omitempty"`
-	AuthorAssociation  string     `json:"authorAssociation,omitempty"`
-	Permission         string     `json:"permission,omitempty"`
-	Command            string     `json:"command,omitempty"`
-	Intent             string     `json:"intent,omitempty"`
-	HeadSHA            string     `json:"headSHA,omitempty"`
-	Status             string     `json:"status,omitempty"`
-	StatusCommentID    string     `json:"statusCommentID,omitempty"`
-	CreatedRepairJobID string     `json:"createdRepairJobID,omitempty"`
-	CreatedAt          time.Time  `json:"createdAt"`
-	ProcessedAt        *time.Time `json:"processedAt,omitempty"`
-	Error              string     `json:"error,omitempty"`
+	ID                  string     `json:"id"`
+	MonitorNamespace    string     `json:"monitorNamespace"`
+	MonitorName         string     `json:"monitorName"`
+	Repo                string     `json:"repo,omitempty"`
+	Kind                string     `json:"kind,omitempty"`
+	Number              int64      `json:"number,omitempty"`
+	Source              string     `json:"source,omitempty"`
+	DeliveryID          string     `json:"deliveryID,omitempty"`
+	Label               string     `json:"label,omitempty"`
+	MonitorGeneration   int64      `json:"monitorGeneration,omitempty"`
+	DedupeKey           string     `json:"dedupeKey,omitempty"`
+	IdempotencyKey      string     `json:"idempotencyKey,omitempty"`
+	CommentID           string     `json:"commentID,omitempty"`
+	CommentURL          string     `json:"commentURL,omitempty"`
+	Author              string     `json:"author,omitempty"`
+	AuthorAssociation   string     `json:"authorAssociation,omitempty"`
+	Permission          string     `json:"permission,omitempty"`
+	Command             string     `json:"command,omitempty"`
+	Intent              string     `json:"intent,omitempty"`
+	HeadSHA             string     `json:"headSHA,omitempty"`
+	IssueSnapshotDigest string     `json:"issueSnapshotDigest,omitempty"`
+	Status              string     `json:"status,omitempty"`
+	StatusCommentID     string     `json:"statusCommentID,omitempty"`
+	CreatedRepairJobID  string     `json:"createdRepairJobID,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	ProcessedAt         *time.Time `json:"processedAt,omitempty"`
+	Error               string     `json:"error,omitempty"`
 }
 
 // RepairJob stores durable repair and automerge state.

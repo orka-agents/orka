@@ -118,7 +118,7 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	unsupportedRunReq := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/runs?namespace=demo", strings.NewReader(`{"targetKind":"issue","targetNumber":42}`))
+	unsupportedRunReq := httptest.NewRequest(http.MethodPost, "/monitors/repositories/repo-monitor/runs?namespace=demo", strings.NewReader(`{"targetKind":"commit","targetNumber":42}`))
 	unsupportedRunReq.Header.Set("Content-Type", "application/json")
 	resp, err = app.Test(unsupportedRunReq)
 	require.NoError(t, err)
@@ -221,7 +221,6 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedTargets(t *testing.T) {
 		name    string
 		targets string
 	}{
-		{name: "issue target", targets: `"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}}`},
 		{name: "commit target", targets: `"targets":{"pullRequests":{"enabled":false},"commits":{"enabled":true}}`},
 		{name: "pull requests disabled", targets: `"targets":{"pullRequests":{"enabled":false}}`},
 		{name: "require green CI", targets: `"review":{"requireGreenCI":true}`},

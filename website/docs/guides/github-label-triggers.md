@@ -91,3 +91,17 @@ Create the referenced Secret outside git:
 kubectl create secret generic github-webhook-secret \
   --from-literal=secret='<webhook-secret>'
 ```
+
+## Durable `orka:*` RepositoryMonitor Commands
+
+`agent:*` labels remain the lightweight direct Task path. For durable monitor-owned workflows, configure `RepositoryMonitor.spec.triggers.github.labels.enabled: true` and use `orka:*` labels such as `orka:plan`, `orka:implement`, `orka:review`, and `orka:fix`.
+
+The `orka:*` path differs from direct `agent:*` labels:
+
+- the webhook becomes a durable command event instead of an immediate agent-owned GitHub mutation path;
+- the GitHub sender's current repository permission is checked with the monitor `gitSecretRef`;
+- protected or pause labels block the command without queueing work;
+- accepted issue commands queue exact issue monitor runs, and accepted PR review commands queue exact-head monitor runs;
+- duplicate GitHub deliveries reuse the same command event.
+
+Use `agent:*` when you explicitly want a direct one-off agent task. Use `orka:*` when the RepositoryMonitor should own durable state, policy, auditability, and follow-up workflow decisions.

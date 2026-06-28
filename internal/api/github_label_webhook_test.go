@@ -1049,6 +1049,7 @@ func configureGitHubWebhookTest(t *testing.T, env map[string]string) string {
 		githubLabelTriggerPrefixEnv,
 		githubLabelTriggerTimeoutEnv,
 		githubLabelTriggerMaxTurnsEnv,
+		githubAPIBaseURLEnv,
 		githubActionAgentEnv(githubActionImplement),
 		githubActionAgentEnv(githubActionUpdateBranch),
 		githubActionAgentEnv(githubActionReview),
@@ -1180,5 +1181,103 @@ func assertNoTasks(t *testing.T, c client.Client) {
 	if len(tasks.Items) != 0 {
 		encoded, _ := json.Marshal(tasks.Items)
 		t.Fatalf("task count = %d, want 0: %s", len(tasks.Items), string(encoded))
+	}
+}
+
+func TestGitHubWebhook_OrkaIssueLabelCreatesDurableCommandAndIssueRun(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/sozercan/vekil/collaborators/octocat/permission" {
+			t.Fatalf("permission path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
+			t.Fatalf("Authorization = %q, want bearer auth", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("issue-loop", false)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:plan"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":12,"title":"Add health endpoint","body":"Please add /healthz.","html_url":"https://github.com/sozercan/vekil/issues/12","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"bug"},{"name":"orka:plan"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-orka-plan", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", resp.StatusCode, http.StatusCreated, readRespBody(t, resp))
+	}
+	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "issue-loop", Kind: "issue", Number: 12, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents() error = %v", err)
+	}
+	if len(commands) != 1 || commands[0].Intent != "plan" || commands[0].Status != githubCommandStatusAccepted || commands[0].IssueSnapshotDigest == "" {
+		t.Fatalf("commands = %#v, want accepted plan command with issue digest", commands)
+	}
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "issue-loop", TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 12, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Trigger != githubMonitorTriggerLabelCommand {
+		t.Fatalf("runs = %#v, want one label-command issue run", runs)
+	}
+	assertNoTasks(t, fc)
+
+	resp = performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-orka-plan", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("replay status = %d, want accepted; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	commands, _, err = monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "issue-loop", Kind: "issue", Number: 12, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents(replay) error = %v", err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("command count after replay = %d, want 1", len(commands))
+	}
+}
+
+func TestGitHubWebhook_CustomOrkaPRLabelDoesNotAlsoQueueExactEventRun(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	monitor := githubWebhookRepositoryMonitor("custom-pr-command", true)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.PullRequests.Review = "bot:review"
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"bot:review"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{"number":7,"title":"Review me","body":"","html_url":"https://github.com/sozercan/vekil/pull/7","state":"open","draft":false,"base":{"ref":"main","sha":"base","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"head":{"ref":"feature","sha":"head-sha","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"labels":[{"name":"bot:review"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-custom-review", secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want created; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "custom-pr-command", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].Trigger != githubMonitorTriggerLabelCommand {
+		t.Fatalf("runs = %#v, want exactly one durable command run", runs)
 	}
 }

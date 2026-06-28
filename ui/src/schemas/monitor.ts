@@ -88,6 +88,9 @@ export const repositoryMonitorStatusSchema = z.object({
   activeRepairs: z.number().optional(),
   blockedItems: z.number().optional(),
   mergeReadyItems: z.number().optional(),
+  openIssues: z.number().optional(),
+  pendingIssueActions: z.number().optional(),
+  blockedIssues: z.number().optional(),
 })
 
 export const repositoryMonitorSchema = z.object({
@@ -125,6 +128,13 @@ export const monitorItemSchema = z.object({
   title: z.string().optional(),
   author: z.string().optional(),
   state: z.string().optional(),
+  labelsJSON: z.string().optional(),
+  snapshotDigest: z.string().optional(),
+  githubUpdatedAt: z.string().optional(),
+  workflowPhase: z.string().optional(),
+  linkedPRNumber: z.number().optional(),
+  lastCommandID: z.string().optional(),
+  lastCommandIntent: z.string().optional(),
   baseBranch: z.string().optional(),
   headBranch: z.string().optional(),
   headSHA: z.string().optional(),
@@ -141,6 +151,28 @@ export const monitorItemSchema = z.object({
   lastSeenAt: z.string(),
 })
 
+export const monitorCommandSchema = z.object({
+  id: z.string(),
+  monitorNamespace: z.string(),
+  monitorName: z.string(),
+  repo: z.string().optional(),
+  kind: z.string().optional(),
+  number: z.number().optional(),
+  source: z.string().optional(),
+  deliveryID: z.string().optional(),
+  label: z.string().optional(),
+  author: z.string().optional(),
+  permission: z.string().optional(),
+  intent: z.string().optional(),
+  headSHA: z.string().optional(),
+  issueSnapshotDigest: z.string().optional(),
+  status: z.string().optional(),
+  createdAt: z.string(),
+  processedAt: z.string().optional(),
+  error: z.string().optional(),
+})
+
 export type RepositoryMonitor = z.infer<typeof repositoryMonitorSchema>
 export type MonitorRun = z.infer<typeof monitorRunSchema>
 export type MonitorItem = z.infer<typeof monitorItemSchema>
+export type MonitorCommand = z.infer<typeof monitorCommandSchema>
