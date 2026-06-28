@@ -1,0 +1,103 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryMonitor
+metadata:
+  name: issue-to-pr-loop
+  namespace: default
+spec:
+  provider: github
+  repoURL: https://github.com/example-org/example-repo
+  branch: main
+  gitSecretRef:
+    name: git-credentials
+  targets:
+    issues:
+      enabled: true
+      maxPerRun: 10
+      excludeLabels:
+        - blocked
+        - waiting-external
+        - security-sensitive
+    pullRequests:
+      enabled: true
+      includeDrafts: false
+      maxPerRun: 20
+  triggers:
+    github:
+      labels:
+        enabled: true
+        consumeCommandLabels: true
+        requireActorPermission: write
+        issues:
+          triage: orka:triage
+          research: orka:research
+          plan: orka:plan
+          approvePlan: orka:approve-plan
+          implement: orka:implement
+          decompose: orka:to-issues
+          stop: orka:stop
+          resume: orka:resume
+        pullRequests:
+          review: orka:review
+          fix: orka:fix
+          fixCI: orka:fix-ci
+          updateBranch: orka:update-branch
+          automerge: orka:automerge
+          stop: orka:stop
+          resume: orka:resume
+  agents:
+    triager:
+      name: issue-researcher
+    researcher:
+      name: issue-researcher
+    planner:
+      name: issue-researcher
+    implementer:
+      name: issue-implementer
+    reviewer:
+      name: pr-reviewer
+    repairer:
+      name: issue-implementer
+  issueWorkflow:
+    planning:
+      requireHumanApprovalFor:
+        - high
+        - security
+        - database-migration
+    implementation:
+      requireApprovedPlan: true
+      branchPrefix: orka/issue
+  review:
+    exactEventEnabled: true
+    staleReviewTTL: 24h
+    publish:
+      enabled: true
+      event: COMMENT
+      mode: summary_with_inline_findings
+  repair:
+    enabled: true
+    requireMaintainerOptIn: true
+    maxRepairsPerPR: 5
+    maxRepairsPerHead: 2
+  automerge:
+    enabled: false
+    requireMaintainerOptIn: true
+    requireGlobalMergeGate: true
+    allowedMergeMethods:
+      - squash
+  policy:
+    protectedLabels:
+      - security
+      - security-sensitive
+      - orka:needs-human
+    pauseLabels:
+      - blocked
+      - waiting-external
+      - orka:pause
+    allowedRepositoryPermissions:
+      - write
+      - maintain
+      - admin
+  validation:
+    mode: changed
+    commands:
+      - make test

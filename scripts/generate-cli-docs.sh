@@ -47,7 +47,7 @@ commands=(
   "session" "session list" "session get" "session delete"
   "memory" "memory list" "memory get" "memory create" "memory update" "memory delete" "memory enable" "memory disable" "memory proposal" "memory proposal list" "memory proposal get" "memory proposal review" "memory proposal apply" "memory proposal archive"
   "security" "security repo" "security repo list" "security repo get" "security repo create" "security repo update" "security repo delete" "security scan" "security scan run" "security scan list" "security threat-model" "security threat-model get" "security threat-model update" "security finding" "security finding list" "security finding get" "security finding dismiss" "security finding reopen" "security finding validate" "security finding patch" "security finding patches" "security finding pr" "security slice" "security slice list" "security slice get" "security dropped-findings" "security dropped-findings list"
-  "monitor" "monitor list" "monitor get" "monitor create" "monitor update" "monitor delete" "monitor run" "monitor runs" "monitor items" "monitor events"
+  "monitor" "monitor list" "monitor get" "monitor create" "monitor update" "monitor delete" "monitor run" "monitor runs" "monitor items" "monitor issues" "monitor issues list" "monitor commands" "monitor commands list" "monitor commands get" "monitor commands create" "monitor actions" "monitor actions list" "monitor actions get" "monitor events"
   "substrate" "substrate pool" "substrate pool list" "substrate pool get" "substrate pool create" "substrate pool update" "substrate pool delete"
   "completion"
 )

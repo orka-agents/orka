@@ -407,16 +407,23 @@ Usage:
   orka task [command]
 
 Available Commands:
+  approvals   List task approvals
+  approve     Approve a pending task approval
   artifacts   List artifacts for a task
   children    List child tasks
   create      Create a new task
+  decline     Decline a pending task approval
   delete      Delete a task
   download    Download task artifacts
+  events      List task execution events
+  follow      Follow task execution events
+  fork        Fork a task from an execution event checkpoint
   get         Get task details
   list        List tasks
   logs        Get task logs
   plan        Get task autonomous plan state
   result      Get task result
+  trace       Show a task trace summary
   wait        Wait for a task to complete
 
 Flags:
@@ -1420,6 +1427,8 @@ Usage:
 
 Available Commands:
   delete      Delete a session resource
+  events      List session execution events
+  follow      Follow session execution events
   get         Get a session resource
   list        List session resources
 
@@ -2454,11 +2463,15 @@ Usage:
   orka security dropped-findings list <repo> [flags]
 
 Flags:
-      --continue string   Continue token
-      --cursor string     Cursor token
-  -h, --help              help for list
-      --limit int         Maximum number of results (default 50)
-  -o, --output string     Output format: table, json, yaml (default "table")
+      --continue string      Continue token
+      --cursor string        Cursor token
+  -h, --help                 help for list
+      --layer string         Filter by dropped-finding layer (validation, filter, cap)
+      --limit int            Maximum number of results (default 50)
+  -o, --output string        Output format: table, json, yaml (default "table")
+      --reason string        Filter by exact reason or contains=<text>
+      --scan-run-id string   Filter by scan run ID
+      --slice-id string      Filter by review slice ID
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -2478,10 +2491,13 @@ Usage:
   orka monitor [command]
 
 Available Commands:
+  actions     Inspect repository monitor action records
+  commands    Inspect repository monitor command events
   create      Create a repository monitor resource from a manifest
   delete      Delete a repository monitor resource
   events      List repository monitor events
   get         Get a repository monitor resource
+  issues      Inspect repository monitor issue inventory
   items       List repository monitor items
   list        List repository monitor resources
   run         Trigger a manual repository monitor run
@@ -2619,7 +2635,7 @@ Usage:
 
 Flags:
   -h, --help                 help for run
-      --target-kind string   Target kind (e.g. pull_request)
+      --target-kind string   Target kind (pull_request or issue)
       --target-number int    Target number
       --target-sha string    Target commit SHA
 
@@ -2677,6 +2693,232 @@ Flags:
       --repair-state string      Filter by repair state
       --state string             Filter by state
       --verdict string           Filter by review verdict
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka monitor issues`
+
+```text
+Inspect repository monitor issue inventory
+
+Usage:
+  orka monitor issues [command]
+
+Available Commands:
+  list        List repository monitor issues
+
+Flags:
+  -h, --help   help for issues
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka monitor issues [command] --help" for more information about a command.
+```
+
+## `orka monitor issues list`
+
+```text
+List repository monitor issues
+
+Usage:
+  orka monitor issues list <name> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for list
+      --limit int         Maximum number of results (default 50)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --state string      Filter by state
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka monitor commands`
+
+```text
+Inspect repository monitor command events
+
+Usage:
+  orka monitor commands [command]
+
+Available Commands:
+  create      Create a repository monitor command
+  get         Get a repository monitor command
+  list        List repository monitor commands
+
+Flags:
+  -h, --help   help for commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka monitor commands [command] --help" for more information about a command.
+```
+
+## `orka monitor commands list`
+
+```text
+List repository monitor commands
+
+Usage:
+  orka monitor commands list <name> [flags]
+
+Flags:
+      --continue string   Continue token
+      --cursor string     Cursor token
+  -h, --help              help for list
+      --intent string     Filter by command intent
+      --kind string       Filter by target kind
+      --limit int         Maximum number of results (default 50)
+      --number int        Filter by target number
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --status string     Filter by command status
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka monitor commands get`
+
+```text
+Get a repository monitor command
+
+Usage:
+  orka monitor commands get <command-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka monitor commands create`
+
+```text
+Create a repository monitor command
+
+Usage:
+  orka monitor commands create <name> [flags]
+
+Flags:
+  -h, --help                help for create
+      --intent string       Command intent
+      --kind string         Target kind (issue or pull_request) (default "issue")
+      --number int          Target issue or pull request number
+  -o, --output string       Output format: table, json, yaml (default "yaml")
+      --target-sha string   Target head SHA for pull request commands
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka monitor actions`
+
+```text
+Inspect repository monitor action records
+
+Usage:
+  orka monitor actions [command]
+
+Available Commands:
+  get         Get a repository monitor action
+  list        List repository monitor actions
+
+Flags:
+  -h, --help   help for actions
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+
+Use "orka monitor actions [command] --help" for more information about a command.
+```
+
+## `orka monitor actions list`
+
+```text
+List repository monitor actions
+
+Usage:
+  orka monitor actions list <name> [flags]
+
+Flags:
+      --action-kind string   Filter by action kind
+      --continue string      Continue token
+      --cursor string        Cursor token
+  -h, --help                 help for list
+      --kind string          Filter by target kind
+      --limit int            Maximum number of results (default 50)
+      --number int           Filter by target number
+  -o, --output string        Output format: table, json, yaml (default "table")
+      --task-name string     Filter by task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka monitor actions get`
+
+```text
+Get a repository monitor action
+
+Usage:
+  orka monitor actions get <action-id> [flags]
+
+Flags:
+  -h, --help            help for get
+  -o, --output string   Output format: table, json, yaml (default "yaml")
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

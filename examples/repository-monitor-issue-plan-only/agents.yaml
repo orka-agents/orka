@@ -1,0 +1,19 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: issue-researcher
+  namespace: default
+spec:
+  secretRef:
+    name: codex-runtime-credentials
+  runtime:
+    type: codex
+    defaultMaxTurns: 50
+    defaultAllowedTools:
+      - Read
+      - Glob
+      - Grep
+      - LS
+  systemPrompt:
+    inline: |
+      Research and plan GitHub issues for Orka RepositoryMonitor. Do not mutate GitHub.

@@ -711,7 +711,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 			continue
 		}
 		counts.openPullRequests++
-		if item.LastVerdict == repositoryMonitorReviewVerdictPassed && item.RepairState == "" && item.SkipReason == "" {
+		if item.LastVerdict == repositoryMonitorReviewVerdictPassed && item.LastReviewedHeadSHA == item.HeadSHA && item.RepairState == "" && item.SkipReason == "" {
 			counts.mergeReadyItems++
 		}
 		if item.RepairState == repositoryMonitorRepairPhaseQueued {

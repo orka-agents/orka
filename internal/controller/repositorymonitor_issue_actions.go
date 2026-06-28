@@ -169,7 +169,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 
 func repositoryMonitorIssueBlockStopsCommands(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case repositoryMonitorIssueSkipStoppedByCommand, repositoryMonitorReviewVerdictSecuritySensitive:
+	case repositoryMonitorIssueSkipStoppedByCommand, repositoryMonitorReviewVerdictSecuritySensitive, repositoryMonitorSkipReasonBlockedLabel, repositoryMonitorSkipReasonExcluded, repositoryMonitorSkipReasonMissingLabel:
 		return true
 	default:
 		return false

@@ -396,7 +396,7 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
 
 Required fields are `name`, `spec.repoURL`, and `spec.agents.reviewer.name` when pull request monitoring is enabled. The API defaults or infers provider, owner, repository, branch, pull request enablement, pull request `maxPerRun`, `review.event`, and validation mode where possible. `spec.repoURL` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
 
-Only GitHub pull request monitoring is supported in this slice. Requests that enable issue or commit targets, disable pull request monitoring, use a non-GitHub provider, set `review.requireGreenCI`, reference a missing/non-Claude reviewer runtime, or reference a reviewer Agent without usable Claude credentials are rejected with `400`. The reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
+GitHub pull request and issue targets are supported. Commit targets and `review.requireGreenCI` are rejected. Pull request monitoring requires `spec.agents.reviewer.name`; the reviewer Agent must use `runtime.type: claude`, must reference a Secret in the monitor namespace, and that Secret must contain a non-empty `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY` key. Issue-only monitors can set `targets.pullRequests.enabled: false` and `targets.issues.enabled: true`. When `gitSecretRef` is set, the Git Secret must exist in the monitor namespace and contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
 
 ### Trigger Manual Monitor Run
 
@@ -411,7 +411,34 @@ Only GitHub pull request monitoring is supported in this slice. Requests that en
 }
 ```
 
-The request body can be omitted to run a full pull request inventory pass. `targetKind` must be empty or `pull_request`; `targetNumber` and `targetSHA` narrow the run to one PR or exact head. When `targetNumber` is set, the controller fetches that pull request directly from GitHub and does not retire unrelated monitor items from the repository-wide inventory. The API returns `409` when the monitor already has a queued or running run.
+The request body can be omitted to run a full inventory pass. `targetKind` may be empty, `pull_request`, or `issue`; `targetNumber` and `targetSHA` narrow the run to one issue, one PR, or an exact PR head. When `targetNumber` is set, the controller fetches that target directly from GitHub and does not retire unrelated monitor items. The API returns `409` when the monitor already has a queued or running run.
+
+### Create Monitor Command
+
+**Endpoint:** `POST /api/v1/monitors/repositories/{name}/commands`
+
+**Request Body:**
+```json
+{
+  "kind": "issue",
+  "number": 123,
+  "intent": "plan",
+  "targetSHA": ""
+}
+```
+
+Supported issue intents are `triage`, `research`, `plan`, `approve_plan`, `implement`, `decompose`, `stop`, and `resume`. Supported pull request intents are `review`, `fix`, `fix_ci`, `update_branch`, `automerge`, `stop`, and `resume`. The command creation endpoint requires monitor operate authorization, validates that the target kind is enabled on the monitor, records a durable command event, and queues a targeted monitor run.
+
+### List Monitor Commands and Actions
+
+**Endpoints:**
+
+- `GET /api/v1/monitors/commands?namespace=&name=&kind=&number=&intent=&status=`
+- `GET /api/v1/monitors/commands/{id}`
+- `GET /api/v1/monitors/actions?namespace=&name=&kind=&number=&actionKind=&taskName=`
+- `GET /api/v1/monitors/actions/{id}`
+
+Command events record label/API intake, actor/source authorization, target SHA/snapshot bindings, status, and errors. Action records store typed triage/research/plan/implementation/review/repair/automerge outcomes and controller-owned mutation audit records.
 
 See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
 

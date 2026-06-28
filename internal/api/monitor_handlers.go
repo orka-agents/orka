@@ -52,6 +52,7 @@ const (
 	repositoryMonitorRunPhaseQueued        = "queued"
 	repositoryMonitorRunPhaseRunning       = "running"
 	repositoryMonitorRunPhaseFailed        = "failed"
+	repositoryMonitorIntentAutomerge       = "automerge"
 )
 
 func (h *Handlers) ensureRepositoryMonitorStore() error {
@@ -823,6 +824,11 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if err := validateRepositoryMonitorCommandRequest(req); err != nil {
 		return err
 	}
+	if repositoryMonitorCommandRequiresWrite(req) {
+		if err := h.authorizeContextTokenAction(c, "createRepositoryMonitorMutatingCommand", h.contextTokenAuthorization.MonitorWriteScopes); err != nil {
+			return err
+		}
+	}
 	if err := validateRepositoryMonitorCommandTargetEnabled(monitor.Spec, req.Kind); err != nil {
 		return err
 	}
@@ -848,7 +854,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		DedupeKey:           id,
 		IdempotencyKey:      id,
 		Author:              "orka-api",
-		Permission:          "orka:monitors:operate",
+		Permission:          repositoryMonitorAPICommandPermission(req),
 		Command:             req.Intent,
 		Intent:              req.Intent,
 		HeadSHA:             req.TargetSHA,
@@ -872,6 +878,22 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to queue monitor command run: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(event)
+}
+
+func repositoryMonitorCommandRequiresWrite(req CreateRepositoryMonitorCommandRequest) bool {
+	switch req.Intent {
+	case "implement", "fix", commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge:
+		return true
+	default:
+		return false
+	}
+}
+
+func repositoryMonitorAPICommandPermission(req CreateRepositoryMonitorCommandRequest) string {
+	if req.Kind == repositoryMonitorTargetKindPullRequest && req.Intent == repositoryMonitorIntentAutomerge {
+		return "orka:monitors:write"
+	}
+	return "orka:monitors:operate"
 }
 
 func validateRepositoryMonitorCommandTargetEnabled(spec corev1alpha1.RepositoryMonitorSpec, kind string) error {
@@ -904,7 +926,7 @@ func validateRepositoryMonitorCommandRequest(req CreateRepositoryMonitorCommandR
 		}
 	case repositoryMonitorTargetKindPullRequest:
 		switch intent {
-		case "review", "fix", "fix_ci", "update_branch", "automerge", finishReasonStop, "resume":
+		case "review", "fix", commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge, finishReasonStop, "resume":
 			return nil
 		}
 	}

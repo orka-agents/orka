@@ -26,10 +26,12 @@ import (
 )
 
 const (
-	githubAPIBaseURLEnv      = "ORKA_GITHUB_API_BASE_URL"
-	commandIntentStop        = finishReasonStop
-	commandIntentResume      = "resume"
-	commandIntentApprovePlan = "approve_plan"
+	githubAPIBaseURLEnv       = "ORKA_GITHUB_API_BASE_URL"
+	commandIntentStop         = finishReasonStop
+	commandIntentResume       = "resume"
+	commandIntentApprovePlan  = "approve_plan"
+	commandIntentFixCI        = "fix_ci"
+	commandIntentUpdateBranch = "update_branch"
 )
 
 func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte, delivery string, payload githubLabelWebhookPayload, target githubLabelTarget) (githubRepositoryMonitorEventResult, bool, error) {
@@ -88,9 +90,38 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 		if !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 			return false
 		}
+		if target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
+			return false
+		}
 		return target.BaseBranch == "" || strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor))
 	}
-	return target.Kind == repositoryMonitorTargetKindIssue && monitor.Spec.Targets.Issues.Enabled
+	if target.Kind != repositoryMonitorTargetKindIssue || !monitor.Spec.Targets.Issues.Enabled {
+		return false
+	}
+	return repositoryMonitorWebhookIssueTargetLabelsAllowed(monitor.Spec, target.Labels)
+}
+
+func repositoryMonitorWebhookIssueTargetLabelsAllowed(spec corev1alpha1.RepositoryMonitorSpec, labels []string) bool {
+	if repositoryMonitorWebhookMatchingLabel(spec.Targets.Issues.ExcludeLabels, labels) != "" {
+		return false
+	}
+	return len(spec.Targets.Issues.IncludeLabels) == 0 || repositoryMonitorWebhookMatchingLabel(spec.Targets.Issues.IncludeLabels, labels) != ""
+}
+
+func repositoryMonitorWebhookMatchingLabel(policyLabels, itemLabels []string) string {
+	wanted := map[string]struct{}{}
+	for _, label := range policyLabels {
+		label = strings.ToLower(strings.TrimSpace(label))
+		if label != "" {
+			wanted[label] = struct{}{}
+		}
+	}
+	for _, label := range itemLabels {
+		if _, ok := wanted[strings.ToLower(strings.TrimSpace(label))]; ok {
+			return label
+		}
+	}
+	return ""
 }
 
 func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMonitor, target githubLabelTarget, label string) (string, bool) {
@@ -105,8 +136,8 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 		configured = []commandLabel{
 			{intent: "review", label: labels.PullRequests.Review},
 			{intent: "fix", label: labels.PullRequests.Fix},
-			{intent: "fix_ci", label: labels.PullRequests.FixCI},
-			{intent: "update_branch", label: labels.PullRequests.UpdateBranch},
+			{intent: commandIntentFixCI, label: labels.PullRequests.FixCI},
+			{intent: commandIntentUpdateBranch, label: labels.PullRequests.UpdateBranch},
 			{intent: "automerge", label: labels.PullRequests.Automerge},
 			{intent: commandIntentStop, label: labels.PullRequests.Stop},
 			{intent: commandIntentResume, label: labels.PullRequests.Resume},
@@ -139,9 +170,9 @@ func repositoryMonitorDefaultCommandLabel(intent string) string {
 	switch intent {
 	case commandIntentApprovePlan:
 		return "orka:approve-plan"
-	case "fix_ci":
+	case commandIntentFixCI:
 		return "orka:fix-ci"
-	case "update_branch":
+	case commandIntentUpdateBranch:
 		return "orka:update-branch"
 	case "decompose":
 		return "orka:to-issues"

@@ -35,7 +35,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 	}
 	verdict, reason := r.repositoryMonitorAutomergeGate(ctx, monitor, command, pr, item)
 	if verdict != repositoryMonitorIssueVerdictReady {
-		if reason == "ci_pending" {
+		if reason == "ci_pending" || reason == "ci_check_error_retry" || reason == "mergeability_pending" {
 			item.AutomergeState = repositoryMonitorAutomergeStatePending
 			item.SkipReason = reason
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
@@ -81,7 +81,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, "automerge_disabled"
 	case repositoryMonitorAutomergeRequiresGlobalGate(monitor) && !strings.EqualFold(os.Getenv(repositoryMonitorAutomergeGateEnv), "true"):
 		return repositoryMonitorIssuePhaseBlocked, "global_merge_gate_disabled"
-	case !repositoryMonitorAutomergeActorAllowed(monitor, command.Source, command.Permission):
+	case !repositoryMonitorAutomergeActorAllowed(monitor, command.Permission):
 		return repositoryMonitorIssuePhaseBlocked, "actor_permission_insufficient"
 	case command.HeadSHA == "" || command.HeadSHA != pr.HeadSHA:
 		return repositoryMonitorIssuePhaseBlocked, "stale_head_sha"
@@ -91,12 +91,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, "orka_review_not_passed"
 	case item.RepairState != "":
 		return repositoryMonitorIssuePhaseBlocked, "active_or_failed_repair_state"
+	case strings.TrimSpace(pr.MergeableState) == "" || strings.EqualFold(pr.MergeableState, "unknown"):
+		return repositoryMonitorIssuePhaseBlocked, "mergeability_pending"
 	case !strings.EqualFold(pr.MergeableState, "clean"):
 		return repositoryMonitorIssuePhaseBlocked, "pull_request_not_mergeable"
 	}
 	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
 	if err != nil {
-		return repositoryMonitorIssuePhaseBlocked, "ci_check_error"
+		return repositoryMonitorIssuePhaseBlocked, "ci_check_error_retry"
 	}
 	if !ci.passed {
 		return repositoryMonitorIssuePhaseBlocked, ci.reason
@@ -108,8 +110,8 @@ func repositoryMonitorAutomergeRequiresGlobalGate(monitor *corev1alpha1.Reposito
 	return monitor.Spec.Automerge.RequireGlobalMergeGate == nil || *monitor.Spec.Automerge.RequireGlobalMergeGate
 }
 
-func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMonitor, source, permission string) bool {
-	if strings.EqualFold(strings.TrimSpace(source), "api") && strings.EqualFold(strings.TrimSpace(permission), "orka:monitors:operate") {
+func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
+	if strings.EqualFold(strings.TrimSpace(permission), "orka:monitors:write") {
 		return true
 	}
 	permission = strings.ToLower(strings.TrimSpace(permission))
@@ -117,11 +119,7 @@ func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMoni
 	if len(policy) > 0 && !repositoryMonitorAutomergePermissionInList(permission, policy) {
 		return false
 	}
-	minimum := []string{"maintain", "admin"}
-	if repositoryMonitorAutomergePermissionInList("write", policy) {
-		minimum = append(minimum, "write")
-	}
-	return repositoryMonitorAutomergePermissionInList(permission, minimum)
+	return repositoryMonitorAutomergePermissionInList(permission, []string{"maintain", "admin"})
 }
 
 func repositoryMonitorAutomergePermissionInList(permission string, allowed []string) bool {

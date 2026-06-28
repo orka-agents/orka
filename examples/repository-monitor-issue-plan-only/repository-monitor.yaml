@@ -1,0 +1,50 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryMonitor
+metadata:
+  name: issue-plan-only
+  namespace: default
+spec:
+  provider: github
+  repoURL: https://github.com/example-org/example-repo
+  branch: main
+  gitSecretRef:
+    name: git-credentials
+  targets:
+    pullRequests:
+      enabled: false
+    issues:
+      enabled: true
+      maxPerRun: 5
+      excludeLabels:
+        - blocked
+        - security-sensitive
+  triggers:
+    github:
+      labels:
+        enabled: true
+        consumeCommandLabels: true
+        issues:
+          plan: orka:plan
+          approvePlan: orka:approve-plan
+          stop: orka:stop
+          resume: orka:resume
+  agents:
+    triager:
+      name: issue-researcher
+    researcher:
+      name: issue-researcher
+    planner:
+      name: issue-researcher
+  issueWorkflow:
+    implementation:
+      enabled: false
+    planning:
+      requireHumanApprovalFor:
+        - high
+        - security
+  policy:
+    protectedLabels:
+      - security-sensitive
+    pauseLabels:
+      - blocked
+      - orka:pause
