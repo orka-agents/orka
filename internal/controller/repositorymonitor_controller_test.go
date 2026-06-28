@@ -4425,6 +4425,8 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 			_, _ = w.Write([]byte(`{"number":41,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base41","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"ready","sha":"head41","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/commits/head41/check-runs":
 			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"success"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/commits/head41/status":
+			_, _ = w.Write([]byte(`{"state":"success","statuses":[{"context":"legacy","state":"success"}]}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/repos/sozercan/orka/pulls/41/merge":
 			merged = true
 			_, _ = w.Write([]byte(`{"sha":"merged-sha"}`))

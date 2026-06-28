@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -45,7 +44,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 		return true, err
 	}
 	method := repositoryMonitorAutomergeMethod(monitor)
-	sha, err := r.mergeRepositoryMonitorPullRequest(ctx, monitor, owner, repository, pr.Number, method)
+	sha, err := r.mergeRepositoryMonitorPullRequest(ctx, monitor, owner, repository, pr.Number, method, pr.HeadSHA)
 	if err != nil {
 		item.AutomergeState = repositoryMonitorAutomergeStateFailed
 		item.SkipReason = "automerge_failed"
@@ -101,13 +100,24 @@ func repositoryMonitorAutomergeRequiresGlobalGate(monitor *corev1alpha1.Reposito
 
 func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
 	permission = strings.ToLower(strings.TrimSpace(permission))
-	allowed := []string{"maintain", "admin"}
-	for _, policyPermission := range monitor.Spec.Policy.AllowedRepositoryPermissions {
-		if strings.EqualFold(strings.TrimSpace(policyPermission), "write") {
-			allowed = append(allowed, "write")
+	policy := monitor.Spec.Policy.AllowedRepositoryPermissions
+	if len(policy) > 0 && !repositoryMonitorAutomergePermissionInList(permission, policy) {
+		return false
+	}
+	minimum := []string{"maintain", "admin"}
+	if repositoryMonitorAutomergePermissionInList("write", policy) {
+		minimum = append(minimum, "write")
+	}
+	return repositoryMonitorAutomergePermissionInList(permission, minimum)
+}
+
+func repositoryMonitorAutomergePermissionInList(permission string, allowed []string) bool {
+	for _, candidate := range allowed {
+		if strings.EqualFold(strings.TrimSpace(candidate), permission) {
+			return true
 		}
 	}
-	return slices.Contains(allowed, permission)
+	return false
 }
 
 func repositoryMonitorAutomergeMethod(monitor *corev1alpha1.RepositoryMonitor) string {
@@ -142,23 +152,41 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
-	endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
-	var response struct {
-		TotalCount int `json:"total_count"`
-		CheckRuns  []struct {
-			Name       string `json:"name"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-		} `json:"check_runs"`
+	total := -1
+	var checks []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
 	}
-	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
-		return repositoryMonitorCIResult{}, err
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha), page)
+		var response struct {
+			TotalCount int `json:"total_count"`
+			CheckRuns  []struct {
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+			} `json:"check_runs"`
+		}
+		if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
+			return repositoryMonitorCIResult{}, err
+		}
+		if total < 0 {
+			total = response.TotalCount
+		}
+		checks = append(checks, response.CheckRuns...)
+		if len(checks) >= total || len(response.CheckRuns) == 0 {
+			break
+		}
 	}
-	if response.TotalCount == 0 {
-		return repositoryMonitorCIResult{reason: "ci_checks_missing"}, nil
+	if total <= 0 {
+		return r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
+	}
+	if len(checks) < total {
+		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
 	}
 	var pendingOrFailed []string
-	for _, check := range response.CheckRuns {
+	for _, check := range checks {
 		if check.Status != "completed" || check.Conclusion != "success" {
 			pendingOrFailed = append(pendingOrFailed, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
 		}
@@ -166,7 +194,35 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if len(pendingOrFailed) > 0 {
 		return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
 	}
+	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
+	if err != nil {
+		return repositoryMonitorCIResult{}, err
+	}
+	if status.reason != "ci_checks_missing" {
+		return status, nil
+	}
 	return repositoryMonitorCIResult{passed: true}, nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx context.Context, baseURL, owner, repo, token, sha string) (repositoryMonitorCIResult, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
+	var response struct {
+		State    string `json:"state"`
+		Statuses []struct {
+			Context string `json:"context"`
+			State   string `json:"state"`
+		} `json:"statuses"`
+	}
+	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
+		return repositoryMonitorCIResult{}, err
+	}
+	if len(response.Statuses) == 0 {
+		return repositoryMonitorCIResult{reason: "ci_checks_missing"}, nil
+	}
+	if response.State == "success" {
+		return repositoryMonitorCIResult{passed: true}, nil
+	}
+	return repositoryMonitorCIResult{reason: "ci_not_green"}, nil
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx context.Context, endpoint, token string, out any) error {
@@ -196,7 +252,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorAuthorizedJSON(ctx c
 	return json.Unmarshal(data, out)
 }
 
-func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, number int64, method string) (string, error) {
+func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, number int64, method, expectedSHA string) (string, error) {
 	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
 	if err != nil {
 		return "", err
@@ -205,7 +261,7 @@ func (r *RepositoryMonitorReconciler) mergeRepositoryMonitorPullRequest(ctx cont
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
-	payload, _ := json.Marshal(map[string]any{"merge_method": method})
+	payload, _ := json.Marshal(map[string]any{"merge_method": method, "sha": expectedSHA})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, url.PathEscape(owner), url.PathEscape(repository), number), bytes.NewReader(payload))
 	if err != nil {
 		return "", err

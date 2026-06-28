@@ -76,7 +76,7 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 		if run.Phase != repositoryMonitorRunPhaseFailed {
 			return true, false, nil
 		}
-		if run.ID == runID {
+		if run.ID == runID && strings.Contains(run.Error, "failed to signal repository monitor run") {
 			now := time.Now()
 			run.Phase = repositoryMonitorRunPhaseQueued
 			run.StartedAt = now
@@ -87,6 +87,7 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 			}
 			return true, true, nil
 		}
+		return true, false, nil
 	}
 	return false, false, nil
 }

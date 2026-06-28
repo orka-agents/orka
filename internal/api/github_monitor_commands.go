@@ -99,35 +99,37 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 		return "", false
 	}
 	labels := monitor.Spec.Triggers.GitHub.Labels
-	var configured map[string]string
+	type commandLabel struct{ intent, label string }
+	var configured []commandLabel
 	if target.IsPR {
-		configured = map[string]string{
-			"review":            labels.PullRequests.Review,
-			"fix":               labels.PullRequests.Fix,
-			"fix_ci":            labels.PullRequests.FixCI,
-			"update_branch":     labels.PullRequests.UpdateBranch,
-			"automerge":         labels.PullRequests.Automerge,
-			commandIntentStop:   labels.PullRequests.Stop,
-			commandIntentResume: labels.PullRequests.Resume,
+		configured = []commandLabel{
+			{intent: "review", label: labels.PullRequests.Review},
+			{intent: "fix", label: labels.PullRequests.Fix},
+			{intent: "fix_ci", label: labels.PullRequests.FixCI},
+			{intent: "update_branch", label: labels.PullRequests.UpdateBranch},
+			{intent: "automerge", label: labels.PullRequests.Automerge},
+			{intent: commandIntentStop, label: labels.PullRequests.Stop},
+			{intent: commandIntentResume, label: labels.PullRequests.Resume},
 		}
 	} else {
-		configured = map[string]string{
-			"triage":                 labels.Issues.Triage,
-			"research":               labels.Issues.Research,
-			"plan":                   labels.Issues.Plan,
-			commandIntentApprovePlan: labels.Issues.ApprovePlan,
-			"implement":              labels.Issues.Implement,
-			"decompose":              labels.Issues.Decompose,
-			commandIntentStop:        labels.Issues.Stop,
-			commandIntentResume:      labels.Issues.Resume,
+		configured = []commandLabel{
+			{intent: "triage", label: labels.Issues.Triage},
+			{intent: "research", label: labels.Issues.Research},
+			{intent: "plan", label: labels.Issues.Plan},
+			{intent: commandIntentApprovePlan, label: labels.Issues.ApprovePlan},
+			{intent: "implement", label: labels.Issues.Implement},
+			{intent: "decompose", label: labels.Issues.Decompose},
+			{intent: commandIntentStop, label: labels.Issues.Stop},
+			{intent: commandIntentResume, label: labels.Issues.Resume},
 		}
 	}
-	for intent, configuredLabel := range configured {
+	for _, entry := range configured {
+		configuredLabel := entry.label
 		if configuredLabel == "" {
-			configuredLabel = repositoryMonitorDefaultCommandLabel(intent)
+			configuredLabel = repositoryMonitorDefaultCommandLabel(entry.intent)
 		}
 		if strings.EqualFold(strings.TrimSpace(configuredLabel), label) {
-			return intent, true
+			return entry.intent, true
 		}
 	}
 	return "", false

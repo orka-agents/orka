@@ -38,6 +38,7 @@ const (
 	repositoryMonitorIssueActionDecompose      = "issue_decompose"
 	repositoryMonitorIssueActionApprove        = "issue_approve_plan"
 	repositoryMonitorIssueVerdictReady         = "ready"
+	repositoryMonitorIssueVerdictSuccess       = "success"
 	repositoryMonitorCommandIntentStop         = "stop"
 	repositoryMonitorCommandIntentResume       = "resume"
 	repositoryMonitorIssueSkipStoppedByCommand = "stopped_by_command"
@@ -84,10 +85,12 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		item.LastVerdict = repositoryMonitorReviewVerdictStale
 		return 0, r.Store.UpsertMonitorItem(ctx, item)
 	}
-	if item.WorkflowPhase == repositoryMonitorIssuePhaseBlocked &&
-		repositoryMonitorIssueBlockStopsCommands(item.SkipReason) &&
-		command.Intent != repositoryMonitorCommandIntentResume && command.Intent != repositoryMonitorCommandIntentStop {
-		return 0, r.Store.UpsertMonitorItem(ctx, item)
+	if item.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && repositoryMonitorIssueBlockStopsCommands(item.SkipReason) {
+		if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand && command.Intent == repositoryMonitorCommandIntentResume {
+			// Explicit resume clears only an explicit maintainer stop.
+		} else {
+			return 0, r.Store.UpsertMonitorItem(ctx, item)
+		}
 	}
 
 	switch command.Intent {
@@ -575,7 +578,7 @@ func repositoryMonitorPlanReadyVerdict(verdict string) bool {
 
 func repositoryMonitorImplementationReadyVerdict(verdict string) bool {
 	switch strings.ToLower(strings.TrimSpace(verdict)) {
-	case "patch_ready", repositoryMonitorIssueVerdictReady, "succeeded", "success":
+	case "patch_ready", repositoryMonitorIssueVerdictReady, "succeeded", repositoryMonitorIssueVerdictSuccess:
 		return true
 	default:
 		return false
@@ -594,14 +597,22 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	if strings.TrimSpace(sr.PushBranch) != "" && strings.TrimSpace(sr.PushBranch) != configuredBranch {
 		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_branch_mismatch"
 	}
+	mutationID := "act-" + repositoryMonitorShortHash(record.ID+"-mutate")
+	if existing, err := r.Store.GetActionRecord(ctx, monitor.Namespace, mutationID); err == nil {
+		if prNumber := numberFieldFromJSON(existing.PayloadJSON, "pullRequestNumber"); prNumber > 0 {
+			return repositoryMonitorIssuePhasePROpened, int(prNumber), ""
+		}
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return repositoryMonitorIssuePhasePatchReady, 0, "pr_lookup_failed"
+	}
 	prURL, prNumber, err := r.createIssueImplementationPullRequest(ctx, monitor, item, task, configuredBranch)
 	if err != nil {
 		return repositoryMonitorIssuePhaseBlocked, 0, "pr_creation_failed"
 	}
-	payload := map[string]any{"pullRequestURL": prURL, "pullRequestNumber": prNumber, "pushBranch": sr.PushBranch}
+	payload := map[string]any{"pullRequestURL": prURL, "pullRequestNumber": prNumber, "pushBranch": configuredBranch}
 	payloadJSON, _ := json.Marshal(payload)
 	mutationRecord := &store.ActionRecord{
-		ID:                "act-" + repositoryMonitorShortHash(record.ID+"-mutate"),
+		ID:                mutationID,
 		MonitorNamespace:  monitor.Namespace,
 		MonitorName:       monitor.Name,
 		Kind:              repositoryMonitorIssueKind,
@@ -618,6 +629,14 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	}
 	_ = r.Store.CreateActionRecord(ctx, mutationRecord)
 	return repositoryMonitorIssuePhasePROpened, prNumber, ""
+}
+
+func numberFieldFromJSON(payload, key string) int64 {
+	var body map[string]any
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		return 0
+	}
+	return numberField(body, key)
 }
 
 func repositoryMonitorIssueTaskPushBranch(task *corev1alpha1.Task) string {
@@ -645,6 +664,11 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
+	}
+	if prURL, prNumber, err := r.findIssueImplementationPullRequest(ctx, token, baseURL, owner, repository, headBranch); err != nil {
+		return "", 0, err
+	} else if prNumber > 0 {
+		return prURL, prNumber, nil
 	}
 	body := map[string]any{
 		"title": fmt.Sprintf("fix: address issue #%d", item.Number),
@@ -685,6 +709,47 @@ func (r *RepositoryMonitorReconciler) createIssueImplementationPullRequest(ctx c
 		return "", 0, err
 	}
 	return parsed.HTMLURL, parsed.Number, nil
+}
+
+func (r *RepositoryMonitorReconciler) findIssueImplementationPullRequest(ctx context.Context, token, baseURL, owner, repository, headBranch string) (string, int, error) {
+	query := url.Values{}
+	query.Set("state", "open")
+	query.Set("head", owner+":"+headBranch)
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), query.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	httpClient := r.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, repositoryMonitorGitHubResponseLimit))
+	if err != nil {
+		return "", 0, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", 0, &repositoryMonitorGitHubAPIError{Operation: "find issue pull request", StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+	var parsed []struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", 0, err
+	}
+	if len(parsed) == 0 {
+		return "", 0, nil
+	}
+	return parsed[0].HTMLURL, parsed[0].Number, nil
 }
 
 func renderRepositoryMonitorIssuePRBody(item *store.MonitorItem, task *corev1alpha1.Task) string {
