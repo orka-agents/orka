@@ -556,6 +556,62 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t 
 	}
 }
 
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "agent defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{"bash"}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
+			name: "agent defaultAllowBash",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				allow := false
+				agent.Spec.Runtime.DefaultAllowBash = &allow
+			},
+			wantError: "defaultAllowBash",
+		},
+		{
+			name: "task allowedTools",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read"}}
+			},
+			wantError: "allowedTools",
+		},
+		{
+			name: "task allowBash",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				allow := false
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowBash: &allow}
+			},
+			wantError: "allowBash",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+				},
+			}
+			tt.mutate(task, agent)
+			err := r.validateTaskAgentCompatibility(task, agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateTaskAgentCompatibility_RuntimeRefRejectsPriorTaskRef(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

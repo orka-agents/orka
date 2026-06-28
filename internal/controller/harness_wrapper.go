@@ -46,24 +46,28 @@ func clearDeprecatedHarnessRuntimeAnnotations(annotations map[string]string) {
 }
 
 const (
-	harnessWrapperEndpointEnv            = "ORKA_HARNESS_WRAPPER_ENDPOINT"
-	harnessWrapperAuthValueEnv           = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
-	harnessWrapperAuthValueFileEnv       = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
-	harnessWrapperTurnIDAnnotation       = "orka.ai/harness-wrapper-turn-id"
-	harnessWrapperRuntimeAnnotation      = "orka.ai/harness-wrapper-runtime-session-id"
-	harnessWrapperCorrelationIDAnno      = "orka.ai/harness-wrapper-correlation-id"
-	harnessWrapperLastFrameSeqAnno       = "orka.ai/harness-wrapper-last-frame-seq"
-	harnessWrapperStartedAnno            = "orka.ai/harness-wrapper-started"
-	harnessWrapperPlannedAtAnno          = "orka.ai/harness-wrapper-planned-at"
-	harnessWrapperMetadataAnno           = "orka.ai/harness-wrapper-metadata"
-	harnessWrapperRuntimeRefAnno         = "orka.ai/harness-wrapper-runtime-ref"
-	harnessWrapperContractAnno           = "orka.ai/harness-wrapper-contract-version"
-	harnessWrapperOutputFetchRetriesAnno = "orka.ai/harness-wrapper-output-fetch-retries"
-	harnessWrapperMaxOutputFetchRetries  = 3
-	harnessWrapperSkillsFilesMeta        = "skillsFiles"
-	harnessWrapperStreamPollTimeout      = 2 * time.Second
-	harnessWrapperNoTimeoutDuration      = time.Hour * 24 * 365 * 100
-	harnessWrapperRuntimeGeneric         = "generic"
+	harnessWrapperEndpointEnv                 = "ORKA_HARNESS_WRAPPER_ENDPOINT"
+	harnessWrapperAuthValueEnv                = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN"
+	harnessWrapperAuthValueFileEnv            = "ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE"
+	harnessWrapperTurnIDAnnotation            = "orka.ai/harness-wrapper-turn-id"
+	harnessWrapperRuntimeAnnotation           = "orka.ai/harness-wrapper-runtime-session-id"
+	harnessWrapperCorrelationIDAnno           = "orka.ai/harness-wrapper-correlation-id"
+	harnessWrapperLastFrameSeqAnno            = "orka.ai/harness-wrapper-last-frame-seq"
+	harnessWrapperStartedAnno                 = "orka.ai/harness-wrapper-started"
+	harnessWrapperPlannedAtAnno               = "orka.ai/harness-wrapper-planned-at"
+	harnessWrapperMetadataAnno                = "orka.ai/harness-wrapper-metadata"
+	harnessWrapperRuntimeRefAnno              = "orka.ai/harness-wrapper-runtime-ref"
+	harnessWrapperContractAnno                = "orka.ai/harness-wrapper-contract-version"
+	harnessWrapperOutputFetchRetriesAnno      = "orka.ai/harness-wrapper-output-fetch-retries"
+	harnessWrapperCancelDependencyRetriesAnno = "orka.ai/harness-wrapper-cancel-dependency-retries"
+	harnessWrapperAuthRetriesAnno             = "orka.ai/harness-wrapper-auth-retries"
+	harnessWrapperMaxOutputFetchRetries       = 3
+	harnessWrapperMaxCancelDependencyRetries  = 3
+	harnessWrapperMaxAuthRetries              = 3
+	harnessWrapperSkillsFilesMeta             = "skillsFiles"
+	harnessWrapperStreamPollTimeout           = 2 * time.Second
+	harnessWrapperNoTimeoutDuration           = time.Hour * 24 * 365 * 100
+	harnessWrapperRuntimeGeneric              = "generic"
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -476,22 +480,24 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		if err != nil {
 			return r.failTask(ctx, task, fmt.Sprintf("invalid harness runtime endpoint: %v", err))
 		}
-		if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
-			if harnessWrapperCapabilitiesErrorIsRetryable(err) {
-				return ctrl.Result{RequeueAfter: time.Second}, nil
-			}
-			return r.failTask(ctx, task, err.Error())
-		}
 		// Cross-restart idempotency backstop: if this deterministic turn ID already
 		// produced persisted frames, the turn was already accepted and ran. Do NOT
 		// re-issue StartTurn (which would duplicate external side effects after a
 		// wrapper pod restart wiped its in-memory turn map); recover by treating the
-		// turn as accepted and proceeding to the Running transition.
+		// turn as accepted and proceeding to the Running transition. Check persisted
+		// frames before live capabilities so accepted turns remain recoverable if the
+		// runtime rolls after emitting frames but before started=true is persisted.
 		hasFrames, framesErr := r.harnessWrapperTurnHasPersistedFrames(ctx, task, request.TurnID)
 		if framesErr != nil {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		if !hasFrames {
+			if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
+				if harnessWrapperCapabilitiesErrorIsRetryable(err) {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				return r.failTask(ctx, task, err.Error())
+			}
 			if _, err := client.StartTurn(ctx, request); err != nil {
 				message := err.Error()
 				switch {
@@ -506,6 +512,13 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 						return ctrl.Result{}, clearErr
 					}
 					return ctrl.Result{RequeueAfter: time.Second}, nil
+				case target.RuntimeRefName != "" && harnessWrapperAuthError(err):
+					if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
+						return ctrl.Result{}, waitErr
+					} else if wait {
+						return ctrl.Result{RequeueAfter: time.Second}, nil
+					}
+					return r.failTask(ctx, task, events.RedactExecutionEventText(message))
 				case harnessWrapperStartTurnErrorIsRetryable(err):
 					return ctrl.Result{RequeueAfter: time.Second}, nil
 				default:
@@ -656,6 +669,13 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		}
 	}
 	if err != nil && result.Completed == nil && result.Failed == nil && !result.Cancelled {
+		if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
+			if wait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
+				return ctrl.Result{}, waitErr
+			} else if wait {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
 		if harnessWrapperStreamErrorIsMissingTurn(err) && r.shouldRetry(task) {
 			if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
 				return ctrl.Result{}, clearErr
@@ -819,6 +839,68 @@ func (r *TaskReconciler) harnessWrapperTurnHasPersistedFrames(ctx context.Contex
 			return false, nil
 		}
 	}
+}
+
+func harnessWrapperAuthRetries(task *corev1alpha1.Task) int {
+	if task == nil || task.Annotations == nil {
+		return 0
+	}
+	retries, err := strconv.Atoi(strings.TrimSpace(task.Annotations[harnessWrapperAuthRetriesAnno]))
+	if err != nil || retries < 0 {
+		return 0
+	}
+	return retries
+}
+
+func (r *TaskReconciler) waitForHarnessWrapperAuthRetry(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	retries := harnessWrapperAuthRetries(task)
+	if retries >= harnessWrapperMaxAuthRetries {
+		return false, nil
+	}
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[harnessWrapperAuthRetriesAnno] = strconv.Itoa(retries + 1)
+	if err := r.Patch(ctx, task, patch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func harnessWrapperCancelDependencyRetries(task *corev1alpha1.Task) int {
+	if task == nil || task.Annotations == nil {
+		return 0
+	}
+	retries, err := strconv.Atoi(strings.TrimSpace(task.Annotations[harnessWrapperCancelDependencyRetriesAnno]))
+	if err != nil || retries < 0 {
+		return 0
+	}
+	return retries
+}
+
+func (r *TaskReconciler) patchHarnessWrapperCancelDependencyRetries(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retries int,
+) error {
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[harnessWrapperCancelDependencyRetriesAnno] = strconv.Itoa(retries)
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) waitForHarnessCancelDependency(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	retries := harnessWrapperCancelDependencyRetries(task)
+	if retries >= harnessWrapperMaxCancelDependencyRetries {
+		return false, nil
+	}
+	if err := r.patchHarnessWrapperCancelDependencyRetries(ctx, task, retries+1); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func harnessWrapperOutputFetchRetries(task *corev1alpha1.Task) int {
@@ -1008,6 +1090,19 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 	return nil
 }
 
+func harnessWrapperAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"(401)", "(403)", "unauthorized", "forbidden"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func harnessWrapperStartTurnErrorIsRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -1051,6 +1146,8 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperContractAnno)
 		clearDeprecatedHarnessRuntimeAnnotations(task.Annotations)
 		delete(task.Annotations, harnessWrapperOutputFetchRetriesAnno)
+		delete(task.Annotations, harnessWrapperCancelDependencyRetriesAnno)
+		delete(task.Annotations, harnessWrapperAuthRetriesAnno)
 	}
 	return r.Patch(ctx, task, patch)
 }

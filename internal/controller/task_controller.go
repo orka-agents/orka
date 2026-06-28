@@ -483,6 +483,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		}
 
 		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
+			if isAgentRuntimeDependencyNotReady(cancelErr) {
+				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
+					return ctrl.Result{}, waitErr
+				} else if shouldWait {
+					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+			}
 			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
 		}
 
@@ -1596,6 +1604,14 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
 			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
+				if isAgentRuntimeDependencyNotReady(cancelErr) {
+					if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
+						return ctrl.Result{}, waitErr
+					} else if shouldWait {
+						log.Info("waiting to cancel timed-out harness runtime turn", "error", cancelErr)
+						return ctrl.Result{RequeueAfter: time.Second}, nil
+					}
+				}
 				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
 			}
 			return r.failTask(ctx, task, "task timed out")
@@ -2042,6 +2058,14 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
+			if isAgentRuntimeDependencyNotReady(cancelErr) {
+				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
+					return ctrl.Result{}, waitErr
+				} else if shouldWait {
+					log.Info("waiting to cancel harness runtime turn for cancelled task", "error", cancelErr)
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+			}
 			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
 		}
 	}
@@ -2794,6 +2818,22 @@ func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.Works
 }
 
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent != nil && agent.Spec.Runtime != nil {
+		if len(agent.Spec.Runtime.DefaultAllowedTools) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowedTools policy metadata")
+		}
+		if agent.Spec.Runtime.DefaultAllowBash != nil {
+			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowBash policy metadata")
+		}
+	}
+	if task != nil && task.Spec.AgentRuntime != nil {
+		if len(task.Spec.AgentRuntime.AllowedTools) > 0 || len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowedTools/disallowedTools policy metadata")
+		}
+		if task.Spec.AgentRuntime.AllowBash != nil {
+			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowBash policy metadata")
+		}
+	}
 	if agent != nil && agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
 		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support agent secretRef credential delivery")
 	}

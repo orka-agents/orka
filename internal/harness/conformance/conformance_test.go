@@ -61,6 +61,20 @@ func TestCheckReadinessFailsUnsupportedProtocolVersion(t *testing.T) {
 	}
 }
 
+func TestCheckFailsWhenProbeTurnFails(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{Behavior: harnesstest.BehaviorFailure})
+	defer server.Close()
+
+	request := defaultStartTurnRequest("turn-fails")
+	result := Check(context.Background(), Target{BaseURL: server.URL(), ProbeTurn: true, StartTurnRequest: &request})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "completed terminal") {
+		t.Fatalf("Message = %q, want completed terminal failure", result.Message)
+	}
+}
+
 func TestCheckFailsWhenTerminalFrameOmitted(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{Behavior: harnesstest.BehaviorMissingTerminal})
 	defer server.Close()
