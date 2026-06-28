@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Development | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://sozercan.github.io/orka/docs/development"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Development | Orka"><meta data-rh="true" name="description" content="Prerequisites"><meta data-rh="true" property="og:description" content="Prerequisites"><link data-rh="true" rel="canonical" href="https://sozercan.github.io/orka/docs/development"><link data-rh="true" rel="alternate" href="https://sozercan.github.io/orka/docs/development" hreflang="en"><link data-rh="true" rel="alternate" href="https://sozercan.github.io/orka/docs/development" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Development","item":"https://sozercan.github.io/orka/docs/development"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.01a08f18.css">
-<script src="/orka/assets/js/runtime~main.5c228fdc.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.ec93fbfe.js" defer="defer"></script>
 <script src="/orka/assets/js/main.6d38e451.js" defer="defer"></script>
 </head>
 <body>
@@ -54,6 +54,10 @@ active parent trace through Task annotations.</p>
 upstream <code>semconv</code> because the GenAI conventions are still Development-stage.
 Run focused telemetry tests with:</p>
 <div class="language-bash codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-bash codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ ./internal/worker ./workers/ai ./workers/harness/cliwrapper -run &#x27;Tracing|Telemetry|GenAI|ExecuteTool|TraceContext|Traceparent|TaskRun|DelegateTrace&#x27; -v</span><br></div></code></pre></div></div>
+<p>The live Kind e2e coverage for collector export lives in
+<code>test/e2e/otel_genai_test.go</code>. It patches the controller with
+<code>--enable-telemetry</code>, points it at an in-cluster OpenTelemetry Collector, and
+asserts that AI worker Jobs export GenAI model/tool spans and metrics.</p>
 <p>Run disabled-telemetry hot-path benchmarks with:</p>
 <div class="language-bash codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#393A34;--prism-background-color:#f6f8fa"><div class="codeBlockContent_QJqH"><pre tabindex="0" class="prism-code language-bash codeBlock_bY9V thin-scrollbar" style="color:#393A34;background-color:#f6f8fa"><code class="codeBlockLines_e6Vv"><div class="token-line" style="color:#393A34"><span class="token plain">go test ./internal/llm ./internal/tools ./internal/worker -run &#x27;^$&#x27; -bench &#x27;Telemetry|Tracing|ExecuteTool|ToolExecutor&#x27; -benchmem</span><br></div></code></pre></div></div>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="ui-development">UI Development<a href="#ui-development" class="hash-link" aria-label="Direct link to UI Development" title="Direct link to UI Development" translate="no">​</a></h2>
