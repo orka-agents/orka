@@ -9,6 +9,7 @@ Orka is a Kubernetes-native task execution platform that manages Jobs and Pods f
 - **Scope discipline** — implement exactly what's asked, nothing more.
 - **Pre-land/pre-commit code changes**: use `$autoreview` until no accepted/actionable findings remain, unless equivalent manual review already done, trivial/docs-only, or user opts out.
 - **Git push discipline** — after making a change, push to the current branch when it is not `main`; never push directly to `main`.
+- **Post-PR closeout** — after creating or updating an agent-authored PR, use `$pr-closeout` until current CI/review blockers are resolved, unless the human opts out or the PR is intentionally draft/WIP.
 
 ## Continuous Review
 
@@ -27,6 +28,10 @@ Before creating or updating a GitHub PR or issue body for agent-authored work, r
 - Drop system/developer prompts, reasoning, raw tool outputs, env, cookies, tokens, auth URLs, secrets, broad local paths, and unrelated session turns.
 - If no safe transcript exists or the human declines, continue without a transcript and do not add a placeholder section.
 
+## PR Closeout
+
+After creating or updating an agent-authored PR, use `$pr-closeout` (`.agents/skills/pr-closeout/SKILL.md`) by default, like `$autoreview` is used before landing. Resolve merge conflicts, fix failing CI, address or push back on unresolved review threads, reply on GitHub and resolve addressed comments, push the non-main PR branch, and repeat until current CI is green and no unresolved actionable review threads remain. Skip only when the human opts out, the PR is intentionally draft/WIP, or the remaining blocker is external/human-only. Do not merge or enable auto-merge unless explicitly asked.
+
 ## Build & Test
 
 ```bash
@@ -44,6 +49,8 @@ UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/do
 For testing against a local Kubernetes cluster, use the `$kindctl` skill to manage repo/worktree-scoped kind clusters without touching the global kubeconfig.
 
 To stand up a reverse proxy for Anthropic/Gemini/OpenAI-compatible clients, use the `$vekil-reverse-proxy-deploy` skill. When it falls back to GitHub Copilot device-code login, surface the login code and URL to the user and wait for their confirmation before continuing — never complete the login on their behalf.
+
+To stand up an execution-workspace provider on a local kind cluster for evaluation, use the `$agent-sandbox-deploy` skill (kubernetes-sigs agent-sandbox; pairs with `$kindctl` for the cluster and `$orka-kind-deploy` for the controller) or the `$agent-substrate-deploy` skill (Agent Substrate; owns its own gVisor kind cluster, so it is not hosted on a `$kindctl` cluster). Both are local/kind eval only — Orka does not install or manage these providers in production — and both surface the `$vekil-reverse-proxy-deploy` device-code login to the user for confirmation rather than completing it.
 
 ## Verification
 
@@ -91,4 +98,5 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - Reviewing a memory proposal does not apply it; use the explicit proposal apply endpoint for accepted `memory` proposals when durable memory should be created
 - Kontxt TxTokens are accepted via `Txn-Token` by default; `Authorization: Bearer` context-token support is opt-in so ServiceAccount/OIDC auth can coexist
 - Live GitHub OIDC/kontxt E2E requires GitHub Actions `id-token: write` or `ORKA_GITHUB_OIDC_TOKEN`; redact JWTs, TxTokens, and request tokens in logs
+- OpenTelemetry GenAI constants are hand-rolled in `internal/tracing/genai`; telemetry is enabled with `--enable-telemetry`/`--enable-tracing`, workers honor `ORKA_ENABLE_TELEMETRY`, and prompt/completion content capture remains default-off/fail-closed
 - Harness-wrapper real-world validation should include at least one Codex/Claude task through Vekil, workspace clone/read, fork/checkpoint continuation, cancel/timeout, unsafe workspace URL rejection, and (when a GitHub token is available) branch push + PR creation/cleanup on a temporary branch.

@@ -80,7 +80,7 @@ func TestHandleChatCompletions_NGreaterThanOne(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -370,6 +370,17 @@ func TestExtractContent(t *testing.T) {
 }
 
 func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
+	// Point the provider at a local mock so the handler never reaches the real
+	// api.openai.com. A real outbound call would make this test slow (and flaky
+	// under load) and couples it to network egress; the mock proves provider
+	// resolution succeeds (status != 400) deterministically and instantly.
+	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid key","type":"invalid_request_error"}}`))
+	}))
+	defer mockAPI.Close()
+
 	// Create provider and secret
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{
@@ -379,6 +390,7 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
 			DefaultModel: "gpt-4",
+			BaseURL:      mockAPI.URL,
 			SecretRef: corev1alpha1.ProviderSecretRef{
 				Name: "openai-secret",
 				Key:  "api-key",
@@ -409,14 +421,14 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req)
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The request will fail because the API key is fake, but it should get past
-	// the provider resolution phase (status != 400). We expect a 500 from the
-	// actual API call failing.
+	// The request will fail because the mock rejects the key, but it should get
+	// past the provider resolution phase (status != 400). We expect a 500 from the
+	// upstream call failing.
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == 400 {
 		t.Errorf("did not expect 400; provider resolution should have succeeded. body: %s", string(respBody))
@@ -772,6 +784,64 @@ func TestHandleStreamingCompletion_WithToolCalls(t *testing.T) {
 	bodyStr := string(body)
 	if !strings.Contains(bodyStr, "search") {
 		t.Errorf("expected tool call in stream, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_StreamIncludesUsageChunk(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 2)
+	ch <- llm.StreamChunk{Content: "Hello"}
+	ch <- llm.StreamChunk{Done: true, StopReason: "end_turn", InputTokens: 14, OutputTokens: 6}
+	close(ch)
+	mock := &oaiMockProvider{streamCh: ch}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-stream-usage", "gpt-4", 1234567890,
+			&StreamOptions{IncludeUsage: true},
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"usage":{"prompt_tokens":14,"completion_tokens":6,"total_tokens":20}`) {
+		t.Fatalf("expected usage chunk in stream, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_StreamOmitsUsageChunkWithoutCounts(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 2)
+	ch <- llm.StreamChunk{Content: "Hello"}
+	ch <- llm.StreamChunk{Done: true, StopReason: "end_turn"}
+	close(ch)
+	mock := &oaiMockProvider{streamCh: ch}
+
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4"},
+			"chatcmpl-stream-no-usage", "gpt-4", 1234567890,
+			&StreamOptions{IncludeUsage: true},
+		)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "prompt_tokens") || strings.Contains(bodyStr, "completion_tokens") {
+		t.Fatalf("unexpected zero usage chunk in stream: %s", bodyStr)
 	}
 }
 
@@ -1146,7 +1216,9 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := app.Test(req)
+	// The provider points at the local mockAPI above, so this stays in-process and
+	// returns immediately; the modest timeout just guards against a hang.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -9,10 +9,16 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	tracingpkg "github.com/sozercan/orka/internal/tracing"
+	tracingtest "github.com/sozercan/orka/internal/tracing/testutil"
 )
 
 func TestNewLoggingMiddleware(t *testing.T) {
@@ -23,7 +29,7 @@ func TestNewLoggingMiddleware(t *testing.T) {
 		return c.SendString("OK")
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/test?query=secret", nil)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -163,6 +169,7 @@ func TestNewMetricsMiddleware_WithError(t *testing.T) {
 }
 
 func TestNewTracingMiddleware(t *testing.T) {
+	h := tracingtest.NewSpanHarness(t)
 	app := fiber.New()
 	app.Use(requestid.New())
 	app.Use(NewTracingMiddleware())
@@ -177,6 +184,19 @@ func TestNewTracingMiddleware(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	spans := h.Recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans = %d, want 1", len(spans))
+	}
+	if spans[0].Name() != "GET /test" {
+		t.Fatalf("span name = %q, want GET /test", spans[0].Name())
+	}
+	if got := spanAttributeString(spans[0].Attributes(), "http.route"); got != "/test" {
+		t.Fatalf("http.route = %q, want /test", got)
+	}
+	if got := spanAttributeString(spans[0].Attributes(), "http.url"); strings.Contains(got, "query=secret") {
+		t.Fatalf("http.url includes query string: %q", got)
 	}
 }
 
@@ -257,4 +277,50 @@ func TestNewTracingMiddleware_WithoutRequestID(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
+}
+
+func TestNewTracingMiddleware_PropagatesSpanContextToHandlers(t *testing.T) {
+	h := tracingtest.NewSpanHarness(t)
+	app := fiber.New()
+	app.Use(NewTracingMiddleware())
+	app.Get("/child", func(c fiber.Ctx) error {
+		_, child := tracingpkg.Tracer("test").Start(c.Context(), "handler.child")
+		child.End()
+		return c.SendString("OK")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/child", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("Test request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	spans := h.Recorder.Ended()
+	var serverID, childParentID string
+	for _, span := range spans {
+		if span.SpanKind() == trace.SpanKindServer {
+			serverID = span.SpanContext().SpanID().String()
+		}
+		if span.Name() == "handler.child" {
+			childParentID = span.Parent().SpanID().String()
+		}
+	}
+	if serverID == "" || childParentID == "" {
+		t.Fatalf("serverID=%q childParentID=%q spans=%d", serverID, childParentID, len(spans))
+	}
+	if childParentID != serverID {
+		t.Fatalf("handler child parent = %s, want server span %s", childParentID, serverID)
+	}
+}
+
+func spanAttributeString(attrs []attribute.KeyValue, key string) string {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsString()
+		}
+	}
+	return ""
 }

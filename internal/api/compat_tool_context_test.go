@@ -19,19 +19,20 @@ const (
 	compatToolContextNamespace     = "compat-ns"
 	compatToolContextGeneratedName = "proxy-test"
 	compatToolAuthFailed           = "authorization_failed"
+	compatToolOpenAIProviderType   = "openai"
 )
 
 func TestCompatProxyToolContextOpenAIProfile(t *testing.T) {
 	generated := 0
 	ctx := newCompatProxyToolContext(compatProxyToolContextConfig{
 		Namespace:        compatToolContextNamespace,
-		Provider:         ProviderResolutionInfo{Name: "provider-a", Type: "openai"},
+		Provider:         ProviderResolutionInfo{Name: "provider-a", Type: compatToolOpenAIProviderType},
 		WatchNamespace:   "watch-ns",
 		GenerateTaskName: func() string { generated++; return compatToolContextGeneratedName },
 		Profile:          openAICompatProxyToolContextProfile,
 	})
 
-	if ctx.Namespace != compatToolContextNamespace || ctx.Tenant != compatToolContextNamespace || ctx.Provider != "provider-a" || ctx.ProviderType != "openai" || ctx.WatchNamespace != "watch-ns" {
+	if ctx.Namespace != compatToolContextNamespace || ctx.Tenant != compatToolContextNamespace || ctx.Provider != "provider-a" || ctx.ProviderType != compatToolOpenAIProviderType || ctx.WatchNamespace != "watch-ns" {
 		t.Fatalf("tool context fields = %#v", ctx)
 	}
 	if got := ctx.TaskLabels()["orka.ai/source"]; got != "openai-proxy" {

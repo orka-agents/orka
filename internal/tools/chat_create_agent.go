@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 // ChatCreateAgentTool creates an Agent CRD from the chat context.
@@ -197,6 +198,7 @@ func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolC
 		}
 		return result, nil
 	}
+	tracing.StampTaskTraceContext(ctx, task)
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return ChatToolSuccess(map[string]any{
 			"agentName":      agent.Name,

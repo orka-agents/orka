@@ -19,8 +19,12 @@ import (
 
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/workers/common"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -370,12 +374,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turn
 
 func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	defer s.finishTurn(turn)
-	ctx := turn.ctx
+	ctx := extractHarnessTurnTraceContext(turn.ctx, turn.request)
 	if deadline := turn.deadline(); !deadline.IsZero() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
+	agentName := strings.TrimSpace(turn.request.Metadata["agentName"])
+	if agentName == "" {
+		agentName = s.adapter.Name()
+	}
+	ctx, taskSpan := tracing.Tracer("orka.harness").Start(ctx, "task.run", trace.WithAttributes(
+		tracing.TaskAttributes(turn.request.TaskName, turn.request.Namespace, turn.request.Namespace, agentName, "")...,
+	))
+	defer func() {
+		if failed, errType := turnTerminalFailure(turn); failed {
+			taskSpan.SetStatus(codes.Error, errType)
+			taskSpan.SetAttributes(attribute.String("error.type", errType))
+		}
+		taskSpan.End()
+	}()
 	turnCtx := turn.materializeContext(s.adapter.Name(), s.config)
 	if eventing, ok := s.adapter.(EventingAdapter); ok {
 		_, err := eventing.RunTurn(ctx, turnCtx, func(frame harness.HarnessEventFrame) error {
@@ -608,6 +626,32 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 	}
+}
+
+func extractHarnessTurnTraceContext(ctx context.Context, request harness.StartTurnRequest) context.Context {
+	carrier := tracing.MapCarrier{}
+	if request.Metadata != nil {
+		carrier["traceparent"] = request.Metadata["traceparent"]
+		carrier["tracestate"] = request.Metadata["tracestate"]
+	}
+	if carrier["traceparent"] == "" {
+		return ctx
+	}
+	return tracing.ExtractContext(ctx, carrier)
+}
+
+func turnTerminalFailure(turn *turnState) (bool, string) {
+	if turn == nil {
+		return false, ""
+	}
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	for i := len(turn.frames) - 1; i >= 0; i-- {
+		if turn.frames[i].Type == harness.FrameTurnFailed {
+			return true, "turn_failed"
+		}
+	}
+	return false, ""
 }
 
 func (s *Server) failedTurnPartialResult(ctx context.Context, turnCtx TurnContext, run CommandResult) (string, bool) {

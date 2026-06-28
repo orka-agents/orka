@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -38,6 +39,13 @@ func (f *FallbackProvider) SetCooldownTracker(tracker *CooldownTracker) {
 // Name returns the provider name.
 func (f *FallbackProvider) Name() string {
 	return fmt.Sprintf("fallback(%s)", f.primary.Name())
+}
+
+// TelemetryProviderName delegates to the primary provider so error telemetry
+// emitted before a concrete fallback response is available uses the configured
+// serving provider identity instead of the wrapper name.
+func (f *FallbackProvider) TelemetryProviderName() string {
+	return ProviderTelemetryName(f.primary)
 }
 
 // Complete tries the primary provider, then falls back on failure.
@@ -79,6 +87,9 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 
 		resp, err := c.provider.Complete(ctx, callReq)
 		if err == nil {
+			if resp != nil && strings.TrimSpace(resp.Provider) == "" {
+				resp.Provider = ProviderTelemetryName(c.provider)
+			}
 			if f.tracker != nil {
 				f.tracker.Reset(c.provider.Name())
 			}
@@ -175,12 +186,14 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		if f.tracker != nil {
 			f.tracker.Reset(c.provider.Name())
 		}
+		providerName := ProviderTelemetryName(c.provider)
+		modelName := requestModel(callReq)
 		outCh := make(chan StreamChunk)
 		go func() {
 			defer close(outCh)
-			outCh <- firstChunk
+			outCh <- withStreamTelemetry(firstChunk, providerName, modelName)
 			for chunk := range innerCh {
-				outCh <- chunk
+				outCh <- withStreamTelemetry(chunk, providerName, modelName)
 			}
 		}()
 		return outCh, nil
@@ -193,6 +206,16 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 	}
 	close(ch)
 	return ch, nil
+}
+
+func withStreamTelemetry(chunk StreamChunk, providerName, modelName string) StreamChunk {
+	if strings.TrimSpace(chunk.Provider) == "" {
+		chunk.Provider = providerName
+	}
+	if strings.TrimSpace(chunk.Model) == "" {
+		chunk.Model = modelName
+	}
+	return chunk
 }
 
 // shortestCooldown returns the provider with the shortest remaining cooldown.
@@ -214,5 +237,6 @@ func (f *FallbackProvider) shortestCooldown() Provider {
 	return shortest
 }
 
-// Ensure FallbackProvider implements Provider.
+// Ensure FallbackProvider implements Provider and TelemetryIdentity.
 var _ Provider = (*FallbackProvider)(nil)
+var _ TelemetryIdentity = (*FallbackProvider)(nil)

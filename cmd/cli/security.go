@@ -321,7 +321,7 @@ func newSecuritySliceGetCmd() *cobra.Command {
 func newSecurityDroppedFindingsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "dropped-findings", Short: "Inspect dropped findings"}
 	var limit int
-	var cursor string
+	var cursor, layer, reason, scanRunID, sliceID string
 	list := &cobra.Command{
 		Use:   "list <repo>",
 		Short: "List dropped security findings",
@@ -332,6 +332,10 @@ func newSecurityDroppedFindingsCmd() *cobra.Command {
 				"limit", fmt.Sprintf("%d", limit),
 				"cursor", cursor,
 				"continue", cursor,
+				"scanRunID", scanRunID,
+				"sliceID", sliceID,
+				"layer", layer,
+				"reason", reason,
 			)
 			c := newClientFromCmd(cmd)
 			path := "/api/v1/security/repositories/" + url.PathEscape(args[0]) + "/dropped-findings"
@@ -346,6 +350,10 @@ func newSecurityDroppedFindingsCmd() *cobra.Command {
 	list.Flags().IntVar(&limit, "limit", 50, "Maximum number of results")
 	list.Flags().StringVar(&cursor, "cursor", "", "Cursor token")
 	list.Flags().StringVar(&cursor, "continue", "", "Continue token")
+	list.Flags().StringVar(&scanRunID, "scan-run-id", "", "Filter by scan run ID")
+	list.Flags().StringVar(&sliceID, "slice-id", "", "Filter by review slice ID")
+	list.Flags().StringVar(&layer, "layer", "", "Filter by dropped-finding layer (validation, filter, cap)")
+	list.Flags().StringVar(&reason, "reason", "", "Filter by exact reason or contains=<text>")
 	cmd.AddCommand(list)
 	return cmd
 }

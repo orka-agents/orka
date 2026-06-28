@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,7 +28,14 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/contexttoken"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
 	"github.com/sozercan/orka/internal/workerenv"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -41,7 +49,23 @@ const (
 	mcpToolsCallMethod               = "tools/call"
 	mcpInitializeMethod              = "initialize"
 	mcpInitializedNotificationMethod = "notifications/initialized"
+	toolIdempotencyKeyHeader         = "Idempotency-Key"
 )
+
+type toolCallIDContextKey struct{}
+
+// WithToolCallID records the model provider's tool-call id for Tool CRD span metadata.
+func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
+	if strings.TrimSpace(toolCallID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolCallIDContextKey{}, toolCallID)
+}
+
+func toolCallIDFromContext(ctx context.Context) string {
+	toolCallID, _ := ctx.Value(toolCallIDContextKey{}).(string)
+	return strings.TrimSpace(toolCallID)
+}
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
 type ToolExecutor struct {
@@ -79,10 +103,45 @@ func NewToolExecutor() *ToolExecutor {
 }
 
 // Execute executes a Tool CRD by making an HTTP request.
-func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
+func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
+	start := time.Now()
+	toolName := toolTelemetryName(tool)
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+	}
+	attrs = append(attrs, tracing.ToolAttributes(toolName, tracing.ToolKindHTTP, -1, "")...)
+	attrs = append(attrs, tracing.TaskAttributes(os.Getenv(workerenv.TaskName), e.namespace, e.namespace, "", "")...)
+	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	ctx, span := tracing.GenAITracer(genai.InstrumentationName).Start(ctx, genai.OperationExecuteTool+" "+toolName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	defer func() {
+		resultSize := len(result)
+		span.SetAttributes(tracing.ToolAttributes("", "", resultSize, "")...)
+		metricAttrs := []attribute.KeyValue{
+			attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+			attribute.String(genai.AttrToolName, toolName),
+			attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+		}
+		if err != nil {
+			errType := toolExecutionErrorType(err)
+			span.SetStatus(codes.Error, errType)
+			span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+		}
+		recordExternalToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+		span.End()
+	}()
+
 	prepared, err := e.prepareRequest(ctx, tool, args)
 	if err != nil {
 		return "", err
+	}
+	if prepared.request != nil {
+		span.SetAttributes(httpToolRequestAttributes(prepared.request)...)
+		injectTraceHeaders(ctx, prepared.request.Header)
 	}
 
 	// Configure timeout
@@ -97,10 +156,93 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 
 	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.authToken, prepared.transactionToken)
 	if err != nil {
-		return "", err
+		return "", ToolRequestAttemptedError{Err: err}
 	}
 
 	return string(respBody), nil
+}
+
+// ToolRequestAttemptedError wraps errors that occur after a custom tool request
+// may already have reached the remote endpoint.
+type ToolRequestAttemptedError struct {
+	Err error
+}
+
+func (e ToolRequestAttemptedError) Error() string { return e.Err.Error() }
+func (e ToolRequestAttemptedError) Unwrap() error { return e.Err }
+
+// ToolRequestWasAttempted reports whether err happened after the custom tool send path began.
+func ToolRequestWasAttempted(err error) bool {
+	var attempted ToolRequestAttemptedError
+	return errors.As(err, &attempted)
+}
+
+func recordExternalToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
+	meter := tracing.GenAIMeter(genai.InstrumentationName)
+	histogram, err := meter.Float64Histogram(
+		genai.MetricExecuteToolDuration,
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	)
+	if err != nil {
+		return
+	}
+	histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
+}
+
+func toolExecutionErrorType(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	const httpPrefix = "tool returned HTTP "
+	if idx := strings.Index(message, httpPrefix); idx >= 0 {
+		statusText := message[idx+len(httpPrefix):]
+		code := ""
+		for _, r := range statusText {
+			if r < '0' || r > '9' {
+				break
+			}
+			code += string(r)
+		}
+		if code != "" {
+			return "http_status_" + code
+		}
+	}
+	return fmt.Sprintf("%T", err)
+}
+
+func toolTelemetryName(tool *corev1alpha1.Tool) string {
+	if tool != nil && strings.TrimSpace(tool.Name) != "" {
+		return strings.TrimSpace(tool.Name)
+	}
+	return "http_tool"
+}
+
+func httpToolRequestAttributes(req *http.Request) []attribute.KeyValue {
+	if req == nil {
+		return nil
+	}
+	attrs := []attribute.KeyValue{}
+	if req.Method != "" {
+		attrs = append(attrs, attribute.String("http.request.method", req.Method))
+	}
+	if req.URL != nil {
+		if host := req.URL.Hostname(); host != "" {
+			attrs = append(attrs, attribute.String("server.address", host))
+		}
+		if req.URL.Scheme != "" {
+			attrs = append(attrs, attribute.String("url.scheme", req.URL.Scheme))
+		}
+	}
+	return attrs
+}
+
+func injectTraceHeaders(ctx context.Context, header http.Header) {
+	if header == nil {
+		return
+	}
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
 }
 
 func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets ...string) ([]byte, error) {
@@ -120,6 +262,25 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 	return respBody, nil
 }
 
+type toolIdempotencyKeyContextKey struct{}
+
+// WithToolIdempotencyKey attaches a trusted idempotency key for HTTP tool execution.
+func WithToolIdempotencyKey(ctx context.Context, key string) context.Context {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolIdempotencyKeyContextKey{}, key)
+}
+
+func toolIdempotencyKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	key, _ := ctx.Value(toolIdempotencyKeyContextKey{}).(string)
+	return strings.TrimSpace(key)
+}
+
 type preparedToolRequest struct {
 	httpConfig       corev1alpha1.HTTPExecution
 	request          *http.Request
@@ -128,14 +289,27 @@ type preparedToolRequest struct {
 	mcp              bool
 }
 
-func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
+	if len(bytes.TrimSpace(args)) == 0 {
+		return make(map[string]any), nil
+	}
 	var params map[string]any
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &params); err != nil {
-			return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
-		}
-	} else {
-		params = make(map[string]any)
+	dec := json.NewDecoder(bytes.NewReader(args))
+	dec.UseNumber()
+	if err := dec.Decode(&params); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("trailing data")
+	}
+	return params, nil
+}
+
+func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
+	params, err := decodeToolArguments(args)
+	if err != nil {
+		return preparedToolRequest{}, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
 
 	httpConfig, routeHost, err := toolHTTPConfig(tool)
@@ -197,6 +371,17 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
+	}
+	approvalIdempotencyKey := toolIdempotencyKeyFromContext(ctx)
+	if approvalIdempotencyKey != "" {
+		if existing := strings.TrimSpace(req.Header.Get(toolIdempotencyKeyHeader)); existing != "" && existing != approvalIdempotencyKey {
+			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while approval idempotency is enabled", toolIdempotencyKeyHeader)
+		}
+		if isMCP {
+			req.Header.Del(toolIdempotencyKeyHeader)
+		} else {
+			req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
+		}
 	}
 	if authInject == "header" && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -381,11 +566,18 @@ func (e *ToolExecutor) executeMCPToolCall(ctx context.Context, httpClient *http.
 	if err := e.sendMCPInitializedNotification(ctx, httpClient, prepared, sessionID, protocolVersion); err != nil {
 		return "", err
 	}
+	if key := toolIdempotencyKeyFromContext(prepared.request.Context()); key != "" {
+		prepared.request.Header.Set(toolIdempotencyKeyHeader, key)
+	}
 	respBody, err := executeMCPHTTPRequest(httpClient, prepared.request, mcpToolCallRequestID, prepared.authToken, prepared.transactionToken, sessionID)
 	if err != nil {
-		return "", err
+		return "", ToolRequestAttemptedError{Err: err}
 	}
-	return decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	result, err = decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	if err != nil {
+		return "", ToolRequestAttemptedError{Err: err}
+	}
+	return result, nil
 }
 
 func (e *ToolExecutor) initializeMCP(ctx context.Context, httpClient *http.Client, prepared preparedToolRequest) (string, string, error) {
@@ -447,9 +639,13 @@ func (e *ToolExecutor) terminateMCPSession(ctx context.Context, httpClient *http
 	}
 	req.Host = prepared.request.Host
 	req.Header = prepared.request.Header.Clone()
+	if toolIdempotencyKeyFromContext(prepared.request.Context()) != "" {
+		req.Header.Del(toolIdempotencyKeyHeader)
+	}
 	req.Header.Del("Content-Type")
 	req.Header.Set(mcpSessionIDHeader, sessionID)
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolHeaderValue(protocolVersion))
+	injectTraceHeaders(cleanupCtx, req.Header)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -478,9 +674,13 @@ func newMCPRequest(ctx context.Context, prepared preparedToolRequest, body []byt
 	}
 	req.Host = prepared.request.Host
 	req.Header = prepared.request.Header.Clone()
+	if toolIdempotencyKeyFromContext(prepared.request.Context()) != "" {
+		req.Header.Del(toolIdempotencyKeyHeader)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(mcpProtocolVersionHeader, mcpProtocolHeaderValue(protocolVersion))
+	injectTraceHeaders(ctx, req.Header)
 	return req, nil
 }
 

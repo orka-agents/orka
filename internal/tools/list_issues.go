@@ -17,6 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const listIssuesToolName = "list_issues"
+
 // ListIssuesTool lists open GitHub issues in a repository.
 type ListIssuesTool struct {
 	k8sClient  client.Client
@@ -64,7 +66,7 @@ func NewListIssuesTool(k8sClient client.Client) *ListIssuesTool {
 
 // Name returns the tool name.
 func (t *ListIssuesTool) Name() string {
-	return "list_issues"
+	return listIssuesToolName
 }
 
 // Description returns the tool description.

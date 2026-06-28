@@ -20,6 +20,21 @@ vi.mock('@tanstack/react-router', async () => {
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
+// The session timeline tab opens a live SSE stream; stub the stream hook so this
+// suite stays focused on the detail layout and tab wiring.
+vi.mock('@/hooks/use-execution-event-stream', () => ({
+  useExecutionEventStream: () => ({
+    events: [],
+    lastSeq: 0,
+    status: 'idle',
+    error: null,
+    streamComplete: null,
+    isFollowing: false,
+    stop: vi.fn(),
+    restart: vi.fn(),
+  }),
+}))
+
 import { render, screen, waitFor } from '@/test/test-utils'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
@@ -109,6 +124,29 @@ describe('SessionDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('Transcript')).toBeInTheDocument()
     })
+  })
+
+  it('exposes a Timeline tab that renders the session event timeline', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/sessions/:id/events', () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'session', streamID: 'tl-session', afterSeq: 0, latestSeq: 1,
+          events: [
+            {
+              id: 'e1', namespace: 'default', streamType: 'session', streamID: 'tl-session', seq: 1,
+              type: 'TaskStarted', severity: 'info', createdAt: '2026-06-13T00:00:00Z',
+              taskName: 'task-x', summary: 'x started',
+            },
+          ],
+        }),
+      ),
+    )
+    render(<SessionDetail sessionId="tl-session" />)
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Timeline' })).toBeInTheDocument())
+    await user.click(screen.getByRole('tab', { name: 'Timeline' }))
+    await waitFor(() => expect(screen.getByText('Session timeline')).toBeInTheDocument())
+    expect(await screen.findByText('x started')).toBeInTheDocument()
   })
 
   it('shows delete button', async () => {

@@ -29,6 +29,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 const queryTrue = "true"
@@ -42,6 +43,7 @@ var builtinToolsList = []fiber.Map{
 	builtinToolResponse(tools.NewFileReadTool()),
 	builtinToolResponse(tools.NewWebFetchTool()),
 	builtinToolResponse(tools.NewFileWriteTool()),
+	builtinToolResponse(tools.NewRequestApprovalTool()),
 }
 
 // builtinToolsMap indexes built-in tools by name for single-tool lookup.
@@ -177,10 +179,20 @@ func (h *Handlers) resolveNamespace(c fiber.Ctx, explicit string) (string, error
 		ns = GetEffectiveNamespace(c, "")
 	}
 
-	// Enforce namespace isolation: user can only access their SA namespace
+	// Enforce namespace isolation: authenticated callers must carry a namespace
+	// and can only access that namespace.
 	if h.enforceNamespaceIsolation {
 		ui := GetUserInfo(c)
-		if ui != nil && ui.Namespace != "" && ns != ui.Namespace {
+		if ui != nil && ui.Namespace == "" {
+			log.Info("namespace access denied: namespace-less identity",
+				"username", ui.Username,
+				"authType", ui.AuthType,
+				"requestedNamespace", ns,
+				"ip", c.IP(),
+			)
+			return "", fiber.NewError(fiber.StatusForbidden, "namespace-bound identity required")
+		}
+		if ui != nil && ns != ui.Namespace {
 			log.Info("namespace access denied: isolation violation",
 				"username", ui.Username,
 				"userNamespace", ui.Namespace,
@@ -471,6 +483,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 
 	stampTaskRequesterFromUserInfo(task, GetUserInfo(c))
+	tracing.StampTaskTraceContext(c.Context(), task)
 
 	// Parse timeout if provided
 	if req.Timeout != "" {
@@ -482,6 +495,10 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
+	if err := h.authorizeTaskCreate(ctx, c, task); err != nil {
+		return err
+	}
+
 	if err := h.client.Create(ctx, task); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "task already exists")
@@ -490,6 +507,10 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(task)
+}
+
+func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *corev1alpha1.Task) error {
+	return authorizeKubernetesTaskCreate(ctx, h.clientset, GetUserInfo(c), task)
 }
 
 // ListTasks lists tasks

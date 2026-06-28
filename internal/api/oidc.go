@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -44,6 +45,7 @@ type oidcClaims struct {
 	Email       string          `json:"email,omitempty"`
 	Username    string          `json:"preferred_username,omitempty"`
 	Name        string          `json:"name,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
 	Groups      stringList      `json:"groups,omitempty"`
 	Roles       stringList      `json:"roles,omitempty"`
 	RealmAccess oidcRealmAccess `json:"realm_access,omitempty"`
@@ -56,6 +58,8 @@ type oidcRealmAccess struct {
 type oidcDiscoveryDocument struct {
 	JWKSURI string `json:"jwks_uri"`
 }
+
+var errOIDCAuthorization = errors.New("OIDC authorization failed")
 
 func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*UserInfo, error) {
 	parsed, err := parseOIDCTokenCandidate(token, cfg)
@@ -88,18 +92,17 @@ func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCCon
 	if err := json.Unmarshal(verified.RawClaims, &claims); err != nil {
 		return nil, fmt.Errorf("parse JWT claims: %w", err)
 	}
+	if err := authorizeOIDCClaims(claims, cfg); err != nil {
+		return nil, err
+	}
 
-	return userInfoFromOIDCClaims(claims), nil
+	return userInfoFromOIDCClaims(claims, cfg), nil
 }
 
 func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 	parsed, err := parseCompactJWT(token)
 	if err != nil {
 		return nil, err
-	}
-
-	if !jwtSigningAlgorithmAllowed(parsed.Header.Algorithm, nil) {
-		return nil, fmt.Errorf("unsupported JWT signing algorithm %q", parsed.Header.Algorithm.String())
 	}
 
 	var claims struct {
@@ -118,7 +121,36 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 	return parsed, nil
 }
 
-func userInfoFromOIDCClaims(claims oidcClaims) *UserInfo {
+func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
+	if len(cfg.AllowedSubjects) == 0 {
+		return fmt.Errorf("%w: OIDC subject authorization is not configured", errOIDCAuthorization)
+	}
+
+	for _, allowed := range cfg.AllowedSubjects {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		matched, err := wildcardMatch(allowed, claims.Subject)
+		if err != nil {
+			return fmt.Errorf("%w: invalid allowed subject pattern %q: %v", errOIDCAuthorization, allowed, err)
+		}
+		if matched {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%w: subject %q is not authorized", errOIDCAuthorization, claims.Subject)
+}
+
+func wildcardMatch(pattern, value string) (bool, error) {
+	quoted := regexp.QuoteMeta(pattern)
+	quoted = strings.ReplaceAll(quoted, `\*`, ".*")
+	quoted = strings.ReplaceAll(quoted, `\?`, ".")
+	return regexp.MatchString("^"+quoted+"$", value)
+}
+
+func userInfoFromOIDCClaims(claims oidcClaims, cfg OIDCConfig) *UserInfo {
 	username := claims.Username
 	if username == "" {
 		username = claims.Email
@@ -133,14 +165,20 @@ func userInfoFromOIDCClaims(claims oidcClaims) *UserInfo {
 	roles := append([]string{}, claims.Roles...)
 	roles = append(roles, claims.RealmAccess.Roles...)
 
+	namespace := cfg.Namespace
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+
 	return &UserInfo{
-		Username: username,
-		Groups:   append([]string{}, claims.Groups...),
-		AuthType: AuthTypeOIDC,
-		Subject:  claims.Subject,
-		Email:    claims.Email,
-		Issuer:   claims.Issuer,
-		Roles:    roles,
+		Username:  username,
+		Groups:    append([]string{}, claims.Groups...),
+		Namespace: namespace,
+		AuthType:  AuthTypeOIDC,
+		Subject:   claims.Subject,
+		Email:     claims.Email,
+		Issuer:    claims.Issuer,
+		Roles:     roles,
 	}
 }
 

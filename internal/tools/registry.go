@@ -10,10 +10,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -25,6 +35,7 @@ type ToolContext struct {
 	Namespace                 string
 	SessionID                 string
 	TaskID                    string
+	TaskUID                   string
 	ToolCallID                string
 	Tenant                    string
 	Provider                  string
@@ -51,6 +62,10 @@ type ToolContext struct {
 	AuthorizeSecretRead            func(context.Context, string, string) *ChatToolError
 	RequireSecretReadAuthorization bool
 	IncrementTasks                 func()
+	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
+	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
+	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool)
 }
 
 type toolContextKey struct{}
@@ -115,6 +130,11 @@ const trueStr = "true"
 
 const defaultMergeMethod = "squash"
 
+const (
+	unknownToolTelemetryName  = "unknown_tool"
+	rejectedToolTelemetryName = "rejected_tool"
+)
+
 // Tool is the interface for built-in tools
 type Tool interface {
 	// Name returns the tool name
@@ -169,13 +189,177 @@ func (r *Registry) List() []Tool {
 	return tools
 }
 
-// Execute executes a tool by name
-func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	tool, ok := r.Get(name)
-	if !ok {
-		return "", fmt.Errorf("tool %q not found", name)
+// Names returns all registered tool names in stable order.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
 	}
-	return tool.Execute(ctx, args)
+	sort.Strings(names)
+	return names
+}
+
+// Execute executes a tool by name. It is the DRY instrumentation point for
+// built-in registry tools used by chat, proxy-compatible handlers, and workers.
+func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	start := time.Now()
+	tool, ok := r.Get(name)
+	toolTelemetryName := name
+	if !ok {
+		toolTelemetryName = unknownToolTelemetryName
+	}
+	toolTypeValue := toolType(ctx, tool)
+	toolKind := registryToolKind(name)
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
+		attribute.String(genai.AttrToolType, toolTypeValue),
+	}
+	attrs = append(attrs, tracing.ToolAttributes(toolTelemetryName, toolKind, -1, "")...)
+	if tc := GetToolContext(ctx); tc != nil {
+		tenant := tc.Tenant
+		if tenant == "" {
+			tenant = tc.Namespace
+		}
+		attrs = append(attrs, tracing.TaskAttributes(tc.TaskID, tc.Namespace, tenant, "", "")...)
+		if tc.ToolCallID != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+		}
+	}
+	if ok {
+		if description := tool.Description(); description != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
+		}
+	}
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+toolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	defer span.End()
+
+	// Keep histogram labels low-cardinality and separate from span-only task/result attributes.
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
+		attribute.String(genai.AttrToolType, toolTypeValue),
+	}
+	if !ok {
+		err := fmt.Errorf("tool %q not found", name)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(genai.AttrErrorType, "tool_not_found"))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, "tool_not_found"))
+		recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+		return "", err
+	}
+
+	result, err := tool.Execute(ctx, args)
+	duration := time.Since(start).Seconds()
+	span.SetAttributes(tracing.ToolAttributes("", "", len(result), "")...)
+	if err != nil {
+		errType := fmt.Sprintf("%T", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	} else if failed, errType, message := failedToolResult(result); failed {
+		span.SetStatus(codes.Error, message)
+		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+	}
+	recordToolDuration(ctx, duration, metricAttrs...)
+	return result, err
+}
+
+// RecordRejectedToolCall records a failed tool invocation that is rejected before
+// dispatch, for example by request-level allowlists or invalid arguments. It
+// intentionally does not execute the tool.
+func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, message string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	start := time.Now()
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
+	}
+	if toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	if errType == "" {
+		errType = "tool_rejected"
+	}
+	if message == "" {
+		message = errType
+	}
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+rejectedToolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	span.SetStatus(codes.Error, message)
+	span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+	span.End()
+	metricAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, rejectedToolTelemetryName),
+		attribute.String(genai.AttrToolType, genai.ToolTypeFunction),
+		attribute.String(genai.AttrErrorType, errType),
+	}
+	recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
+}
+
+// FailedToolResultForTelemetry detects structured tool failures for callers
+// that reject tool calls before dispatch but still need telemetry.
+func FailedToolResultForTelemetry(result string) (bool, string, string) {
+	return failedToolResult(result)
+}
+
+func failedToolResult(result string) (bool, string, string) {
+	var body map[string]any
+	if json.Unmarshal([]byte(result), &body) != nil {
+		return false, "", ""
+	}
+	success, ok := body["success"].(bool)
+	if !ok || success {
+		return false, "", ""
+	}
+
+	var tr ChatToolResult
+	_ = json.Unmarshal([]byte(result), &tr)
+	errType := tr.ErrorType
+	if errType == "" {
+		errType = "tool_error"
+	}
+	message := tr.Error
+	if message == "" {
+		message = errType
+	}
+	return true, errType, message
+}
+
+func toolType(ctx context.Context, _ Tool) string {
+	// Registry tools are in-process functions. External Tool CRD/MCP execution is
+	// handled by worker.ToolExecutor and can be modeled as extension later.
+	return genai.ToolTypeFunction
+}
+
+func registryToolKind(name string) string {
+	if name == delegateTaskToolName {
+		return tracing.ToolKindDelegate
+	}
+	return tracing.ToolKindBuiltin
+}
+
+func recordToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
+	meter := tracing.GenAIMeter(genai.InstrumentationName)
+	histogram, err := meter.Float64Histogram(
+		genai.MetricExecuteToolDuration,
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	)
+	if err != nil {
+		return
+	}
+	histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
 }
 
 // ToLLMTools converts the registry to LLM tool definitions
@@ -206,6 +390,7 @@ func RegisterBuiltinTools() {
 	DefaultRegistry.Register(NewFileReadTool())
 	DefaultRegistry.Register(NewWebFetchTool())
 	DefaultRegistry.Register(NewFileWriteTool())
+	DefaultRegistry.Register(NewRequestApprovalTool())
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client
@@ -277,6 +462,28 @@ func RegisterProxyPRTools(k8sClient client.Client) {
 	DefaultRegistry.Register(NewCheckPullRequestCITool(k8sClient))
 }
 
+// KnownBuiltInToolNames returns every built-in tool name known to Orka, including
+// tools registered in the default proxy registry and coordination tools that are
+// registered in worker processes. Controller-side validation uses this to reject
+// approvalRequiredTools entries that would be handled as built-ins rather than
+// Tool CRDs.
+func KnownBuiltInToolNames() []string {
+	seen := map[string]bool{}
+	for _, group := range [][]string{DefaultRegistry.Names(), ChatToolNames(), CoordinationToolNames()} {
+		for _, name := range group {
+			if name != "" {
+				seen[name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // ChatToolNames returns the names of all chat tools in registration order.
 func ChatToolNames() []string {
 	return []string{
@@ -288,6 +495,37 @@ func ChatToolNames() []string {
 		createToolCRDToolName,
 		deleteToolToolName,
 		deleteSessionToolName,
+	}
+}
+
+// CoordinationToolNames returns the names of all coordination tools registered by
+// RegisterCoordinationTools in worker processes.
+func CoordinationToolNames() []string {
+	return []string{
+		delegateTaskToolName,
+		waitForTasksToolName,
+		createContainerTaskToolName,
+		cancelTaskToolName,
+		sendMessageToolName,
+		checkMessagesToolName,
+		createPullRequestToolName,
+		checkPullRequestCIToolName,
+		mergePullRequestToolName,
+		autoMergePullRequestToolName,
+		reviewPullRequestToolName,
+		postReviewCommentToolName,
+		checkPRReviewMarkerToolName,
+		listIssuesToolName,
+		listPullRequestsToolName,
+		getIssueToolName,
+		commentOnIssueToolName,
+		createAgentToolName,
+		deleteAgentToolName,
+		updatePlanToolName,
+		"recall_memory",
+		"remember",
+		"propose_memory",
+		"search_transcript",
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
@@ -87,10 +88,16 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "sandbox-template"},
 				}}
 			},
-			objects: []client.Object{&sandboxextv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
-				Name:      "sandbox-template",
-				Namespace: defaultNS,
-			}}},
+			objects: []client.Object{
+				&sandboxextv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+					Name:      "sandbox-template",
+					Namespace: defaultNS,
+				}},
+				&sandboxextv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{
+					Name:      "sandbox-template",
+					Namespace: defaultNS,
+				}},
+			},
 			agentSandboxEnabled:    true,
 			wantPath:               agentExecutionPathRejected,
 			wantReason:             "execution workspace is not supported by harness runtime yet",

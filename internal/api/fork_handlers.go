@@ -27,6 +27,7 @@ import (
 	forkcontext "github.com/sozercan/orka/internal/fork"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 type ForkTaskRequest struct {
@@ -145,7 +146,11 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		Spec: spec,
 	}
 	stampTaskRequesterFromUserInfo(forked, GetUserInfo(c))
+	tracing.StampTaskTraceContext(c.Context(), forked)
 	if err := h.authorizeContextTokenTaskCreate(c, createTaskRequestFromTask(forked), namespace); err != nil {
+		return err
+	}
+	if err := h.authorizeTaskCreate(c.Context(), c, forked); err != nil {
 		return err
 	}
 

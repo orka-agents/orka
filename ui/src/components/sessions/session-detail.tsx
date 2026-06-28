@@ -1,10 +1,12 @@
 import { Link, useNavigate } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/layout/page-header'
 import { ArrowLeft, Trash2 } from 'lucide-react'
 import { TranscriptViewer } from './transcript-viewer'
+import { SessionEventTimeline } from './session-event-timeline'
 import { useSession, useDeleteSession } from '@/hooks/use-sessions'
 
 export function SessionDetail({ sessionId }: { sessionId: string }) {
@@ -48,31 +50,44 @@ export function SessionDetail({ sessionId }: { sessionId: string }) {
         />
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Messages</CardTitle></CardHeader>
-          <CardContent><p className="text-2xl font-bold">{session.messageCount ?? '0'}</p></CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Input Tokens</CardTitle></CardHeader>
-          <CardContent><p className="text-2xl font-bold">{session.inputTokens ?? '0'}</p></CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Output Tokens</CardTitle></CardHeader>
-          <CardContent><p className="text-2xl font-bold">{session.outputTokens ?? '0'}</p></CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Active Task</CardTitle></CardHeader>
-          <CardContent><p className="text-2xl font-bold">{session.activeTask || '-'}</p></CardContent>
-        </Card>
-      </div>
+      <Tabs defaultValue="overview">
+        <TabsList>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="timeline">Timeline</TabsTrigger>
+        </TabsList>
 
-      <Card>
-        <CardHeader><CardTitle>Transcript</CardTitle></CardHeader>
-        <CardContent>
-          <TranscriptViewer transcript={session.transcript} />
-        </CardContent>
-      </Card>
+        <TabsContent value="overview" className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm">Messages</CardTitle></CardHeader>
+              <CardContent><p className="text-2xl font-bold">{session.messageCount ?? '0'}</p></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm">Input Tokens</CardTitle></CardHeader>
+              <CardContent><p className="text-2xl font-bold">{session.inputTokens ?? '0'}</p></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm">Output Tokens</CardTitle></CardHeader>
+              <CardContent><p className="text-2xl font-bold">{session.outputTokens ?? '0'}</p></CardContent>
+            </Card>
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="text-sm">Active Task</CardTitle></CardHeader>
+              <CardContent><p className="text-2xl font-bold">{session.activeTask || '-'}</p></CardContent>
+            </Card>
+          </div>
+
+          <Card>
+            <CardHeader><CardTitle>Transcript</CardTitle></CardHeader>
+            <CardContent>
+              <TranscriptViewer transcript={session.transcript} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="timeline">
+          <SessionEventTimeline key={`${session.namespace}/${session.name}`} sessionId={session.name} />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

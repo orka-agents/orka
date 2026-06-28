@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -192,8 +193,10 @@ var _ = AfterSuite(func() {
 	}
 
 	By("undeploying the controller-manager")
-	cmd = exec.Command("make", "undeploy")
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	cmd = exec.CommandContext(cleanupCtx, "make", "undeploy")
 	_, _ = utils.Run(cmd)
+	cleanupCancel()
 
 	By("uninstalling CRDs")
 	cmd = exec.Command("make", "uninstall")

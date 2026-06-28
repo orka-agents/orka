@@ -11,13 +11,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 
 	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 )
 
@@ -44,7 +51,9 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.taskAccess().ensureReadable(c, "listTaskApprovals", namespace, taskName); err != nil {
+	task, err := h.taskAccess().loadReadable(c, "listTaskApprovals", namespace, taskName)
+	if err != nil {
+
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -54,7 +63,7 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
-	return c.JSON(ListTaskApprovalsResponse{Namespace: namespace, TaskName: taskName, Approvals: approvals.Derive(listed, time.Now().UTC())})
+	return c.JSON(ListTaskApprovalsResponse{Namespace: namespace, TaskName: taskName, Approvals: deriveTaskApprovalState(filterTaskApprovalEvents(listed, task))})
 }
 
 // DecideTaskApproval handles POST /api/v1/tasks/{id}/approvals/{approvalID}/decision.
@@ -100,12 +109,16 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
-	current, found := findApproval(approvals.Derive(listed, time.Now().UTC()), approvalID)
+	listed = filterTaskApprovalEvents(listed, task)
+	current, found := findApproval(deriveTaskApprovalState(listed), approvalID)
 	if !found {
 		return fiber.NewError(fiber.StatusNotFound, "approval not found")
 	}
 	if current.Status != approvals.StatusPending {
 		if (current.Status == approvals.StatusApproved && decision == approvalDecisionApprove) || (current.Status == approvals.StatusDeclined && decision == approvalDecisionDecline) {
+			if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, current); err != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", err))
+			}
 			return c.JSON(current)
 		}
 		return fiber.NewError(fiber.StatusConflict, fmt.Sprintf("approval is already %s", current.Status))
@@ -127,6 +140,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		"decision":   decision,
 		"reason":     strings.TrimSpace(req.Reason),
 		"actor":      actor,
+		"taskUID":    string(task.UID),
 	})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode approval decision: %v", err))
@@ -154,8 +168,12 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 			if listErr != nil {
 				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", listErr))
 			}
-			if current, found := findApproval(approvals.Derive(refreshed, time.Now().UTC()), approvalID); found {
+			refreshed = filterTaskApprovalEvents(refreshed, task)
+			if current, found := findApproval(deriveTaskApprovalState(refreshed), approvalID); found {
 				if approvalStatusMatchesDecision(current.Status, decision) {
+					if patchErr := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, current); patchErr != nil {
+						return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", patchErr))
+					}
 					return c.JSON(current)
 				}
 				return fiber.NewError(fiber.StatusConflict, fmt.Sprintf("approval is already %s", current.Status))
@@ -164,18 +182,52 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append approval decision: %v", err))
 	}
 	listed = append(listed, *appended)
-	updated, _ := findApproval(approvals.Derive(listed, time.Now().UTC()), approvalID)
+	updated, _ := findApproval(deriveTaskApprovalState(listed), approvalID)
+	if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, updated); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", err))
+	}
 	return c.JSON(updated)
 }
 
-func (h *Handlers) listTaskApprovalEvents(ctx context.Context, namespace, taskName string) ([]store.ExecutionEvent, error) {
-	return newTaskTimelineReader(h.executionEventStore, namespace, taskName).listMatching(ctx, []string{
-		events.ExecutionEventTypeApprovalRequested,
-		events.ExecutionEventTypeApprovalApproved,
-		events.ExecutionEventTypeApprovalDeclined,
-		events.ExecutionEventTypeApprovalExpired,
-		events.ExecutionEventTypeApprovalCancelled,
+func filterTaskApprovalEvents(input []store.ExecutionEvent, task *corev1alpha1.Task) []store.ExecutionEvent {
+	if task == nil {
+		return input
+	}
+	return approvals.FilterEventsForTaskUID(input, string(task.UID))
+}
+
+func deriveTaskApprovalState(input []store.ExecutionEvent) []approvals.Approval {
+	// V1 does not passively expire approvals. Until an expiry producer appends
+	// explicit ApprovalExpired events, pending approvals must remain human-
+	// decidable and must match controller parking semantics.
+	return approvals.Derive(input, time.Time{})
+}
+
+func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, namespace, taskName string, approval approvals.Approval) error {
+	if h == nil || h.client == nil || strings.TrimSpace(approval.ID) == "" {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, current); err != nil {
+			return err
+		}
+		base := current.DeepCopy()
+		if current.Annotations == nil {
+			current.Annotations = map[string]string{}
+		}
+		current.Annotations[labels.AnnotationApprovalDecidedAt] = time.Now().UTC().Format(time.RFC3339Nano)
+		current.Annotations[labels.AnnotationApprovalDecisionID] = approval.ID
+		current.Annotations[labels.AnnotationApprovalDecisionStatus] = approval.Status
+		if approval.DecisionSeq > 0 {
+			current.Annotations[labels.AnnotationApprovalDecisionSeq] = strconv.FormatInt(approval.DecisionSeq, 10)
+		}
+		return h.client.Patch(ctx, current, client.MergeFrom(base))
 	})
+}
+
+func (h *Handlers) listTaskApprovalEvents(ctx context.Context, namespace, taskName string) ([]store.ExecutionEvent, error) {
+	return newTaskTimelineReader(h.executionEventStore, namespace, taskName).listMatching(ctx, approvals.EventTypes())
 }
 
 func approvalDecisionActor(userInfo *UserInfo) string {

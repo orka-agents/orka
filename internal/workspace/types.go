@@ -111,9 +111,9 @@ type ClaimRequest struct {
 	CreateIfMissing bool
 	Template        TemplateRef
 	ReuseKey        string
-	// WarmPoolPolicy is the backend-native warm-pool selector. Agent-sandbox
-	// accepts "none" to force a cold claim and "default" to allow matching warm
-	// pools.
+	// WarmPoolPolicy is retained for the legacy agent-sandbox worker environment
+	// contract. With agent-sandbox v0.5, Template.Name identifies the
+	// SandboxWarmPool to claim.
 	WarmPoolPolicy string
 	Labels         map[string]string
 	Annotations    map[string]string

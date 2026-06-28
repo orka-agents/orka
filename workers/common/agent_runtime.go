@@ -28,8 +28,12 @@ import (
 
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/redact"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // AgentConfig holds worker configuration from environment variables.
@@ -472,6 +476,43 @@ func execGitContext(ctx context.Context, dir string, args ...string) error {
 // AgentExecutor is a function that runs the agent and returns its output.
 type AgentExecutor func(ctx context.Context, cfg *AgentConfig) (string, error)
 
+func agentTelemetryEnabled() bool {
+	return workerenv.IsTrue(os.Getenv(workerenv.EnableTelemetry))
+}
+
+func startAgentTaskRunTelemetry(
+	ctx context.Context,
+	runtimeName string,
+	cfg *AgentConfig,
+) (context.Context, trace.Span, func(context.Context) error, error) {
+	tracingShutdown, err := tracing.Init("orka-agent-worker", agentTelemetryEnabled())
+	if err != nil {
+		return ctx, nil, nil, fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+	if traceParent := os.Getenv(workerenv.TraceParent); traceParent != "" {
+		ctx = tracing.ExtractContext(ctx, tracing.MapCarrier{
+			"traceparent": traceParent,
+			"tracestate":  os.Getenv(workerenv.TraceState),
+			"baggage":     os.Getenv(workerenv.TraceBaggage),
+		})
+	}
+	agentName := strings.TrimSpace(os.Getenv(workerenv.AgentName))
+	if agentName == "" {
+		agentName = runtimeName
+	}
+	ctx, taskSpan := tracing.Tracer("orka.worker").Start(ctx, "task.run", trace.WithAttributes(
+		tracing.TaskAttributes(cfg.TaskName, cfg.TaskNamespace, cfg.TaskNamespace, agentName, "")...,
+	))
+	return ctx, taskSpan, tracingShutdown, nil
+}
+
+func agentRuntimeErrorType(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", err)
+}
+
 const (
 	agentSandboxWorkerUploadPath              = "orka-agent-worker"
 	agentSandboxWorkerExecPath                = "/app/" + agentSandboxWorkerUploadPath
@@ -624,6 +665,9 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	}
 
 	defer func() {
+		// RunAgent has a named error return. Go assigns every return expression
+		// to err before deferred functions run, including returns from shadowed
+		// inner err variables, so this observes the final worker outcome.
 		if err != nil {
 			recordAgentWorkerFailedEvent(eventRecorder, name, taskName, err)
 			return
@@ -640,6 +684,26 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	taskName = cfg.TaskName
+
+	ctx, taskSpan, tracingShutdown, err := startAgentTaskRunTelemetry(ctx, name, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := tracingShutdown(shutdownCtx); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to shutdown telemetry: %v\n", shutdownErr)
+		}
+	}()
+	defer func() {
+		if err != nil {
+			errType := agentRuntimeErrorType(err)
+			taskSpan.SetStatus(codes.Error, errType)
+			taskSpan.SetAttributes(attribute.String("error.type", errType))
+		}
+		taskSpan.End()
+	}()
 
 	fmt.Printf("Worker %s started task=%s/%s%s\n",
 		name, cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))

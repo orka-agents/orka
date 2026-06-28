@@ -93,6 +93,7 @@ spec:
 | `enabled` | bool | `false` | Enable agent-to-agent coordination tools |
 | `autonomous` | bool | `false` | Enables autonomous loop mode. When true, the controller re-creates Jobs in a loop instead of marking the task as Succeeded |
 | `maxIterations` | int32 | `0` | Limits the number of autonomous loop iterations. Only used when `autonomous` is true. `0` means unlimited |
+| `approvalRequiredTools` | list | `[]` | Custom Tool CRD names that require human approval before execution in enabled autonomous coordination mode. Built-in tools, including `request_approval`, are rejected |
 | `allowedAgents` | list | `[]` | List of agent names this agent is allowed to delegate to |
 | `maxConcurrentChildren` | int32 | `5` | Maximum number of concurrent child tasks |
 | `maxDepth` | int32 | `3` | Maximum delegation depth |
@@ -100,6 +101,8 @@ spec:
 **Auto-injected coordination tools** (when `enabled: true`):
 
 `delegate_task`, `wait_for_tasks`, `create_container_task`, `cancel_task`, `send_message`, `check_messages`, `recall_memory`, `remember`, `propose_memory`, `search_transcript`, `create_pull_request`, `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `merge_pull_request`, `auto_merge_pull_request`, `review_pull_request`, `post_review_comment`, `create_agent`, `delete_agent`, `update_plan`
+
+When `autonomous: true`, `request_approval` is also injected so the worker can park the task after an explicit human approval request.
 
 **Opt-in coordination tools** (require explicit `spec.tools[]` entries on the Agent):
 
@@ -141,6 +144,15 @@ spec:
   timeZone: "UTC"               # optional IANA time zone
   historyDays: 30                # optional initial history window
   validationMode: light          # off, light, or full
+  validationMaxFindingsPerRun: 8 # optional auto-validation task cap for light mode
+  validationMinSeverity: medium  # optional auto-validation severity threshold
+  validationMinConfidence: medium # optional auto-validation confidence threshold
+  customScanInstructionsRef:     # optional ConfigMap-backed additive scanner instructions
+    name: repo-security-policy
+    key: policy                  # optional; defaults to policy
+  falsePositivePolicyRef:        # optional ConfigMap-backed false-positive policy
+    name: repo-security-policy
+    key: false-positives
   analysisAgentRef:
     name: security-reviewer
   patchAgentRef:                 # optional; defaults to the analysis agent when omitted
@@ -167,10 +179,17 @@ spec:
 | `timeZone` | string | No | IANA time zone used by `schedule`. |
 | `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
 | `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
+| `validationMaxFindingsPerRun` | int32 | No | Maximum automatic validation tasks to enqueue per scan run in `light` mode. |
+| `validationMinSeverity` | string | No | Minimum severity eligible for automatic validation. Defaults are mode-dependent. |
+| `validationMinConfidence` | string | No | Minimum confidence eligible for automatic validation. Defaults are mode-dependent. |
+| `customScanInstructionsRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive scanner instructions. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
+| `falsePositivePolicyRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive false-positive policy text. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
 | `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
 | `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
-| `maxFindingsPerRun` | int32 | No | Bounds scan output volume. |
+| `maxFindingsPerRun` | int32 | No | Bounds accepted scan findings per run after validation and deterministic dropped-finding filters. |
 | `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
+
+`PolicyConfigMapKeyRef` uses `name` plus optional `key`; when `key` is omitted, Orka reads the `policy` key. Policy ConfigMap values are capped at 32 KiB and rejected if they look like they contain secrets, tokens, private keys, or credentials. Custom policy text is additive only; it cannot disable Orka's default evidence, no-secret, or finding-quality rules.
 
 **Status fields:**
 
@@ -666,14 +685,15 @@ Key configuration values for the Helm chart:
 | `controller.replicas` | `1` | Controller replicas |
 | `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
 | `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
+| `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `controller.apiPort` | `8080` | REST API port |
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
 | `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
-| `controller.agentSandbox.defaultTemplate` | `""` | Default execution workspace template when a Task omits `templateRef.name` |
-| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Warm pool policy: `disabled` or `template` |
+| `controller.agentSandbox.defaultTemplate` | `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
+| `controller.agentSandbox.warmPoolPolicy` | `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
 | `controller.agentSandbox.namespaceStrategy` | `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
 | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
@@ -686,6 +706,7 @@ Key configuration values for the Helm chart:
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
+| `client.namespace` | `""` | Client ServiceAccount namespace override. Empty defaults to `controller.watchNamespace` when namespace isolation is enforced and `watchNamespace` is set, otherwise the release namespace. |
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
@@ -737,8 +758,8 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--agent-sandbox-enabled` | `ORKA_AGENT_SANDBOX_ENABLED` env or `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `--agent-sandbox-router-url` | `ORKA_AGENT_SANDBOX_ROUTER_URL` env or `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
-| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default execution workspace template when a Task omits `templateRef.name` |
-| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Warm pool policy: `disabled` or `template` |
+| `--agent-sandbox-default-template` | `ORKA_AGENT_SANDBOX_DEFAULT_TEMPLATE` env or `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
+| `--agent-sandbox-warm-pool-policy` | `ORKA_AGENT_SANDBOX_WARM_POOL_POLICY` env or `disabled` | Legacy compatibility setting: `disabled` or `template`; v0.5 claims use `SandboxWarmPool` references |
 | `--agent-sandbox-namespace-strategy` | `ORKA_AGENT_SANDBOX_NAMESPACE_STRATEGY` env or `task` | Sandbox resource namespace strategy: `task` or `controller` |
 | `--agent-sandbox-claim-timeout` | `ORKA_AGENT_SANDBOX_CLAIM_TIMEOUT` env or `2m` | Timeout for workspace claim and readiness operations |
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` env or `30m` | Timeout for agent runtime execution inside the sandbox |
@@ -747,6 +768,8 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |
 | `--oidc-jwks-url` | `ORKA_OIDC_JWKS_URL` env or `""` | Optional JWKS URL. When empty, Orka discovers it from the issuer metadata |
+| `--oidc-allowed-subjects` | `ORKA_OIDC_ALLOWED_SUBJECTS` env or `""` | Required comma-separated OIDC subject allowlist patterns when OIDC is enabled |
+| `--oidc-namespace` | `ORKA_OIDC_NAMESPACE` env or `default` | Namespace assigned to authorized OIDC callers for namespace isolation |
 | `--context-token-profile` | `ORKA_CONTEXT_TOKEN_PROFILE` env or `""` | Context-token profile for external API requests. Currently supports `kontxt` |
 | `--context-token-issuer` | `ORKA_CONTEXT_TOKEN_ISSUER` env or `""` | Context-token issuer URL. Requires `--context-token-profile` and `--context-token-audience` when set |
 | `--context-token-audience` | `ORKA_CONTEXT_TOKEN_AUDIENCE` env or `""` | Expected context-token audience. Requires `--context-token-profile` and `--context-token-issuer` when set |
@@ -811,7 +834,7 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 
 ### Agent Sandbox Controller Settings
 
-Agent sandbox settings are disabled by default. When enabled, the controller validates `Task.spec.execution.workspace`, resolves/defaults the effective `SandboxTemplate` and workspace settings, injects the resolved settings into harness wrapper turns, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
+Agent sandbox settings are disabled by default. When enabled, the controller validates `Task.spec.execution.workspace`, resolves/defaults the effective `SandboxWarmPool` and workspace settings, injects the resolved settings into harness wrapper turns, and the worker wrapper owns upstream sandbox claim, execution, and cleanup. Settings can be supplied as flags, environment variables, or Helm values:
 
 | Flag | Environment variable | Helm value | Default |
 |------|----------------------|------------|---------|
@@ -824,17 +847,19 @@ Agent sandbox settings are disabled by default. When enabled, the controller val
 | `--agent-sandbox-command-timeout` | `ORKA_AGENT_SANDBOX_COMMAND_TIMEOUT` | `controller.agentSandbox.commandTimeout` | `30m` |
 | `--agent-sandbox-cleanup-policy` | `ORKA_AGENT_SANDBOX_CLEANUP_POLICY` | `controller.agentSandbox.cleanupPolicy` | `delete` |
 
-Supported values are `disabled` or `template` for warm pool policy, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/template namespace. See [Agent Sandbox Workspaces](agent-sandbox.md) for examples, live smoke-test steps, and limitations.
+Supported values are `disabled` or `template` for the legacy warm pool policy setting, `task` or `controller` for namespace strategy, and `delete` or `retain` for cleanup policy. `task` defaults sandbox claims to the Task namespace; `controller` defaults them to the controller namespace when discoverable, and explicit `templateRef.namespace` values are honored as the claim/warm-pool namespace. See [Agent Sandbox Workspaces](agent-sandbox.md) for examples, live smoke-test steps, and limitations.
 
 When this feature is enabled, harness wrapper pods need RBAC for the upstream sandbox API: create/delete/patch `sandboxclaims`, read `sandboxtemplates`, `sandboxwarmpools`, and `sandboxes`, create `pods/portforward`, and read `endpointslices`. The Helm chart and generated worker RBAC include these permissions; custom deployments must include equivalent rules for the worker ServiceAccount.
 
 ### External API OIDC Authentication
 
-ServiceAccount bearer token authentication is always available. To allow external callers such as GitHub Actions to authenticate directly with OIDC JWTs, configure both issuer and audience:
+ServiceAccount bearer token authentication is always available. To allow external callers such as GitHub Actions to authenticate directly with OIDC JWTs, configure issuer, audience, an explicit subject allowlist, and the namespace assigned to OIDC callers:
 
 ```bash
 --oidc-issuer=https://token.actions.githubusercontent.com
 --oidc-audience=orka-ci
+--oidc-allowed-subjects=repo:my-org/my-repo:ref:refs/heads/main
+--oidc-namespace=ci
 ```
 
 The same settings can be supplied with environment variables:
@@ -842,11 +867,13 @@ The same settings can be supplied with environment variables:
 ```bash
 ORKA_OIDC_ISSUER=https://token.actions.githubusercontent.com
 ORKA_OIDC_AUDIENCE=orka-ci
+ORKA_OIDC_ALLOWED_SUBJECTS=repo:my-org/my-repo:ref:refs/heads/main
+ORKA_OIDC_NAMESPACE=ci
 # Optional; when omitted, Orka discovers the JWKS URL from the issuer metadata.
 ORKA_OIDC_JWKS_URL=https://token.actions.githubusercontent.com/.well-known/jwks
 ```
 
-OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, and a non-empty `sub`. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
+OIDC validation requires RS256-signed JWTs with matching `iss` and `aud`, valid time claims, a non-empty `sub`, and a `sub` value that matches `--oidc-allowed-subjects`. Wildcards `*` and `?` are supported in allowlist patterns; use the narrowest GitHub Actions subject for the trusted repository, branch, environment, or workflow. Authorized OIDC callers are bound to `--oidc-namespace` (or `default` when omitted) so namespace isolation can reject requests for other namespaces. When an OIDC-authenticated caller creates a Task, Orka records the verified identity in `spec.requestedBy`. Clients cannot set `requestedBy` themselves.
 
 ### External API Context-Token Authentication
 
@@ -947,19 +974,25 @@ env:
 
 | Flag / Environment Variable | Default | Description |
 |------------------------------|---------|-------------|
-| `--enable-tracing` | `false` | Enable OpenTelemetry tracing |
+| `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK default | Standard OpenTelemetry sampler configuration |
 
 ### Instrumented Components
 
 | Tracer | Span | Attributes |
 |--------|------|------------|
-| `orka.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
-| `orka.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
-| `orka.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
-| `orka.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
-| `orka.tools` | `tool.execute` | `tool.name`, `tool.success` |
-| `orka.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+| `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
+| `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
+| `orka.worker` / `orka.harness` | `task.run` | `orka.task.id`, `orka.task.namespace`, `orka.tenant`, `orka.agent.name` when known |
+| `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
+| `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
+| `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
+| `orka.controller` | `task.reconcile` | task name, namespace, type, and propagated trace context |
+
+Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
+executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
+children. Tool spans do not include raw arguments or result bodies.
 
 ### Example: Jaeger Setup
 

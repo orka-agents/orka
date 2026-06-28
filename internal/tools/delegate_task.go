@@ -21,6 +21,8 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DelegateTaskTool implements multi-agent task delegation
@@ -450,6 +452,9 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if err != nil {
 		return "", err
 	}
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(orkatracing.DelegateAttributes(dc.parentName, "")...)
+	orkatracing.StampTaskTraceContext(ctx, childTask)
 	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, dc.parentTask, childTask, dc.args.Agent); err != nil {
 		return "", err
 	}
@@ -471,6 +476,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
+	span.SetAttributes(orkatracing.DelegateAttributes("", childTask.Name)...)
 
 	if childTokenExchangeEnabled {
 		if err := adoptChildTransactionTokenSecret(ctx, t.k8sClient, childTask); err != nil {

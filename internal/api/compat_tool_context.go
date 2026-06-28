@@ -87,7 +87,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 	if cfg.Profile.TaskCreateAction != "" {
 		toolCtx.AuthorizeTaskCreate = func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-				return authorizeAndStampToolTaskCreate(ctx, cfg.Client, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.TaskCreateAction, cfg.UserInfo, task)
+				return authorizeAndStampToolTaskCreate(ctx, cfg.Client, cfg.KubeClient, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.TaskCreateAction, cfg.UserInfo, task)
 			}
 			return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
 		}

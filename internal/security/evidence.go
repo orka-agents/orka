@@ -172,8 +172,14 @@ func lineRangeIncluded(startLine, endLine int, ranges []ReviewContextLineRange) 
 }
 
 func validateEvidenceQuote(file ReviewContextIncludedFile, workspaceRoot string, ref FindingsV2EvidenceRef) string {
+	if ref.Quote == nil || strings.TrimSpace(*ref.Quote) == "" {
+		return ""
+	}
 	if strings.TrimSpace(file.Excerpt) != "" {
-		return validateEvidenceQuoteInContent(file.Excerpt, ref)
+		if excerpt := excerptLinesForOriginalRange(file.Excerpt, file.IncludedLineRanges, ref.StartLine, ref.EndLine); excerpt != "" && strings.Contains(excerpt, *ref.Quote) {
+			return ""
+		}
+		return "evidence quote does not match cited file range"
 	}
 	if strings.TrimSpace(workspaceRoot) == "" {
 		return ""
@@ -195,6 +201,20 @@ func validateEvidenceQuote(file ReviewContextIncludedFile, workspaceRoot string,
 		return "evidence file is not readable"
 	}
 	return validateEvidenceQuoteInContent(string(data), ref)
+}
+
+func excerptLinesForOriginalRange(content string, ranges []ReviewContextLineRange, startLine, endLine int) string {
+	excerptStartLine := 1
+	for _, lineRange := range ranges {
+		lineCount := lineRange.EndLine - lineRange.StartLine + 1
+		if startLine >= lineRange.StartLine && endLine <= lineRange.EndLine {
+			localStart := excerptStartLine + startLine - lineRange.StartLine
+			localEnd := excerptStartLine + endLine - lineRange.StartLine
+			return linesInRange(content, localStart, localEnd)
+		}
+		excerptStartLine += lineCount
+	}
+	return ""
 }
 
 func validateEvidenceQuoteInContent(content string, ref FindingsV2EvidenceRef) string {
