@@ -21,7 +21,7 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
-	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing"
 )
 
 // CreateContainerTaskTool creates a container-type Task CR.
@@ -111,6 +111,7 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
 		return result, nil
 	}
+	tracing.StampTaskTraceContext(ctx, task)
 	if err := tc.Client.Create(ctx, task); err != nil {
 		return classifyChatK8sErr(err)
 	}
@@ -192,7 +193,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 	if err := validateChildTaskAgainstParentTransaction(ctx, t.k8sClient, parentTask, task, ""); err != nil {
 		return "", err
 	}
-	orkatracing.StampTaskTraceContext(ctx, task)
+	tracing.StampTaskTraceContext(ctx, task)
 
 	childTokenExchangeEnabled, err := shouldPrepareChildTransactionToken(parentTask)
 	if err != nil {

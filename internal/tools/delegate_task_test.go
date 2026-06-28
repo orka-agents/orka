@@ -35,6 +35,7 @@ import (
 	"github.com/sozercan/orka/internal/contexttoken"
 	"github.com/sozercan/orka/internal/labels"
 	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
 	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -1366,5 +1367,87 @@ func TestDelegateTaskTool_Execute_NoAutoRetry(t *testing.T) {
 	// When auto_retry is not set, no retry annotations should be present
 	if _, ok := childTask.Annotations[labels.AnnotationAutoRetry]; ok {
 		t.Error("expected no auto-retry annotation when auto_retry is false")
+	}
+}
+
+func TestDelegateTaskToolExecuteStampsTraceContextAndSpanAttributes(t *testing.T) {
+	if _, err := orkatracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testResearcherAgentName)
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	k8sClient := newFakeClient(parentTask(), researcherAgent())
+	registry := NewRegistry()
+	registry.Register(NewDelegateTaskTool(k8sClient))
+
+	rootCtx, rootSpan := orkatracing.Tracer("test").Start(context.Background(), "task.run")
+	stepCtx, stepSpan := orkatracing.Tracer("test").Start(rootCtx, "agent.step")
+	toolCtx := WithToolContext(stepCtx, &ToolContext{TaskID: parentTaskName, Namespace: defaultNamespace, Tenant: defaultNamespace})
+	result, err := registry.Execute(toolCtx, delegateTaskToolName, json.RawMessage(`{"agent":"researcher","prompt":"Research"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	stepSpan.End()
+	rootSpan.End()
+
+	var delegateResult DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &delegateResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	childTask := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: delegateResult.TaskName, Namespace: defaultNamespace}, childTask); err != nil {
+		t.Fatalf("get child task: %v", err)
+	}
+	if childTask.Annotations[labels.AnnotationTraceParent] == "" {
+		t.Fatalf("missing %s annotation", labels.AnnotationTraceParent)
+	}
+
+	delegateSpan := testutil.SpanNamed(spans.Recorder.Ended(), "execute_tool delegate_task")
+	if delegateSpan == nil {
+		t.Fatal("missing delegate tool span")
+	}
+	attrs := testutil.AttributeMap(delegateSpan)
+	if got := attrs[orkatracing.AttrToolKind].AsString(); got != orkatracing.ToolKindDelegate {
+		t.Fatalf("%s = %q", orkatracing.AttrToolKind, got)
+	}
+	if got := attrs[orkatracing.AttrParentTaskID].AsString(); got != parentTaskName {
+		t.Fatalf("%s = %q", orkatracing.AttrParentTaskID, got)
+	}
+	if got := attrs[orkatracing.AttrChildTaskID].AsString(); got != delegateResult.TaskName {
+		t.Fatalf("%s = %q", orkatracing.AttrChildTaskID, got)
+	}
+
+	childCtx := orkatracing.ExtractTaskTraceContext(context.Background(), childTask)
+	childTaskCtx, childRunSpan := orkatracing.Tracer("test").Start(childCtx, "child task.run")
+	childStepCtx, childStepSpan := orkatracing.Tracer("test").Start(childTaskCtx, "child agent.step")
+	_, childModelSpan := orkatracing.GenAITracer(genai.InstrumentationName).Start(childStepCtx, "chat test-model")
+	childModelSpan.End()
+	childStepSpan.End()
+	childRunSpan.End()
+	childRun := testutil.SpanNamed(spans.Recorder.Ended(), "child task.run")
+	if childRun == nil {
+		t.Fatal("missing child task.run span")
+	}
+	if got, want := childRun.SpanContext().TraceID(), delegateSpan.SpanContext().TraceID(); got != want {
+		t.Fatalf("child trace id = %s, want %s", got, want)
+	}
+	if got, want := childRun.Parent().SpanID(), delegateSpan.SpanContext().SpanID(); got != want {
+		t.Fatalf("child parent span id = %s, want delegate span %s", got, want)
+	}
+	childStep := testutil.SpanNamed(spans.Recorder.Ended(), "child agent.step")
+	childModel := testutil.SpanNamed(spans.Recorder.Ended(), "chat test-model")
+	if childStep == nil || childModel == nil {
+		t.Fatalf("missing child step/model spans: step=%v model=%v", childStep != nil, childModel != nil)
+	}
+	if got, want := childModel.SpanContext().TraceID(), delegateSpan.SpanContext().TraceID(); got != want {
+		t.Fatalf("child model trace id = %s, want %s", got, want)
+	}
+	if got, want := childModel.Parent().SpanID(), childStep.SpanContext().SpanID(); got != want {
+		t.Fatalf("child model parent = %s, want child step %s", got, want)
 	}
 }

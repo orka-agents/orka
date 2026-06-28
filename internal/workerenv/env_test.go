@@ -21,6 +21,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 			TaskNamespace:      "default",
 			ResultEndpoint:     "http://controller/results/default/task-1",
 			ControllerURL:      "http://controller",
+			AgentName:          "agent-a",
 			TransactionID:      "txn-123",
 			TransactionProfile: "kontxt",
 		},

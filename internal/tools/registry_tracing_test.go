@@ -15,13 +15,16 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/tracing/genai"
 	"github.com/sozercan/orka/internal/tracing/testutil"
 )
 
+const tracingToolName = "tracing_test_tool"
+
 type tracingTestTool struct{}
 
-func (tracingTestTool) Name() string                { return "test_tool" }
+func (tracingTestTool) Name() string                { return tracingToolName }
 func (tracingTestTool) Description() string         { return "test description" }
 func (tracingTestTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (tracingTestTool) Execute(context.Context, json.RawMessage) (string, error) {
@@ -34,7 +37,7 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(tracingTestTool{})
 	ctx := WithToolContext(context.Background(), &ToolContext{ToolCallID: "call-1"})
-	if _, err := registry.Execute(ctx, "test_tool", json.RawMessage(`{}`)); err != nil {
+	if _, err := registry.Execute(ctx, tracingToolName, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
@@ -49,11 +52,20 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 	if got := attrs[genai.AttrOperationName].AsString(); got != genai.OperationExecuteTool {
 		t.Fatalf("operation attr = %q", got)
 	}
-	if got := attrs[genai.AttrToolName].AsString(); got != "test_tool" {
+	if got := attrs[genai.AttrToolName].AsString(); got != tracingToolName {
 		t.Fatalf("tool name attr = %q", got)
 	}
 	if got := attrs[genai.AttrToolCallID].AsString(); got != "call-1" {
 		t.Fatalf("tool call id attr = %q", got)
+	}
+	if got := attrs[tracing.AttrToolName].AsString(); got != tracingToolName {
+		t.Fatalf("orka tool name attr = %q", got)
+	}
+	if got := attrs[tracing.AttrToolKind].AsString(); got != tracing.ToolKindBuiltin {
+		t.Fatalf("orka tool kind attr = %q", got)
+	}
+	if got := attrs[tracing.AttrToolResultSizeBytes].AsInt64(); got != int64(len(`{"success":true}`)) {
+		t.Fatalf("result size attr = %d", got)
 	}
 
 	rm := metrics.Collect(t)
@@ -63,7 +75,7 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 }
 
 func findToolSpan(spans []sdktrace.ReadOnlySpan) sdktrace.ReadOnlySpan {
-	return findSpanByName(spans, "execute_tool test_tool")
+	return findSpanByName(spans, "execute_tool "+tracingToolName)
 }
 
 func findSpanByName(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
@@ -104,6 +116,9 @@ func TestRegistryExecuteMarksStructuredToolFailure(t *testing.T) {
 			}
 			if got := attrs[genai.AttrErrorType].AsString(); got != errTypeInvalidArgs {
 				t.Fatalf("error type attr = %q, want invalid_arguments", got)
+			}
+			if got := attrs[tracing.AttrToolResultSizeBytes].AsInt64(); got == 0 {
+				t.Fatal("missing structured failure result size")
 			}
 			return
 		}
