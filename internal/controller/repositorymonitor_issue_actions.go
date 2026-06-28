@@ -37,6 +37,7 @@ const (
 	repositoryMonitorIssueActionImplementation = "issue_implementation"
 	repositoryMonitorIssueActionDecompose      = "issue_decompose"
 	repositoryMonitorIssueActionApprove        = "issue_approve_plan"
+	repositoryMonitorIssueVerdictReady         = "ready"
 	repositoryMonitorCommandIntentStop         = "stop"
 	repositoryMonitorCommandIntentResume       = "resume"
 	repositoryMonitorIssueSkipStoppedByCommand = "stopped_by_command"
@@ -565,7 +566,7 @@ func repositoryMonitorPlanRiskRequiresApproval(monitor *corev1alpha1.RepositoryM
 
 func repositoryMonitorPlanReadyVerdict(verdict string) bool {
 	switch strings.ToLower(strings.TrimSpace(verdict)) {
-	case "ready":
+	case repositoryMonitorIssueVerdictReady:
 		return true
 	default:
 		return false
@@ -574,7 +575,7 @@ func repositoryMonitorPlanReadyVerdict(verdict string) bool {
 
 func repositoryMonitorImplementationReadyVerdict(verdict string) bool {
 	switch strings.ToLower(strings.TrimSpace(verdict)) {
-	case "patch_ready", "ready", "succeeded", "success":
+	case "patch_ready", repositoryMonitorIssueVerdictReady, "succeeded", "success":
 		return true
 	default:
 		return false
