@@ -882,7 +882,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 
 func repositoryMonitorCommandRequiresWrite(req CreateRepositoryMonitorCommandRequest) bool {
 	switch req.Intent {
-	case "implement", "fix", commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge:
+	case commandIntentApprovePlan, "implement", "fix", commandIntentFixCI, commandIntentUpdateBranch, repositoryMonitorIntentAutomerge:
 		return true
 	default:
 		return false

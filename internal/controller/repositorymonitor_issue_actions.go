@@ -36,6 +36,7 @@ const (
 	repositoryMonitorIssueActionPlan           = "issue_plan"
 	repositoryMonitorIssueActionImplementation = "issue_implementation"
 	repositoryMonitorIssueActionDecompose      = "issue_decompose"
+	repositoryMonitorIssueActionMutateToPR     = "mutate_to_pr"
 	repositoryMonitorIssueActionApprove        = "issue_approve_plan"
 	repositoryMonitorIssueVerdictReady         = "ready"
 	repositoryMonitorIssueVerdictSuccess       = "success"
@@ -57,11 +58,14 @@ const (
 	repositoryMonitorIssuePhaseImplementationQueued = "implementation_queued"
 	repositoryMonitorIssuePhaseImplementing         = "implementing"
 	repositoryMonitorIssuePhasePatchReady           = "patch_ready"
+	repositoryMonitorIssuePhaseMutationQueued       = "mutation_queued"
+	repositoryMonitorIssuePhaseMutatingToPR         = "mutating_to_pr"
 	repositoryMonitorIssuePhasePROpened             = "pr_opened"
 
 	repositoryMonitorIssueAnnotationSnapshotDigest = "orka.ai/monitor-snapshot-digest"
 	repositoryMonitorIssueAnnotationActionKind     = "orka.ai/monitor-action-kind"
 	repositoryMonitorIssueAnnotationCommandID      = "orka.ai/monitor-command-id"
+	repositoryMonitorIssuePatchSchemaVersion       = "orka.patch.v1"
 )
 
 //nolint:gocyclo // Command state transitions are intentionally explicit and auditable.
@@ -238,11 +242,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 	}
 	allowedTools := readOnlyAgentAllowedTools()
 	if actionKind == repositoryMonitorIssueActionImplementation {
-		branch := repositoryMonitorIssueImplementationBranch(monitor, item, command)
-		workspace.PushBranch = branch
-		workspace.PRBaseBranch = effectiveRepositoryMonitorBranch(monitor)
 		allowedTools = nil
-		env = append(env, corev1.EnvVar{Name: workerenv.RequirePushBranch, Value: "true"})
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -395,7 +395,8 @@ func repositoryMonitorIssuePhaseAwaitingTask(phase string) bool {
 	case repositoryMonitorIssuePhaseTriageQueued, repositoryMonitorIssuePhaseTriaging,
 		repositoryMonitorIssuePhaseResearchQueued, repositoryMonitorIssuePhaseResearching,
 		repositoryMonitorIssuePhasePlanQueued, repositoryMonitorIssuePhasePlanning,
-		repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhaseImplementing:
+		repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhaseImplementing,
+		repositoryMonitorIssuePhaseMutationQueued, repositoryMonitorIssuePhaseMutatingToPR:
 		return true
 	default:
 		return false
@@ -527,7 +528,18 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 				item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 				break
 			}
-			phase, prNumber, reason := r.finishIssueImplementation(ctx, monitor, item, record, task)
+			phase, mutationTaskName, reason := r.finishIssueImplementation(ctx, monitor, item, record, task)
+			item.WorkflowPhase = phase
+			if mutationTaskName != "" {
+				item.LastActionKind = repositoryMonitorIssueActionMutateToPR
+				item.LastActionTaskName = mutationTaskName
+				item.LastVerdict = repositoryMonitorRunPhaseQueued
+			}
+			if reason != "" {
+				item.SkipReason = reason
+			}
+		case repositoryMonitorIssueActionMutateToPR:
+			phase, prNumber, reason := r.finishIssueMutation(ctx, monitor, item, record, task)
 			item.WorkflowPhase = phase
 			if reason != "" {
 				item.SkipReason = reason
@@ -592,7 +604,22 @@ func repositoryMonitorImplementationReadyVerdict(verdict string) bool {
 	}
 }
 
-func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, int, string) {
+func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, string, string) {
+	sr := common.ParseStructuredResult(record.PayloadJSON)
+	if strings.TrimSpace(sr.Diff) == "" {
+		return repositoryMonitorIssuePhaseBlocked, "", "implementation_patch_missing"
+	}
+	if reason := r.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, sr); reason != "" {
+		return repositoryMonitorIssuePhaseBlocked, "", reason
+	}
+	mutationTaskName, err := r.createRepositoryMonitorIssueMutationTask(ctx, monitor, item, record, task)
+	if err != nil {
+		return repositoryMonitorIssuePhaseBlocked, "", "mutation_task_create_failed"
+	}
+	return repositoryMonitorIssuePhaseMutationQueued, mutationTaskName, ""
+}
+
+func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, int, string) {
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	if strings.TrimSpace(sr.PushError) != "" {
 		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_failed"
@@ -604,7 +631,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	if strings.TrimSpace(sr.PushBranch) != "" && strings.TrimSpace(sr.PushBranch) != configuredBranch {
 		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_branch_mismatch"
 	}
-	mutationID := "act-" + repositoryMonitorShortHash(record.ID+"-mutate")
+	mutationID := "act-" + repositoryMonitorShortHash(record.ID+"-github")
 	if existing, err := r.Store.GetActionRecord(ctx, monitor.Namespace, mutationID); err == nil {
 		if prNumber := numberFieldFromJSON(existing.PayloadJSON, "pullRequestNumber"); prNumber > 0 {
 			return repositoryMonitorIssuePhasePROpened, int(prNumber), ""
@@ -624,7 +651,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 		MonitorName:       monitor.Name,
 		Kind:              repositoryMonitorIssueKind,
 		Number:            item.Number,
-		ActionKind:        "mutate_to_pr",
+		ActionKind:        "github_pr_created",
 		SnapshotDigest:    item.SnapshotDigest,
 		TaskName:          task.Name,
 		CommandEventID:    record.CommandEventID,
@@ -636,6 +663,90 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	}
 	_ = r.Store.CreateActionRecord(ctx, mutationRecord)
 	return repositoryMonitorIssuePhasePROpened, prNumber, ""
+}
+
+func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task, sr *common.StructuredResult) string {
+	if r.ArtifactStore == nil {
+		return "artifact_store_missing"
+	}
+	if strings.Contains(sr.Diff, "GIT binary patch") {
+		return "patch_binary_change_denied"
+	}
+	if len(sr.Files) > 12 {
+		return "patch_changed_file_limit_exceeded"
+	}
+	for _, file := range sr.Files {
+		path := strings.TrimSpace(strings.ReplaceAll(file, "\\", "/"))
+		lower := strings.ToLower(path)
+		if path == "" || strings.HasPrefix(path, "../") || strings.HasPrefix(path, "/") {
+			return "patch_path_invalid"
+		}
+		if strings.HasPrefix(lower, ".github/workflows/") || strings.HasPrefix(lower, "config/rbac/") || (strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret")) {
+			return "patch_path_denied"
+		}
+	}
+	if strings.Contains(sr.Diff, "BEGIN PRIVATE KEY") || strings.Contains(sr.Diff, "ghp_") {
+		return "patch_secret_scan_failed"
+	}
+	diffName := repositoryMonitorIssuePatchDiffArtifact(item.Number, record.ID)
+	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sr.Diff)); err != nil {
+		return "patch_diff_artifact_save_failed"
+	}
+	summary := map[string]any{
+		"schemaVersion":   repositoryMonitorIssuePatchSchemaVersion,
+		"repo":            monitor.Spec.Owner + "/" + monitor.Spec.Repository,
+		"baseBranch":      effectiveRepositoryMonitorBranch(monitor),
+		"baseSHA":         sr.BaseSHA,
+		"target":          map[string]any{"kind": repositoryMonitorIssueKind, "number": item.Number, "snapshotDigest": item.SnapshotDigest},
+		"planID":          record.CommandEventID,
+		"format":          "git-diff",
+		"patchArtifactID": diffName,
+		"changedFiles":    sr.Files,
+	}
+	data, _ := json.Marshal(summary)
+	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), "application/json", data); err != nil {
+		return "patch_summary_artifact_save_failed"
+	}
+	return ""
+}
+
+func repositoryMonitorIssuePatchDiffArtifact(issueNumber int64, recordID string) string {
+	return fmt.Sprintf("orka-issue-%d-%s.diff", issueNumber, repositoryMonitorShortHash(recordID))
+}
+
+func repositoryMonitorIssuePatchSummaryArtifact(issueNumber int64, recordID string) string {
+	return fmt.Sprintf("orka-issue-%d-%s.json", issueNumber, repositoryMonitorShortHash(recordID))
+}
+
+func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueMutationTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, implementationTask *corev1alpha1.Task) (string, error) {
+	agent := monitor.Spec.Agents.Implementer
+	if agent == nil || strings.TrimSpace(agent.Name) == "" {
+		return "", fmt.Errorf("implementer agent is required for mutation task")
+	}
+	branch := repositoryMonitorIssueImplementationBranch(monitor, item, &store.CommandEvent{ID: record.CommandEventID})
+	priority := int32(850)
+	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
+	agentRef := *agent
+	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: monitor.Spec.RepoURL, Branch: effectiveRepositoryMonitorBranch(monitor), PRBaseBranch: effectiveRepositoryMonitorBranch(monitor), PushBranch: branch}
+	gitRef := monitor.Spec.GitSecretRef
+	workspace.GitSecretRef = gitRef
+	taskName := repositoryMonitorBoundedDNSName(fmt.Sprintf("monmutate-%s-%d-%s", monitor.Name, item.Number, record.ID), 63)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        taskName,
+			Namespace:   monitor.Namespace,
+			Labels:      map[string]string{labels.LabelManaged: "true", labels.LabelCreatedBy: "repository-monitor", labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name), labels.LabelGitHubTarget: labels.SelectorValue(repositoryMonitorIssueKind), labels.LabelGitHubNumber: labels.SelectorValue(strconv.FormatInt(item.Number, 10))},
+			Annotations: map[string]string{labels.AnnotationRepositoryMonitorName: monitor.Name, labels.AnnotationMonitorItemKind: repositoryMonitorIssueKind, labels.AnnotationMonitorItemNumber: strconv.FormatInt(item.Number, 10), repositoryMonitorIssueAnnotationSnapshotDigest: item.SnapshotDigest, repositoryMonitorIssueAnnotationActionKind: repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueAnnotationCommandID: record.CommandEventID},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &agentRef, Prompt: "Apply the prior implementation diff, run configured validation if practical, make no unrelated changes, and finish so Orka can push the configured branch. Do not open or merge pull requests.", Timeout: &timeout, Priority: &priority, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{Workspace: workspace}, PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: implementationTask.Name, Namespace: implementationTask.Namespace}, Env: []corev1.EnvVar{{Name: workerenv.RequirePushBranch, Value: "true"}}},
+	}
+	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
+		return "", err
+	}
+	if err := r.Create(ctx, task); err != nil && !apierrors.IsAlreadyExists(err) {
+		return "", err
+	}
+	return taskName, nil
 }
 
 func numberFieldFromJSON(payload, key string) int64 {

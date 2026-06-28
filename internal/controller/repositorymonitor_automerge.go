@@ -202,7 +202,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 			pending = append(pending, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
 			continue
 		}
-		if check.Conclusion != "success" {
+		if !repositoryMonitorCheckRunConclusionPassing(check.Conclusion) {
 			failed = append(failed, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
 		}
 	}
@@ -220,6 +220,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		return status, nil
 	}
 	return repositoryMonitorCIResult{passed: true}, nil
+}
+
+func repositoryMonitorCheckRunConclusionPassing(conclusion string) bool {
+	switch strings.ToLower(strings.TrimSpace(conclusion)) {
+	case "success", "neutral", "skipped":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx context.Context, baseURL, owner, repo, token, sha string) (repositoryMonitorCIResult, error) {

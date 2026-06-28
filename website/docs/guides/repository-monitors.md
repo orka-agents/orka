@@ -326,7 +326,7 @@ When issue command labels are enabled, accepted issue commands now drive monitor
 
 Issue action tasks are bound to the issue snapshot digest. Result payloads with mismatched issue numbers or stale digests are recorded as stale/failed action records instead of advancing workflow state.
 
-Implementation tasks use a controller-selected push branch (`spec.issueWorkflow.implementation.branchPrefix`, default `orka/issue`) and Orka's workspace push handling. After a successful pushed implementation result, the controller creates a pull request with a deterministic Orka-rendered body and records a `mutate_to_pr` action record.
+Implementation tasks do not push directly. They return a structured diff that Orka validates and stores as `orka.patch.v1` patch artifacts. After patch validation, the controller creates a separate mutation task with a controller-selected push branch (`spec.issueWorkflow.implementation.branchPrefix`, default `orka/issue`) and a `priorTaskRef` to apply the validated diff in a fresh workspace. When that mutation task pushes successfully, the controller creates or reuses the pull request with a deterministic Orka-rendered body and records mutation action records.
 
 Inspect action records with:
 

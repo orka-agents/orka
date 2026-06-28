@@ -24,6 +24,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/workers/common"
 )
 
 const (
@@ -4469,5 +4470,31 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 	}
 	if item.AutomergeState != repositoryMonitorAutomergeStateMerged {
 		t.Fatalf("item = %#v, want automerge merged", item)
+	}
+}
+
+func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := repositoryMonitorReviewIngestTestMonitor("patch-validation")
+	monitor.Spec.Owner = "sozercan"
+	monitor.Spec.Repository = "orka"
+	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 55, SnapshotDigest: "sha256:test"}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-task", Namespace: "default"}}
+	record := &store.ActionRecord{ID: "act-impl", CommandEventID: "cmd-impl"}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore, ArtifactStore: monitorStore}
+	denied := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n", Files: []string{".github/workflows/ci.yml"}}
+	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, denied); got != "patch_path_denied" {
+		t.Fatalf("denied patch reason = %q, want patch_path_denied", got)
+	}
+	valid := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/internal/x.go b/internal/x.go\n--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"internal/x.go"}}
+	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, valid); got != "" {
+		t.Fatalf("valid patch reason = %q, want empty", got)
+	}
+	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")); err != nil {
+		t.Fatalf("diff artifact missing: %v", err)
+	}
+	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")); err != nil {
+		t.Fatalf("summary artifact missing: %v", err)
 	}
 }

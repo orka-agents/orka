@@ -56,6 +56,7 @@ type RepositoryMonitorReconciler struct {
 	Scheme                    *runtime.Scheme
 	Store                     store.RepositoryMonitorStore
 	ResultStore               store.ResultStore
+	ArtifactStore             store.ArtifactStore
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
