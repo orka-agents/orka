@@ -63,11 +63,12 @@ func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
 		`INSERT INTO security_scan_runs
 		 (id, namespace, repository_scan, task_name, mode, phase, base_commit, head_commit, commit_count,
 		  slice_count, reviewed_slice_count, skipped_slice_count, accepted_findings, dropped_findings,
-		  summary, error_message, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  scanner_policy_version, policy_digest, idempotency_key, summary, error_message, started_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.Namespace, run.RepositoryScan, run.TaskName, run.Mode, run.Phase,
 		run.BaseCommit, run.HeadCommit, run.CommitCount, run.SliceCount, run.ReviewedSliceCount,
-		run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings, run.Summary, run.ErrorMessage,
+		run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
+		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey, run.Summary, run.ErrorMessage,
 		run.StartedAt, run.CompletedAt,
 	)
 	return err
@@ -79,10 +80,12 @@ func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
 		`UPDATE security_scan_runs
 		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
 		     slice_count = ?, reviewed_slice_count = ?, skipped_slice_count = ?, accepted_findings = ?, dropped_findings = ?,
+		     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?,
 		     summary = ?, error_message = ?, started_at = ?, completed_at = ?
 		 WHERE namespace = ? AND id = ?`,
 		run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
 		run.SliceCount, run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
+		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey,
 		run.Summary, run.ErrorMessage, run.StartedAt, run.CompletedAt, run.Namespace, run.ID,
 	)
 	return err
@@ -94,14 +97,16 @@ func (s *Store) GetScanRun(ctx context.Context, namespace, id string) (*store.Sc
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, namespace, repository_scan, task_name, mode, phase, started_at, completed_at,
 		        base_commit, head_commit, commit_count, slice_count, reviewed_slice_count, skipped_slice_count,
-		        accepted_findings, dropped_findings, summary, error_message
+		        accepted_findings, dropped_findings, scanner_policy_version, policy_digest, idempotency_key,
+		        summary, error_message
 		 FROM security_scan_runs WHERE namespace = ? AND id = ?`,
 		namespace, id,
 	).Scan(
 		&run.ID, &run.Namespace, &run.RepositoryScan, &run.TaskName, &run.Mode, &run.Phase,
 		&run.StartedAt, &run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount,
 		&run.SliceCount, &run.ReviewedSliceCount, &run.SkippedSliceCount, &run.AcceptedFindings,
-		&run.DroppedFindings, &run.Summary, &run.ErrorMessage,
+		&run.DroppedFindings, &run.ScannerPolicyVersion, &run.PolicyDigest, &run.IdempotencyKey,
+		&run.Summary, &run.ErrorMessage,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
@@ -125,7 +130,8 @@ func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan stri
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, namespace, repository_scan, task_name, mode, phase, started_at, completed_at,
 		        base_commit, head_commit, commit_count, slice_count, reviewed_slice_count, skipped_slice_count,
-		        accepted_findings, dropped_findings, summary, error_message
+		        accepted_findings, dropped_findings, scanner_policy_version, policy_digest, idempotency_key,
+		        summary, error_message
 		 FROM security_scan_runs
 		 WHERE namespace = ? AND repository_scan = ?
 		 ORDER BY started_at DESC, id DESC
@@ -144,7 +150,8 @@ func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan stri
 			&run.ID, &run.Namespace, &run.RepositoryScan, &run.TaskName, &run.Mode, &run.Phase,
 			&run.StartedAt, &run.CompletedAt, &run.BaseCommit, &run.HeadCommit, &run.CommitCount,
 			&run.SliceCount, &run.ReviewedSliceCount, &run.SkippedSliceCount, &run.AcceptedFindings,
-			&run.DroppedFindings, &run.Summary, &run.ErrorMessage,
+			&run.DroppedFindings, &run.ScannerPolicyVersion, &run.PolicyDigest, &run.IdempotencyKey,
+			&run.Summary, &run.ErrorMessage,
 		); err != nil {
 			return nil, "", err
 		}
@@ -196,6 +203,14 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 	if err != nil {
 		return err
 	}
+	changedFilesJSON, err := marshalSecurityJSON(slice.ChangedFiles)
+	if err != nil {
+		return err
+	}
+	changedLineRangesJSON, err := marshalSecurityJSON(slice.ChangedLineRanges)
+	if err != nil {
+		return err
+	}
 
 	now := time.Now()
 	if slice.CreatedAt.IsZero() {
@@ -207,8 +222,8 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		`INSERT INTO security_review_slices
 		 (id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		  entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		  trust_boundaries_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(namespace, repository_scan, id) DO UPDATE SET
 		   source = excluded.source,
 		   title = excluded.title,
@@ -222,13 +237,15 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 		   tests_json = excluded.tests_json,
 		   tags_json = excluded.tags_json,
 		   trust_boundaries_json = excluded.trust_boundaries_json,
+		   changed_files_json = excluded.changed_files_json,
+		   changed_line_ranges_json = excluded.changed_line_ranges_json,
 		   last_scan_run_id = excluded.last_scan_run_id,
 		   last_reviewed_at = COALESCE(excluded.last_reviewed_at, security_review_slices.last_reviewed_at),
 		   updated_at = excluded.updated_at`,
 		slice.ID, slice.Namespace, slice.RepositoryScan, slice.Source, slice.Title, slice.Summary,
 		slice.Kind, slice.Confidence, slice.Status, entrypointsJSON, ownedFilesJSON, contextFilesJSON,
-		testsJSON, tagsJSON, trustBoundariesJSON, slice.LastScanRunID, slice.LastReviewedAt,
-		slice.CreatedAt, slice.UpdatedAt,
+		testsJSON, tagsJSON, trustBoundariesJSON, changedFilesJSON, changedLineRangesJSON,
+		slice.LastScanRunID, slice.LastReviewedAt, slice.CreatedAt, slice.UpdatedAt,
 	)
 	return err
 }
@@ -237,19 +254,21 @@ func scanReviewSlice(scanner interface {
 	Scan(dest ...any) error
 }) (*store.ReviewSlice, error) {
 	var (
-		slice               store.ReviewSlice
-		entrypointsJSON     string
-		ownedFilesJSON      string
-		contextFilesJSON    string
-		testsJSON           string
-		tagsJSON            string
-		trustBoundariesJSON string
+		slice                 store.ReviewSlice
+		entrypointsJSON       string
+		ownedFilesJSON        string
+		contextFilesJSON      string
+		testsJSON             string
+		tagsJSON              string
+		trustBoundariesJSON   string
+		changedFilesJSON      string
+		changedLineRangesJSON string
 	)
 	err := scanner.Scan(
 		&slice.ID, &slice.Namespace, &slice.RepositoryScan, &slice.Source, &slice.Title,
 		&slice.Summary, &slice.Kind, &slice.Confidence, &slice.Status, &entrypointsJSON,
 		&ownedFilesJSON, &contextFilesJSON, &testsJSON, &tagsJSON, &trustBoundariesJSON,
-		&slice.LastScanRunID, &slice.LastReviewedAt, &slice.CreatedAt, &slice.UpdatedAt,
+		&changedFilesJSON, &changedLineRangesJSON, &slice.LastScanRunID, &slice.LastReviewedAt, &slice.CreatedAt, &slice.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -273,6 +292,12 @@ func scanReviewSlice(scanner interface {
 	if err := unmarshalSecurityJSON(trustBoundariesJSON, &slice.TrustBoundaries); err != nil {
 		return nil, err
 	}
+	if err := unmarshalSecurityJSON(changedFilesJSON, &slice.ChangedFiles); err != nil {
+		return nil, err
+	}
+	if err := unmarshalSecurityJSON(changedLineRangesJSON, &slice.ChangedLineRanges); err != nil {
+		return nil, err
+	}
 	return &slice, nil
 }
 
@@ -289,7 +314,7 @@ func (s *Store) ListReviewSlices(ctx context.Context, filter store.ReviewSliceFi
 	query := strings.Builder{}
 	query.WriteString(`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json, trust_boundaries_json,
-		last_scan_run_id, last_reviewed_at, created_at, updated_at
+		changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
 		FROM security_review_slices WHERE namespace = ? AND repository_scan = ?`)
 	args := []any{filter.Namespace, filter.RepositoryScan}
 	if filter.Status != "" {
@@ -328,7 +353,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		        entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json, trust_boundaries_json,
-		        last_scan_run_id, last_reviewed_at, created_at, updated_at
+		        changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
 		 FROM security_review_slices
 		 WHERE namespace = ? AND repository_scan = ? AND id = ?`,
 		namespace, repositoryScan, id,
@@ -683,6 +708,7 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 	}
 
 	if filter.Recommended {
+		query.WriteString(` AND validation_status != 'failed' AND state NOT IN ('dismissed', 'suppressed', 'false_positive', 'fixed', 'resolved')`)
 		query.WriteString(` ORDER BY
 			CASE severity
 				WHEN 'critical' THEN 4
@@ -851,10 +877,10 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO security_dropped_findings
-		 (id, namespace, repository_scan, scan_run_id, task_name, slice_id, reason, sample_json, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (id, namespace, repository_scan, scan_run_id, task_name, slice_id, reason, layer, sample_json, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		dropped.ID, dropped.Namespace, dropped.RepositoryScan, dropped.ScanRunID, dropped.TaskName,
-		dropped.SliceID, dropped.Reason, dropped.SampleJSON, dropped.CreatedAt,
+		dropped.SliceID, dropped.Reason, dropped.Layer, dropped.SampleJSON, dropped.CreatedAt,
 	)
 	return err
 }
@@ -870,7 +896,7 @@ func (s *Store) ListDroppedFindings(ctx context.Context, filter store.DroppedFin
 	}
 
 	query := strings.Builder{}
-	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, task_name, slice_id, reason, sample_json, created_at
+	query.WriteString(`SELECT id, namespace, repository_scan, scan_run_id, task_name, slice_id, reason, layer, sample_json, created_at
 		FROM security_dropped_findings WHERE namespace = ?`)
 	args := []any{filter.Namespace}
 	if filter.RepositoryScan != "" {
@@ -884,6 +910,18 @@ func (s *Store) ListDroppedFindings(ctx context.Context, filter store.DroppedFin
 	if filter.SliceID != "" {
 		query.WriteString(` AND slice_id = ?`)
 		args = append(args, filter.SliceID)
+	}
+	if filter.Layer != "" {
+		query.WriteString(` AND layer = ?`)
+		args = append(args, filter.Layer)
+	}
+	if filter.Reason != "" {
+		query.WriteString(` AND reason = ?`)
+		args = append(args, filter.Reason)
+	}
+	if filter.ReasonContains != "" {
+		query.WriteString(` AND reason LIKE ?`)
+		args = append(args, "%"+filter.ReasonContains+"%")
 	}
 	query.WriteString(` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
 	args = append(args, filter.Limit, offset)
@@ -899,7 +937,7 @@ func (s *Store) ListDroppedFindings(ctx context.Context, filter store.DroppedFin
 		var item store.DroppedFinding
 		if err := rows.Scan(
 			&item.ID, &item.Namespace, &item.RepositoryScan, &item.ScanRunID, &item.TaskName,
-			&item.SliceID, &item.Reason, &item.SampleJSON, &item.CreatedAt,
+			&item.SliceID, &item.Reason, &item.Layer, &item.SampleJSON, &item.CreatedAt,
 		); err != nil {
 			return nil, "", err
 		}

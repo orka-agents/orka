@@ -7,14 +7,18 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -263,7 +267,7 @@ func runSecurityMapper(ctx context.Context) error {
 	}
 	baseCommit := strings.TrimSpace(os.Getenv(security.EnvScanBaseCommit))
 	headCommit := strings.TrimSpace(os.Getenv(security.EnvScanHeadCommit))
-	changedFilesComputed, changedFiles, changedFilesError, resolvedHeadCommit :=
+	changedFilesComputed, changedFiles, changedLineRanges, diffSummary, changedFilesError, resolvedHeadCommit :=
 		changedFilesForSecurityScan(ctx, workDir, baseCommit, headCommit)
 	if headCommit == "" {
 		headCommit = resolvedHeadCommit
@@ -274,6 +278,8 @@ func runSecurityMapper(ctx context.Context) error {
 		HeadCommit:           headCommit,
 		ChangedFilesComputed: changedFilesComputed,
 		ChangedFiles:         changedFiles,
+		ChangedLineRanges:    changedLineRanges,
+		DiffSummary:          diffSummary,
 		ChangedFilesError:    changedFilesError,
 		Slices:               slices,
 	}
@@ -292,7 +298,7 @@ func runSecurityMapper(ctx context.Context) error {
 func changedFilesForSecurityScan(
 	ctx context.Context,
 	workDir, baseCommit, headCommit string,
-) (bool, []string, string, string) {
+) (bool, []string, []security.ChangedLineRange, string, string, string) {
 	if headCommit == "" {
 		out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").CombinedOutput()
 		if err == nil {
@@ -300,14 +306,14 @@ func changedFilesForSecurityScan(
 		}
 	}
 	if baseCommit == "" || headCommit == "" {
-		return false, nil, "", headCommit
+		return false, nil, nil, "", "", headCommit
 	}
 	for _, commit := range []string{baseCommit, headCommit} {
 		if !safeGitCommitID(commit) {
-			return false, nil, fmt.Sprintf("commit %q is not a hex SHA", commit), headCommit
+			return false, nil, nil, "", fmt.Sprintf("commit %q is not a hex SHA", commit), headCommit
 		}
 		if err := ensureCommitAvailableForDiff(ctx, workDir, commit); err != nil {
-			return false, nil, err.Error(), headCommit
+			return false, nil, nil, "", err.Error(), headCommit
 		}
 	}
 
@@ -321,7 +327,7 @@ func changedFilesForSecurityScan(
 		if message == "" {
 			message = err.Error()
 		}
-		return false, nil, message, headCommit
+		return false, nil, nil, "", message, headCommit
 	}
 	deletedFiles := safeChangedFileLines(deletedOut)
 	if len(deletedFiles) > 0 {
@@ -329,7 +335,7 @@ func changedFilesForSecurityScan(
 			"changed-file selection disabled because deleted files require full review: %s",
 			strings.Join(deletedFiles, ", "),
 		)
-		return false, nil, message, headCommit
+		return false, nil, nil, "", message, headCommit
 	}
 
 	out, err := exec.CommandContext(ctx,
@@ -342,11 +348,213 @@ func changedFilesForSecurityScan(
 		if message == "" {
 			message = err.Error()
 		}
-		return false, nil, message, headCommit
+		return false, nil, nil, "", message, headCommit
 	}
 
 	files := safeChangedFileLines(out)
-	return true, files, "", headCommit
+	lineRanges, err := changedLineRangesForSecurityScan(ctx, workDir, baseCommit, headCommit)
+	if err != nil {
+		if errors.Is(err, errChangedDiffTooLarge) {
+			diffSummary := fmt.Sprintf(
+				"%d changed files; changed line ranges omitted because diff exceeded safety cap",
+				len(files),
+			)
+			return true, files, nil, diffSummary, "", headCommit
+		}
+		diffSummary := fmt.Sprintf(
+			"%d changed files; changed line ranges omitted because diff could not be parsed: %s",
+			len(files), err,
+		)
+		return true, files, nil, diffSummary, "", headCommit
+	}
+	diffSummary := fmt.Sprintf("%d changed files; %d changed line ranges", len(files), len(lineRanges))
+	return true, files, lineRanges, diffSummary, "", headCommit
+}
+
+const (
+	maxChangedLineRangesForArtifact  = 2000
+	maxChangedDiffBytesForLineRanges = 2 * 1024 * 1024
+	maxChangedDiffLinesForLineRanges = 20000
+)
+
+var (
+	errChangedDiffTooLarge           = errors.New("changed diff exceeds changed-line metadata safety cap")
+	changedLineRangesForSecurityScan = defaultChangedLineRangesForSecurityScan
+)
+
+func defaultChangedLineRangesForSecurityScan(
+	ctx context.Context,
+	workDir, baseCommit, headCommit string,
+) ([]security.ChangedLineRange, error) {
+	cmd := exec.CommandContext(ctx,
+		"git", "-C", workDir,
+		"diff", "--unified=0", "--diff-filter=ACMRT", "--relative",
+		baseCommit, headCommit, "--", ".",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	lineRanges, parseErr := parseChangedLineRangesFromUnifiedDiffReader(stdout)
+	if parseErr != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		return nil, parseErr
+	}
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = waitErr.Error()
+		}
+		return nil, fmt.Errorf("git diff changed line ranges: %s", message)
+	}
+	return lineRanges, nil
+}
+
+var unifiedDiffHunkRE = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
+
+func parseChangedLineRangesFromUnifiedDiff(diff []byte) ([]security.ChangedLineRange, error) {
+	return parseChangedLineRangesFromUnifiedDiffReader(bytes.NewReader(diff))
+}
+
+func parseChangedLineRangesFromUnifiedDiffReader(r io.Reader) ([]security.ChangedLineRange, error) {
+	reader := bufio.NewReaderSize(r, 64*1024)
+	currentPath := ""
+	expectPlusHeader := false
+	inHunk := false
+	ranges := make([]security.ChangedLineRange, 0)
+	atLineStart := true
+	bytesRead := 0
+	linesRead := 0
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		bytesRead += len(chunk)
+		if bytesRead > maxChangedDiffBytesForLineRanges {
+			return nil, errChangedDiffTooLarge
+		}
+		if len(chunk) > 0 && atLineStart {
+			linesRead++
+			if linesRead > maxChangedDiffLinesForLineRanges {
+				return nil, errChangedDiffTooLarge
+			}
+			line := strings.TrimRight(string(chunk), "\r\n")
+			switch {
+			case strings.HasPrefix(line, "diff --git "):
+				currentPath = ""
+				expectPlusHeader = false
+				inHunk = false
+			case !inHunk && strings.HasPrefix(line, "--- "):
+				expectPlusHeader = true
+			case expectPlusHeader && strings.HasPrefix(line, "+++ "):
+				pathValue := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+				currentPath = normalizeDiffPath(pathValue)
+				if currentPath != "" && !security.SafeRepoPath(currentPath) {
+					currentPath = ""
+				}
+				expectPlusHeader = false
+			case strings.HasPrefix(line, "@@ "):
+				inHunk = true
+				expectPlusHeader = false
+				if currentPath == "" {
+					break
+				}
+				matches := unifiedDiffHunkRE.FindStringSubmatch(line)
+				if len(matches) == 0 {
+					return nil, fmt.Errorf("parse changed line ranges: unsupported hunk header %q", line)
+				}
+				start := atoiDiffNumber(matches[1])
+				count := 1
+				if matches[2] != "" {
+					count = atoiDiffNumber(matches[2])
+				}
+				if len(ranges) >= maxChangedLineRangesForArtifact {
+					return nil, errChangedDiffTooLarge
+				}
+				if count <= 0 {
+					if start <= 0 {
+						start = 1
+					}
+					count = 1
+				}
+				if start <= 0 {
+					break
+				}
+				ranges = append(ranges, security.ChangedLineRange{Path: currentPath, StartLine: start, EndLine: start + count - 1})
+			}
+		}
+		if err == nil {
+			atLineStart = true
+			continue
+		}
+		if err == bufio.ErrBufferFull {
+			atLineStart = false
+			continue
+		}
+		if err == io.EOF {
+			break
+		}
+		return nil, err
+	}
+	return mergeChangedLineRanges(ranges), nil
+}
+
+func normalizeDiffPath(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	if value == "/dev/null" || value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "b/") || strings.HasPrefix(value, "a/") {
+		value = value[2:]
+	}
+	return value
+}
+
+func atoiDiffNumber(value string) int {
+	out := 0
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		out = out*10 + int(ch-'0')
+	}
+	return out
+}
+
+func mergeChangedLineRanges(ranges []security.ChangedLineRange) []security.ChangedLineRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].Path != ranges[j].Path {
+			return ranges[i].Path < ranges[j].Path
+		}
+		if ranges[i].StartLine != ranges[j].StartLine {
+			return ranges[i].StartLine < ranges[j].StartLine
+		}
+		return ranges[i].EndLine < ranges[j].EndLine
+	})
+	out := make([]security.ChangedLineRange, 0, len(ranges))
+	for _, lineRange := range ranges {
+		if lineRange.Path == "" || lineRange.StartLine <= 0 || lineRange.EndLine < lineRange.StartLine {
+			continue
+		}
+		if len(out) == 0 || out[len(out)-1].Path != lineRange.Path || lineRange.StartLine > out[len(out)-1].EndLine+1 {
+			out = append(out, lineRange)
+			continue
+		}
+		if lineRange.EndLine > out[len(out)-1].EndLine {
+			out[len(out)-1].EndLine = lineRange.EndLine
+		}
+	}
+	return out
 }
 
 func safeChangedFileLines(out []byte) []string {

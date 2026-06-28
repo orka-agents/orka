@@ -133,6 +133,7 @@ func main() {
 	var contextTokenProviderUseScopes string
 	var contextTokenSecretReadScopes string
 	var contextTokenSecretCredentialReadScopes string
+	var contextTokenConfigMapReadScopes string
 	var contextTokenAgentReadScopes string
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
@@ -364,6 +365,10 @@ func main() {
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_CREDENTIAL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize using Secret data as outbound credentials. "+
 			"Defaults to orka:secrets:credentials:read.")
+	flag.StringVar(&contextTokenConfigMapReadScopes, "context-token-configmap-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CONFIGMAP_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize ConfigMap reads used as operation inputs. "+
+			"Defaults to orka:configmaps:read.")
 	flag.StringVar(&contextTokenAgentReadScopes, "context-token-agent-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Agent reads. Defaults to orka:agents:read.")
@@ -494,6 +499,7 @@ func main() {
 		ProviderUseScopes:          contextTokenProviderUseScopes,
 		SecretReadScopes:           contextTokenSecretReadScopes,
 		SecretCredentialReadScopes: contextTokenSecretCredentialReadScopes,
+		ConfigMapReadScopes:        contextTokenConfigMapReadScopes,
 		AgentReadScopes:            contextTokenAgentReadScopes,
 		AgentWriteScopes:           contextTokenAgentWriteScopes,
 		MemoryReadScopes:           contextTokenMemoryReadScopes,

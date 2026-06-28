@@ -9,6 +9,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -242,7 +245,9 @@ func TestChangedFilesForSecurityScanFetchesMissingBaseInShallowClone(t *testing.
 		t.Fatal("base commit is already available in shallow clone; fixture is invalid")
 	}
 
-	computed, files, message, resolvedHead := changedFilesForSecurityScan(context.Background(), clone, baseCommit, "")
+	computed, files, lineRanges, diffSummary, message, resolvedHead := changedFilesForSecurityScan(
+		context.Background(), clone, baseCommit, "",
+	)
 	if !computed {
 		t.Fatalf("changedFilesForSecurityScan() computed=false message=%q", message)
 	}
@@ -251,6 +256,13 @@ func TestChangedFilesForSecurityScanFetchesMissingBaseInShallowClone(t *testing.
 	}
 	if !reflect.DeepEqual(files, []string{"app.go"}) {
 		t.Fatalf("changed files = %#v, want app.go", files)
+	}
+	if len(lineRanges) != 1 || lineRanges[0].Path != "app.go" ||
+		lineRanges[0].StartLine != 2 || lineRanges[0].EndLine != 3 {
+		t.Fatalf("changed line ranges = %#v, want app.go:2-3", lineRanges)
+	}
+	if !strings.Contains(diffSummary, "1 changed files") {
+		t.Fatalf("diff summary = %q, want changed-file count", diffSummary)
 	}
 	if !gitCommitAvailable(context.Background(), clone, baseCommit) {
 		t.Fatal("base commit was not fetched into shallow clone")
@@ -275,7 +287,7 @@ func TestChangedFilesForSecurityScanFallsBackToFullReviewForDeletedFiles(t *test
 	runGit(t, source, "commit", "-m", "remove auth")
 	headCommit := runGit(t, source, "rev-parse", "HEAD")
 
-	computed, files, message, resolvedHead := changedFilesForSecurityScan(
+	computed, files, lineRanges, _, message, resolvedHead := changedFilesForSecurityScan(
 		context.Background(),
 		source,
 		baseCommit,
@@ -284,8 +296,8 @@ func TestChangedFilesForSecurityScanFallsBackToFullReviewForDeletedFiles(t *test
 	if computed {
 		t.Fatal("changedFilesForSecurityScan() computed=true, want false when deleted files require full review")
 	}
-	if len(files) != 0 {
-		t.Fatalf("changed files = %#v, want none when falling back to full review", files)
+	if len(files) != 0 || len(lineRanges) != 0 {
+		t.Fatalf("changed files/ranges = %#v/%#v, want none when falling back to full review", files, lineRanges)
 	}
 	if resolvedHead != headCommit {
 		t.Fatalf("resolved head = %q, want %q", resolvedHead, headCommit)
@@ -309,15 +321,187 @@ func TestChangedFilesForSecurityScanRejectsNonSHARevisions(t *testing.T) {
 	runGit(t, source, "add", "app.go")
 	runGit(t, source, "commit", "-m", "base")
 
-	computed, files, message, _ := changedFilesForSecurityScan(context.Background(), source, "HEAD", "")
+	computed, files, lineRanges, _, message, _ := changedFilesForSecurityScan(context.Background(), source, "HEAD", "")
 	if computed {
 		t.Fatal("changedFilesForSecurityScan() computed=true, want false for non-SHA base")
 	}
-	if len(files) != 0 {
-		t.Fatalf("changed files = %#v, want none for rejected base", files)
+	if len(files) != 0 || len(lineRanges) != 0 {
+		t.Fatalf("changed files/ranges = %#v/%#v, want none for rejected base", files, lineRanges)
 	}
 	if !strings.Contains(message, "not a hex SHA") {
 		t.Fatalf("message = %q, want non-SHA rejection", message)
+	}
+}
+
+func TestChangedLineRangesForSecurityScanParsesUnifiedDiff(t *testing.T) {
+	diff := []byte("diff --git a/app.go b/app.go\n--- a/app.go\n+++ b/app.go\n@@ -1,0 +2,2 @@\n+one\n+two\n")
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{{Path: "app.go", StartLine: 2, EndLine: 3}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedLineRangesHandlesMultipleHunksSameFile(t *testing.T) {
+	diff := []byte(strings.Join([]string{
+		"diff --git a/app.go b/app.go",
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1 +1 @@",
+		"+one",
+		"@@ -10 +12,2 @@",
+		"+two",
+		"+three",
+		"",
+	}, "\n"))
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{
+		{Path: "app.go", StartLine: 1, EndLine: 1},
+		{Path: "app.go", StartLine: 12, EndLine: 13},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedLineRangesIgnoresAddedLinesThatLookLikeFileHeaders(t *testing.T) {
+	diff := []byte(strings.Join([]string{
+		"diff --git a/app.go b/app.go",
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1 +1,2 @@",
+		"+++ not a file header",
+		"+ordinary addition",
+		"@@ -10 +11 @@",
+		"+later addition",
+		"",
+	}, "\n"))
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{
+		{Path: "app.go", StartLine: 1, EndLine: 2},
+		{Path: "app.go", StartLine: 11, EndLine: 11},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedLineRangesPreservesDeletionOnlyHunkAnchor(t *testing.T) {
+	diff := []byte(strings.Join([]string{
+		"diff --git a/app.go b/app.go",
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -6 +6,0 @@",
+		"-removedSecurityCheck()",
+		"",
+	}, "\n"))
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{{Path: "app.go", StartLine: 6, EndLine: 6}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want deletion anchor %#v", got, want)
+	}
+}
+
+func TestChangedLineRangesPreservesFirstLineDeletionAnchor(t *testing.T) {
+	diff := []byte(strings.Join([]string{
+		"diff --git a/app.go b/app.go",
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1 +0,0 @@",
+		"-removedSecurityCheck()",
+		"",
+	}, "\n"))
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	want := []security.ChangedLineRange{{Path: "app.go", StartLine: 1, EndLine: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranges = %#v, want deletion anchor %#v", got, want)
+	}
+}
+
+func TestChangedFilesForSecurityScanKeepsFilesWhenLineRangeParseFails(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatalf("Mkdir(source) error = %v", err)
+	}
+	runGit(t, source, "init", "-b", "main")
+	runGit(t, source, "config", "user.email", "orka@example.com")
+	runGit(t, source, "config", "user.name", "Orka Test")
+	if err := os.WriteFile(filepath.Join(source, "app.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(base) error = %v", err)
+	}
+	runGit(t, source, "add", "app.go")
+	runGit(t, source, "commit", "-m", "base")
+	baseCommit := runGit(t, source, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(source, "app.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(head) error = %v", err)
+	}
+	runGit(t, source, "commit", "-am", "head")
+	headCommit := runGit(t, source, "rev-parse", "HEAD")
+
+	original := changedLineRangesForSecurityScan
+	changedLineRangesForSecurityScan = func(context.Context, string, string, string) ([]security.ChangedLineRange, error) {
+		return nil, fmt.Errorf("parse changed line ranges: unsupported hunk header")
+	}
+	t.Cleanup(func() { changedLineRangesForSecurityScan = original })
+
+	computed, files, lineRanges, diffSummary, message, _ := changedFilesForSecurityScan(
+		context.Background(), source, baseCommit, headCommit,
+	)
+	if !computed || message != "" {
+		t.Fatalf("computed=%v message=%q, want file-level fallback without error message", computed, message)
+	}
+	if !reflect.DeepEqual(files, []string{"app.go"}) || len(lineRanges) != 0 {
+		t.Fatalf("files/ranges = %#v/%#v, want app.go and no ranges", files, lineRanges)
+	}
+	if !strings.Contains(diffSummary, "changed line ranges omitted") {
+		t.Fatalf("diffSummary = %q, want line-range omission", diffSummary)
+	}
+}
+
+func TestChangedLineRangeParserStopsAtSafetyCap(t *testing.T) {
+	diff := "diff --git a/app.go b/app.go\n--- a/app.go\n+++ b/app.go\n@@ -1 +1 @@\n+" +
+		strings.Repeat("x", maxChangedDiffBytesForLineRanges+1)
+	_, err := parseChangedLineRangesFromUnifiedDiff([]byte(diff))
+	if !errors.Is(err, errChangedDiffTooLarge) {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v, want diff safety cap", err)
+	}
+}
+
+func TestChangedLineRangeParserStopsAtRangeCountCap(t *testing.T) {
+	var diff strings.Builder
+	diff.WriteString("diff --git a/app.go b/app.go\n--- a/app.go\n+++ b/app.go\n")
+	for i := 1; i <= maxChangedLineRangesForArtifact+1; i++ {
+		fmt.Fprintf(&diff, "@@ -%d +%d @@\n+line\n", i, i)
+	}
+	_, err := parseChangedLineRangesFromUnifiedDiff([]byte(diff.String()))
+	if !errors.Is(err, errChangedDiffTooLarge) {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v, want range count cap", err)
+	}
+}
+
+func TestChangedLineRangesRejectsUnsafePaths(t *testing.T) {
+	diff := []byte("diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n+secret\n")
+	got, err := parseChangedLineRangesFromUnifiedDiff(diff)
+	if err != nil {
+		t.Fatalf("parseChangedLineRangesFromUnifiedDiff() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ranges = %#v, want unsafe path ignored", got)
 	}
 }
 

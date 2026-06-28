@@ -496,6 +496,130 @@ func TestRepositoryScanMutations_ContextTokenTransactionContextAuthorizationDeni
 	}
 }
 
+func TestCreateRepositoryScanPolicyRefs(t *testing.T) {
+	ctx := context.Background()
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	policy := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: "demo", Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}},
+		Data:       map[string]string{"scan": "Focus on operator repositories.", "fp": "Ignore public docs examples."},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, policy)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite + " " + ContextTokenScopeConfigMapsRead})
+	body := fmt.Sprintf(`{
+		"name":"scan-policy-test",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"analysisAgentRef":{"name":"analysis"},
+			"customScanInstructionsRef":{"name":"scan-policy","key":"scan"},
+			"falsePositivePolicyRef":{"name":"scan-policy","key":"fp"}
+		}
+	}`, securityTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var got corev1alpha1.RepositoryScan
+	require.NoError(t, handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "scan-policy-test"}, &got))
+	require.Equal(t, "scan-policy", got.Spec.CustomScanInstructionsRef.Name)
+	require.Equal(t, "fp", got.Spec.FalsePositivePolicyRef.Key)
+}
+
+func TestCreateRepositoryScanPolicyRefRequiresConfigMapReadScope(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	policy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: "demo", Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": "policy"}}
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, policy)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	body := fmt.Sprintf(`{
+		"name":"scan-policy-test",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"analysisAgentRef":{"name":"analysis"},
+			"customScanInstructionsRef":{"name":"scan-policy"}
+		}
+	}`, securityTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestCreateRepositoryScanPolicyRefMissingKeyFails(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	policy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: "demo", Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"other": "policy"}}
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, policy)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite + " " + ContextTokenScopeConfigMapsRead})
+	body := fmt.Sprintf(`{
+		"name":"scan-policy-test",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"analysisAgentRef":{"name":"analysis"},
+			"customScanInstructionsRef":{"name":"scan-policy","key":"missing"}
+		}
+	}`, securityTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestCreateRepositoryScanPolicyRefOversizedFails(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	policy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: "demo", Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": strings.Repeat("a", security.MaxCustomPolicyBytes+1)}}
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, policy)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite + " " + ContextTokenScopeConfigMapsRead})
+	body := fmt.Sprintf(`{
+		"name":"scan-policy-test",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"analysisAgentRef":{"name":"analysis"},
+			"customScanInstructionsRef":{"name":"scan-policy"}
+		}
+	}`, securityTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestCreateRepositoryScanPolicyRefOtherNamespaceFails(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	policy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "scan-policy", Namespace: "other", Labels: map[string]string{security.PolicyConfigMapAllowedLabel: "true"}}, Data: map[string]string{"policy": "policy"}}
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, policy)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite + " " + ContextTokenScopeConfigMapsRead})
+	body := fmt.Sprintf(`{
+		"name":"scan-policy-test",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"analysisAgentRef":{"name":"analysis"},
+			"customScanInstructionsRef":{"name":"scan-policy"}
+		}
+	}`, securityTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(body))
+	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
 func TestRepositoryScanMutations_ContextTokenRefAuthorizationDenials(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -1150,7 +1274,7 @@ func TestCreateManualSecurityScan_ContextTokenStampsTaskRequesterAndTransaction(
 	}
 	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
 
-	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite})
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeSecurityWrite + " " + ContextTokenScopeConfigMapsRead})
 	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
 	req.Header.Set(KontxtHeaderName, token)
 	resp, err := app.Test(req)

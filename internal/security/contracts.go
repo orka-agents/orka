@@ -17,21 +17,28 @@ const (
 	ArtifactFindingsV2      = "security-findings.v2.json"
 	ArtifactDroppedFindings = "security-dropped-findings.json"
 
-	EnvRepositoryScanName = "ORKA_SECURITY_REPOSITORY_SCAN"
-	EnvReviewSliceJSON    = "ORKA_SECURITY_REVIEW_SLICE_JSON"
-	EnvStage              = "ORKA_SECURITY_STAGE"
-	EnvScanID             = "ORKA_SECURITY_SCAN_ID"
-	EnvSliceID            = "ORKA_SECURITY_SLICE_ID"
-	EnvFindingID          = "ORKA_SECURITY_FINDING_ID"
-	EnvPatchBranch        = "ORKA_SECURITY_PATCH_BRANCH"
-	EnvScanBaseCommit     = "ORKA_SECURITY_SCAN_BASE_COMMIT"
-	EnvScanHeadCommit     = "ORKA_SECURITY_SCAN_HEAD_COMMIT"
+	EnvRepositoryScanName   = "ORKA_SECURITY_REPOSITORY_SCAN"
+	EnvReviewSliceJSON      = "ORKA_SECURITY_REVIEW_SLICE_JSON"
+	EnvStage                = "ORKA_SECURITY_STAGE"
+	EnvScanID               = "ORKA_SECURITY_SCAN_ID"
+	EnvSliceID              = "ORKA_SECURITY_SLICE_ID"
+	EnvFindingID            = "ORKA_SECURITY_FINDING_ID"
+	EnvPatchBranch          = "ORKA_SECURITY_PATCH_BRANCH"
+	EnvScanBaseCommit       = "ORKA_SECURITY_SCAN_BASE_COMMIT"
+	EnvScanHeadCommit       = "ORKA_SECURITY_SCAN_HEAD_COMMIT"
+	EnvScannerPolicyVersion = "ORKA_SECURITY_SCANNER_POLICY_VERSION"
+	EnvPolicyDigest         = "ORKA_SECURITY_POLICY_DIGEST"
+	EnvPolicyProvenance     = "ORKA_SECURITY_POLICY_PROVENANCE"
+
+	ScannerPolicyVersion = "2026-06-orka-fp-policy-v1"
 
 	SchemaVersionReviewSlices  = 1
 	SchemaVersionReviewContext = 1
 	SchemaVersionFindingsV2    = 2
 	SchemaVersionPatchSummary  = 1
 )
+
+type ChangedLineRange = store.ChangedLineRange
 
 // ReviewSlicesArtifact is the deterministic mapper output.
 type ReviewSlicesArtifact struct {
@@ -40,6 +47,8 @@ type ReviewSlicesArtifact struct {
 	HeadCommit           string              `json:"headCommit,omitempty"`
 	ChangedFilesComputed bool                `json:"changedFilesComputed,omitempty"`
 	ChangedFiles         []string            `json:"changedFiles,omitempty"`
+	ChangedLineRanges    []ChangedLineRange  `json:"changedLineRanges,omitempty"`
+	DiffSummary          string              `json:"diffSummary,omitempty"`
 	ChangedFilesError    string              `json:"changedFilesError,omitempty"`
 	Slices               []store.ReviewSlice `json:"slices"`
 }
@@ -47,6 +56,8 @@ type ReviewSlicesArtifact struct {
 type ReviewContextManifest struct {
 	SchemaVersion     int                         `json:"schemaVersion"`
 	SliceID           string                      `json:"sliceId"`
+	ChangedFiles      []string                    `json:"changedFiles,omitempty"`
+	ChangedLineRanges []ChangedLineRange          `json:"changedLineRanges,omitempty"`
 	IncludedFiles     []ReviewContextIncludedFile `json:"includedFiles"`
 	OmittedFiles      []ReviewContextOmittedFile  `json:"omittedFiles,omitempty"`
 	PromptBytes       int                         `json:"promptBytes"`
@@ -163,6 +174,16 @@ func ParseReviewSlicesArtifact(data []byte) (*ReviewSlicesArtifact, error) {
 	if artifact.SchemaVersion != SchemaVersionReviewSlices {
 		return nil, fmt.Errorf("unsupported security slices schemaVersion %d", artifact.SchemaVersion)
 	}
+	for _, file := range artifact.ChangedFiles {
+		if !SafeRepoPath(file) {
+			return nil, fmt.Errorf("changed file path %q is not repo-relative and safe", file)
+		}
+	}
+	for _, lineRange := range artifact.ChangedLineRanges {
+		if !validChangedLineRange(lineRange) {
+			return nil, fmt.Errorf("changed line range for %q is invalid", lineRange.Path)
+		}
+	}
 	for i := range artifact.Slices {
 		if err := validateReviewSliceContract(artifact.Slices[i]); err != nil {
 			return nil, fmt.Errorf("slice %d: %w", i, err)
@@ -182,6 +203,16 @@ func ParseReviewContextManifest(data []byte) (*ReviewContextManifest, error) {
 	}
 	if strings.TrimSpace(manifest.SliceID) == "" {
 		return nil, fmt.Errorf("sliceId is required")
+	}
+	for _, file := range manifest.ChangedFiles {
+		if !SafeRepoPath(file) {
+			return nil, fmt.Errorf("changed file path %q is not repo-relative and safe", file)
+		}
+	}
+	for _, lineRange := range manifest.ChangedLineRanges {
+		if !validChangedLineRange(lineRange) {
+			return nil, fmt.Errorf("changed line range for %q is invalid", lineRange.Path)
+		}
 	}
 	for _, file := range manifest.IncludedFiles {
 		if !SafeRepoPath(file.Path) {
@@ -237,7 +268,21 @@ func validateReviewSliceContract(slice store.ReviewSlice) error {
 			return fmt.Errorf("test path %q is not repo-relative and safe", test.Path)
 		}
 	}
+	for _, file := range slice.ChangedFiles {
+		if !SafeRepoPath(file) {
+			return fmt.Errorf("changed file path %q is not repo-relative and safe", file)
+		}
+	}
+	for _, lineRange := range slice.ChangedLineRanges {
+		if !validChangedLineRange(lineRange) {
+			return fmt.Errorf("changed line range for %q is invalid", lineRange.Path)
+		}
+	}
 	return nil
+}
+
+func validChangedLineRange(lineRange ChangedLineRange) bool {
+	return SafeRepoPath(lineRange.Path) && lineRange.StartLine > 0 && lineRange.EndLine >= lineRange.StartLine
 }
 
 // SafeRepoPath returns true when p is a clean relative repository path.
