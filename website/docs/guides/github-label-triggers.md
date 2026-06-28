@@ -94,7 +94,7 @@ kubectl create secret generic github-webhook-secret \
 
 ## Durable `orka:*` RepositoryMonitor Commands
 
-`agent:*` labels remain the lightweight direct Task path. For durable monitor-owned workflows, configure `RepositoryMonitor.spec.triggers.github.labels.enabled: true` and use `orka:*` labels such as `orka:plan`, `orka:implement`, `orka:review`, and `orka:fix`.
+`agent:*` labels remain the lightweight direct Task path. For durable monitor-owned workflows, configure `RepositoryMonitor.spec.triggers.github.labels.enabled: true` and use `orka:*` labels such as `orka:plan`, `orka:implement`, `orka:review`, `orka:fix`, and the optional head-bound `orka:automerge`.
 
 The `orka:*` path differs from direct `agent:*` labels:
 

@@ -4403,3 +4403,69 @@ func TestRepositoryMonitorIssueWorkflowPolicyHelpers(t *testing.T) {
 		t.Fatal("patch_ready implementation verdict not considered ready")
 	}
 }
+
+func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	merged := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
+			t.Fatalf("Authorization header = %q, want %q", got, repositoryMonitorTestBearerHeader())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/41":
+			_, _ = w.Write([]byte(`{"number":41,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base41","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"ready","sha":"head41","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/commits/head41/check-runs":
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"success"}]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/sozercan/orka/pulls/41/merge":
+			merged = true
+			_, _ = w.Write([]byte(`{"sha":"merged-sha"}`))
+		default:
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("pr-automerge")
+	globalGate := false
+	monitor.Spec.Automerge.Enabled = true
+	monitor.Spec.Automerge.RequireGlobalMergeGate = &globalGate
+	monitor.Spec.Automerge.AllowedMergeMethods = []string{"squash"}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: "pr-automerge", Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	processedAt := time.Now()
+	command := &store.CommandEvent{ID: "cmd-automerge-41", MonitorNamespace: "default", MonitorName: "pr-automerge", Repo: "sozercan/orka", Kind: repositoryMonitorPullRequestKind, Number: 41, Intent: "automerge", Permission: "maintain", HeadSHA: "head41", Status: "accepted", CreatedAt: processedAt, ProcessedAt: &processedAt}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-automerge-41", MonitorNamespace: "default", MonitorName: "pr-automerge", Trigger: "github_label_command", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 41, TargetSHA: "head41", CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pr-automerge"}}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !merged {
+		t.Fatal("merge endpoint was not called")
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, "default", "pr-automerge", repositoryMonitorPullRequestKind, "41")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.AutomergeState != repositoryMonitorAutomergeStateMerged {
+		t.Fatalf("item = %#v, want automerge merged", item)
+	}
+}

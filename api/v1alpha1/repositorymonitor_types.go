@@ -232,6 +232,8 @@ type RepositoryMonitorPullRequestCommandLabels struct {
 	// +optional
 	UpdateBranch string `json:"updateBranch,omitempty"`
 	// +optional
+	Automerge string `json:"automerge,omitempty"`
+	// +optional
 	Stop string `json:"stop,omitempty"`
 	// +optional
 	Resume string `json:"resume,omitempty"`

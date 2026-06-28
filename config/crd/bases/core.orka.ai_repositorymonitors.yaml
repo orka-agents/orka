@@ -574,6 +574,8 @@ spec:
                               to label names. Empty fields use the default orka:*
                               labels.
                             properties:
+                              automerge:
+                                type: string
                               fix:
                                 type: string
                               fixCI:

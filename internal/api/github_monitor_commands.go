@@ -106,6 +106,7 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 			"fix":               labels.PullRequests.Fix,
 			"fix_ci":            labels.PullRequests.FixCI,
 			"update_branch":     labels.PullRequests.UpdateBranch,
+			"automerge":         labels.PullRequests.Automerge,
 			commandIntentStop:   labels.PullRequests.Stop,
 			commandIntentResume: labels.PullRequests.Resume,
 		}

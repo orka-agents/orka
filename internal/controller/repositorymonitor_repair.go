@@ -48,6 +48,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		item.RepairState = ""
 		item.SkipReason = ""
 		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
+	case "automerge":
+		handled, err := r.tryProcessPullRequestAutomergeCommand(ctx, monitor, run, command, owner, repository, pr, item)
+		return handled, 0, err
 	case "review":
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.LastVerdict = repositoryMonitorVerdictSkipped

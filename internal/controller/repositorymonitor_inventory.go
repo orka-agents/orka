@@ -786,6 +786,7 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 	if existing != nil {
 		item.LastReviewID = existing.LastReviewID
 		item.LastReviewedHeadSHA = existing.LastReviewedHeadSHA
+		item.LastVerdict = existing.LastVerdict
 		item.RepairState = existing.RepairState
 		item.AutomergeState = existing.AutomergeState
 		item.StatusCommentID = existing.StatusCommentID

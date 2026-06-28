@@ -36,7 +36,7 @@ The first implementation is intentionally narrow:
 - Issue-only monitors can set `spec.targets.pullRequests.enabled: false` and `spec.targets.issues.enabled: true`.
 - `spec.review.requireGreenCI` is rejected until CI state collection is available.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
-- Repair, automerge, maintainer command routing, and public review comment updates are represented in the API/store shape but are not active workflows in this slice.
+- Repair, maintainer command routing, issue action workflows, and optional head-bound automerge are active monitor-owned workflows. Automerge remains disabled by default and requires explicit configuration plus a one-shot command.
 - The reviewer Agent must use `runtime.type: claude` and reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`.
 
 ## CI Coverage
@@ -302,6 +302,7 @@ spec:
         pullRequests:
           review: orka:review
           fix: orka:fix
+          automerge: orka:automerge
 ```
 
 When a matching label webhook arrives, Orka verifies the webhook signature, matches the repository monitor by repository and target kind, checks the sender's current GitHub repository permission using `spec.gitSecretRef`, records a durable command event, and queues a targeted monitor run for accepted commands. Replayed deliveries are idempotent. Guard labels from `spec.policy.protectedLabels` and `spec.policy.pauseLabels` record blocked commands and do not queue work.
@@ -344,3 +345,10 @@ Pull request command labels can start bounded controller-tracked repair tasks:
 - `orka:update-branch` queues a base-update repair task and allows empty push-branch updates.
 
 Repair jobs are stored durably and linked to monitor items. Successful repairs clear stale review state so the next exact-head review can recompute readiness. A PR with a passed exact-head review and no active repair is surfaced as merge-ready state for humans to merge; Orka still does not merge automatically.
+
+
+## Optional Automerge
+
+Automerge is disabled by default. To enable it, set `spec.automerge.enabled: true` and use a one-shot pull request command label such as `orka:automerge`. When `spec.automerge.requireGlobalMergeGate` is omitted or true, the controller also requires the process environment variable `ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE=true`; set `requireGlobalMergeGate: false` only for tightly scoped test or local deployments.
+
+Before merging, Orka verifies that the command is bound to the current PR head SHA, the actor permission satisfies the automerge policy, the PR has a passed exact-head Orka review, CI checks are green, the PR is mergeable, there are no protected/pause labels, and no repair is active or failed. Every merge attempt writes an action record before or during the attempt, and failures are surfaced in the PR item `automergeState`.
