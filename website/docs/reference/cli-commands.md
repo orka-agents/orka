@@ -610,6 +610,163 @@ Global Flags:
       --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
 ```
 
+## `orka task events`
+
+```text
+List task execution events
+
+Usage:
+  orka task events <task> [flags]
+
+Flags:
+      --after int          Only return events after this sequence
+  -h, --help               help for events
+      --limit int          Maximum events to return (default 100)
+  -o, --output string      Output format: table, json, yaml (default "table")
+      --type stringArray   Filter by event type (repeatable; streaming supports repeats)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka task follow`
+
+```text
+Follow task execution events
+
+Usage:
+  orka task follow <task> [flags]
+
+Flags:
+      --after int          Resume after this sequence
+  -h, --help               help for follow
+      --type stringArray   Filter by event type (repeatable)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka task trace`
+
+```text
+Show a task trace summary
+
+Usage:
+  orka task trace <task> [flags]
+
+Flags:
+  -h, --help            help for trace
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka task approvals`
+
+```text
+List task approvals
+
+Usage:
+  orka task approvals <task> [flags]
+
+Flags:
+  -h, --help            help for approvals
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka task approve`
+
+```text
+Approve a pending task approval
+
+Usage:
+  orka task approve <task> <approvalID> [flags]
+
+Flags:
+  -h, --help            help for approve
+  -o, --output string   Output format: table, json, yaml (default "json")
+      --reason string   Decision reason
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka task decline`
+
+```text
+Decline a pending task approval
+
+Usage:
+  orka task decline <task> <approvalID> [flags]
+
+Flags:
+  -h, --help            help for decline
+  -o, --output string   Output format: table, json, yaml (default "json")
+      --reason string   Decision reason
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
+## `orka task fork`
+
+```text
+Fork a task from an execution event checkpoint
+
+Usage:
+  orka task fork <task> [flags]
+
+Flags:
+      --after int       Checkpoint sequence (default: latest) (default -1)
+      --agent string    Override agent reference
+  -h, --help            help for fork
+      --name string     Forked task name
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --prompt string   Override prompt
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Kontxt transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+```
+
 ## `orka task wait`
 
 ```text

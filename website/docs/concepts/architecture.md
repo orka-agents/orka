@@ -112,7 +112,7 @@ Orka uses seven CRDs:
 | **API Authentication** | Kubernetes ServiceAccount tokens plus optional OIDC JWT and generic context-token validation. | Native K8s auth by default; OIDC and `kontxt` TxTokens support external/request-scoped API clients. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker/harness pods. |
-| **Observability** | Prometheus metrics, structured logs, optional OpenTelemetry tracing. | Standard K8s metrics/logging with opt-in distributed tracing. |
+| **Observability** | Prometheus metrics, structured logs, optional OpenTelemetry traces and GenAI OTLP metrics. | Standard K8s metrics/logging with opt-in distributed tracing and model/tool latency telemetry. |
 | **AI Tools** | Built-in + extensible via CRDs | Ship with categorized built-in tools and can be extended via Tool CRDs. |
 | **Failure Policy** | Configurable retry with backoff | `spec.retryPolicy` with max retries and exponential backoff. |
 | **Session Execution** | Serial per session | Tasks sharing a session run one-at-a-time to prevent race conditions. |

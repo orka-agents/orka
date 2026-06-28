@@ -830,7 +830,7 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--health-probe-bind-address` | `:8081` | Health probe address |
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
-| `--enable-tracing` | `false` | Enable OpenTelemetry distributed tracing (requires `OTEL_EXPORTER_OTLP_ENDPOINT`) |
+| `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
 
 ### Agent Sandbox Controller Settings
 
@@ -956,27 +956,49 @@ monitoring:
 
 Context-token metrics are described in more detail in [Kontxt TxToken integration](kontxt.md#observability). All context-token labels use low-cardinality values only.
 
-## OpenTelemetry Tracing
+## OpenTelemetry telemetry
 
-Orka supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+Orka supports opt-in OpenTelemetry traces and GenAI metrics for debugging,
+performance analysis, and backend cost/latency dashboards. Telemetry is
+disabled by default and uses OpenTelemetry no-op providers until enabled.
 
-### Enabling Tracing
+### Enabling telemetry
 
-Add the `--enable-tracing` flag to the controller:
+Add the `--enable-telemetry` flag to the controller and configure an OTLP
+collector endpoint. The legacy `--enable-tracing` alias enables the same traces
+and metrics:
 
 ```yaml
 args:
-  - --enable-tracing
+  - --enable-telemetry
 env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
     value: "jaeger-collector.observability.svc:4317"
+  - name: OTEL_EXPORTER_OTLP_INSECURE
+    value: "true"
 ```
 
 | Flag / Environment Variable | Default | Description |
 |------------------------------|---------|-------------|
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default `localhost:4317` | OTLP collector endpoint for traces and metrics |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Trace-specific OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics-specific OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | SDK default gRPC | Set to `http/protobuf` for OTLP/HTTP collectors |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | unset | Signal-specific exporter protocol overrides |
+| `OTEL_EXPORTER_OTLP_INSECURE` and signal-specific insecure vars | SDK default | Disable TLS for in-cluster/dev collectors that require it |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK default | Standard OpenTelemetry sampler configuration |
+
+Controller-local defaults such as `localhost:4317` are valid only for the
+controller process. AI worker Jobs receive telemetry enablement only when the
+controller has a non-loopback, worker-reachable OTLP endpoint. The controller
+copies non-secret OTLP endpoint/protocol/insecure/timeout/compression settings
+to AI worker Pods and intentionally does not copy OTLP headers, certificate or
+client-key env vars, `OTEL_RESOURCE_ATTRIBUTES`, or baggage.
+
+Harness-wrapper and agent-runtime worker telemetry is explicit opt-in. Set
+`ORKA_ENABLE_TELEMETRY=true` and OTLP exporter env on those workloads when you
+want their process-local `task.run` spans exported.
 
 ### Instrumented Components
 
