@@ -407,16 +407,23 @@ Usage:
   orka task [command]
 
 Available Commands:
+  approvals   List task approvals
+  approve     Approve a pending task approval
   artifacts   List artifacts for a task
   children    List child tasks
   create      Create a new task
+  decline     Decline a pending task approval
   delete      Delete a task
   download    Download task artifacts
+  events      List task execution events
+  follow      Follow task execution events
+  fork        Fork a task from an execution event checkpoint
   get         Get task details
   list        List tasks
   logs        Get task logs
   plan        Get task autonomous plan state
   result      Get task result
+  trace       Show a task trace summary
   wait        Wait for a task to complete
 
 Flags:
@@ -1420,6 +1427,8 @@ Usage:
 
 Available Commands:
   delete      Delete a session resource
+  events      List session execution events
+  follow      Follow session execution events
   get         Get a session resource
   list        List session resources
 
@@ -2454,11 +2463,15 @@ Usage:
   orka security dropped-findings list <repo> [flags]
 
 Flags:
-      --continue string   Continue token
-      --cursor string     Cursor token
-  -h, --help              help for list
-      --limit int         Maximum number of results (default 50)
-  -o, --output string     Output format: table, json, yaml (default "table")
+      --continue string      Continue token
+      --cursor string        Cursor token
+  -h, --help                 help for list
+      --layer string         Filter by dropped-finding layer (validation, filter, cap)
+      --limit int            Maximum number of results (default 50)
+  -o, --output string        Output format: table, json, yaml (default "table")
+      --reason string        Filter by exact reason or contains=<text>
+      --scan-run-id string   Filter by scan run ID
+      --slice-id string      Filter by review slice ID
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

@@ -194,6 +194,7 @@ orka security scan list my-repo -o json
 orka security finding list my-repo -o json
 orka security slice list my-repo -o json
 orka security dropped-findings list my-repo -o json
+orka security dropped-findings list my-repo --layer filter --reason contains=rate-limit -o json
 orka security repo delete my-repo
 ```
 
