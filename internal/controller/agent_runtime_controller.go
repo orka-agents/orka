@@ -206,6 +206,9 @@ func validateAgentRuntimeRequiredCapabilities(
 	if err := validateObservedHarnessCapabilities(caps); err != nil {
 		return err
 	}
+	if strings.TrimSpace(caps.RuntimeName) != sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName) {
+		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
+	}
 	required := runtime.Spec.Capabilities
 	if required == nil {
 		return nil

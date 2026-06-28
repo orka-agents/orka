@@ -12,7 +12,10 @@ import (
 	"github.com/sozercan/orka/internal/harness"
 )
 
-const defaultProbeTimeout = 30 * time.Second
+const (
+	defaultProbeTimeout = 30 * time.Second
+	cleanupProbeTimeout = 10 * time.Second
+)
 
 // Target identifies a harness endpoint to probe. BearerToken is used only for
 // authenticated control-plane endpoints and is never included in Result.
@@ -132,6 +135,7 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		frames = append(frames, frame)
 		return nil
 	}); err != nil {
+		cancelProbeTurn(ctx, client, result, request, "conformance stream failed")
 		result.addFailure(fmt.Sprintf("stream frames failed: %v", err))
 		return
 	}
@@ -201,6 +205,24 @@ func assertUnauthenticatedTurnResourcesRejected(
 		result.addFailure("unauthenticated cancel turn was accepted")
 	} else if !isAuthRequiredError(err) {
 		result.addFailure(fmt.Sprintf("unauthenticated cancel turn returned %v, want 401/403", err))
+	}
+}
+
+func cancelProbeTurn(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest, reason string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupProbeTimeout)
+	defer cancel()
+	_, err := client.CancelTurn(cleanupCtx, harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		Reason:           reason,
+	})
+	if err != nil {
+		result.addFailure(fmt.Sprintf("cancel probe turn failed: %v", err))
 	}
 }
 

@@ -293,6 +293,35 @@ func TestHarnessWrapperBuiltInRuntimeIgnoresRuntimeRefAnnotation(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperFrozenRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://custom.example.invalid")
+	runtime.Status.ObservedAuthRefResourceVersion = "1"
+	token.ResourceVersion = "2"
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, "fibey-agentkit")),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         "fibey-agentkit",
+		RuntimeName:            "fibey-agentkit",
+		ContractVersion:        "orka.harness.v1",
+		Endpoint:               "http://custom.example.invalid",
+		RuntimeGeneration:      1,
+		AuthRefName:            "fibey-agentkit-token",
+		AuthRefField:           "token",
+		AuthRefResourceVersion: "1",
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if !isAgentRuntimeDependencyNotReady(err) {
+		t.Fatalf("resolveHarnessRuntimeTarget() error = %v, want dependency-not-ready for frozen target after auth Secret version changed", err)
+	}
+}
+
 func TestHarnessWrapperRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
