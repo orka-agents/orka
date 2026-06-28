@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,6 +17,8 @@ const (
 	defaultProbeTimeout = 30 * time.Second
 	cleanupProbeTimeout = 10 * time.Second
 )
+
+var errProbeTerminalFrameSeen = errors.New("probe terminal frame seen")
 
 // Target identifies a harness endpoint to probe. BearerToken is used only for
 // authenticated control-plane endpoints and is never included in Result.
@@ -133,8 +136,13 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	defer cancel()
 	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
 		frames = append(frames, frame)
-		return nil
-	}); err != nil {
+		switch frame.Type {
+		case harness.FrameTurnCompleted, harness.FrameTurnFailed, harness.FrameTurnCancelled:
+			return errProbeTerminalFrameSeen
+		default:
+			return nil
+		}
+	}); err != nil && !errors.Is(err, errProbeTerminalFrameSeen) {
 		cancelProbeTurn(ctx, client, result, request, "conformance stream failed")
 		result.addFailure(fmt.Sprintf("stream frames failed: %v", err))
 		return
