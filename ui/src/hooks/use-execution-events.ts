@@ -18,6 +18,16 @@ import type {
 // in one page; the live stream still fills anything beyond it.
 const INITIAL_EVENT_PAGE_LIMIT = '1000'
 
+// Cache key prefix for this hook's single-page replay query. Deliberately
+// DISTINCT from the ['taskEvents', ...] key used by the full-history paged hook
+// in use-tasks.ts: the two fetchers return different shapes (one bounded page vs.
+// the whole paged history), so sharing a key would let a refetch of one overwrite
+// the other's cache — e.g. this one-page query could clobber the paged hook's
+// complete list with a partial page, and the paged hook would then resume from a
+// truncated tail. They only diverged into the same key once both started keying
+// by uid, so they get separate namespaces here.
+const TASK_EVENTS_PAGE_KEY = 'taskEventsPage'
+
 // List the initial (replay) page of a task's execution events. Live updates are
 // layered on top by the streaming hook; this query provides the static history
 // and a refetchable fallback when streaming is unavailable.
@@ -30,7 +40,7 @@ const INITIAL_EVENT_PAGE_LIMIT = '1000'
 export function useTaskEvents(taskId: string, enabled = true, taskUid?: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
-    queryKey: ['taskEvents', taskId, namespace, taskUid ?? ''],
+    queryKey: [TASK_EVENTS_PAGE_KEY, taskId, namespace, taskUid ?? ''],
     queryFn: () =>
       api.get<ListExecutionEventsResponse>(executionEventApiPath.taskEvents(taskId), {
         namespace,
@@ -119,6 +129,11 @@ export function useDecideApproval(taskId: string) {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['taskApprovals', taskId, namespace] })
+      // Refresh BOTH event caches: this hook's single-page replay query and the
+      // full-history paged query in use-tasks.ts (broad ['taskEvents', ...] prefix,
+      // which the Overview/Execution panels read). A decision appends events to the
+      // task timeline that both should reflect.
+      queryClient.invalidateQueries({ queryKey: [TASK_EVENTS_PAGE_KEY, taskId, namespace] })
       queryClient.invalidateQueries({ queryKey: ['taskEvents', taskId, namespace] })
       queryClient.invalidateQueries({ queryKey: ['taskTrace', taskId, namespace] })
     },
@@ -145,7 +160,15 @@ export function useForkTask(taskId: string) {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      // Refresh BOTH event caches (single-page replay + the full-history paged
+      // query in use-tasks.ts that the Overview/Execution panels read).
+      queryClient.invalidateQueries({ queryKey: [TASK_EVENTS_PAGE_KEY, taskId, namespace] })
       queryClient.invalidateQueries({ queryKey: ['taskEvents', taskId, namespace] })
+      // A fork appends TaskForkRequested/TaskForkCreated to this (source) task's
+      // timeline, and the Trace tab derives its Fork provenance section from that
+      // timeline. Invalidate the trace too so an already-loaded Trace tab reflects
+      // the new fork instead of going stale until a manual refresh.
+      queryClient.invalidateQueries({ queryKey: ['taskTrace', taskId, namespace] })
     },
   })
 }

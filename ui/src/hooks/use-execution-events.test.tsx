@@ -93,6 +93,40 @@ describe('use-execution-events hooks', () => {
     expect(calls).toBe(2)
   })
 
+  it('useTaskEvents does not share a cache key with the full-history taskEvents hook', async () => {
+    // The paged full-history hook in use-tasks.ts caches under ['taskEvents', ...].
+    // This single-page replay hook must use a DISTINCT key so a refetch of one
+    // never overwrites the other with an incompatible shape/partial page. Seed the
+    // ['taskEvents', ...] entry with a sentinel and confirm this hook ignores it
+    // and fetches its own data.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+    })
+    // Sentinel under the OTHER hook's key (same id/namespace/uid tuple).
+    client.setQueryData(
+      ['taskEvents', 'tk', 'default', 'uid-1'],
+      { latestSeq: 999, events: [{ seq: 999 }] },
+    )
+    let fetched = false
+    server.use(
+      http.get(`${API}/tasks/:id/events`, () => {
+        fetched = true
+        return HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 3, events: [],
+        })
+      }),
+    )
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => useTaskEvents('tk', true, 'uid-1'), { wrapper })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    // It fetched fresh (didn't read the sentinel under the other hook's key) and
+    // shows ITS own data, not the seeded 999 — proving the keys don't collide.
+    expect(fetched).toBe(true)
+    expect(result.current.data?.latestSeq).toBe(3)
+  })
+
   it('useSessionEvents hits the session events endpoint', async () => {
     let capturedPath = ''
     server.use(
@@ -283,5 +317,79 @@ describe('use-execution-events hooks', () => {
     expect(capturedBody).toEqual({ afterSeq: 3, newTaskName: 'tk-fork-1234' })
     expect(resp.newTaskName).toBe('tk-fork-1234')
     expect(resp.afterSeq).toBe(3)
+  })
+
+  it('useForkTask invalidates both event caches so full-history and replay views refresh', async () => {
+    // The fork mutation must invalidate BOTH this hook's single-page replay key
+    // (TASK_EVENTS_PAGE_KEY) AND the full-history ['taskEvents', ...] cache used by
+    // the Overview/Execution panels (use-tasks.ts). A client.invalidateQueries spy
+    // records which keys were invalidated.
+    server.use(
+      http.post(`${API}/tasks/:id/fork`, ({ params }) =>
+        HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: params.id, newTaskName: 'tk-fork-iv', afterSeq: 1,
+            forkContext: { sourceNamespace: 'default', sourceTask: params.id, afterSeq: 1, events: [], truncated: false },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+    })
+    const invalidated: unknown[] = []
+    const spy = vi.spyOn(client, 'invalidateQueries').mockImplementation((filters?: { queryKey?: unknown }) => {
+      invalidated.push(filters?.queryKey)
+      return Promise.resolve()
+    })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => useForkTask('tk'), { wrapper })
+    await result.current.mutateAsync({ afterSeq: 1 })
+    const keys = invalidated.map((k) => (Array.isArray(k) ? k[0] : k))
+    // Both the single-page replay key and the full-history taskEvents key.
+    expect(keys).toContain('taskEventsPage')
+    expect(keys).toContain('taskEvents')
+    spy.mockRestore()
+  })
+
+  it('useForkTask invalidates the trace query so fork provenance refreshes', async () => {
+    // The Trace tab derives its Fork provenance section from the source task's
+    // timeline; a successful fork must invalidate the taskTrace query so an
+    // already-loaded trace refetches instead of going stale.
+    let traceCalls = 0
+    server.use(
+      http.get(`${API}/tasks/:id/trace`, ({ params }) => {
+        traceCalls += 1
+        return HttpResponse.json({
+          task: { namespace: 'default', name: params.id, resultAvailable: false },
+          latestSeq: traceCalls, generatedAt: '2026-06-13T00:00:00Z',
+          timeline: [], modelRequests: [], toolCalls: [], childTasks: [], workspace: [], artifacts: [], errors: [], warnings: [],
+        })
+      }),
+      http.post(`${API}/tasks/:id/fork`, ({ params }) =>
+        HttpResponse.json(
+          {
+            namespace: 'default', sourceTaskName: params.id, newTaskName: 'tk-fork-9', afterSeq: 2,
+            forkContext: { sourceNamespace: 'default', sourceTask: params.id, afterSeq: 2, events: [], truncated: false },
+          },
+          { status: 201 },
+        ),
+      ),
+    )
+    // Both hooks share one QueryClient so the mutation's invalidation reaches the
+    // trace query.
+    const wrapper = createWrapper()
+    const { result } = renderHook(
+      () => ({ trace: useTaskTrace('tk'), fork: useForkTask('tk') }),
+      { wrapper },
+    )
+    await waitFor(() => expect(result.current.trace.isSuccess).toBe(true))
+    const before = traceCalls
+    await result.current.fork.mutateAsync({ afterSeq: 2 })
+    // The fork invalidates the trace, so it refetches.
+    await waitFor(() => expect(traceCalls).toBeGreaterThan(before))
   })
 })

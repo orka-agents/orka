@@ -112,6 +112,29 @@ describe('useExecutionEventStream', () => {
     expect(result.current.lastSeq).toBe(1)
   })
 
+  it('advances the cursor for a stream_complete drained by flush (no trailing separator)', async () => {
+    const conn = makeStreamResponse()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)
+
+    const { result } = renderHook(() =>
+      useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true }),
+    )
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    conn.push(eventFrame(4))
+    await waitFor(() => expect(result.current.events).toHaveLength(1))
+    // Final stream_complete arrives WITHOUT the trailing blank-line separator,
+    // then the stream closes — so it's only drained by flush(), not the in-loop
+    // parser. The flush path must still advance lastSeq to the terminal seq.
+    const noSep = `id: 9\nevent: stream_complete\ndata: {"lastSeq":9,"type":"TaskSucceeded"}\n`
+    conn.push(noSep)
+    conn.close()
+    await waitFor(() => expect(result.current.status).toBe('complete'))
+    expect(result.current.streamComplete?.type).toBe('TaskSucceeded')
+    // The resume cursor reflects the terminal frame, not the last event (4).
+    expect(result.current.lastSeq).toBe(9)
+  })
+
   it('ignores heartbeat frames and does not advance the cursor', async () => {
     const conn = makeStreamResponse()
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(conn.response)

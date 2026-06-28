@@ -193,6 +193,15 @@ export function useExecutionEventStream(
         for (const frame of frameBuffer.flush()) {
           if (frame.kind === 'event') acceptEvent(frame.event)
           else if (frame.kind === 'complete') {
+            // Mirror the in-loop completion path: advance the resume cursor to the
+            // terminal lastSeq before signalling complete. Without this, a stream
+            // that closes on a final stream_complete block lacking a trailing
+            // blank-line separator (exactly the case flush() exists to drain)
+            // would leave lastSeq at a stale value.
+            if (frame.complete.lastSeq > lastSeqRef.current) {
+              lastSeqRef.current = frame.complete.lastSeq
+              setLastSeq(frame.complete.lastSeq)
+            }
             setStreamComplete(frame.complete)
             return 'complete'
           }

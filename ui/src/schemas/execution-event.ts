@@ -30,6 +30,16 @@ export const executionEventSchema = z.object({
   agentName: z.string().optional(),
   toolName: z.string().optional(),
   toolCallID: z.string().optional(),
+  // Model telemetry, emitted at top level by the backend ExecutionEventResponse
+  // on ModelRequest* events. These MUST be declared here: the schema parses live
+  // SSE frames too, and Zod strips undeclared keys — without them a streamed
+  // model event would drop this telemetry and, via mergeEventsBySeq (later wins),
+  // overwrite the full-telemetry row from the initial page until a refresh.
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  stopReason: z.string().optional(),
+  inputTokens: z.number().optional(),
+  outputTokens: z.number().optional(),
   summary: z.string().optional(),
   content: z.unknown().optional(),
   contentText: z.string().optional(),

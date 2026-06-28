@@ -70,6 +70,30 @@ describe('parseExecutionEventFrame', () => {
     }
   })
 
+  it('preserves model telemetry on streamed ModelRequest events', () => {
+    // The backend emits provider/model/stopReason/inputTokens/outputTokens at the
+    // top level on model events. The schema must keep them (Zod strips undeclared
+    // keys), otherwise a streamed event would overwrite the full-telemetry row
+    // from the initial page via mergeEventsBySeq.
+    const data = eventData({
+      type: 'ModelRequestCompleted',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4',
+      stopReason: 'end_turn',
+      inputTokens: 1200,
+      outputTokens: 345,
+    })
+    const frame = parseExecutionEventFrame(`id: 1\nevent: execution_event\ndata: ${data}`)
+    expect(frame?.kind).toBe('event')
+    if (frame?.kind === 'event') {
+      expect(frame.event.provider).toBe('anthropic')
+      expect(frame.event.model).toBe('claude-sonnet-4')
+      expect(frame.event.stopReason).toBe('end_turn')
+      expect(frame.event.inputTokens).toBe(1200)
+      expect(frame.event.outputTokens).toBe(345)
+    }
+  })
+
   it('parses stream_complete frames', () => {
     const frame = parseExecutionEventFrame(
       'id: 9\nevent: stream_complete\ndata: {"lastSeq":9,"type":"TaskSucceeded"}',
