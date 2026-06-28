@@ -82,10 +82,12 @@ func Check(ctx context.Context, target Target) Result {
 		result.ObservedCapabilities = caps
 	}
 
-	if target.ProbeTurn {
-		runTurnProbe(ctx, target, &result, baseURL, controlTimeout)
-	} else if target.RequireAuth {
-		result.addFailure("RequireAuth requires ProbeTurn")
+	if len(result.Failures) == 0 {
+		if target.ProbeTurn {
+			runTurnProbe(ctx, target, &result, baseURL, controlTimeout)
+		} else if target.RequireAuth {
+			result.addFailure("RequireAuth requires ProbeTurn")
+		}
 	}
 	result.finalize()
 	return result
@@ -103,8 +105,8 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	if target.StartTurnRequest != nil {
 		request = *target.StartTurnRequest
 	}
-	if target.RequireAuth {
-		assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request)
+	if target.RequireAuth && !assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request) {
+		return
 	}
 
 	client, err := newClient(baseURL, target.BearerToken, target.HTTPClient, controlTimeout)
@@ -143,20 +145,23 @@ func assertUnauthenticatedStartRejected(
 	baseURL string,
 	controlTimeout time.Duration,
 	request harness.StartTurnRequest,
-) {
+) bool {
 	unauth, err := newClient(baseURL, "", target.HTTPClient, controlTimeout)
 	if err != nil {
 		result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
-		return
+		return false
 	}
 	probe := request
 	probe.TurnID = harness.HarnessTurnID(string(request.TurnID) + "-unauth")
 	probe.CorrelationID = request.CorrelationID + "-unauth"
 	if _, err := unauth.StartTurn(ctx, probe); err == nil {
 		result.addFailure("unauthenticated start turn was accepted")
+		return false
 	} else if !isAuthRequiredError(err) {
 		result.addFailure(fmt.Sprintf("unauthenticated start turn returned %v, want 401/403", err))
+		return false
 	}
+	return true
 }
 
 func assertUnauthenticatedTurnResourcesRejected(
