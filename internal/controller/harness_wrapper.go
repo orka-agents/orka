@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"sort"
@@ -1157,9 +1158,7 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	if request.Metadata == nil {
 		request.Metadata = map[string]string{}
 	}
-	for key, value := range plannedMetadata {
-		request.Metadata[key] = value
-	}
+	maps.Copy(request.Metadata, plannedMetadata)
 	return request, nil
 }
 
