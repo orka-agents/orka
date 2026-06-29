@@ -24,4 +24,5 @@ function Badge({
   )
 }
 
-export { Badge }
+// eslint-disable-next-line react-refresh/only-export-components -- preserve compatibility for existing badgeVariants imports.
+export { Badge, badgeVariants }

@@ -72,4 +72,5 @@ function TabsContent({
   )
 }
 
-export { Tabs, TabsList, TabsTrigger, TabsContent }
+// eslint-disable-next-line react-refresh/only-export-components -- preserve compatibility for existing tabsListVariants imports.
+export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants }

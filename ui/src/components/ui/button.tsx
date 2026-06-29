@@ -28,4 +28,5 @@ function Button({
   )
 }
 
-export { Button }
+// eslint-disable-next-line react-refresh/only-export-components -- preserve compatibility for existing buttonVariants imports.
+export { Button, buttonVariants }
