@@ -17,13 +17,15 @@ interface ActivitySpotlightProps {
   latestEvent?: ExecutionEvent
   /** True while a live stream/poll is following the namespace. */
   following: boolean
+  /** True when the focused event stream failed and the headline may be stale. */
+  eventError?: boolean
 }
 
 /**
  * Hero panel: who is active, what they're doing, how long, and whether we're
  * live. Idle (no running task) shows a clear, non-misleading resting state.
  */
-export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpotlightProps) {
+export function ActivitySpotlight({ task, latestEvent, following, eventError = false }: ActivitySpotlightProps) {
   const [now, setNow] = useState(() => Date.now())
   const phase = task?.status?.phase
   const running = phase === 'Running'
@@ -98,6 +100,9 @@ export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpot
           <span aria-hidden="true">·</span>
           <span className="tabular-nums">{elapsed}</span>
         </div>
+        {eventError && (
+          <p className="text-sm text-destructive" role="alert">Unable to load events</p>
+        )}
         {headline && <p className="truncate text-sm text-muted-foreground">{headline}</p>}
       </CardContent>
     </Card>

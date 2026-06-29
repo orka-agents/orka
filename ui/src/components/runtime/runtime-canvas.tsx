@@ -8,6 +8,7 @@ import { SonarPing } from '@/components/ui/sonar-ping'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { useTaskListAll, useTaskEvents } from '@/hooks/use-tasks'
+import { ApiError } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
 import { isLiveTask, selectActiveTask, type LatestActivityByTask } from '@/lib/runtime-activity'
 import type { Task } from '@/schemas/task'
@@ -23,13 +24,15 @@ import { TaskFlowPanel } from './task-flow-panel'
  * unavailable (501/empty).
  */
 function ActiveSpotlight({ task, following }: { task: Task | null; following: boolean }) {
-  const { data } = useTaskEvents(
+  const { data, error, failureReason } = useTaskEvents(
     task?.metadata.name ?? '',
     following ? 5000 : false,
     task?.metadata.uid,
   )
   const latestEvent = data?.events[data.events.length - 1]
-  return <ActivitySpotlight task={task} latestEvent={latestEvent} following={following} />
+  const issue = error ?? failureReason
+  const eventError = Boolean(issue) && !(issue instanceof ApiError && issue.status === 501)
+  return <ActivitySpotlight task={task} latestEvent={latestEvent} following={following} eventError={eventError} />
 }
 
 /**
@@ -42,7 +45,7 @@ export function RuntimeCanvas() {
   const namespace = useUIStore((s) => s.namespace)
   const queryClient = useQueryClient()
   const [following, setFollowing] = useState(true)
-  const { data, isLoading } = useTaskListAll('100', following ? 10000 : false)
+  const { data, isLoading, error: taskListError, refetch: refetchTasks } = useTaskListAll('100', following ? 10000 : false)
 
   const tasks = data?.items ?? []
   const runningTasks = tasks.filter(isLiveTask)
@@ -104,6 +107,13 @@ export function RuntimeCanvas() {
           <Skeleton className="h-40 w-full lg:col-span-2" />
           <Skeleton className="h-40 w-full" />
         </div>
+      ) : taskListError ? (
+        <Card>
+          <CardContent className="flex flex-col items-center gap-3 py-12">
+            <p className="text-sm font-medium text-destructive" role="alert">Failed to load tasks</p>
+            <Button variant="outline" size="sm" onClick={() => refetchTasks()}>Retry</Button>
+          </CardContent>
+        </Card>
       ) : tasks.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center gap-4 py-12">

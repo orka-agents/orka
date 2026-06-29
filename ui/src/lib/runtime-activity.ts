@@ -39,27 +39,17 @@ export type LatestActivityByTask = Record<string, number>
 /**
  * Deterministic ordering for "most recently active" first. Tie-breaks descend a
  * fixed ladder so the result is stable even when fields are missing:
- *   1. latest event time (when provided)  — what just advanced
- *   2. status.startTime                    — newest start
- *   3. metadata.creationTimestamp          — newest created
- *   4. metadata.name (ascending)           — stable final tiebreak
+ *   1. best known activity timestamp       — latest event, else start, else create
+ *   2. metadata.name (ascending)           — stable final tiebreak
  */
 export function compareByActivity(
   a: Task,
   b: Task,
   latestActivity: LatestActivityByTask = {},
 ): number {
-  const activityA = latestActivity[a.metadata.name] ?? -1
-  const activityB = latestActivity[b.metadata.name] ?? -1
+  const activityA = latestActivity[a.metadata.name] ?? epochMs(a.status?.startTime) ?? epochMs(a.metadata.creationTimestamp) ?? -1
+  const activityB = latestActivity[b.metadata.name] ?? epochMs(b.status?.startTime) ?? epochMs(b.metadata.creationTimestamp) ?? -1
   if (activityA !== activityB) return activityB - activityA
-
-  const startA = epochMs(a.status?.startTime)
-  const startB = epochMs(b.status?.startTime)
-  if (startA !== startB) return (startB ?? -1) - (startA ?? -1)
-
-  const createA = epochMs(a.metadata.creationTimestamp)
-  const createB = epochMs(b.metadata.creationTimestamp)
-  if (createA !== createB) return (createB ?? -1) - (createA ?? -1)
 
   return a.metadata.name.localeCompare(b.metadata.name)
 }

@@ -111,7 +111,9 @@ export function useTaskApprovals(
         namespace,
       }),
     enabled: enabled && !!taskId,
+    retry: false,
     refetchInterval: (query) => {
+      if (query.state.error instanceof ApiError && query.state.error.status === 501) return false
       if (!pollIntervalMs) return false
       // A settled task won't change a pending approval (it's read-only), so stop
       // polling instead of refetching the same pending row indefinitely.

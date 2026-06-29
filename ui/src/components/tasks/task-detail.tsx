@@ -50,7 +50,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const taskEventsUnsupported = taskEventsIssue instanceof ApiError && taskEventsIssue.status === 501
   const taskEventsFailed = Boolean(taskEventsIssue) && !taskEventsUnsupported
   const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
-  const forkSupported = !taskEventsUnsupported
+  const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()

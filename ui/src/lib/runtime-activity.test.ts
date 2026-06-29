@@ -41,6 +41,12 @@ describe('runtime-activity', () => {
     expect(selectActiveTask(tasks, { hot: 2000, old: 1000 })?.metadata.name).toBe('hot')
   })
 
+  it('does not let stale cached event activity outrank a newer start time', () => {
+    const stale = task('stale', { status: { phase: 'Running', startTime: '2026-06-28T10:00:00Z' } })
+    const newer = task('newer', { status: { phase: 'Running', startTime: '2026-06-28T12:00:00Z' } })
+    expect(selectActiveTask([stale, newer], { stale: Date.parse('2026-06-28T11:00:00Z') })?.metadata.name).toBe('newer')
+  })
+
   it('selectActiveTask falls back to newest startTime then name when no seq', () => {
     const a = task('a', { status: { phase: 'Running', startTime: '2026-06-28T10:00:00Z' } })
     const b = task('b', { status: { phase: 'Running', startTime: '2026-06-28T11:00:00Z' } })
