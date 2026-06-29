@@ -33,6 +33,23 @@ describe('useTaskArtifacts', () => {
     expect(result.current.data?.artifacts).toHaveLength(1)
   })
 
+  it('polls when a refetch interval is provided', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/t-live/artifacts', () => {
+      calls += 1
+      return HttpResponse.json({
+        artifacts: calls === 1
+          ? []
+          : [{ filename: 'later.txt', contentType: 'text/plain', size: 1 }],
+      })
+    }))
+
+    const { result } = renderHook(() => useTaskArtifacts('t-live', true, undefined, 20), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(calls).toBeGreaterThan(1))
+    await waitFor(() => expect(result.current.data?.artifacts[0]?.filename).toBe('later.txt'))
+  })
+
   it('handles empty artifact response', async () => {
     server.use(http.get('/api/v1/tasks/t2/artifacts', () => HttpResponse.json({ artifacts: [] })))
     const { result } = renderHook(() => useTaskArtifacts('t2'), { wrapper: createWrapper() })

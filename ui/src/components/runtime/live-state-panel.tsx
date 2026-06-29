@@ -56,6 +56,8 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
   const ws = status?.executionWorkspace
   const sessionName = spec.sessionRef?.name
   const resultRef = status?.resultRef
+  const legacyResultAvailable = resultRef?.available === undefined && Boolean(resultRef?.configMapName || resultRef?.key)
+  const resultAvailable = resultRef?.available === true || legacyResultAvailable
   const labels = nonSecretEntries(metadata.labels)
   const annotations = nonSecretEntries(metadata.annotations)
   const wsPlacement = ws?.placement
@@ -134,7 +136,7 @@ export function LiveStatePanel({ task }: LiveStatePanelProps) {
 
         {resultRef && (
           <Section title="Result">
-            <Field label="Available" value={resultRef.available ? 'Yes' : 'No'} />
+            <Field label="Available" value={resultAvailable ? 'Yes' : 'No'} />
             {resultRef.configMapName && <Field label="ConfigMap" value={resultRef.configMapName} />}
             {resultRef.key && <Field label="Key" value={resultRef.key} />}
           </Section>

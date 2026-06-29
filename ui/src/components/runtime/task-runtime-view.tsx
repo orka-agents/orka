@@ -24,6 +24,8 @@ interface TaskRuntimeViewProps {
   forkSupported?: boolean
   /** Response-level latest seq (0 for an empty stream); pins fork afterSeq. */
   latestSeq?: number
+  /** Poll artifacts while a live task is being followed. */
+  artifactRefetchInterval?: number | false
 }
 
 /**
@@ -32,7 +34,7 @@ interface TaskRuntimeViewProps {
  * pure presentation — no duplicate fetches. Follow/pause is owned by the parent
  * so toggling it actually gates the parent's polling, not just the spotlight.
  */
-export function TaskRuntimeView({ task, events = [], trace, approvals, artifacts, streamStatus, following = true, onToggleFollow, forkSupported = true, latestSeq }: TaskRuntimeViewProps) {
+export function TaskRuntimeView({ task, events = [], trace, approvals, artifacts, streamStatus, following = true, onToggleFollow, forkSupported = true, latestSeq, artifactRefetchInterval = false }: TaskRuntimeViewProps) {
   const latestEvent = events[events.length - 1]
   // Prefer the response-level seq (0 for an empty stream) so fork afterSeq is
   // pinned even before any event arrives; fall back to the last event's seq.
@@ -48,7 +50,11 @@ export function TaskRuntimeView({ task, events = [], trace, approvals, artifacts
         </div>
         <div className="space-y-4">
           <ValidationSummary task={task} trace={trace} approvals={approvals} artifacts={artifacts} />
-          <TaskArtifactsPanel taskId={task.metadata.name} taskUid={task.metadata.uid} />
+          <TaskArtifactsPanel
+            taskId={task.metadata.name}
+            taskUid={task.metadata.uid}
+            refetchInterval={artifactRefetchInterval}
+          />
           <LiveStatePanel task={task} />
         </div>
       </div>

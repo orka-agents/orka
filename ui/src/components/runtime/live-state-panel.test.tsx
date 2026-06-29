@@ -48,6 +48,16 @@ describe('LiveStatePanel', () => {
     expect(screen.getByText('read-only')).toBeInTheDocument()
   })
 
+  it('treats legacy result references as available', () => {
+    render(<LiveStatePanel task={{
+      ...minimalTask,
+      status: { phase: 'Succeeded', resultRef: { configMapName: 'legacy-result', key: 'out' } },
+    }} />)
+    expect(screen.getByText('Available')).toBeInTheDocument()
+    expect(screen.getByText('Yes')).toBeInTheDocument()
+    expect(screen.getByText('legacy-result')).toBeInTheDocument()
+  })
+
   it('omits empty sections for a minimal task', () => {
     render(<LiveStatePanel task={minimalTask} />)
     expect(screen.getByText('Status')).toBeInTheDocument()

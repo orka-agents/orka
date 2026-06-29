@@ -48,6 +48,22 @@ describe('useTask', () => {
       status: { phase: 'Succeeded' },
     })
   })
+
+  it('uses the supplied refetch interval for task detail polling', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/poll-task', () => {
+      calls += 1
+      return HttpResponse.json({
+        metadata: { name: 'poll-task', namespace: 'default', uid: 'uid-poll' },
+        spec: { type: 'container', image: 'alpine' },
+        status: { phase: 'Running' },
+      })
+    }))
+
+    renderHook(() => useTask('poll-task', 20), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(calls).toBeGreaterThan(1))
+  })
 })
 
 describe('useTaskResult', () => {

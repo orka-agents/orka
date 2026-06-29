@@ -63,6 +63,18 @@ describe('RuntimeTimeline', () => {
     expect(screen.queryByText('task created')).not.toBeInTheDocument()
   })
 
+  it('keeps cached events visible when showing an event fetch failure', () => {
+    render(<RuntimeTimeline events={events} status="error" />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to load events')
+    expect(screen.getByText('task created')).toBeInTheDocument()
+  })
+
+  it('shows event fetch failures instead of the empty state', () => {
+    render(<RuntimeTimeline events={[]} status="error" />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Unable to load events')
+    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+  })
+
   it('shows stream complete marker', () => {
     render(<RuntimeTimeline events={events} status="complete" />)
     expect(screen.getByText('— stream complete —')).toBeInTheDocument()

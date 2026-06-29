@@ -17,12 +17,12 @@ export function useTaskList(limit = '25', refetchInterval: number | false = 1000
   })
 }
 
-export function useTask(id: string) {
+export function useTask(id: string, refetchInterval: number | false = 5000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['task', id, namespace],
     queryFn: () => api.get<Task>(`/tasks/${id}`, { namespace }),
-    refetchInterval: 5000,
+    refetchInterval,
   })
 }
 

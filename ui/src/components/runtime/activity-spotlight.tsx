@@ -29,9 +29,9 @@ export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpot
   const justUpdated = useFreshness(headline)
 
   useEffect(() => {
-    // Only tick for a live task with a clock: terminal tasks freeze at
-    // completionTime, and a startTime-less task renders "—".
-    if (!task || isTerminal(task.status?.phase) || elapsedSeconds(task, now) === null) return
+    // Only tick for a running task with a clock: terminal tasks freeze at
+    // completionTime, waiting tasks are not active, and startTime-less tasks render "—".
+    if (!task || task.status?.phase !== 'Running' || elapsedSeconds(task, now) === null) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -53,15 +53,17 @@ export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpot
 
   const agent = task.spec.agentRef?.name || UNASSIGNED_AGENT
   // For terminal tasks freeze the clock at completionTime (the run's duration);
-  // a live task ticks against now. Avoids labelling Succeeded/Failed as "Active"
-  // with an ever-growing timer when the runtime tab opens a completed task.
+  // a running task ticks against now. Pending/Scheduled tasks are waiting, not
+  // active, even when opened in the task detail Runtime tab.
   const terminal = isTerminal(task.status?.phase)
+  const running = task.status?.phase === 'Running'
   const endMs = terminal && task.status?.completionTime ? new Date(task.status.completionTime).getTime() : now
-  const elapsed = formatElapsed(elapsedSeconds(task, endMs))
-  const heading = terminal ? 'Last run' : 'Active now'
+  const elapsed = formatElapsed(running || terminal ? elapsedSeconds(task, endMs) : null)
+  const heading = terminal ? 'Last run' : running ? 'Active now' : 'Waiting'
+  const liveLabel = terminal ? 'Completed' : running ? (following ? 'Following live' : 'Paused') : 'Not running'
 
   return (
-    <Card className={cn('border-l-2', terminal ? 'border-l-transparent' : 'border-l-live', justUpdated && 'motion-safe:animate-freshness')}>
+    <Card className={cn('border-l-2', running ? 'border-l-live' : 'border-l-transparent', justUpdated && 'motion-safe:animate-freshness')}>
       <CardContent className="space-y-2 py-5">
         <div className="flex items-center justify-between gap-3">
           <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -72,10 +74,10 @@ export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpot
               aria-hidden="true"
               className={cn(
                 'inline-block size-2 shrink-0 rounded-full',
-                !terminal && following ? 'bg-status-running motion-safe:animate-pulse-live' : 'bg-muted-foreground',
+                running && following ? 'bg-status-running motion-safe:animate-pulse-live' : 'bg-muted-foreground',
               )}
             />
-            {terminal ? 'Completed' : following ? 'Following live' : 'Paused'}
+            {liveLabel}
           </span>
         </div>
         <div className="flex items-center justify-between gap-3">

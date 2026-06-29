@@ -40,7 +40,12 @@ export async function downloadTaskArtifact(taskId: string, filename: string, nam
 // List artifact metadata for a task. Backend returns { artifacts: [] }, and 501
 // when the artifact store is disabled — treat that as a stable "unsupported"
 // empty rather than retrying forever.
-export function useTaskArtifacts(taskId: string, enabled = true, taskUid?: string) {
+export function useTaskArtifacts(
+  taskId: string,
+  enabled = true,
+  taskUid?: string,
+  refetchInterval: number | false = false,
+) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['taskArtifacts', taskId, namespace, taskUid ?? ''],
@@ -51,5 +56,9 @@ export function useTaskArtifacts(taskId: string, enabled = true, taskUid?: strin
     enabled: enabled && !!taskId,
     retry: (failureCount, error) =>
       !(error instanceof ApiError && error.status === 501) && failureCount < 3,
+    refetchInterval: (query) =>
+      query.state.error instanceof ApiError && query.state.error.status === 501
+        ? false
+        : refetchInterval,
   })
 }

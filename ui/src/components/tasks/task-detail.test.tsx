@@ -157,6 +157,27 @@ describe('TaskDetail', () => {
     expect(screen.getByText('Derived checks')).toBeInTheDocument()
   })
 
+  it('surfaces task event fetch failures in the Runtime timeline', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    server.use(
+      http.get('/api/v1/tasks/:id/events', () =>
+        HttpResponse.json({ error: 'backend unavailable' }, { status: 500 }),
+      ),
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'event-error', namespace: 'default', uid: 'uid-event-error' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+
+    render(<TaskDetail taskId="event-error" />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to load events')
+    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+  })
+
   it('surfaces disabled execution-event storage in the Runtime timeline', async () => {
     mockSearch.current = { tab: 'runtime' }
     server.use(

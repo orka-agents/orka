@@ -42,6 +42,16 @@ describe('runtime-validation', () => {
     expect(checks.find((c) => c.id === 'result')?.status).toBe('pass')
   })
 
+  it('does not treat an empty resultRef as an available result', () => {
+    const checks = deriveRuntimeChecks({
+      task: { ...base, status: { phase: 'Succeeded', resultRef: {} } },
+      trace: trace({ task: { namespace: 'default', name: 't', resultAvailable: false } }),
+    })
+    const result = checks.find((c) => c.id === 'result')
+    expect(result?.status).toBe('warn')
+    expect(result?.reason).toBe('No result recorded')
+  })
+
   it('pending approval warns', () => {
     const checks = deriveRuntimeChecks({ task: base, approvals: [{ id: '1', action: 'x', status: 'pending', createdAt: '' }] })
     expect(checks.find((c) => c.id === 'approvals')?.status).toBe('warn')

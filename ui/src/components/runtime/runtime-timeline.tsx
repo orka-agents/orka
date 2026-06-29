@@ -79,25 +79,32 @@ export function RuntimeTimeline({
 
       {status === 'unsupported' ? (
         <p className="text-sm text-muted-foreground">Live stream not enabled</p>
-      ) : visible.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No events</p>
       ) : (
-        <ul className="space-y-px">
-          {visible.map((e) => (
-            <li
-              key={e.id}
-              className="flex items-baseline gap-2 px-1 py-0.5 text-xs"
-            >
-              <span className="w-10 shrink-0 text-right tabular-nums text-muted-foreground">
-                {e.seq}
-              </span>
-              <span className={cn('w-44 shrink-0 truncate font-mono', severityClass(e.severity))}>
-                {e.type}
-              </span>
-              <span className="truncate text-muted-foreground">{e.summary ?? ''}</span>
-            </li>
-          ))}
-        </ul>
+        <>
+          {status === 'error' && (
+            <p className="text-sm text-destructive" role="alert">Unable to load events</p>
+          )}
+          {visible.length > 0 ? (
+            <ul className="space-y-px">
+              {visible.map((e) => (
+                <li
+                  key={e.id}
+                  className="flex items-baseline gap-2 px-1 py-0.5 text-xs"
+                >
+                  <span className="w-10 shrink-0 text-right tabular-nums text-muted-foreground">
+                    {e.seq}
+                  </span>
+                  <span className={cn('w-44 shrink-0 truncate font-mono', severityClass(e.severity))}>
+                    {e.type}
+                  </span>
+                  <span className="truncate text-muted-foreground">{e.summary ?? ''}</span>
+                </li>
+              ))}
+            </ul>
+          ) : status !== 'error' ? (
+            <p className="text-sm text-muted-foreground">No events</p>
+          ) : null}
+        </>
       )}
 
       {status === 'complete' && (

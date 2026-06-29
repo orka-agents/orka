@@ -47,6 +47,14 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('—')).toBeInTheDocument()
   })
 
+  it('labels a pending task as waiting, not active', () => {
+    render(<ActivitySpotlight task={task('queued', { status: { phase: 'Pending' } })} following />)
+    expect(screen.getByText('Waiting')).toBeInTheDocument()
+    expect(screen.getByText('Not running')).toBeInTheDocument()
+    expect(screen.queryByText('Active now')).not.toBeInTheDocument()
+    expect(screen.queryByText('Following live')).not.toBeInTheDocument()
+  })
+
   it('labels a terminal task as completed, not active', () => {
     render(<ActivitySpotlight task={task('done', { status: { phase: 'Succeeded', startTime: new Date(0).toISOString(), completionTime: new Date(5000).toISOString() } })} following={false} />)
     expect(screen.getByText('Last run')).toBeInTheDocument()

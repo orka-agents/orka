@@ -38,14 +38,18 @@ function timeAgo(ts?: string): string {
 
 export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
-  const { data: task, isLoading } = useTask(taskId)
-  const { data: taskEventsResponse, error: taskEventsError } = useTaskEvents(
+  const { data: task, isLoading } = useTask(taskId, following ? 5000 : false)
+  const { data: taskEventsResponse, error: taskEventsError, failureReason: taskEventsFailureReason } = useTaskEvents(
     taskId,
     following ? 5000 : false,
     task?.metadata.uid,
   )
   // Fork and the runtime timeline need execution-event storage; a 501 means it's off.
-  const taskEventsUnsupported = taskEventsError instanceof ApiError && taskEventsError.status === 501
+  // While retries are pending, failureReason carries the current fetch failure.
+  const taskEventsIssue = taskEventsError ?? taskEventsFailureReason
+  const taskEventsUnsupported = taskEventsIssue instanceof ApiError && taskEventsIssue.status === 501
+  const taskEventsFailed = Boolean(taskEventsIssue) && !taskEventsUnsupported
+  const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
   const forkSupported = !taskEventsUnsupported
   const taskEvents = taskEventsResponse?.events ?? []
   const deleteTask = useDeleteTask()
@@ -76,11 +80,31 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const runtimeActive = activeTab === 'runtime'
   const taskRunning = task?.status?.phase === 'Running'
   const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
-  const { data: trace } = useTaskTrace(taskId, runtimeActive, task?.metadata.uid)
+  const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
+  const { data: trace } = useTaskTrace(
+    taskId,
+    runtimeActive,
+    task?.metadata.uid,
+    traceRefetchInterval,
+  )
   // Poll approvals while live so a new blocking approval surfaces in the runtime
   // health panel; stops once terminal (matches TaskApprovalPanel semantics).
-  const { data: approvalsResp } = useTaskApprovals(taskId, runtimeActive, 5000, taskRunning, taskTerminal, task?.metadata.uid)
-  const { data: artifactsResp } = useTaskArtifacts(taskId, runtimeActive, task?.metadata.uid)
+  const approvalRefetchInterval = following ? 5000 : undefined
+  const { data: approvalsResp } = useTaskApprovals(
+    taskId,
+    runtimeActive,
+    approvalRefetchInterval,
+    taskRunning,
+    taskTerminal,
+    task?.metadata.uid,
+  )
+  const artifactRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
+  const { data: artifactsResp } = useTaskArtifacts(
+    taskId,
+    runtimeActive,
+    task?.metadata.uid,
+    artifactRefetchInterval,
+  )
 
   if (isLoading) {
     return (
@@ -171,8 +195,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             following={following}
             onToggleFollow={() => setFollowing((f) => !f)}
             forkSupported={forkSupported}
-            streamStatus={taskEventsUnsupported ? 'unsupported' : undefined}
+            streamStatus={taskEventsStreamStatus}
             latestSeq={taskEventsResponse?.latestSeq}
+            artifactRefetchInterval={artifactRefetchInterval}
           />
         </TabsContent>
 

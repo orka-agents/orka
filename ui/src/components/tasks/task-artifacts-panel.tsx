@@ -18,9 +18,17 @@ function formatSize(size?: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function TaskArtifactsPanel({ taskId, taskUid }: { taskId: string; taskUid?: string }) {
+export function TaskArtifactsPanel({
+  taskId,
+  taskUid,
+  refetchInterval = false,
+}: {
+  taskId: string
+  taskUid?: string
+  refetchInterval?: number | false
+}) {
   const namespace = useUIStore((s) => s.namespace)
-  const { data, isLoading, error } = useTaskArtifacts(taskId, true, taskUid)
+  const { data, isLoading, error } = useTaskArtifacts(taskId, true, taskUid, refetchInterval)
   const artifacts = data?.artifacts ?? []
   // 501 = artifact store disabled (a normal empty), anything else is a real
   // failure that must not be silently shown as "No artifacts".
