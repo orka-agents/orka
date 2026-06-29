@@ -317,6 +317,27 @@ type RepositoryMonitorIssueImplementationSpec struct {
 	// BranchPrefix is the branch prefix for implementation push branches. Defaults to orka/issue.
 	// +optional
 	BranchPrefix string `json:"branchPrefix,omitempty"`
+
+	// MaxActive bounds concurrently active issue implementation/mutation jobs per monitor. Defaults to 2.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxActive *int32 `json:"maxActive,omitempty"`
+
+	// MaxAttemptsPerIssue bounds implementation attempts for one issue. Defaults to 2.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxAttemptsPerIssue *int32 `json:"maxAttemptsPerIssue,omitempty"`
+
+	// MaxChangedFiles bounds changed files in an implementation patch. Defaults to 12.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxChangedFiles *int32 `json:"maxChangedFiles,omitempty"`
+
+	// AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+	// Examples: api/**, internal/**, docs/**.
+	// +listType=set
+	// +optional
+	AllowedPaths []string `json:"allowedPaths,omitempty"`
 }
 
 // RepositoryMonitorReviewSpec configures review behavior.

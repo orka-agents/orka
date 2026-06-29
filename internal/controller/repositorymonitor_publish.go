@@ -255,8 +255,10 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		Comments: comments,
 	})
 	if err != nil {
+		_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review-failed"), RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", Status: "failed", Error: err.Error()})
 		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "create_review"})
 	}
+	_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review"), RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", GitHubURL: response.HTMLURL, ExternalID: strconv.FormatInt(response.ID, 10), Status: "succeeded"})
 	publishRecord.Phase = repositoryMonitorPublishPhaseSucceeded
 	publishRecord.GitHubReviewID = strconv.FormatInt(response.ID, 10)
 	publishRecord.GitHubReviewURL = response.HTMLURL

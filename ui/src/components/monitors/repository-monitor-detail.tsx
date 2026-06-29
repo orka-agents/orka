@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
-import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorItems, useRepositoryMonitorRuns, useRunRepositoryMonitor } from '@/hooks/use-monitors'
+import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 
 function shortSHA(value?: string) {
@@ -39,6 +39,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
   const issueItems = useRepositoryMonitorItems(monitorName, 'issue')
   const actions = useRepositoryMonitorActions(monitorName)
   const commands = useRepositoryMonitorCommands(monitorName)
+  const workActions = useRepositoryMonitorWorkActions(monitorName)
+  const implementationJobs = useRepositoryMonitorImplementationJobs(monitorName)
+  const mutations = useRepositoryMonitorMutations(monitorName)
   const runMonitor = useRunRepositoryMonitor(monitorName)
   const createCommand = useCreateRepositoryMonitorCommand(monitorName)
 
@@ -246,6 +249,81 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       {command.kind} #{command.number} · {command.intent || command.label} · {formatTime(command.createdAt)}
                     </div>
                     {command.error ? <div className="mt-1 text-xs text-destructive">{command.error}</div> : null}
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Workflow Timeline</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(workActions.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No workflow actions queued yet.</div>
+              ) : (
+                (workActions.data?.items ?? []).slice(0, 10).map((action) => (
+                  <div key={action.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{action.id}</span>
+                      <Badge variant={action.status === 'blocked' || action.status === 'failed' || action.status === 'cancelled' ? 'destructive' : action.status === 'succeeded' ? 'default' : 'secondary'}>{action.status}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {action.targetKind} #{action.targetNumber} · {action.desiredAction || action.intent} · {action.phase || 'queued'} · {formatTime(action.updatedAt)}
+                    </div>
+                    {action.taskName ? <div className="mt-1 font-mono text-xs">Task: {action.taskName}</div> : null}
+                    {action.blockedReason || action.error ? (
+                      <div className="mt-2 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">Why blocked: {action.blockedReason || action.error}</div>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Implementation Jobs</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(implementationJobs.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No implementation jobs yet.</div>
+              ) : (
+                (implementationJobs.data?.items ?? []).slice(0, 8).map((job) => (
+                  <div key={job.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{job.id}</span>
+                      <Badge variant={job.phase === 'blocked' || job.error ? 'destructive' : job.phase === 'pr_opened' ? 'default' : 'secondary'}>{job.phase || 'unknown'}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">Issue #{job.issueNumber} · attempt {job.attempt ?? 0} · validation {job.validationState || 'pending'}</div>
+                    {job.branch ? <div className="mt-1 font-mono text-xs">Branch: {job.branch}</div> : null}
+                    {job.patchArtifactID ? <div className="mt-1 font-mono text-xs">Patch: {job.patchArtifactID}</div> : null}
+                    {job.prNumber ? <div className="mt-1 text-xs">Linked PR #{job.prNumber}</div> : null}
+                    {job.error ? <div className="mt-1 text-xs text-destructive">{job.error}</div> : null}
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>GitHub Mutations</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(mutations.data?.items ?? []).length === 0 ? (
+                <div className="py-8 text-center text-sm text-muted-foreground">No GitHub mutations recorded yet.</div>
+              ) : (
+                (mutations.data?.items ?? []).slice(0, 8).map((mutation) => (
+                  <div key={mutation.id} className="rounded-md border px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{mutation.operation}</span>
+                      <Badge variant={mutation.status === 'failed' ? 'destructive' : mutation.status === 'succeeded' ? 'default' : 'secondary'}>{mutation.status || 'recorded'}</Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">{mutation.targetKind} #{mutation.targetNumber} · {mutation.reason || 'mutation'} · {formatTime(mutation.createdAt)}</div>
+                    {mutation.githubURL ? <div className="mt-1 truncate text-xs">{mutation.githubURL}</div> : null}
+                    {mutation.error ? <div className="mt-1 text-xs text-destructive">{mutation.error}</div> : null}
                   </div>
                 ))
               )}

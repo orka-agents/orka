@@ -12,13 +12,13 @@ Create these Secrets outside git:
 
 ```bash
 kubectl create secret generic git-credentials \
-  --from-literal=token='<github-token>'
+  --from-literal='token=<github-token>'
 
 kubectl create secret generic codex-runtime-credentials \
-  --from-literal=OPENAI_API_KEY='<openai-api-key>'
+  --from-literal='OPENAI_API_KEY=<openai-api-key>'
 
 kubectl create secret generic claude-runtime-credentials \
-  --from-literal=ANTHROPIC_API_KEY='<anthropic-api-key>'
+  --from-literal='ANTHROPIC_API_KEY=<anthropic-api-key>'
 ```
 
 Configure your GitHub webhook to send `issues` and `pull_request` events to `/webhooks/github` with the controller webhook secret.

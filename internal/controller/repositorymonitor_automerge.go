@@ -56,6 +56,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 	method := repositoryMonitorAutomergeMethod(monitor)
 	sha, err := r.mergeRepositoryMonitorPullRequest(ctx, monitor, owner, repository, pr.Number, method, pr.HeadSHA)
 	if err != nil {
+		_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge-failed"), RunID: run.ID, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Reason: "automerge", Status: "failed", Error: err.Error()})
 		item.AutomergeState = repositoryMonitorAutomergeStateFailed
 		item.SkipReason = "automerge_failed"
 		if updateErr := r.Store.UpsertMonitorItem(ctx, item); updateErr != nil {
@@ -63,6 +64,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestAutomergeCommand(ctx 
 		}
 		return true, r.createRepositoryMonitorAutomergeRecord(ctx, monitor, command, item, repositoryMonitorAutomergeStateFailed, err.Error(), map[string]any{"mergeMethod": method, "error": err.Error()})
 	}
+	_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge"), RunID: run.ID, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Reason: "automerge", ExternalID: sha, Status: "succeeded"})
 	item.AutomergeState = repositoryMonitorAutomergeStateMerged
 	item.SkipReason = ""
 	item.State = "merged"
@@ -89,11 +91,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, repositoryMonitorSkipReasonBlockedLabel
 	case item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA:
 		return repositoryMonitorIssuePhaseBlocked, "orka_review_not_passed"
-	case item.RepairState != "":
+	case repositoryMonitorAutomergeRepairStateBlocks(item.RepairState):
 		return repositoryMonitorIssuePhaseBlocked, "active_or_failed_repair_state"
 	case strings.TrimSpace(pr.MergeableState) == "" || strings.EqualFold(pr.MergeableState, "unknown"):
 		return repositoryMonitorIssuePhaseBlocked, "mergeability_pending"
-	case !strings.EqualFold(pr.MergeableState, "clean"):
+	case !repositoryMonitorAutomergeMergeableStateCanCheckCI(pr.MergeableState):
 		return repositoryMonitorIssuePhaseBlocked, "pull_request_not_mergeable"
 	}
 	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
@@ -104,6 +106,24 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomergeGate(ctx context
 		return repositoryMonitorIssuePhaseBlocked, ci.reason
 	}
 	return repositoryMonitorIssueVerdictReady, ""
+}
+
+func repositoryMonitorAutomergeMergeableStateCanCheckCI(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "clean", "unstable":
+		return true
+	default:
+		return false
+	}
+}
+
+func repositoryMonitorAutomergeRepairStateBlocks(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "", repositoryMonitorRepairPhaseSucceeded:
+		return false
+	default:
+		return true
+	}
 }
 
 func repositoryMonitorAutomergeRequiresGlobalGate(monitor *corev1alpha1.RepositoryMonitor) bool {
@@ -119,7 +139,18 @@ func repositoryMonitorAutomergeActorAllowed(monitor *corev1alpha1.RepositoryMoni
 	if len(policy) > 0 && !repositoryMonitorAutomergePermissionInList(permission, policy) {
 		return false
 	}
-	return repositoryMonitorAutomergePermissionInList(permission, []string{"maintain", "admin"})
+	return repositoryMonitorAutomergePermissionInList(permission, repositoryMonitorAutomergePermissionsAtLeast(monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission))
+}
+
+func repositoryMonitorAutomergePermissionsAtLeast(minimum string) []string {
+	switch strings.ToLower(strings.TrimSpace(minimum)) {
+	case "admin":
+		return []string{"admin"}
+	case "maintain":
+		return []string{"maintain", "admin"}
+	default:
+		return []string{"write", "maintain", "admin"}
+	}
 }
 
 func repositoryMonitorAutomergePermissionInList(permission string, allowed []string) bool {
@@ -216,10 +247,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if err != nil {
 		return repositoryMonitorCIResult{}, err
 	}
-	if status.reason != "ci_checks_missing" {
-		return status, nil
+	if status.reason == "ci_checks_missing" {
+		return repositoryMonitorCIResult{passed: true}, nil
 	}
-	return repositoryMonitorCIResult{passed: true}, nil
+	return status, nil
 }
 
 func repositoryMonitorCheckRunConclusionPassing(conclusion string) bool {
@@ -351,5 +382,13 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorAutomergeRecord(ctx
 	if err := r.Store.CreateActionRecord(ctx, record); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {
 		return err
 	}
-	return nil
+	status := repositoryMonitorWorkActionStatusSucceeded
+	switch verdict {
+	case repositoryMonitorAutomergeStateBlocked, repositoryMonitorAutomergeStateFailed:
+		status = repositoryMonitorWorkActionStatusBlocked
+	case repositoryMonitorAutomergeStateStarted, repositoryMonitorAutomergeStatePending:
+		status = repositoryMonitorWorkActionStatusRunning
+	}
+	workReason := strings.TrimSpace(summary)
+	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, repositoryMonitorPullRequestKind, item.Number, command.HeadSHA, "", repositoryMonitorActionAutomerge, status, verdict, "", workReason)
 }

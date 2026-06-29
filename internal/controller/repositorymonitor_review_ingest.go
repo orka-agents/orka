@@ -121,6 +121,9 @@ func repositoryMonitorReviewTaskTerminal(phase corev1alpha1.TaskPhase) bool {
 
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task) (bool, error) {
 	recordID := repositoryMonitorReviewRecordID(task)
+	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], "review"); err != nil || cancelled {
+		return false, err
+	}
 	if err := validateRepositoryMonitorReviewTaskItemBinding(task, monitor, repositoryMonitorPullRequestKind, item.Number); err != nil {
 		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonTaskMismatch, err.Error())
 	}
@@ -191,6 +194,15 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}
 	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, reason); err != nil {
 		return false, err
+	}
+	if commandID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationCommandID]); commandID != "" {
+		status := repositoryMonitorWorkActionStatusSucceeded
+		if reason != "" || record.Verdict == repositoryMonitorReviewVerdictFailed {
+			status = repositoryMonitorWorkActionStatusBlocked
+		}
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: "review"}, repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "", "pr_review", status, record.Verdict, task.Name, reason); err != nil {
+			return false, err
+		}
 	}
 	if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "review_result_ingested", fmt.Sprintf("Pull request #%d review result ingested", item.Number), map[string]any{
 		"reviewID":   record.ID,
@@ -357,6 +369,9 @@ func repositoryMonitorReviewFindingsJSON(findings []repositoryMonitorReviewFindi
 }
 
 func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, recordID, verdict, reason, summary string) (bool, error) {
+	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], "review"); err != nil || cancelled {
+		return false, err
+	}
 	summary = strings.TrimSpace(summary)
 	if summary == "" {
 		summary = reason
@@ -382,6 +397,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, reason); err != nil {
 		return false, err
 	}
+	if commandID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationCommandID]); commandID != "" {
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: "review"}, repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, record.Verdict, task.Name, reason); err != nil {
+			return false, err
+		}
+	}
 	if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, "review_result_rejected", fmt.Sprintf("Pull request #%d review result rejected: %s", item.Number, reason), map[string]any{
 		"reviewID": record.ID,
 		"taskName": task.Name,
@@ -397,6 +417,9 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 }
 
 func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, task *corev1alpha1.Task) (bool, error) {
+	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], "review"); err != nil || cancelled {
+		return false, err
+	}
 	if item.LastReviewID != task.Name || item.LastVerdict != repositoryMonitorRunPhaseQueued {
 		return false, nil
 	}

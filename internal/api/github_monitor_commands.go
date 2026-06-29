@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
 )
@@ -30,6 +31,8 @@ const (
 	commandIntentStop         = finishReasonStop
 	commandIntentResume       = "resume"
 	commandIntentApprovePlan  = "approve_plan"
+	commandIntentDecompose    = "decompose"
+	commandIntentPlan         = "plan"
 	commandIntentFixCI        = "fix_ci"
 	commandIntentUpdateBranch = "update_branch"
 )
@@ -49,7 +52,7 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
 		intent, ok := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name)
-		if !ok || !repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target) {
+		if !ok || !repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {
 			continue
 		}
 		result.Matched++
@@ -78,12 +81,15 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 	return result, result.Matched > 0, nil
 }
 
-func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
+func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, intent string) bool {
 	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !monitor.Spec.Triggers.GitHub.Labels.Enabled {
 		return false
 	}
 	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)
 	if err != nil || !strings.EqualFold(strings.TrimSpace(repo.FullName), owner+"/"+repository) {
+		return false
+	}
+	if strings.TrimSpace(target.State) != "" && !strings.EqualFold(strings.TrimSpace(target.State), "open") {
 		return false
 	}
 	if target.IsPR {
@@ -93,12 +99,12 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 		if target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
 			return false
 		}
-		return target.BaseBranch == "" || strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor))
+		return target.BaseBranch == "" || strings.TrimSpace(target.BaseBranch) == effectiveRepositoryMonitorBranch(monitor)
 	}
 	if target.Kind != repositoryMonitorTargetKindIssue || !monitor.Spec.Targets.Issues.Enabled {
 		return false
 	}
-	return repositoryMonitorWebhookIssueTargetLabelsAllowed(monitor.Spec, target.Labels)
+	return repositoryMonitorControlCommandIntent(intent) || repositoryMonitorCommandGuardLabel(monitor, target.Labels) != "" || repositoryMonitorWebhookIssueTargetLabelsAllowed(monitor.Spec, target.Labels)
 }
 
 func repositoryMonitorWebhookIssueTargetLabelsAllowed(spec corev1alpha1.RepositoryMonitorSpec, labels []string) bool {
@@ -174,7 +180,7 @@ func repositoryMonitorDefaultCommandLabel(intent string) string {
 		return "orka:fix-ci"
 	case commandIntentUpdateBranch:
 		return "orka:update-branch"
-	case "decompose":
+	case commandIntentDecompose:
 		return "orka:to-issues"
 	default:
 		return "orka:" + strings.ReplaceAll(intent, "_", "-")
@@ -195,12 +201,14 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 	if permissionErr != nil {
 		return nil, false, fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("failed to verify GitHub actor permission: %v", permissionErr))
 	}
-	if !repositoryMonitorPermissionAllowed(monitor, permission) {
+	if !repositoryMonitorPermissionAllowedForIntent(monitor, permission, intent) {
 		status = githubCommandStatusRejected
 		errorMessage = fmt.Sprintf("sender %q has GitHub permission %q, which is not allowed for RepositoryMonitor commands", payload.Sender.Login, permission)
-	} else if guard := repositoryMonitorCommandGuardLabel(monitor, target.Labels); guard != "" {
-		status = githubCommandStatusBlocked
-		errorMessage = fmt.Sprintf("target has guard label %q", guard)
+	} else if !repositoryMonitorControlCommandIntent(intent) {
+		if guard := repositoryMonitorCommandGuardLabel(monitor, target.Labels); guard != "" {
+			status = githubCommandStatusBlocked
+			errorMessage = fmt.Sprintf("target has guard label %q", guard)
+		}
 	}
 
 	processedAt := time.Now()
@@ -235,10 +243,38 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 		}
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command: %v", err))
 	}
-	if command.Status == githubCommandStatusAccepted && monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+	metrics.RecordRepositoryMonitorCommand(command.Intent, command.Status)
+	consumeAcceptedCommandLabel := command.Status == githubCommandStatusAccepted && monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels
+	if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, ""); err != nil {
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor workflow action: %v", err))
+	}
+	if consumeAcceptedCommandLabel {
 		if err := h.consumeRepositoryMonitorCommandLabel(c.Context(), monitor, payload.Repository, target, payload.Label.Name); err != nil {
+			_ = h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, &store.GitHubMutationRecord{
+				ID:             "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label|failed"))),
+				CommandEventID: command.ID,
+				Operation:      "remove_label",
+				TargetKind:     target.Kind,
+				TargetNumber:   int64(target.Number),
+				TargetSHA:      target.HeadSHA,
+				Reason:         "consume_command_label",
+				Status:         "failed",
+				Error:          err.Error(),
+			})
 			command.Error = fmt.Sprintf("accepted, but failed to consume command label: %v", err)
 			_ = h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command)
+		} else {
+			_ = h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, &store.GitHubMutationRecord{
+				ID:             "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label|succeeded"))),
+				CommandEventID: command.ID,
+				Operation:      "remove_label",
+				TargetKind:     target.Kind,
+				TargetNumber:   int64(target.Number),
+				TargetSHA:      target.HeadSHA,
+				Reason:         "consume_command_label",
+				RequestDigest:  "sha256:" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(payload.Label.Name))),
+				Status:         "succeeded",
+			})
 		}
 	}
 	return command, false, nil
@@ -300,8 +336,31 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 		Phase:            repositoryMonitorRunPhaseQueued,
 		StartedAt:        time.Now(),
 	}
+	if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, run.ID); err != nil {
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to link monitor workflow action to run: %v", err))
+	}
+	if command.Status != githubCommandStatusAccepted {
+		return run, false, nil
+	}
 	if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err != nil {
 		if existing, getErr := h.repositoryMonitorStore.GetMonitorRun(c.Context(), run.MonitorNamespace, run.ID); getErr == nil {
+			if existing.Phase == repositoryMonitorRunPhaseFailed && strings.Contains(existing.Error, "failed to signal repository monitor run") {
+				existing.Phase = repositoryMonitorRunPhaseQueued
+				existing.StartedAt = time.Now()
+				existing.CompletedAt = nil
+				existing.Error = ""
+				if updateErr := h.repositoryMonitorStore.UpdateMonitorRun(c.Context(), existing); updateErr != nil {
+					return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to reset repository monitor command run: %v", updateErr))
+				}
+				if err := h.annotateRepositoryMonitorRunRequest(c, monitor, existing); err != nil {
+					_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, existing.ID, err)
+					if failErr := h.markRepositoryMonitorRunSignalFailed(c, existing, err); failErr != nil {
+						return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
+					}
+					return nil, false, err
+				}
+				return existing, true, nil
+			}
 			return existing, false, nil
 		}
 		if errors.Is(err, store.ErrConflict) {
@@ -310,6 +369,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor command run: %v", err))
 	}
 	if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
+		_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, run.ID, err)
 		if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
 			return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
 		}
@@ -377,14 +437,25 @@ func (h *Handlers) repositoryMonitorCommandActorPermission(ctx context.Context, 
 	}
 	var parsed struct {
 		Permission string `json:"permission"`
+		RoleName   string `json:"role_name"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return "", fmt.Errorf("failed to parse GitHub permission response: %w", err)
 	}
-	if strings.TrimSpace(parsed.Permission) == "" {
+	permission := firstNonEmptyGitHubPermission(parsed.RoleName, parsed.Permission)
+	if strings.TrimSpace(permission) == "" {
 		return "", fmt.Errorf("GitHub permission response did not include permission")
 	}
-	return strings.ToLower(strings.TrimSpace(parsed.Permission)), nil
+	return strings.ToLower(strings.TrimSpace(permission)), nil
+}
+
+func firstNonEmptyGitHubPermission(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (h *Handlers) repositoryMonitorGitHubToken(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, error) {
@@ -404,6 +475,39 @@ func (h *Handlers) repositoryMonitorGitHubToken(ctx context.Context, monitor *co
 		}
 	}
 	return "", fmt.Errorf("spec.gitSecretRef %q must contain a token, password, or %s key", monitor.Spec.GitSecretRef.Name, workerenv.GitHubToken)
+}
+
+func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.RepositoryMonitor, permission, intent string) bool {
+	if strings.TrimSpace(intent) == githubActionReview && monitor != nil && monitor.Spec.Review.Publish.Enabled {
+		return repositoryMonitorPermissionAllowed(monitor, permission)
+	}
+	if !repositoryMonitorReadOnlyCommandIntent(intent) {
+		return repositoryMonitorPermissionAllowed(monitor, permission)
+	}
+	permission = strings.ToLower(strings.TrimSpace(permission))
+	if !repositoryMonitorPermissionInList(permission, []string{"triage", "write", "maintain", "admin"}) {
+		return false
+	}
+	policyAllowed := monitor.Spec.Policy.AllowedRepositoryPermissions
+	return len(policyAllowed) == 0 || repositoryMonitorPermissionInList(permission, policyAllowed)
+}
+
+func repositoryMonitorControlCommandIntent(intent string) bool {
+	switch strings.TrimSpace(intent) {
+	case commandIntentStop:
+		return true
+	default:
+		return false
+	}
+}
+
+func repositoryMonitorReadOnlyCommandIntent(intent string) bool {
+	switch strings.TrimSpace(intent) {
+	case "triage", "research", commandIntentPlan, "review":
+		return true
+	default:
+		return false
+	}
 }
 
 func repositoryMonitorPermissionAllowed(monitor *corev1alpha1.RepositoryMonitor, permission string) bool {
@@ -495,3 +599,159 @@ func slicesSortStringsFold(values []string) {
 }
 
 func osGetenv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+
+func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string) error {
+	if monitor == nil || command == nil || h.repositoryMonitorStore == nil {
+		return nil
+	}
+	desiredAction := store.RepositoryMonitorDesiredActionForIntent(command.Intent)
+	if desiredAction == "" {
+		return nil
+	}
+	var status string
+	phase := desiredAction + "_queued"
+	blockedReason := ""
+	switch command.Status {
+	case githubCommandStatusRejected:
+		status = repositoryMonitorRunPhaseFailed
+		phase = "rejected"
+		blockedReason = command.Error
+	case githubCommandStatusBlocked:
+		status = githubCommandStatusBlocked
+		phase = githubCommandStatusBlocked
+		blockedReason = command.Error
+	case githubCommandStatusAccepted, "":
+		status = repositoryMonitorRunPhaseQueued
+	default:
+		status = command.Status
+	}
+	var completedAt *time.Time
+	switch status {
+	case repositoryMonitorRunPhaseFailed, githubCommandStatusBlocked, githubCommandStatusCompleted:
+		now := time.Now()
+		completedAt = &now
+	}
+	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
+	if existing, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
+		if existing.Status == "cancelled" && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
+			return nil
+		}
+		if runID != "" && existing.RunID == "" {
+			existing.RunID = runID
+		}
+		if status == repositoryMonitorRunPhaseQueued && existing.Status == repositoryMonitorRunPhaseFailed && existing.BlockedReason == "run_signal_failed" {
+			existing.Status = repositoryMonitorRunPhaseQueued
+			existing.Phase = phase
+			existing.BlockedReason = ""
+			existing.Error = ""
+			existing.CompletedAt = nil
+		}
+		if existing.Status == "queued" && status != "queued" {
+			existing.Status = status
+			existing.Phase = phase
+			existing.BlockedReason = blockedReason
+		}
+		metrics.RecordRepositoryMonitorWorkAction(existing.DesiredAction, existing.Status)
+		return h.repositoryMonitorStore.UpdateWorkAction(ctx, existing)
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	dedupe := store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, desiredAction)
+	if command.Status == githubCommandStatusAccepted && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
+		active, _, err := h.repositoryMonitorStore.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, DedupeKey: dedupe, Limit: 5})
+		if err != nil {
+			return err
+		}
+		for _, candidate := range active {
+			switch candidate.Status {
+			case repositoryMonitorRunPhaseQueued, "leased", "running":
+				command.Status = githubCommandStatusCompleted
+				command.Error = "coalesced with active workflow action " + candidate.ID
+				_ = h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
+				return nil
+			}
+		}
+	}
+	metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID})
+	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
+	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, &store.WorkAction{
+		ID:                   id,
+		MonitorNamespace:     monitor.Namespace,
+		MonitorName:          monitor.Name,
+		RunID:                runID,
+		CommandEventID:       command.ID,
+		MonitorGeneration:    monitor.Generation,
+		TargetKind:           command.Kind,
+		TargetNumber:         command.Number,
+		TargetSHA:            command.HeadSHA,
+		TargetSnapshotDigest: command.IssueSnapshotDigest,
+		Intent:               command.Intent,
+		DesiredAction:        desiredAction,
+		DedupeKey:            dedupe,
+		IdempotencyKey:       command.IdempotencyKey,
+		Status:               status,
+		Phase:                phase,
+		BlockedReason:        blockedReason,
+		MetadataJSON:         string(metadata),
+		CreatedAt:            command.CreatedAt,
+		CompletedAt:          completedAt,
+	}); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "constraint") {
+			command.Status = githubCommandStatusCompleted
+			command.Error = "coalesced with active workflow action"
+			_ = h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *Handlers) failRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string, cause error) error {
+	if monitor == nil || command == nil || h.repositoryMonitorStore == nil || cause == nil {
+		return nil
+	}
+	desiredAction := store.RepositoryMonitorDesiredActionForIntent(command.Intent)
+	if desiredAction == "" {
+		return nil
+	}
+	action, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, desiredAction))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	now := time.Now()
+	action.Status = repositoryMonitorRunPhaseFailed
+	action.Phase = repositoryMonitorRunPhaseFailed
+	action.RunID = runID
+	action.Error = cause.Error()
+	action.BlockedReason = "run_signal_failed"
+	action.CompletedAt = &now
+	return h.repositoryMonitorStore.UpdateWorkAction(ctx, action)
+}
+
+func (h *Handlers) recordRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {
+	if monitor == nil || record == nil || h.repositoryMonitorStore == nil {
+		return nil
+	}
+	if record.ID == "" {
+		sum := sha256.Sum256([]byte(record.Operation + "|" + record.TargetKind + "|" + fmt.Sprint(record.TargetNumber) + "|" + record.TargetSHA + "|" + record.Reason + "|" + record.GitHubURL))
+		record.ID = "ghmut-" + hex.EncodeToString(sum[:])[:16]
+	}
+	record.MonitorNamespace = monitor.Namespace
+	record.MonitorName = monitor.Name
+	record.MonitorGeneration = monitor.Generation
+	if record.Actor == "" {
+		record.Actor = "orka-controller"
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+	if err := h.repositoryMonitorStore.CreateGitHubMutationRecord(ctx, record); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {
+		return err
+	}
+	metrics.RecordRepositoryMonitorGitHubMutation(record.Operation, record.Status)
+	return nil
+}

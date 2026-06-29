@@ -192,10 +192,13 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 	for _, stmt := range []string{
 		`DELETE FROM monitor_runs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_items WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM work_actions WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM action_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM review_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM review_publish_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM command_events WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM implementation_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
+		`DELETE FROM github_mutation_records WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM repair_jobs WHERE monitor_namespace = ? AND monitor_name = ?`,
 		`DELETE FROM monitor_events WHERE monitor_namespace = ? AND monitor_name = ?`,
 	} {
@@ -500,6 +503,10 @@ func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFi
 	if filter.Kind != "" {
 		query.WriteString(" AND kind = ?")
 		args = append(args, filter.Kind)
+	}
+	if filter.Number != 0 {
+		query.WriteString(" AND number = ?")
+		args = append(args, filter.Number)
 	}
 	if filter.State != "" {
 		query.WriteString(" AND state = ?")
@@ -1238,4 +1245,508 @@ func (s *Store) ListMonitorEvents(ctx context.Context, filter store.MonitorEvent
 		return nil, "", err
 	}
 	return events, nextOffsetCursor(offset, len(events), limit), nil
+}
+
+// CreateWorkAction inserts a durable workflow action.
+func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	if action == nil {
+		return store.ValidationErrorf("work action is required")
+	}
+	if action.ID == "" || action.MonitorNamespace == "" || action.MonitorName == "" || action.Status == "" {
+		return store.ValidationErrorf("work action id, monitor namespace, monitor name, and status are required")
+	}
+	now := time.Now()
+	if action.CreatedAt.IsZero() {
+		action.CreatedAt = now
+	}
+	action.UpdatedAt = now
+	if action.MetadataJSON == "" {
+		action.MetadataJSON = "{}"
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO work_actions
+		 (id, monitor_namespace, monitor_name, run_id, command_event_id, monitor_generation,
+		  target_kind, target_number, target_sha, target_snapshot_digest, intent, desired_action,
+		  depends_on_action_id, dedupe_key, idempotency_key, status, phase, attempt,
+		  lease_owner, lease_expires_at, task_name, blocked_reason, error, artifact_ids,
+		  payload_digest, metadata_json, created_at, updated_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		action.ID, action.MonitorNamespace, action.MonitorName, action.RunID, action.CommandEventID,
+		action.MonitorGeneration, action.TargetKind, action.TargetNumber, action.TargetSHA,
+		action.TargetSnapshotDigest, action.Intent, action.DesiredAction, action.DependsOnActionID,
+		action.DedupeKey, action.IdempotencyKey, action.Status, action.Phase, action.Attempt,
+		action.LeaseOwner, action.LeaseExpiresAt, action.TaskName, action.BlockedReason, action.Error,
+		action.ArtifactIDs, action.PayloadDigest, action.MetadataJSON, action.CreatedAt, action.UpdatedAt,
+		action.CompletedAt,
+	)
+	return err
+}
+
+// UpdateWorkAction updates durable workflow action state.
+func (s *Store) UpdateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	if action == nil {
+		return store.ValidationErrorf("work action is required")
+	}
+	action.UpdatedAt = time.Now()
+	if action.MetadataJSON == "" {
+		action.MetadataJSON = "{}"
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE work_actions SET run_id = ?, command_event_id = ?, monitor_generation = ?,
+		 target_kind = ?, target_number = ?, target_sha = ?, target_snapshot_digest = ?, intent = ?,
+		 desired_action = ?, depends_on_action_id = ?, dedupe_key = ?, idempotency_key = ?, status = ?,
+		 phase = ?, attempt = ?, lease_owner = ?, lease_expires_at = ?, task_name = ?, blocked_reason = ?,
+		 error = ?, artifact_ids = ?, payload_digest = ?, metadata_json = ?, updated_at = ?, completed_at = ?
+		 WHERE monitor_namespace = ? AND id = ?`,
+		action.RunID, action.CommandEventID, action.MonitorGeneration, action.TargetKind, action.TargetNumber,
+		action.TargetSHA, action.TargetSnapshotDigest, action.Intent, action.DesiredAction,
+		action.DependsOnActionID, action.DedupeKey, action.IdempotencyKey, action.Status, action.Phase,
+		action.Attempt, action.LeaseOwner, action.LeaseExpiresAt, action.TaskName, action.BlockedReason,
+		action.Error, action.ArtifactIDs, action.PayloadDigest, action.MetadataJSON, action.UpdatedAt,
+		action.CompletedAt, action.MonitorNamespace, action.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func workActionSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, run_id, command_event_id, monitor_generation,
+	        target_kind, target_number, target_sha, target_snapshot_digest, intent, desired_action,
+	        depends_on_action_id, dedupe_key, idempotency_key, status, phase, attempt, lease_owner,
+	        lease_expires_at, task_name, blocked_reason, error, artifact_ids, payload_digest,
+	        metadata_json, created_at, updated_at, completed_at FROM work_actions`
+}
+
+func workActionScanDest(action *store.WorkAction, leaseExpiresAt, completedAt *sql.NullTime) []any {
+	return []any{
+		&action.ID, &action.MonitorNamespace, &action.MonitorName, &action.RunID, &action.CommandEventID,
+		&action.MonitorGeneration, &action.TargetKind, &action.TargetNumber, &action.TargetSHA,
+		&action.TargetSnapshotDigest, &action.Intent, &action.DesiredAction, &action.DependsOnActionID,
+		&action.DedupeKey, &action.IdempotencyKey, &action.Status, &action.Phase, &action.Attempt,
+		&action.LeaseOwner, leaseExpiresAt, &action.TaskName, &action.BlockedReason, &action.Error,
+		&action.ArtifactIDs, &action.PayloadDigest, &action.MetadataJSON, &action.CreatedAt,
+		&action.UpdatedAt, completedAt,
+	}
+}
+
+func applyWorkActionNullableTimes(action *store.WorkAction, leaseExpiresAt, completedAt sql.NullTime) {
+	if leaseExpiresAt.Valid {
+		action.LeaseExpiresAt = &leaseExpiresAt.Time
+	}
+	if completedAt.Valid {
+		action.CompletedAt = &completedAt.Time
+	}
+}
+
+// GetWorkAction fetches one workflow action by ID.
+func (s *Store) GetWorkAction(ctx context.Context, namespace, id string) (*store.WorkAction, error) {
+	var action store.WorkAction
+	var leaseExpiresAt, completedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).
+		Scan(workActionScanDest(&action, &leaseExpiresAt, &completedAt)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	applyWorkActionNullableTimes(&action, leaseExpiresAt, completedAt)
+	return &action, nil
+}
+
+// ListWorkActions lists workflow actions ordered by update time.
+func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilter) ([]store.WorkAction, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit := defaultMonitorLimit(filter.Limit)
+	query := strings.Builder{}
+	query.WriteString(workActionSelectSQL())
+	query.WriteString(" WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	appendWorkActionFilters(&query, &args, filter)
+	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+	var actions []store.WorkAction
+	for rows.Next() {
+		var action store.WorkAction
+		var leaseExpiresAt, completedAt sql.NullTime
+		if err := rows.Scan(workActionScanDest(&action, &leaseExpiresAt, &completedAt)...); err != nil {
+			return nil, "", err
+		}
+		applyWorkActionNullableTimes(&action, leaseExpiresAt, completedAt)
+		actions = append(actions, action)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return actions, nextOffsetCursor(offset, len(actions), limit), nil
+}
+
+func appendWorkActionFilters(query *strings.Builder, args *[]any, filter store.WorkActionFilter) {
+	if filter.MonitorName != "" {
+		query.WriteString(" AND monitor_name = ?")
+		*args = append(*args, filter.MonitorName)
+	}
+	if filter.TargetKind != "" {
+		query.WriteString(" AND target_kind = ?")
+		*args = append(*args, filter.TargetKind)
+	}
+	if filter.TargetNumber != 0 {
+		query.WriteString(" AND target_number = ?")
+		*args = append(*args, filter.TargetNumber)
+	}
+	if filter.TargetSHA != "" {
+		query.WriteString(" AND target_sha = ?")
+		*args = append(*args, filter.TargetSHA)
+	}
+	if filter.Intent != "" {
+		query.WriteString(" AND intent = ?")
+		*args = append(*args, filter.Intent)
+	}
+	if filter.DesiredAction != "" {
+		query.WriteString(" AND desired_action = ?")
+		*args = append(*args, filter.DesiredAction)
+	}
+	if filter.Status != "" {
+		query.WriteString(" AND status = ?")
+		*args = append(*args, filter.Status)
+	}
+	if filter.RunID != "" {
+		query.WriteString(" AND run_id = ?")
+		*args = append(*args, filter.RunID)
+	}
+	if filter.CommandEventID != "" {
+		query.WriteString(" AND command_event_id = ?")
+		*args = append(*args, filter.CommandEventID)
+	}
+	if filter.TaskName != "" {
+		query.WriteString(" AND task_name = ?")
+		*args = append(*args, filter.TaskName)
+	}
+	if filter.DedupeKey != "" {
+		query.WriteString(" AND dedupe_key = ?")
+		*args = append(*args, filter.DedupeKey)
+	}
+}
+
+// LeaseNextWorkAction leases the oldest queued or expired workflow action matching the filter.
+func (s *Store) LeaseNextWorkAction(ctx context.Context, filter store.WorkActionFilter, leaseOwner string, leaseTTL time.Duration) (*store.WorkAction, error) {
+	if strings.TrimSpace(leaseOwner) == "" {
+		return nil, store.ValidationErrorf("lease owner is required")
+	}
+	if leaseTTL <= 0 {
+		return nil, store.ValidationErrorf("lease ttl must be positive")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	now := time.Now()
+	query := strings.Builder{}
+	query.WriteString("SELECT id FROM work_actions WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	appendWorkActionFilters(&query, &args, filter)
+	query.WriteString(" AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)) ORDER BY created_at ASC, id ASC LIMIT 1")
+	args = append(args, now)
+	var id string
+	if err := tx.QueryRowContext(ctx, query.String(), args...).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	leaseExpiresAt := now.Add(leaseTTL)
+	result, err := tx.ExecContext(ctx, `UPDATE work_actions
+		SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempt = attempt + 1, updated_at = ?
+		WHERE monitor_namespace = ? AND id = ?
+		AND (status = 'queued' OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
+		leaseOwner, leaseExpiresAt, now, filter.Namespace, id, now)
+	if err != nil {
+		return nil, err
+	}
+	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
+		return nil, store.ErrConflict
+	}
+	var action store.WorkAction
+	var leaseTime, completedAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, workActionSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, filter.Namespace, id).Scan(workActionScanDest(&action, &leaseTime, &completedAt)...); err != nil {
+		return nil, err
+	}
+	applyWorkActionNullableTimes(&action, leaseTime, completedAt)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+// CancelWorkActions cancels non-terminal workflow actions for a target.
+func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error) {
+	now := time.Now()
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE work_actions SET status = 'cancelled', blocked_reason = ?, error = '', completed_at = ?, updated_at = ?
+		 WHERE monitor_namespace = ? AND monitor_name = ? AND target_kind = ? AND target_number = ?
+		 AND status IN ('queued', 'leased', 'running')`, reason, now, now, namespace, monitorName, targetKind, targetNumber)
+	if err != nil {
+		return 0, err
+	}
+	rows, _ := result.RowsAffected()
+	return int(rows), nil
+}
+
+// CreateImplementationJob inserts an implementation job.
+func (s *Store) CreateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
+	if job == nil {
+		return store.ValidationErrorf("implementation job is required")
+	}
+	if job.ID == "" || job.MonitorNamespace == "" || job.MonitorName == "" {
+		return store.ValidationErrorf("implementation job id, monitor namespace, and monitor name are required")
+	}
+	now := time.Now()
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = now
+	}
+	job.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO implementation_jobs
+		 (id, monitor_namespace, monitor_name, repo, issue_number, plan_id, snapshot_digest, phase,
+		  attempt, branch, patch_artifact_id, pr_number, validation_state, task_name, mutation_task_name,
+		  command_event_id, work_action_id, monitor_generation, error, created_at, updated_at, completed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.MonitorNamespace, job.MonitorName, job.Repo, job.IssueNumber, job.PlanID,
+		job.SnapshotDigest, job.Phase, job.Attempt, job.Branch, job.PatchArtifactID, job.PRNumber,
+		job.ValidationState, job.TaskName, job.MutationTaskName, job.CommandEventID, job.WorkActionID,
+		job.MonitorGeneration, job.Error, job.CreatedAt, job.UpdatedAt, job.CompletedAt,
+	)
+	return err
+}
+
+// UpdateImplementationJob updates implementation job state.
+func (s *Store) UpdateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
+	if job == nil {
+		return store.ValidationErrorf("implementation job is required")
+	}
+	job.UpdatedAt = time.Now()
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE implementation_jobs SET repo = ?, issue_number = ?, plan_id = ?, snapshot_digest = ?, phase = ?,
+		 attempt = ?, branch = ?, patch_artifact_id = ?, pr_number = ?, validation_state = ?, task_name = ?,
+		 mutation_task_name = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?, error = ?,
+		 updated_at = ?, completed_at = ? WHERE monitor_namespace = ? AND id = ?`,
+		job.Repo, job.IssueNumber, job.PlanID, job.SnapshotDigest, job.Phase, job.Attempt, job.Branch,
+		job.PatchArtifactID, job.PRNumber, job.ValidationState, job.TaskName, job.MutationTaskName,
+		job.CommandEventID, job.WorkActionID, job.MonitorGeneration, job.Error, job.UpdatedAt,
+		job.CompletedAt, job.MonitorNamespace, job.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func implementationJobSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, repo, issue_number, plan_id, snapshot_digest,
+	        phase, attempt, branch, patch_artifact_id, pr_number, validation_state, task_name,
+	        mutation_task_name, command_event_id, work_action_id, monitor_generation, error,
+	        created_at, updated_at, completed_at FROM implementation_jobs`
+}
+
+func implementationJobScanDest(job *store.ImplementationJob, completedAt *sql.NullTime) []any {
+	return []any{&job.ID, &job.MonitorNamespace, &job.MonitorName, &job.Repo, &job.IssueNumber,
+		&job.PlanID, &job.SnapshotDigest, &job.Phase, &job.Attempt, &job.Branch, &job.PatchArtifactID,
+		&job.PRNumber, &job.ValidationState, &job.TaskName, &job.MutationTaskName, &job.CommandEventID,
+		&job.WorkActionID, &job.MonitorGeneration, &job.Error, &job.CreatedAt, &job.UpdatedAt, completedAt}
+}
+
+// GetImplementationJob fetches one implementation job.
+func (s *Store) GetImplementationJob(ctx context.Context, namespace, id string) (*store.ImplementationJob, error) {
+	var job store.ImplementationJob
+	var completedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, implementationJobSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(implementationJobScanDest(&job, &completedAt)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if completedAt.Valid {
+		job.CompletedAt = &completedAt.Time
+	}
+	return &job, nil
+}
+
+// ListImplementationJobs lists implementation jobs ordered by update time.
+func (s *Store) ListImplementationJobs(ctx context.Context, filter store.ImplementationJobFilter) ([]store.ImplementationJob, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit := defaultMonitorLimit(filter.Limit)
+	query := strings.Builder{}
+	query.WriteString(implementationJobSelectSQL())
+	query.WriteString(" WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	if filter.MonitorName != "" {
+		query.WriteString(" AND monitor_name = ?")
+		args = append(args, filter.MonitorName)
+	}
+	if filter.Repo != "" {
+		query.WriteString(" AND repo = ?")
+		args = append(args, filter.Repo)
+	}
+	if filter.IssueNumber != 0 {
+		query.WriteString(" AND issue_number = ?")
+		args = append(args, filter.IssueNumber)
+	}
+	if filter.Phase != "" {
+		query.WriteString(" AND phase = ?")
+		args = append(args, filter.Phase)
+	}
+	if filter.TaskName != "" {
+		query.WriteString(" AND task_name = ?")
+		args = append(args, filter.TaskName)
+	}
+	query.WriteString(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+	var jobs []store.ImplementationJob
+	for rows.Next() {
+		var job store.ImplementationJob
+		var completedAt sql.NullTime
+		if err := rows.Scan(implementationJobScanDest(&job, &completedAt)...); err != nil {
+			return nil, "", err
+		}
+		if completedAt.Valid {
+			job.CompletedAt = &completedAt.Time
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return jobs, nextOffsetCursor(offset, len(jobs), limit), nil
+}
+
+// CreateGitHubMutationRecord inserts an immutable GitHub mutation audit record.
+func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
+	if record == nil {
+		return store.ValidationErrorf("github mutation record is required")
+	}
+	if record.ID == "" || record.MonitorNamespace == "" || record.MonitorName == "" || record.Operation == "" {
+		return store.ValidationErrorf("github mutation record id, monitor namespace, monitor name, and operation are required")
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now()
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO github_mutation_records
+		 (id, monitor_namespace, monitor_name, run_id, command_event_id, work_action_id, monitor_generation,
+		  operation, target_kind, target_number, target_sha, actor, reason, request_digest, github_url,
+		  github_request_id, external_id, status, error, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID, record.MonitorNamespace, record.MonitorName, record.RunID, record.CommandEventID,
+		record.WorkActionID, record.MonitorGeneration, record.Operation, record.TargetKind,
+		record.TargetNumber, record.TargetSHA, record.Actor, record.Reason, record.RequestDigest,
+		record.GitHubURL, record.GitHubRequestID, record.ExternalID, record.Status, record.Error,
+		record.CreatedAt,
+	)
+	return err
+}
+
+func githubMutationRecordSelectSQL() string {
+	return `SELECT id, monitor_namespace, monitor_name, run_id, command_event_id, work_action_id,
+	        monitor_generation, operation, target_kind, target_number, target_sha, actor, reason,
+	        request_digest, github_url, github_request_id, external_id, status, error, created_at
+	        FROM github_mutation_records`
+}
+
+func githubMutationRecordScanDest(record *store.GitHubMutationRecord) []any {
+	return []any{&record.ID, &record.MonitorNamespace, &record.MonitorName, &record.RunID,
+		&record.CommandEventID, &record.WorkActionID, &record.MonitorGeneration, &record.Operation,
+		&record.TargetKind, &record.TargetNumber, &record.TargetSHA, &record.Actor, &record.Reason,
+		&record.RequestDigest, &record.GitHubURL, &record.GitHubRequestID, &record.ExternalID,
+		&record.Status, &record.Error, &record.CreatedAt}
+}
+
+// GetGitHubMutationRecord fetches one mutation record.
+func (s *Store) GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*store.GitHubMutationRecord, error) {
+	var record store.GitHubMutationRecord
+	err := s.db.QueryRowContext(ctx, githubMutationRecordSelectSQL()+` WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(githubMutationRecordScanDest(&record)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+// ListGitHubMutationRecords lists mutation records ordered newest first.
+func (s *Store) ListGitHubMutationRecords(ctx context.Context, filter store.GitHubMutationRecordFilter) ([]store.GitHubMutationRecord, string, error) {
+	offset, err := parseOffsetCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	limit := defaultMonitorLimit(filter.Limit)
+	query := strings.Builder{}
+	query.WriteString(githubMutationRecordSelectSQL())
+	query.WriteString(" WHERE monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	if filter.MonitorName != "" {
+		query.WriteString(" AND monitor_name = ?")
+		args = append(args, filter.MonitorName)
+	}
+	if filter.Operation != "" {
+		query.WriteString(" AND operation = ?")
+		args = append(args, filter.Operation)
+	}
+	if filter.TargetKind != "" {
+		query.WriteString(" AND target_kind = ?")
+		args = append(args, filter.TargetKind)
+	}
+	if filter.TargetNumber != 0 {
+		query.WriteString(" AND target_number = ?")
+		args = append(args, filter.TargetNumber)
+	}
+	if filter.Status != "" {
+		query.WriteString(" AND status = ?")
+		args = append(args, filter.Status)
+	}
+	query.WriteString(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close() //nolint:errcheck
+	var records []store.GitHubMutationRecord
+	for rows.Next() {
+		var record store.GitHubMutationRecord
+		if err := rows.Scan(githubMutationRecordScanDest(&record)...); err != nil {
+			return nil, "", err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return records, nextOffsetCursor(offset, len(records), limit), nil
 }

@@ -2491,18 +2491,26 @@ Usage:
   orka monitor [command]
 
 Available Commands:
-  actions     Inspect repository monitor action records
-  commands    Inspect repository monitor command events
-  create      Create a repository monitor resource from a manifest
-  delete      Delete a repository monitor resource
-  events      List repository monitor events
-  get         Get a repository monitor resource
-  issues      Inspect repository monitor issue inventory
-  items       List repository monitor items
-  list        List repository monitor resources
-  run         Trigger a manual repository monitor run
-  runs        List repository monitor runs
-  update      Update a repository monitor resource from a manifest
+  actions         Inspect repository monitor action records
+  commands        Inspect repository monitor command events
+  create          Create a repository monitor resource from a manifest
+  delete          Delete a repository monitor resource
+  doctor          Summarize monitor workflow health
+  events          List repository monitor events
+  get             Get a repository monitor resource
+  implementations Inspect repository monitor implementation jobs
+  issue           Control a repository monitor issue workflow
+  issues          Inspect repository monitor issue inventory
+  items           List repository monitor items
+  list            List repository monitor resources
+  mutations       Inspect controller-owned GitHub mutation records
+  pr              Control a repository monitor pull request workflow
+  run             Trigger a manual repository monitor run
+  runs            List repository monitor runs
+  trigger-labels  Validate monitor label trigger configuration
+  update          Update a repository monitor resource from a manifest
+  watch           Watch monitor status
+  work-actions    Inspect repository monitor workflow actions
 
 Flags:
   -h, --help   help for monitor
@@ -2689,6 +2697,7 @@ Flags:
   -h, --help                     help for items
       --kind string              Filter by item kind
       --limit int                Maximum number of results (default 50)
+      --number int               Filter by item number
   -o, --output string            Output format: table, json, yaml (default "table")
       --repair-state string      Filter by repair state
       --state string             Filter by state
@@ -2712,6 +2721,7 @@ Usage:
   orka monitor issues [command]
 
 Available Commands:
+  get         Get a repository monitor issue item
   list        List repository monitor issues
 
 Flags:

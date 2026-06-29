@@ -46,6 +46,9 @@ jobs:
       - name: Create UI embed stub
         run: make ensure-ui-embed
 
+      - name: Run fake-GitHub RepositoryMonitor E2E
+        run: bash scripts/repository-monitor-fake-e2e.sh
+
       - name: Run RepositoryMonitor smoke tests
         run: |
           go test ./internal/store/sqlite \

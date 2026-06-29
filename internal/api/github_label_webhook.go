@@ -59,6 +59,7 @@ const (
 	githubCommandStatusAccepted                = "accepted"
 	githubCommandStatusRejected                = "rejected"
 	githubCommandStatusBlocked                 = "blocked"
+	githubCommandStatusCompleted               = "completed"
 	githubMonitorEventTypeExactRunQueued       = "exact_event_run_queued"
 	githubWebhookDefaultTimeout                = 30 * time.Minute
 	githubWebhookDefaultMaxTurns         int32 = 100
@@ -95,6 +96,7 @@ type githubWebhookIssue struct {
 	Title       string                    `json:"title"`
 	Body        string                    `json:"body"`
 	HTMLURL     string                    `json:"html_url"`
+	State       string                    `json:"state"`
 	UpdatedAt   time.Time                 `json:"updated_at"`
 	PullRequest *githubIssuePullRequestID `json:"pull_request,omitempty"`
 	Labels      []githubWebhookLabel      `json:"labels"`
@@ -130,6 +132,7 @@ type githubLabelTarget struct {
 	Title        string
 	Body         string
 	HTMLURL      string
+	State        string
 	IsPR         bool
 	IncompletePR bool
 	Draft        bool
@@ -309,7 +312,7 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 	}
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
-		if _, isCommand := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name); isCommand && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target) {
+		if intent, isCommand := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name); isCommand && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {
 			continue
 		}
 		if !repositoryMonitorAcceptsPullRequestEvent(monitor, payload.Repository, target) {
@@ -589,6 +592,7 @@ func (p githubLabelWebhookPayload) target() (githubLabelTarget, bool) {
 			Title:      pr.Title,
 			Body:       pr.Body,
 			HTMLURL:    pr.HTMLURL,
+			State:      pr.State,
 			IsPR:       true,
 			Draft:      pr.Draft,
 			BaseBranch: pr.Base.Ref,
@@ -614,6 +618,7 @@ func (p githubLabelWebhookPayload) target() (githubLabelTarget, bool) {
 				Title:        p.Issue.Title,
 				Body:         p.Issue.Body,
 				HTMLURL:      htmlURL,
+				State:        p.Issue.State,
 				IsPR:         true,
 				IncompletePR: true,
 				Repo:         p.Repository,
@@ -629,6 +634,7 @@ func (p githubLabelWebhookPayload) target() (githubLabelTarget, bool) {
 			Title:     p.Issue.Title,
 			Body:      p.Issue.Body,
 			HTMLURL:   htmlURL,
+			State:     p.Issue.State,
 			Repo:      p.Repository,
 			BaseRepo:  p.Repository,
 			HeadRepo:  p.Repository,

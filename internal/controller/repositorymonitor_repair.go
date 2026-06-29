@@ -28,6 +28,7 @@ const (
 	repositoryMonitorRepairPhaseFailed    = "failed"
 )
 
+//nolint:gocyclo // PR command safety gates are intentionally explicit.
 func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, int, error) {
 	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || item == nil {
 		return false, 0, nil
@@ -41,21 +42,55 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	}
 	switch command.Intent {
 	case repositoryMonitorCommandIntentStop:
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, "stopped_by_command"); err != nil {
+			return true, 0, err
+		}
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusSucceeded, "blocked", "", "stopped_by_command"); err != nil {
+			return true, 0, err
+		}
 		item.RepairState = repositoryMonitorRepairPhaseFailed
 		item.SkipReason = "stopped_by_command"
 		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 	case repositoryMonitorCommandIntentResume:
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusSucceeded, "resumed", "", ""); err != nil {
+			return true, 0, err
+		}
 		item.RepairState = ""
 		item.SkipReason = ""
 		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 	case repositoryMonitorCommandIntentAutomerge:
+		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorCommandIntentAutomerge); err != nil || cancelled {
+			return true, 0, err
+		}
 		handled, err := r.tryProcessPullRequestAutomergeCommand(ctx, monitor, run, command, owner, repository, pr, item)
 		return handled, 0, err
 	case "review":
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, "review_blocked", "", repositoryMonitorSkipReasonBlockedLabel); err != nil {
+				return true, 0, err
+			}
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
+		}
+		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, "review"); err != nil || cancelled {
+			return true, 0, err
+		}
+		if monitor.Spec.Review.RequireGreenCI {
+			ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+			if err != nil {
+				return true, 0, err
+			}
+			if !ci.passed {
+				item.CIState = firstNonEmptyIssueAction(ci.reason, "ci_not_green")
+				item.LastVerdict = repositoryMonitorVerdictSkipped
+				item.SkipReason = item.CIState
+				if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, "review_blocked", "", item.CIState); err != nil {
+					return true, 0, err
+				}
+				return true, 0, r.Store.UpsertMonitorItem(ctx, item)
+			}
+			item.CIState = "passed"
 		}
 		taskName, created, err := r.createRepositoryMonitorReviewTask(ctx, monitor, run, owner, repository, pr)
 		if err != nil {
@@ -64,6 +99,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		item.LastVerdict = repositoryMonitorRunPhaseQueued
 		item.LastReviewID = taskName
 		item.SkipReason = ""
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusRunning, "review_queued", taskName, ""); err != nil {
+			return true, 0, err
+		}
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return true, 0, err
 		}
@@ -78,10 +116,22 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.RepairState = repositoryMonitorRepairPhaseFailed
 			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, "repair_blocked", "", repositoryMonitorSkipReasonBlockedLabel); err != nil {
+				return true, 0, err
+			}
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 		}
+		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorRepairWorkflowActionKind(command.Intent)); err != nil || cancelled {
+			return true, 0, err
+		}
 		created, err := r.createRepositoryMonitorRepairTask(ctx, monitor, run, command, owner, repository, pr, item)
-		return true, created, err
+		if err != nil {
+			return true, created, err
+		}
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(command.Intent), repositoryMonitorWorkActionStatusRunning, repositoryMonitorRepairPhaseQueued, repositoryMonitorRepairTaskName(monitor, pr, command), ""); err != nil {
+			return true, created, err
+		}
+		return true, created, nil
 	default:
 		return false, 0, nil
 	}
@@ -189,6 +239,13 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	return created, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_task_created", fmt.Sprintf("Pull request #%d %s repair task queued", pr.Number, command.Intent), map[string]any{"taskName": taskName, "intent": command.Intent})
 }
 
+func repositoryMonitorRepairWorkflowActionKind(intent string) string {
+	if strings.TrimSpace(intent) == "fix" {
+		return "pr_repair"
+	}
+	return strings.TrimSpace(intent)
+}
+
 func repositoryMonitorRepairTaskName(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, command *store.CommandEvent) string {
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monrepair-%s-%d-%s", monitor.Name, pr.Number, command.ID), 63)
 }
@@ -220,6 +277,19 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
 			continue
 		}
+		if cancelled, cancelErr := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {
+			return ingested, cancelErr
+		} else if cancelled {
+			completedAt := time.Now()
+			job.Phase = repositoryMonitorRepairPhaseFailed
+			job.LastError = "stopped_by_command"
+			job.CompletedAt = &completedAt
+			if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
+				return ingested, err
+			}
+			ingested = true
+			continue
+		}
 		if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 			job.Phase = repositoryMonitorRepairPhaseFailed
 			job.LastError = "repair task result is missing"
@@ -247,6 +317,19 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		job.CompletedAt = &completedAt
 		if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
 			return ingested, err
+		}
+		commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
+		workStatus := repositoryMonitorWorkActionStatusSucceeded
+		if job.Phase != repositoryMonitorRepairPhaseSucceeded {
+			workStatus = repositoryMonitorWorkActionStatusFailed
+		}
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: job.Intent}, repositoryMonitorPullRequestKind, job.PRNumber, job.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(job.Intent), workStatus, job.Phase, job.TaskName, job.LastError); err != nil {
+			return ingested, err
+		}
+		if job.Phase == repositoryMonitorRepairPhaseSucceeded {
+			_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(job.ID+"-push"), CommandEventID: commandID, Operation: "push_branch", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: job.PRNumber, TargetSHA: job.HeadSHA, Reason: job.Intent, GitHubURL: job.Branch, ExternalID: job.PushedSHA, Status: "succeeded"})
+		} else {
+			_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(job.ID+"-push-failed"), CommandEventID: commandID, Operation: "push_branch", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: job.PRNumber, TargetSHA: job.HeadSHA, Reason: job.Intent, GitHubURL: job.Branch, Status: "failed", Error: job.LastError})
 		}
 		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(job.PRNumber, 10))
 		if err == nil {

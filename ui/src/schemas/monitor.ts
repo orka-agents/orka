@@ -24,8 +24,29 @@ export const repositoryMonitorSpecSchema = z.object({
   }).optional(),
   agents: z.object({
     reviewer: agentRefSchema.optional(),
+    triager: agentRefSchema.optional(),
+    researcher: agentRefSchema.optional(),
+    planner: agentRefSchema.optional(),
     repairer: agentRefSchema.optional(),
     implementer: agentRefSchema.optional(),
+  }).optional(),
+
+  issueWorkflow: z.object({
+    triage: z.object({ enabled: z.boolean().optional() }).optional(),
+    research: z.object({ enabled: z.boolean().optional() }).optional(),
+    planning: z.object({
+      enabled: z.boolean().optional(),
+      requireHumanApprovalFor: z.array(z.string()).optional(),
+    }).optional(),
+    implementation: z.object({
+      enabled: z.boolean().optional(),
+      requireApprovedPlan: z.boolean().optional(),
+      branchPrefix: z.string().optional(),
+      maxActive: z.number().optional(),
+      maxAttemptsPerIssue: z.number().optional(),
+      maxChangedFiles: z.number().optional(),
+      allowedPaths: z.array(z.string()).optional(),
+    }).optional(),
   }).optional(),
   review: z.object({
     event: z.string().optional(),
@@ -175,6 +196,82 @@ export const monitorActionSchema = z.object({
   createdAt: z.string(),
 })
 
+export const monitorWorkActionSchema = z.object({
+  id: z.string(),
+  monitorNamespace: z.string(),
+  monitorName: z.string(),
+  runID: z.string().optional(),
+  commandEventID: z.string().optional(),
+  monitorGeneration: z.number().optional(),
+  targetKind: z.string().optional(),
+  targetNumber: z.number().optional(),
+  targetSHA: z.string().optional(),
+  targetSnapshotDigest: z.string().optional(),
+  intent: z.string().optional(),
+  desiredAction: z.string().optional(),
+  status: z.string(),
+  phase: z.string().optional(),
+  attempt: z.number().optional(),
+  leaseOwner: z.string().optional(),
+  leaseExpiresAt: z.string().optional(),
+  taskName: z.string().optional(),
+  blockedReason: z.string().optional(),
+  error: z.string().optional(),
+  artifactIDs: z.string().optional(),
+  payloadDigest: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().optional(),
+})
+
+export const monitorImplementationJobSchema = z.object({
+  id: z.string(),
+  monitorNamespace: z.string(),
+  monitorName: z.string(),
+  repo: z.string().optional(),
+  issueNumber: z.number().optional(),
+  planID: z.string().optional(),
+  snapshotDigest: z.string().optional(),
+  phase: z.string().optional(),
+  attempt: z.number().optional(),
+  branch: z.string().optional(),
+  patchArtifactID: z.string().optional(),
+  prNumber: z.number().optional(),
+  validationState: z.string().optional(),
+  taskName: z.string().optional(),
+  mutationTaskName: z.string().optional(),
+  commandEventID: z.string().optional(),
+  workActionID: z.string().optional(),
+  monitorGeneration: z.number().optional(),
+  error: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().optional(),
+})
+
+export const monitorMutationSchema = z.object({
+  id: z.string(),
+  monitorNamespace: z.string(),
+  monitorName: z.string(),
+  runID: z.string().optional(),
+  commandEventID: z.string().optional(),
+  workActionID: z.string().optional(),
+  monitorGeneration: z.number().optional(),
+  operation: z.string(),
+  targetKind: z.string().optional(),
+  targetNumber: z.number().optional(),
+  targetSHA: z.string().optional(),
+  actor: z.string().optional(),
+  reason: z.string().optional(),
+  requestDigest: z.string().optional(),
+  githubURL: z.string().optional(),
+  githubRequestID: z.string().optional(),
+  externalID: z.string().optional(),
+  status: z.string().optional(),
+  error: z.string().optional(),
+  createdAt: z.string(),
+})
+
 export const monitorCommandSchema = z.object({
   id: z.string(),
   monitorNamespace: z.string(),
@@ -200,4 +297,7 @@ export type RepositoryMonitor = z.infer<typeof repositoryMonitorSchema>
 export type MonitorRun = z.infer<typeof monitorRunSchema>
 export type MonitorItem = z.infer<typeof monitorItemSchema>
 export type MonitorAction = z.infer<typeof monitorActionSchema>
+export type MonitorWorkAction = z.infer<typeof monitorWorkActionSchema>
+export type MonitorImplementationJob = z.infer<typeof monitorImplementationJobSchema>
+export type MonitorMutation = z.infer<typeof monitorMutationSchema>
 export type MonitorCommand = z.infer<typeof monitorCommandSchema>

@@ -67,6 +67,23 @@ ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/bu
 vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
 
+
+.PHONY: repository-monitor-fake-e2e
+repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonitor issue-to-PR E2E scenarios
+	bash scripts/repository-monitor-fake-e2e.sh
+
+.PHONY: repository-monitor-validate
+repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
+	bash scripts/repository-monitor-validate.sh
+
+.PHONY: repository-monitor-live-preflight
+repository-monitor-live-preflight: ## Check prerequisites for live GitHub label trigger E2E without changing the cluster
+	bash scripts/live-github-label-trigger-e2e.sh --preflight-only
+
+.PHONY: repository-monitor-completion-audit
+repository-monitor-completion-audit: ensure-ui-embed ## Run local validation plus live preflight audit for RepositoryMonitor plan completion
+	bash scripts/repository-monitor-completion-audit.sh
+
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out

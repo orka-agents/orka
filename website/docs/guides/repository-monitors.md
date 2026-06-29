@@ -6,7 +6,7 @@ slug: /repository-monitors
 
 Repository monitors are durable, Kubernetes-native PR review automation for GitHub repositories. A `RepositoryMonitor` stores the repository scope, review agent, schedule, and safety policy in a CRD. The controller records runs, PR inventory, review results, and audit events in the SQLite store, then exposes that state through the REST API and embedded dashboard.
 
-This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The current implementation supports GitHub pull request inventory, read-only review task creation, structured review ingestion, and optional controller-owned GitHub `COMMENT` review publishing.
+This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The implementation supports GitHub pull request and issue inventory, durable `orka:*` command intake, issue triage/research/planning/implementation, controller-owned issue-to-PR mutation, exact-head PR review, bounded repair, readiness state, mutation auditing, and optional controller-owned GitHub `COMMENT` review publishing. Automerge is available only when explicitly configured and remains disabled by default.
 
 ## What It Does
 
@@ -21,8 +21,8 @@ A repository monitor can:
 - refetch one pull request for targeted manual and webhook runs before queueing review work
 - queue exact-head monitor runs from GitHub pull request webhook events
 - ingest typed JSON review results from completed review tasks
-- store monitor runs, PR items, review records, and audit events durably
-- show monitor status, recent runs, and the PR queue in the dashboard under **Monitors**
+- store monitor runs, issue/PR items, command events, workflow actions, action records, implementation jobs, mutation records, review records, and audit events durably
+- show monitor status, recent runs, workflow timeline, blocked reasons, implementation jobs, mutation audit, issues, and the PR queue in the dashboard under **Monitors**
 
 The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, writes generated PR context under `/workspace/.git/orka/`, and is instructed to return only the structured review result. It does not receive GitHub mutation credentials, post comments, push commits, merge, close, or mutate labels. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review from the structured result.
 
@@ -34,9 +34,9 @@ The first implementation is intentionally narrow:
 - Pull requests and issues are supported target types; commit monitoring is still rejected.
 - Pull request monitoring is enabled by default when no target is specified.
 - Issue-only monitors can set `spec.targets.pullRequests.enabled: false` and `spec.targets.issues.enabled: true`.
-- `spec.review.requireGreenCI` is rejected until CI state collection is available.
+- `spec.review.requireGreenCI` gates review selection until CI is green.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
-- Repair, maintainer command routing, issue action workflows, and optional head-bound automerge are active monitor-owned workflows. Automerge remains disabled by default and requires explicit configuration plus a one-shot command.
+- Repair, maintainer command routing, issue action workflows, implementation budgets (`maxActive`, `maxAttemptsPerIssue`, `maxChangedFiles`, `allowedPaths`), and optional head-bound automerge are active monitor-owned workflows. Automerge remains disabled by default and requires explicit configuration plus a one-shot command.
 - The reviewer Agent must use `runtime.type: claude` and reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`.
 
 ## CI Coverage

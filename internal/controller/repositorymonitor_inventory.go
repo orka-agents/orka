@@ -67,6 +67,7 @@ type repositoryMonitorPullRequest struct {
 	MergeableState string
 }
 
+//nolint:gocyclo // Pull request inventory combines selection, CI gating, and audit decisions.
 func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string) (int, int, int, error) {
 	if err := validateRepositoryMonitorRunTargetKind(run); err != nil {
 		return 0, 0, 0, err
@@ -167,6 +168,28 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			continue
 		}
 
+		if monitor.Spec.Review.RequireGreenCI {
+			ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+			if err != nil {
+				return selected, createdTasks, skipped, err
+			}
+			if ci.passed {
+				item.CIState = repositoryMonitorCIStatePassed
+			} else {
+				skipped++
+				item.CIState = firstNonEmptyIssueAction(ci.reason, "ci_not_green")
+				item.LastVerdict = repositoryMonitorVerdictSkipped
+				item.SkipReason = item.CIState
+				if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+				if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "item_skipped", fmt.Sprintf("Pull request #%d skipped: %s", pr.Number, item.SkipReason), map[string]any{"reason": item.SkipReason, "ciState": item.CIState}); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+				continue
+			}
+		}
+
 		selected++
 		taskName, created, err := r.createRepositoryMonitorReviewTask(ctx, monitor, run, owner, repository, pr)
 		if err != nil {
@@ -221,6 +244,19 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	repoFullName := owner + "/" + repository
 	prNumber := strconv.FormatInt(pr.Number, 10)
 	workspaceRepo, gitSecretRef := repositoryMonitorReviewTaskGitSource(monitor, owner, repository, pr)
+	annotations := map[string]string{
+		labels.AnnotationRepositoryMonitorName:  monitor.Name,
+		labels.AnnotationMonitorRunID:           run.ID,
+		labels.AnnotationMonitorItemKind:        repositoryMonitorPullRequestKind,
+		labels.AnnotationMonitorItemNumber:      prNumber,
+		labels.AnnotationMonitorHeadSHA:         pr.HeadSHA,
+		labels.AnnotationGitHubRepository:       repoFullName,
+		labels.AnnotationAgentReadOnly:          "true",
+		labels.AnnotationWorkspaceInitContainer: "true",
+	}
+	if strings.TrimSpace(run.CommandEventID) != "" {
+		annotations[repositoryMonitorIssueAnnotationCommandID] = run.CommandEventID
+	}
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -235,16 +271,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 				labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
 				labels.LabelGitHubNumber:      labels.SelectorValue(prNumber),
 			},
-			Annotations: map[string]string{
-				labels.AnnotationRepositoryMonitorName:  monitor.Name,
-				labels.AnnotationMonitorRunID:           run.ID,
-				labels.AnnotationMonitorItemKind:        repositoryMonitorPullRequestKind,
-				labels.AnnotationMonitorItemNumber:      prNumber,
-				labels.AnnotationMonitorHeadSHA:         pr.HeadSHA,
-				labels.AnnotationGitHubRepository:       repoFullName,
-				labels.AnnotationAgentReadOnly:          "true",
-				labels.AnnotationWorkspaceInitContainer: "true",
-			},
+			Annotations: annotations,
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeAgent,
@@ -590,9 +617,6 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 	}
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fmt.Errorf("at least one repository monitor target must be enabled")
-	}
-	if spec.Review.RequireGreenCI {
-		return fmt.Errorf("spec.review.requireGreenCI is not supported until repository monitor CI state collection is available")
 	}
 	return nil
 }

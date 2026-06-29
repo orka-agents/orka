@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	"github.com/sozercan/orka/internal/metrics"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -587,7 +589,9 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 		if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 			return nil, 0, err
 		}
-		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), nil); eventErr != nil {
+		failureState := repositoryMonitorRunFailureState(processErr)
+		metrics.RecordRepositoryMonitorBlock(failureState)
+		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{"state": failureState}); eventErr != nil {
 			return nil, 0, eventErr
 		}
 		return &run, 0, nil
@@ -639,6 +643,29 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
 	}
 	return &run, 0, nil
+}
+
+func repositoryMonitorRunFailureState(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ghErr *repositoryMonitorGitHubAPIError
+	if errors.As(err, &ghErr) {
+		if ghErr.StatusCode == http.StatusTooManyRequests || (ghErr.StatusCode == http.StatusForbidden && repositoryMonitorGitHubErrorLooksRateLimited(ghErr.Body)) {
+			return "github_rate_limited"
+		}
+		if ghErr.StatusCode >= 500 {
+			return "retry_scheduled"
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	if apierrors.IsTooManyRequests(err) || strings.Contains(lower, "insufficient quota") || strings.Contains(lower, "cluster capacity") {
+		return "cluster_capacity_blocked"
+	}
+	if strings.Contains(lower, "llm_rate_limited") || strings.Contains(lower, "llm rate limited") {
+		return "llm_rate_limited"
+	}
+	return "retry_scheduled"
 }
 
 func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun) error {

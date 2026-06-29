@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { MonitorAction, MonitorCommand, MonitorItem, MonitorRun, RepositoryMonitor } from '@/schemas/monitor'
+import type { MonitorAction, MonitorCommand, MonitorImplementationJob, MonitorItem, MonitorMutation, MonitorRun, MonitorWorkAction, RepositoryMonitor } from '@/schemas/monitor'
 
 interface ListResponse<T> {
   items: T[]
@@ -74,6 +74,36 @@ export function useRepositoryMonitorCommands(name: string) {
   })
 }
 
+export function useRepositoryMonitorWorkActions(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'work-actions', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorWorkAction>>('/monitors/work-actions', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorImplementationJobs(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'implementation-jobs', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorImplementationJob>>('/monitors/implementation-jobs', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorMutations(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'mutations', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorMutation>>('/monitors/mutations', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
 
 export interface CreateRepositoryMonitorCommandBody {
   kind: string
@@ -90,6 +120,9 @@ export function useCreateRepositoryMonitorCommand(name: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['monitors', 'commands', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['monitors', 'runs', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'work-actions', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'implementation-jobs', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'mutations', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['monitors', 'items', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['monitors', 'repository', namespace, name] })
     },

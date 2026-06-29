@@ -1247,6 +1247,37 @@ func TestGitHubWebhook_OrkaIssueLabelCreatesDurableCommandAndIssueRun(t *testing
 	}
 }
 
+func TestGitHubWebhook_OrkaClosedIssueLabelDoesNotCreateCommand(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("closed-issue-loop", false)
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:plan"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":12,"state":"closed","title":"Already fixed","body":"done","html_url":"https://github.com/sozercan/vekil/issues/12","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-orka-closed", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want accepted ignored event; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "closed-issue-loop", Kind: "issue", Number: 12, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents() error = %v", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands = %#v, want none for closed issue", commands)
+	}
+}
+
 func TestGitHubWebhook_CustomOrkaPRLabelDoesNotAlsoQueueExactEventRun(t *testing.T) {
 	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1279,6 +1310,174 @@ func TestGitHubWebhook_CustomOrkaPRLabelDoesNotAlsoQueueExactEventRun(t *testing
 	}
 	if len(runs) != 1 || runs[0].Trigger != githubMonitorTriggerLabelCommand {
 		t.Fatalf("runs = %#v, want exactly one durable command run", runs)
+	}
+}
+
+func TestGitHubWebhook_OrkaGuardLabelBlocksCommandWithoutRun(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("guarded-issue-loop", false)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	monitor.Spec.Policy.ProtectedLabels = []string{"security-sensitive"}
+	monitor.Spec.Targets.Issues.ExcludeLabels = []string{"security-sensitive"}
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:implement"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":31,"state":"open","title":"Sensitive","body":"Do not automate publicly.","html_url":"https://github.com/sozercan/vekil/issues/31","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"security-sensitive"},{"name":"orka:implement"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-guarded-issue", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want accepted blocked event; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "guarded-issue-loop", Kind: "issue", Number: 31, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents() error = %v", err)
+	}
+	if len(commands) != 1 || commands[0].Status != githubCommandStatusBlocked || !strings.Contains(commands[0].Error, "security-sensitive") {
+		t.Fatalf("commands = %#v, want one blocked command with guard label", commands)
+	}
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "guarded-issue-loop", TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 31, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs = %#v, want no run for guarded command", runs)
+	}
+}
+
+func TestGitHubWebhook_OrkaEquivalentCommandsCoalesceActiveWorkAction(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("coalesce-issue-loop", false)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:plan"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":32,"state":"open","title":"Plan once","body":"Please plan once.","html_url":"https://github.com/sozercan/vekil/issues/32","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	first := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-coalesce-one", secret, body)
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first status = %d, want created; body: %s", first.StatusCode, readRespBody(t, first))
+	}
+	second := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-coalesce-two", secret, body)
+	if second.StatusCode != http.StatusAccepted {
+		t.Fatalf("second status = %d, want accepted coalesced event; body: %s", second.StatusCode, readRespBody(t, second))
+	}
+	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "coalesce-issue-loop", Kind: "issue", Number: 32, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents() error = %v", err)
+	}
+	if len(commands) != 2 {
+		t.Fatalf("commands = %#v, want two command records", commands)
+	}
+	completed := 0
+	for _, command := range commands {
+		if command.Status == githubCommandStatusCompleted && strings.Contains(command.Error, "coalesced") {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("commands = %#v, want one completed coalesced command", commands)
+	}
+	runs, _, err := monitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "default", MonitorName: "coalesce-issue-loop", TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 32, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMonitorRuns() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %#v, want one run after equivalent command coalescing", runs)
+	}
+}
+
+func TestGitHubWebhook_OrkaResumeDoesNotBypassGuardLabel(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("guarded-resume", false)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	monitor.Spec.Policy.PauseLabels = []string{"orka:pause"}
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:resume"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":34,"state":"open","title":"Paused","body":"Still paused.","html_url":"https://github.com/sozercan/vekil/issues/34","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:pause"},{"name":"orka:resume"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, "delivery-guarded-resume", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want accepted blocked event; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "guarded-resume", Kind: "issue", Number: 34, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents() error = %v", err)
+	}
+	if len(commands) != 1 || commands[0].Status != githubCommandStatusBlocked || !strings.Contains(commands[0].Error, "orka:pause") {
+		t.Fatalf("commands = %#v, want blocked resume command", commands)
+	}
+}
+
+func TestGitHubWebhook_OrkaPRLabelRequiresExactBaseBranchCase(t *testing.T) {
+	secret := configureGitHubWebhookTest(t, nil)
+	monitor := githubWebhookRepositoryMonitor("case-sensitive-pr", false)
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.PullRequests.Review = "orka:review"
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:review"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"pull_request":{"number":33,"title":"Wrong case","body":"","html_url":"https://github.com/sozercan/vekil/pull/33","state":"open","draft":false,"base":{"ref":"Main","sha":"base","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"head":{"ref":"feature","sha":"head-sha","repo":{"full_name":"sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git"}},"labels":[{"name":"orka:review"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	resp := performSignedGitHubWebhook(t, server, githubEventPullRequest, "delivery-pr-branch-case", secret, body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want accepted ignored event; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	commands, _, err := monitorStore.ListCommandEvents(t.Context(), store.CommandEventFilter{Namespace: "default", MonitorName: "case-sensitive-pr", Kind: repositoryMonitorTargetKindPullRequest, Number: 33, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommandEvents() error = %v", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands = %#v, want none for case-mismatched base branch", commands)
 	}
 }
 
@@ -1350,6 +1549,88 @@ func TestGitHubWebhook_DuplicateAcceptedCommandEnsuresMissingRun(t *testing.T) {
 	}
 }
 
+func TestGitHubWebhook_DuplicateAcceptedCommandRetriesFailedRunSignal(t *testing.T) {
+	permissionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"permission":"write"}`))
+	}))
+	t.Cleanup(permissionServer.Close)
+	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: permissionServer.URL})
+	pullRequestsEnabled := false
+	monitor := githubWebhookRepositoryMonitor("dedupe-failed-run", false)
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: githubWebhookTestGitSecret}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	monitorStore := setupGitHubWebhookMonitorStore(t)
+	server := NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore})
+
+	body := []byte(`{
+		"action":"labeled",
+		"label":{"name":"orka:plan"},
+		"repository":{"full_name":"sozercan/vekil","html_url":"https://github.com/sozercan/vekil","clone_url":"https://github.com/sozercan/vekil.git","default_branch":"main"},
+		"issue":{"number":22,"state":"open","title":"Plan after retry","body":"Please plan.","html_url":"https://github.com/sozercan/vekil/issues/22","updated_at":"2026-06-01T00:00:00Z","labels":[{"name":"orka:plan"}]},
+		"sender":{"login":"octocat"}
+	}`)
+	target, ok := githubLabelWebhookPayload{
+		Action:     "labeled",
+		Label:      githubWebhookLabel{Name: "orka:plan"},
+		Repository: githubWebhookRepository{FullName: "sozercan/vekil"},
+		Issue:      &githubWebhookIssue{Number: 22, State: "open", Title: "Plan after retry", Body: "Please plan.", Labels: []githubWebhookLabel{{Name: "orka:plan"}}},
+	}.target()
+	if !ok {
+		t.Fatal("target() failed")
+	}
+	delivery := "delivery-failed-run-retry"
+	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, "orka:plan", delivery)
+	processedAt := time.Now()
+	command := &store.CommandEvent{ID: repositoryMonitorCommandID(dedupe), MonitorNamespace: "default", MonitorName: monitor.Name, Repo: "sozercan/vekil", Kind: "issue", Number: 22, Source: githubCommandEventSourceLabel, DeliveryID: delivery, Label: "orka:plan", DedupeKey: dedupe, IdempotencyKey: dedupe, Intent: "plan", Status: githubCommandStatusAccepted, CreatedAt: processedAt, ProcessedAt: &processedAt}
+	if err := monitorStore.CreateCommandEvent(t.Context(), command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	completedAt := time.Now().Add(-time.Minute)
+	failedRun := &store.MonitorRun{ID: repositoryMonitorCommandRunID(command), MonitorNamespace: "default", MonitorName: monitor.Name, Trigger: githubMonitorTriggerLabelCommand, TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 22, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: time.Now().Add(-2 * time.Minute), CompletedAt: &completedAt, Error: "failed to signal repository monitor run: conflict"}
+	if err := monitorStore.CreateMonitorRun(t.Context(), failedRun); err != nil {
+		t.Fatalf("CreateMonitorRun(failed) error = %v", err)
+	}
+	if err := monitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
+		ID:               store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)),
+		MonitorNamespace: "default",
+		MonitorName:      monitor.Name,
+		CommandEventID:   command.ID,
+		TargetKind:       repositoryMonitorTargetKindIssue,
+		TargetNumber:     22,
+		Intent:           command.Intent,
+		DesiredAction:    store.RepositoryMonitorDesiredActionForIntent(command.Intent),
+		Status:           repositoryMonitorRunPhaseFailed,
+		Phase:            repositoryMonitorRunPhaseFailed,
+		BlockedReason:    "run_signal_failed",
+		Error:            "failed to signal repository monitor run: conflict",
+		CompletedAt:      &completedAt,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction(failed) error = %v", err)
+	}
+	resp := performSignedGitHubWebhook(t, server, githubEventIssues, delivery, secret, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want created retry; body: %s", resp.StatusCode, readRespBody(t, resp))
+	}
+	run, err := monitorStore.GetMonitorRun(t.Context(), "default", failedRun.ID)
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.Phase != repositoryMonitorRunPhaseQueued || run.CompletedAt != nil || run.Error != "" {
+		t.Fatalf("run after retry = %#v, want queued unsignaled retry", run)
+	}
+	action, err := monitorStore.GetWorkAction(t.Context(), "default", store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != repositoryMonitorRunPhaseQueued || action.CompletedAt != nil || action.Error != "" || action.BlockedReason != "" {
+		t.Fatalf("work action after retry = %#v, want queued with terminal fields cleared", action)
+	}
+}
+
 func TestRepositoryMonitorPermissionAllowedEnforcesMinimumAndPolicy(t *testing.T) {
 	monitor := githubWebhookRepositoryMonitor("permission-policy", false)
 	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = "admin"
@@ -1359,5 +1640,13 @@ func TestRepositoryMonitorPermissionAllowedEnforcesMinimumAndPolicy(t *testing.T
 	}
 	if !repositoryMonitorPermissionAllowed(monitor, "admin") {
 		t.Fatal("admin permission rejected despite satisfying minimum and policy")
+	}
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = "maintain"
+	monitor.Spec.Policy.AllowedRepositoryPermissions = nil
+	if !repositoryMonitorPermissionAllowed(monitor, firstNonEmptyGitHubPermission("maintain", "write")) {
+		t.Fatal("maintain role_name should satisfy maintain minimum even when legacy permission is write")
+	}
+	if !repositoryMonitorPermissionAllowedForIntent(monitor, firstNonEmptyGitHubPermission("triage", "read"), "plan") {
+		t.Fatal("triage role_name should satisfy read-only plan command")
 	}
 }

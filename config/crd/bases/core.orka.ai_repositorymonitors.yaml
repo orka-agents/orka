@@ -198,6 +198,14 @@ spec:
                   implementation:
                     description: Implementation controls bounded implementation tasks.
                     properties:
+                      allowedPaths:
+                        description: |-
+                          AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+                          Examples: api/**, internal/**, docs/**.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                       branchPrefix:
                         description: BranchPrefix is the branch prefix for implementation
                           push branches. Defaults to orka/issue.
@@ -207,6 +215,24 @@ spec:
                           when an implementer agent is configured and a command requests
                           it.
                         type: boolean
+                      maxActive:
+                        description: MaxActive bounds concurrently active issue implementation/mutation
+                          jobs per monitor. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxAttemptsPerIssue:
+                        description: MaxAttemptsPerIssue bounds implementation attempts
+                          for one issue. Defaults to 2.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      maxChangedFiles:
+                        description: MaxChangedFiles bounds changed files in an implementation
+                          patch. Defaults to 12.
+                        format: int32
+                        minimum: 1
+                        type: integer
                       requireApprovedPlan:
                         description: RequireApprovedPlan blocks implementation unless
                           the latest plan was approved.

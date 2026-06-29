@@ -19,6 +19,37 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+check_docker_ready() {
+  if ! docker info >/dev/null 2>&1; then
+    die "Docker daemon is not reachable; start Docker before running live kind-based GitHub label trigger E2E"
+  fi
+}
+
+parse_args() {
+  while (( $# > 0 )); do
+    case "$1" in
+      --preflight-only)
+        preflight_only=1
+        shift
+        ;;
+      -h|--help)
+        cat <<EOF_HELP
+Usage: $0 [--preflight-only]
+
+Runs the live GitHub label trigger E2E against a local kind cluster.
+
+Options:
+  --preflight-only  Validate local prerequisites and configuration, then exit before cluster changes.
+EOF_HELP
+        exit 0
+        ;;
+      *)
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
@@ -36,6 +67,7 @@ label_name="agent:implement"
 webhook_secret=""
 api_pf_pid=""
 task_name=""
+preflight_only=0
 work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-github-label-trigger-e2e.XXXXXX")"
 api_pf_log="${work_dir}/api-port-forward.log"
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
@@ -323,6 +355,8 @@ PY
 }
 
 main() {
+  parse_args "$@"
+
   require_cmd make
   require_cmd go
   require_cmd docker
@@ -331,6 +365,7 @@ main() {
   require_cmd curl
   require_cmd jq
   require_cmd python3
+  check_docker_ready
 
   if [[ ! "${target_number}" =~ ^[0-9]+$ || "${target_number}" -le 0 ]]; then
     die "GITHUB_LABEL_TRIGGER_TARGET_NUMBER must be a positive integer"
@@ -346,6 +381,11 @@ main() {
 
   cd "${repo_root}"
   [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
+  if (( preflight_only )); then
+    log "Live GitHub label trigger E2E preflight passed for ${repo_full}"
+    rm -rf "${work_dir}" >/dev/null 2>&1 || true
+    exit 0
+  fi
   cp "${manager_kustomization}" "${manager_kustomization_backup}"
 
   trap 'status=$?; on_exit "${status}"; exit "${status}"' EXIT

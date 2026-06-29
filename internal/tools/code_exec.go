@@ -993,7 +993,7 @@ func scrubCodeExecEnv(environ []string) []string {
 		"TERM=dumb",
 	}
 
-	for _, name := range []string{"SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC", "PATHEXT"} {
+	for _, name := range []string{"SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC", "PATHEXT", "DEVELOPER_DIR"} {
 		if value, ok := lookupEnvValue(environ, name); ok {
 			scrubbed = append(scrubbed, name+"="+value)
 		}
