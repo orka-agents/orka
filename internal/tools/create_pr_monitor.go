@@ -21,6 +21,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/security"
+	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -189,6 +190,7 @@ func (t *CreatePRMonitorTool) Execute(ctx context.Context, argsJSON json.RawMess
 		task.Spec.AI.ProviderRef = &corev1alpha1.ProviderReference{Name: providerName}
 	}
 
+	tracing.StampTaskTraceContext(ctx, task)
 	if result, ok := authorizeTaskCreate(ctx, tc, task); !ok {
 		return result, nil
 	}

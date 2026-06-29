@@ -15,10 +15,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/store"
 )
@@ -35,7 +32,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if namespace == "" || streamType == "" || streamID == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace, streamType, and streamID are required")
 	}
-	if err := verifyCallerNamespace(c, namespace); err != nil {
+	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -47,7 +44,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if strings.Contains(streamID, "/") {
 		return fiber.NewError(fiber.StatusBadRequest, "streamID must not contain slash")
 	}
-	writerTask, err := h.verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
+	writerTask, err := h.internalCallerAuthorizer().verifyExecutionEventStreamWriter(c, namespace, streamType, streamID)
 	if err != nil {
 		return err
 	}
@@ -137,41 +134,4 @@ func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {
 		return nil, fiber.NewError(fiber.StatusRequestEntityTooLarge, "execution event payload exceeds size limit")
 	}
 	return data, nil
-}
-
-func (h *InternalHandlers) verifyExecutionEventStreamWriter(
-	c fiber.Ctx,
-	namespace string,
-	streamType string,
-	streamID string,
-) (*corev1alpha1.Task, error) {
-	if h.k8sClient == nil || streamType != events.ExecutionEventStreamTypeTask {
-		return nil, nil
-	}
-	task := &corev1alpha1.Task{}
-	if err := h.k8sClient.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: streamID}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusForbidden, "caller is not the current worker for this task")
-		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := verifyCallerOwnsTaskWorker(c.Context(), h.k8sClient, GetUserInfo(c), task); err != nil {
-		return nil, err
-	}
-	if !task.DeletionTimestamp.IsZero() {
-		return nil, fiber.NewError(fiber.StatusGone, "task is deleting")
-	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
-		return nil, fiber.NewError(fiber.StatusConflict, "task is complete")
-	}
-	return task, nil
-}
-
-func isTerminalInternalTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
-	}
 }

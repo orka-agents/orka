@@ -26,6 +26,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/sozercan/orka/internal/store"
 	chattools "github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
 )
 
 var chatLog = logf.Log.WithName("chat-handler")
@@ -178,9 +180,11 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
-	// Use context.Background() because Fiber/fasthttp recycles the request context
-	// after the handler returns; c.Context() would be invalid for this long-running operation.
-	ctx, cancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
+	// Derive non-SSE work from the Fiber user context so chat.request,
+	// tool-loop, and GenAI spans remain children of the API SERVER span.
+	// SSE mode captures the span context before returning and seeds its
+	// long-lived background context below.
+	ctx, cancel := context.WithTimeout(c.Context(), ch.config.MaxDuration)
 	defer cancel()
 
 	// Resolve namespace from request or token
@@ -232,11 +236,16 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	ctx, span := tracer.Start(ctx, "chat.request",
 		trace.WithAttributes(
 			attribute.String("session.id", sessionID),
+			attribute.String(genai.AttrConversationID, sessionID),
 			attribute.String("chat.provider", provider.Name()),
 			attribute.String("chat.model", model),
 		),
 	)
-	defer span.End()
+	defer func() {
+		if !sseMode {
+			span.End()
+		}
+	}()
 
 	// Build system prompt
 	promptBuilder := NewSystemPromptBuilder(ch.client, namespace)
@@ -367,13 +376,19 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	sseSystemPrompt := systemPrompt
 	sseTools := tools
 	sseExecutor := executor
+	sseParentCtx := baggage.ContextWithBaggage(
+		trace.ContextWithSpanContext(context.Background(), span.SpanContext()),
+		baggage.FromContext(ctx),
+	)
 
 	sseMode = true
 	return c.SendStreamWriter(func(w *bufio.Writer) {
+		defer span.End()
 		defer func() { <-ch.semaphore }()
-		// Use context.Background() because SendStreamWriter outlives the handler;
-		// Fiber's request context is recycled once the handler returns.
-		sseCtx, sseCancel := context.WithTimeout(context.Background(), ch.config.MaxDuration)
+		// SendStreamWriter outlives the handler, so use a background context
+		// seeded with the originating chat span context rather than Fiber's
+		// recycled request context.
+		sseCtx, sseCancel := context.WithTimeout(sseParentCtx, ch.config.MaxDuration)
 		defer sseCancel()
 
 		emitSSE := func(event, data string) {
@@ -424,7 +439,11 @@ func (ch *ChatHandler) runToolLoop(
 	for iteration := 0; ; iteration++ {
 		iterTracer := tracing.Tracer("orka.chat")
 		iterCtx, iterSpan := iterTracer.Start(ctx, "chat.tool_loop.iteration",
-			trace.WithAttributes(attribute.Int("chat.iteration", iteration)),
+			trace.WithAttributes(
+				attribute.Int("chat.iteration", iteration),
+				attribute.String(tracing.AttrTenant, namespace),
+				attribute.String(genai.AttrRequestModel, model),
+			),
 		)
 
 		select {
@@ -461,6 +480,7 @@ func (ch *ChatHandler) runToolLoop(
 			iterSpan.End()
 			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
 		}
+		iterSpan.SetAttributes(attribute.Int("chat.tool_call_count", len(resp.ToolCalls)))
 		usage.LLMCalls++
 		usage.InputTokens += resp.InputTokens
 		usage.OutputTokens += resp.OutputTokens

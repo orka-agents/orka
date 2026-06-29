@@ -434,6 +434,12 @@ type TaskStatus struct {
 	// +optional
 	ExecutionWorkspace *ExecutionWorkspaceStatus `json:"executionWorkspace,omitempty"`
 
+	// HarnessRuntime records the controller-resolved harness runtime target for an
+	// in-flight agent turn. It intentionally stores only non-secret routing metadata
+	// and Secret references, never bearer values.
+	// +optional
+	HarnessRuntime *HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
+
 	// WebhookDelivered indicates whether the webhook was successfully called
 	// +optional
 	WebhookDelivered bool `json:"webhookDelivered,omitempty"`
@@ -459,6 +465,41 @@ type TaskStatus struct {
 	// NextScheduleTime is the next time a child task will be created.
 	// +optional
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
+}
+
+// HarnessRuntimeStatus records the resolved harness runtime selected by the controller.
+type HarnessRuntimeStatus struct {
+	// RuntimeRefName is the AgentRuntime name for custom runtimeRef turns. Empty means built-in CLI wrapper.
+	// +optional
+	RuntimeRefName string `json:"runtimeRefName,omitempty"`
+
+	// RuntimeName is the runtime name advertised by the harness capabilities and sent in turn metadata.
+	// +optional
+	RuntimeName string `json:"runtimeName,omitempty"`
+
+	// ContractVersion is the Orka harness contract version used for the turn.
+	// +optional
+	ContractVersion string `json:"contractVersion,omitempty"`
+
+	// Endpoint is the non-secret harness base URL selected when the turn started.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// RuntimeGeneration is the AgentRuntime generation selected when the turn started.
+	// +optional
+	RuntimeGeneration int64 `json:"runtimeGeneration,omitempty"`
+
+	// AuthRefName is the Secret name selected when the turn started.
+	// +optional
+	AuthRefName string `json:"authRefName,omitempty"`
+
+	// AuthRefField is the Secret data field selected when the turn started.
+	// +optional
+	AuthRefField string `json:"authRefField,omitempty"`
+
+	// AuthRefResourceVersion is the auth Secret resourceVersion validated before starting the turn.
+	// +optional
+	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
 }
 
 // ResultReference indicates whether a result is available for the task

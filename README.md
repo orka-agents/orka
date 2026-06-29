@@ -62,7 +62,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
 - 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
 - 🔮 **Anthropic-Compatible API** — `/anthropic/v1/messages` endpoint for Claude Code and other Anthropic-native clients
-- 📊 **Observability** — Prometheus metrics, structured logging, health probes
+- 📊 **Observability** — Prometheus metrics, structured logging, health probes, and optional OpenTelemetry traces + GenAI OTLP metrics
 - 🔒 **Hardened by Default** — Non-root containers, read-only rootfs, ServiceAccount token auth
 
 ## Quick Start
@@ -115,6 +115,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Getting Started](website/docs/getting-started.md)                   | Installation, quick start, CLI setup                  |
 | [Architecture](website/docs/concepts/architecture.md)                         | System design, components, and data flow              |
 | [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
+| [Observability](website/docs/guides/observability.md)                        | OpenTelemetry traces, GenAI metrics, and task trace guidance |
 | [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Codex CLI, Claude Code CLI, and Copilot CLI runtimes  |
 | [CLI Harness Wrapper](website/docs/guides/cli-harness-wrapper.md)                  | Harness protocol wrapper for Codex, Claude, and Copilot CLI runtimes |
 | [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |

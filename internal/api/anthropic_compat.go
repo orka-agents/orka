@@ -245,7 +245,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+	ctx, cancel := context.WithTimeout(c.Context(), h.config.MaxDuration)
 	defer cancel()
 
 	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
@@ -266,6 +266,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, providerInfo, model); err != nil {
 		return anthropicContextTokenAuthorizationError(c, err)
 	}
+	provider = llm.NewTracingProvider(provider)
 
 	messages, err := convertAnthropicMessages(req.Messages)
 	if err != nil {
@@ -293,93 +294,44 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
-
-	if !orkaToolsDisabled {
-		// Replace client-provided tools with Orka's tools — the server-side tool loop
-		// executes tools itself, so client tools (e.g. Claude Code's Bash, Task) must
-		// not be visible to the LLM or it will call them and get "tool not found" errors.
-		compReq.Tools = nil
-		injectOrkaTools(ctx, h.client, compReq, namespace)
-		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
-		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "anthropicTools", completionToolNames(compReq.Tools)); err != nil {
-			return anthropicContextTokenAuthorizationError(c, err)
-		}
-
-		// Inject coordinator instructions so the LLM knows how to use task management tools
-		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
-
-		// Strip tool_use and tool_result from client message history to avoid
-		// the LLM seeing stale references to tools it no longer has (e.g. Bash, Task)
-		compReq.Messages = stripClientToolMessages(compReq.Messages)
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
+		Client:              h.client,
+		Namespace:           namespace,
+		ToolUseAction:       "anthropicTools",
+		AuthorizationConfig: h.contextTokenAuthorization,
+	})
+	if err != nil {
+		return anthropicContextTokenAuthorizationError(c, err)
 	}
 
 	// Build ToolContext for coordinator tools (create_agent_task, wait_for_task, etc.)
 	var proxyToolCtx *tools.ToolContext
-	if !orkaToolsDisabled {
-		tasksCreated := 0
-		proxyToolCtx = &tools.ToolContext{
+	if orkaToolsEnabled {
+		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
-			Tenant:                    namespace,
-			Provider:                  providerInfo.Name,
-			ProviderType:              providerInfo.Type,
+			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
-			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "anthropic-proxy"} },
-			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				if err := authorizeAndStampToolTaskCreate(ctx, h.client, h.kubeClient, contextToken, h.contextTokenAuthorization, "anthropicToolCreateTask", userInfo, task); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a task configuration authorized by the context token",
-					}
-				}
-				return nil
-			},
-			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				if err := authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "anthropicToolCreateAgent", agent); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use an agent configuration authorized by the context token",
-					}
-				}
-				return nil
-			},
-			AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
-				if err := authorizeContextTokenSecretRead(contextToken, h.contextTokenAuthorization, "anthropicToolReadSecret", namespace, secretName); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a context token authorized to read the git credential secret",
-					}
-				}
-				return nil
-			},
-			RequireSecretReadAuthorization: true,
-			CheckTaskLimit: func() *tools.ChatToolError {
-				if tasksCreated >= 20 {
-					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
-				}
-				return nil
-			},
-			IncrementTasks: func() { tasksCreated++ },
-		}
+			Profile:                   anthropicCompatProxyToolContextProfile,
+			AuthContext:               contextToken,
+			AuthorizationConfig:       h.contextTokenAuthorization,
+			UserInfo:                  userInfo,
+		})
 	}
 
 	if req.Stream {
-		if !orkaToolsDisabled {
-			return h.handleStreamingMessages(c, provider, compReq, model, 0, proxyToolCtx)
+		if orkaToolsEnabled {
+			return h.handleStreamingMessages(c, ctx, provider, compReq, model, proxyToolCtx)
 		}
-		return h.handleStreamingProxy(c, provider, compReq, model)
+		return h.handleStreamingProxy(c, ctx, provider, compReq, model)
 	}
 
 	var resp *llm.CompletionResponse
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		// Run the agentic tool loop (executes tools server-side until final text response)
 		resp, err = runNonStreamingToolLoop(ctx, provider, compReq, model, h.config, proxyToolCtx)
 		if err != nil {

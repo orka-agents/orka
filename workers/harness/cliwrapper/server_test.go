@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sozercan/orka/internal/harness"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -233,9 +235,7 @@ func TestServerEvictsCompletedTurnsAfterRetention(t *testing.T) {
 	}
 	_ = collectWrapperFrames(t, client, request.TurnID, 0)
 	eventually(t, time.Second, func() bool {
-		server.mu.RLock()
-		defer server.mu.RUnlock()
-		return server.turns[request.TurnID] == nil
+		return !server.turnRegistry.active(request.TurnID)
 	})
 }
 
@@ -264,9 +264,7 @@ func TestServerRejectsReacceptOfEvictedTurn(t *testing.T) {
 	_ = collectWrapperFrames(t, client, request.TurnID, 0)
 	// Wait until the completed turn is evicted from the active map.
 	eventually(t, time.Second, func() bool {
-		server.mu.RLock()
-		defer server.mu.RUnlock()
-		return server.turns[request.TurnID] == nil
+		return !server.turnRegistry.active(request.TurnID)
 	})
 
 	// Re-issuing the same turn ID must now be a deterministic conflict, not a new run.
@@ -278,11 +276,48 @@ func TestServerRejectsReacceptOfEvictedTurn(t *testing.T) {
 		t.Fatalf("re-StartTurn error = %v, want 'turn already completed'", err)
 	}
 	// The turn must NOT have been re-admitted to the active map.
-	server.mu.RLock()
-	_, active := server.turns[request.TurnID]
-	server.mu.RUnlock()
-	if active {
+	if server.turnRegistry.active(request.TurnID) {
 		t.Fatal("evicted turn was re-admitted to the active map")
+	}
+}
+
+func TestServerDropsRetainedInputEnvAfterMaterializingContext(t *testing.T) {
+	adapter := &envCapturingAdapter{envCh: make(chan []string, 1)}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = testEchoCommand
+	server, err := NewServer(cfg, adapter)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := validWrapperStartTurnRequest()
+	request.Input.Env = []harness.TurnEnvVar{{Name: "FAKE_SECRET", Value: "secret-value"}}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	_ = collectWrapperFrames(t, client, request.TurnID, 0)
+
+	select {
+	case env := <-adapter.envCh:
+		if !containsEnv(env, "FAKE_SECRET=secret-value") {
+			t.Fatalf("materialized env = %#v, want delivered request env", env)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("adapter did not observe materialized turn env")
+	}
+	turn := server.turnRegistry.lookup(request.TurnID)
+	if turn == nil {
+		t.Fatal("turn was evicted before retention check")
+	}
+	if got := retainedInputEnvLen(turn); got != 0 {
+		t.Fatalf("retained Input.Env len = %d, want 0 after materialization", got)
 	}
 }
 
@@ -464,6 +499,36 @@ func collectWrapperFrames(
 		t.Fatal("no frames")
 	}
 	return frames
+}
+
+func retainedInputEnvLen(turn *turnState) int {
+	turn.mu.Lock()
+	defer turn.mu.Unlock()
+	return len(turn.request.Input.Env)
+}
+
+type envCapturingAdapter struct {
+	envCh chan []string
+}
+
+func (a *envCapturingAdapter) Name() string { return "env-capturing" }
+func (a *envCapturingAdapter) BuildCommand(context.Context, TurnContext) (*CommandSpec, error) {
+	return nil, nil
+}
+func (a *envCapturingAdapter) ParseResult(context.Context, TurnContext, CommandResult) (TurnResult, error) {
+	return TurnResult{}, nil
+}
+func (a *envCapturingAdapter) RunTurn(
+	_ context.Context,
+	turn TurnContext,
+	emit func(harness.HarnessEventFrame) error,
+) (TurnResult, error) {
+	a.envCh <- append([]string(nil), turn.Env...)
+	return TurnResult{}, emit(harness.HarnessEventFrame{
+		Type:      harness.FrameTurnCompleted,
+		Summary:   "done",
+		Completed: &harness.TurnCompleted{Result: "ok"},
+	})
 }
 
 type eventingSecretAdapter struct{}
@@ -739,5 +804,64 @@ func TestServerStripsGitCredentialsFromReadOnlyCommandEnv(t *testing.T) {
 	}
 	if strings.Contains(last.Completed.Result, "token") {
 		t.Fatalf("read-only command received git credentials: %q", last.Completed.Result)
+	}
+}
+
+func TestServerRunTurnEmitsTaskRunSpanFromTraceparentMetadata(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := NewServer(cfg, NewFakeAdapter(FakeBehaviorSuccess))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentCtx, parentSpan := tracing.Tracer("test").Start(context.Background(), "controller")
+	carrier := tracing.InjectContext(parentCtx)
+	forgedCtx, forgedSpan := tracing.Tracer("test").Start(context.Background(), "forged")
+	forgedCarrier := tracing.InjectContext(forgedCtx)
+	forgedSpan.End()
+	request := validWrapperStartTurnRequest()
+	request.Metadata = map[string]string{
+		"traceparent": carrier.Get("traceparent"),
+		"agentName":   "agent-a",
+	}
+	request.Input.Env = append(request.Input.Env, harness.TurnEnvVar{
+		Name:  workerenv.TraceParent,
+		Value: forgedCarrier.Get("traceparent"),
+	})
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	_ = collectWrapperFrames(t, client, request.TurnID, 0)
+	parentSpan.End()
+
+	eventually(t, time.Second, func() bool {
+		return testutil.SpanNamed(spans.Recorder.Ended(), "task.run") != nil
+	})
+	taskRun := testutil.SpanNamed(spans.Recorder.Ended(), "task.run")
+	if taskRun == nil {
+		t.Fatal("missing task.run span")
+	}
+	if got, want := taskRun.Parent().SpanID(), parentSpan.SpanContext().SpanID(); got != want {
+		t.Fatalf("task.run parent = %s, want controller %s", got, want)
+	}
+	if got, forged := taskRun.Parent().SpanID(), forgedSpan.SpanContext().SpanID(); got == forged {
+		t.Fatalf("task.run used task-supplied forged traceparent %s", forged)
+	}
+	attrs := testutil.AttributeMap(taskRun)
+	if got := attrs[tracing.AttrTaskID].AsString(); got != request.TaskName {
+		t.Fatalf("%s = %q", tracing.AttrTaskID, got)
+	}
+	if got := attrs[tracing.AttrAgentName].AsString(); got != "agent-a" {
+		t.Fatalf("%s = %q", tracing.AttrAgentName, got)
 	}
 }

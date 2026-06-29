@@ -485,3 +485,45 @@ func TestDroppedFindingStoreRoundTripFiltering(t *testing.T) {
 		t.Fatalf("ListDroppedFindings() = %#v, want scan1 diagnostic", got)
 	}
 }
+
+func TestFailedValidationExcludesFindingFromRecommendedFilter(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	items := []*store.Finding{
+		{ID: "f_failed", Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan1", Fingerprint: "fp-failed", Title: "failed", Summary: "failed", Severity: "critical", Confidence: "high", ValidationStatus: "failed", State: "open"},
+		{ID: "f_open", Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan1", Fingerprint: "fp-open", Title: "open", Summary: "open", Severity: "high", Confidence: "high", ValidationStatus: "unvalidated", State: "open"},
+	}
+	for _, item := range items {
+		if err := s.UpsertFinding(ctx, item); err != nil {
+			t.Fatalf("UpsertFinding(%s) error = %v", item.ID, err)
+		}
+	}
+	got, _, err := s.ListFindings(ctx, store.FindingFilter{Namespace: "ns1", RepositoryScan: "repo1", Recommended: true})
+	if err != nil {
+		t.Fatalf("ListFindings(recommended) error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "f_open" {
+		t.Fatalf("recommended findings = %#v, want only unvalidated open finding", got)
+	}
+}
+
+func TestValidatedFindingsRankHigher(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	items := []*store.Finding{
+		{ID: "f_unvalidated", Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan1", Fingerprint: "fp-unvalidated", Title: "unvalidated", Summary: "unvalidated", Severity: "high", Confidence: "high", ValidationStatus: "unvalidated", State: "open"},
+		{ID: "f_validated", Namespace: "ns1", RepositoryScan: "repo1", ScanRunID: "scan1", Fingerprint: "fp-validated", Title: "validated", Summary: "validated", Severity: "high", Confidence: "medium", ValidationStatus: "validated", State: "open"},
+	}
+	for _, item := range items {
+		if err := s.UpsertFinding(ctx, item); err != nil {
+			t.Fatalf("UpsertFinding(%s) error = %v", item.ID, err)
+		}
+	}
+	got, _, err := s.ListFindings(ctx, store.FindingFilter{Namespace: "ns1", RepositoryScan: "repo1", Recommended: true})
+	if err != nil {
+		t.Fatalf("ListFindings(recommended) error = %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "f_validated" {
+		t.Fatalf("recommended findings order = %#v, want validated first", got)
+	}
+}

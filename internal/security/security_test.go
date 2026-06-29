@@ -1,9 +1,15 @@
 package security
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/store"
@@ -177,6 +183,103 @@ func TestBuildValidationPromptIncludesAttackPathAnalysis(t *testing.T) {
 	}
 }
 
+func TestBuildReviewPromptIncludesFindingQualityPolicy(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	slice := store.ReviewSlice{ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper"}
+	got := BuildReviewPrompt(scan, "initial", "", "", "", slice)
+	for _, want := range []string{"FINDING QUALITY POLICY", "attacker-controlled source", "trust boundary", "docs-only", "dependency version", "React/TSX XSS", "shell-script command injection"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("BuildReviewPrompt() missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildReviewPromptIncludesOrkaSpecificThreatCategories(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	slice := store.ReviewSlice{
+		ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper",
+		ChangedFiles: []string{"internal/api/security.go"},
+	}
+	got := BuildReviewPrompt(scan, "manual", "base", "head", "", slice)
+	for _, want := range []string{"Kubernetes RBAC", "task and pod execution isolation", "workspace write boundaries", "artifact and result ingestion", "Git credentials", "context-token and TxToken", "AI-agent prompt", "tenant and namespace isolation", "raw token or transcript persistence", "INCREMENTAL/MANUAL CHANGE-FOCUS POLICY"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("BuildReviewPrompt() missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildReviewPromptPreservesFindingsV2Contract(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	slice := store.ReviewSlice{ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper"}
+	got := BuildReviewPrompt(scan, "initial", "", "", "", slice)
+	if !strings.Contains(got, ArtifactFindingsV2) || !strings.Contains(got, `"findings":[]`) || !strings.Contains(got, "empty findings array") {
+		t.Fatalf("BuildReviewPrompt() missing v2 artifact contract:\n%s", got)
+	}
+}
+
+func TestBuildValidationPromptIncludesFindingQualityPolicy(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	finding := &store.Finding{ID: "fnd_1", Title: "Finding", Severity: "high", Confidence: "high"}
+	got := BuildValidationPrompt(scan, finding)
+	for _, want := range []string{"FINDING QUALITY POLICY", "theoretical, stale, docs-only, test-only, client-only", "status=failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("BuildValidationPrompt() missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "write security-findings.v2.json") {
+		t.Fatalf("BuildValidationPrompt() contains review-stage findings artifact instruction:\n%s", got)
+	}
+}
+
+func TestBuildReviewPromptIncludesCustomPolicyButPreservesDefaultPolicy(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	slice := store.ReviewSlice{ID: "slice_api", Title: "API", Kind: "package", RepositoryScan: "repo", Source: "mapper"}
+	policy := PromptPolicy{
+		CustomScanInstructions: "Treat webhook signature bypasses as critical for this repository.",
+		FalsePositivePolicy:    "Suppress findings about intentionally public demo endpoints.",
+		PolicyDigest:           "sha256:test",
+		CustomScanSource:       "scan-policy/policy (sha256:scan)",
+		FalsePositiveSource:    "fp-policy/policy (sha256:fp)",
+	}
+	got := BuildReviewPrompt(scan, "initial", "", "", "", slice, policy)
+	for _, want := range []string{"CONFIGMAP-BACKED SCANNER POLICY", "webhook signature bypasses", "public demo endpoints", "Default Orka security policy", "prompt/tool-injection handling remain mandatory"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("BuildReviewPrompt() missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildThreatModelPromptIncludesCustomPolicy(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	got := BuildThreatModelPrompt(scan, "initial", "", "", "", PromptPolicy{CustomScanInstructions: "Focus on operator RBAC drift."})
+	if !strings.Contains(got, "Focus on operator RBAC drift") || !strings.Contains(got, "Default Orka security policy") {
+		t.Fatalf("BuildThreatModelPrompt() missing custom policy:\n%s", got)
+	}
+}
+
+func TestValidateCustomPolicyTextRejectsOversizedAndSecret(t *testing.T) {
+	if err := ValidateCustomPolicyText(strings.Repeat("a", MaxCustomPolicyBytes+1)); err == nil {
+		t.Fatal("ValidateCustomPolicyText() accepted oversized policy")
+	}
+	if err := ValidateCustomPolicyText("token " + "g" + "hp_" + strings.Repeat("x", 32)); err == nil {
+		t.Fatal("ValidateCustomPolicyText() accepted secret-like policy")
+	}
+	assignment := "to" + "ken" + "=" + strings.Repeat("x", 32)
+	if err := ValidateCustomPolicyText("Never send " + assignment + " to scanners."); err == nil {
+		t.Fatal("ValidateCustomPolicyText() accepted generic token assignment")
+	}
+	jwt := "ey" + "JhbGciOiJIUzI1NiJ9." + strings.Repeat("a", 16) + "." + strings.Repeat("b", 16)
+	if err := ValidateCustomPolicyText("Do not include " + jwt + " in policies."); err == nil {
+		t.Fatal("ValidateCustomPolicyText() accepted JWT-like policy")
+	}
+	if err := ValidateCustomPolicyText("Use risk-sk-score as a false-positive category name."); err != nil {
+		t.Fatalf("ValidateCustomPolicyText() rejected benign sk substring: %v", err)
+	}
+	if err := ValidateCustomPolicyText("Prefer token-based reasoning about auth boundaries, without embedding credentials."); err != nil {
+		t.Fatalf("ValidateCustomPolicyText() rejected benign token wording: %v", err)
+	}
+}
+
 func TestValidationArtifactEvidenceRefsUnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name string
@@ -295,5 +398,18 @@ func TestPatchBranchUsesUniqueTaskHash(t *testing.T) {
 	}
 	if branchA == branchB {
 		t.Fatalf("PatchBranch() should vary by task name, got identical branches %q", branchA)
+	}
+}
+
+func TestLoadScannerPolicyRequiresPolicyConfigMapOptInLabel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme() error = %v", err)
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "default"}, Data: map[string]string{"policy": "custom policy"}}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+	_, err := LoadScannerPolicy(context.Background(), reader, "default", corev1alpha1.RepositoryScanSpec{CustomScanInstructionsRef: &corev1alpha1.PolicyConfigMapKeyRef{Name: "policy"}})
+	if err == nil || !strings.Contains(err.Error(), PolicyConfigMapAllowedLabel) {
+		t.Fatalf("LoadScannerPolicy() error = %v, want opt-in label error", err)
 	}
 }

@@ -234,7 +234,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+	ctx, cancel := context.WithTimeout(c.Context(), h.config.MaxDuration)
 	defer cancel()
 
 	namespace, err := ResolveNamespace(c, c.Query("namespace", ""), h.watchNamespace, h.enforceNamespaceIsolation)
@@ -260,6 +260,7 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 	if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "openAIChatCompletions", namespace, providerInfo, model); err != nil {
 		return openAIContextTokenAuthorizationError(c, err)
 	}
+	provider = llm.NewTracingProvider(provider)
 
 	compReq, errDetail := buildOpenAICompletionRequest(req, model)
 	if errDetail != nil {
@@ -271,99 +272,44 @@ func (h *OpenAICompatHandler) HandleChatCompletions(c fiber.Ctx) error {
 
 	// Inject Orka tools and run the server-side agentic loop by default.
 	// Set X-Orka-Tools: disabled to use as a transparent proxy instead.
-	orkaToolsDisabled := c.Get("X-Orka-Tools") == "disabled"
-
-	if !orkaToolsDisabled {
-		// Replace client tools with Orka's tools (builtin + coordinator)
-		compReq.Tools = nil
-		injectOrkaTools(ctx, h.client, compReq, namespace)
-		compReq.Tools = filterCompletionToolsForContextToken(c, h.contextTokenAuthorization, compReq.Tools)
-		if err := authorizeContextTokenToolUse(c, h.contextTokenAuthorization, "openAITools", completionToolNames(compReq.Tools)); err != nil {
-			return openAIContextTokenAuthorizationError(c, err)
-		}
-
-		// Inject coordinator system prompt
-		compReq.SystemPrompt = coordinatorSystemPrompt(namespace) + "\n\n" + compReq.SystemPrompt
-
-		// Strip client tool messages from history
-		compReq.Messages = stripClientToolMessages(compReq.Messages)
+	orkaToolsEnabled, err := prepareCompatCoordinatorTools(c, ctx, compReq, compatCoordinatorSetup{
+		Client:              h.client,
+		Namespace:           namespace,
+		ToolUseAction:       "openAITools",
+		AuthorizationConfig: h.contextTokenAuthorization,
+	})
+	if err != nil {
+		return openAIContextTokenAuthorizationError(c, err)
 	}
 
 	// Build ToolContext for coordinator tools
 	var proxyToolCtx *tools.ToolContext
-	if !orkaToolsDisabled {
-		tasksCreated := 0
-		proxyToolCtx = &tools.ToolContext{
+	if orkaToolsEnabled {
+		proxyToolCtx = newCompatProxyToolContext(compatProxyToolContextConfig{
 			Client:                    h.client,
 			KubeClient:                h.kubeClient,
 			Namespace:                 namespace,
-			Tenant:                    namespace,
-			Provider:                  providerInfo.Name,
-			ProviderType:              providerInfo.Type,
+			Provider:                  providerInfo,
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", generateChatID()) },
-			TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": "openai-proxy"} },
-			AuthorizeTaskCreate: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-					return authorizeAndStampToolTaskCreate(ctx, h.client, h.kubeClient, contextToken, h.contextTokenAuthorization, "openAIToolCreateTask", userInfo, task)
-				}
-				return chatToolAuthorizationError(authorize, ctx, task, "Use a task configuration authorized by the context token")
-			},
-			AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
-				authorize := func(ctx context.Context, task *corev1alpha1.Task) error {
-					return authorizeContextTokenTaskDeleteObject(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolDeleteTask", task)
-				}
-				return chatToolAuthorizationError(authorize, ctx, task, "Use a task authorized by the context token")
-			},
-			AuthorizeAgentCreate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-					return authorizeContextTokenToolAgentCreate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolCreateAgent", agent)
-				}
-				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent configuration authorized by the context token")
-			},
-			AuthorizeAgentUpdate: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-					return authorizeContextTokenToolAgentUpdate(ctx, h.client, contextToken, h.contextTokenAuthorization, "openAIToolUpdateAgent", agent)
-				}
-				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent update authorized by the context token")
-			},
-			AuthorizeAgentDelete: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
-				authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-					return authorizeContextTokenToolAgentDelete(contextToken, h.contextTokenAuthorization, "openAIToolDeleteAgent", agent)
-				}
-				return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent authorized by the context token")
-			},
-			AuthorizeSecretRead: func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
-				if err := authorizeContextTokenSecretRead(contextToken, h.contextTokenAuthorization, "openAIToolReadSecret", namespace, secretName); err != nil {
-					return &tools.ChatToolError{
-						Type:       "authorization_failed",
-						Message:    err.Error(),
-						Suggestion: "Use a context token authorized to read the git credential secret",
-					}
-				}
-				return nil
-			},
-			RequireSecretReadAuthorization: true,
-			CheckTaskLimit: func() *tools.ChatToolError {
-				if tasksCreated >= 20 {
-					return &tools.ChatToolError{Type: "limit_reached", Message: "task creation limit reached (max 20)", Suggestion: "Wait for existing tasks to complete"}
-				}
-				return nil
-			},
-			IncrementTasks: func() { tasksCreated++ },
-		}
+			Profile:                   openAICompatProxyToolContextProfile,
+			AuthContext:               contextToken,
+			AuthorizationConfig:       h.contextTokenAuthorization,
+			UserInfo:                  userInfo,
+		})
+
 	}
 
 	if req.Stream {
-		if !orkaToolsDisabled {
+		if orkaToolsEnabled {
 			return h.handleStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions, proxyToolCtx)
 		}
 		return h.handleStreamingCompletion(c, ctx, provider, compReq, completionID, model, now, req.StreamOptions)
 	}
 
-	if !orkaToolsDisabled {
+	if orkaToolsEnabled {
 		return h.handleNonStreamingToolLoop(c, ctx, provider, compReq, completionID, model, now, proxyToolCtx)
 	}
 	return h.handleNonStreamingCompletion(c, ctx, provider, compReq, completionID, model, now)
@@ -479,7 +425,7 @@ func (h *OpenAICompatHandler) handleNonStreamingToolLoop(
 // bytes during multi-minute coordinator workflows.
 func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	c fiber.Ctx,
-	_ context.Context,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -495,9 +441,10 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 	capturedProvider := provider
 	capturedReq := req
 	capturedToolCtx := toolCtx
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		// Send role chunk
@@ -661,7 +608,7 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 // handleStreamingCompletion handles a streaming chat completion request.
 func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c fiber.Ctx,
-	_ context.Context,
+	ctx context.Context,
 	provider llm.Provider,
 	req *llm.CompletionRequest,
 	completionID, model string,
@@ -676,9 +623,10 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 	// Capture for closure
 	capturedProvider := provider
 	capturedReq := req
+	streamBaseCtx := detachedSpanContext(ctx)
 
 	return c.SendStreamWriter(func(w *bufio.Writer) {
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), h.config.MaxDuration)
+		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
 		streamCh, err := capturedProvider.Stream(streamCtx, capturedReq)
@@ -869,6 +817,21 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					}},
 				}
 				_ = writeStreamChunk(w, finishChunk)
+				if streamOpts != nil && streamOpts.IncludeUsage && (chunk.InputTokens > 0 || chunk.OutputTokens > 0) {
+					usageChunk := OAIResponse{
+						ID:      completionID,
+						Object:  "chat.completion.chunk",
+						Created: created,
+						Model:   model,
+						Choices: []OAIChoice{},
+						Usage: &OAIUsage{
+							PromptTokens:     chunk.InputTokens,
+							CompletionTokens: chunk.OutputTokens,
+							TotalTokens:      chunk.InputTokens + chunk.OutputTokens,
+						},
+					}
+					_ = writeStreamChunk(w, usageChunk)
+				}
 			}
 		}
 

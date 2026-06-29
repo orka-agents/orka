@@ -101,6 +101,30 @@ func migrate(db *sql.DB) error {
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS runtime_sessions (
+			id              TEXT NOT NULL,
+			namespace       TEXT NOT NULL,
+			session_name    TEXT NOT NULL,
+			active_task     TEXT NOT NULL DEFAULT '',
+			agent_name      TEXT NOT NULL DEFAULT '',
+			provider        TEXT NOT NULL,
+			state           TEXT NOT NULL,
+			cleanup_policy  TEXT NOT NULL,
+			idle_timeout_ns INTEGER NOT NULL DEFAULT 0,
+			max_lifetime_ns INTEGER NOT NULL DEFAULT 0,
+			created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_namespace_updated
+			ON runtime_sessions(namespace, updated_at DESC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_owner
+			ON runtime_sessions(namespace, session_name, provider, state, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_active_task
+			ON runtime_sessions(namespace, active_task, updated_at DESC)
+			WHERE active_task <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_cleanup
+			ON runtime_sessions(namespace, state, cleanup_policy, updated_at ASC)`,
 		`CREATE TABLE IF NOT EXISTS plan_states (
 			namespace     TEXT NOT NULL,
 			task_name     TEXT NOT NULL,
@@ -599,6 +623,9 @@ func migrate(db *sql.DB) error {
 		{Name: "skipped_slice_count", Definition: "skipped_slice_count INTEGER NOT NULL DEFAULT 0"},
 		{Name: "accepted_findings", Definition: "accepted_findings INTEGER NOT NULL DEFAULT 0"},
 		{Name: "dropped_findings", Definition: "dropped_findings INTEGER NOT NULL DEFAULT 0"},
+		{Name: "scanner_policy_version", Definition: "scanner_policy_version TEXT NOT NULL DEFAULT ''"},
+		{Name: "policy_digest", Definition: "policy_digest TEXT NOT NULL DEFAULT ''"},
+		{Name: "idempotency_key", Definition: "idempotency_key TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
 	}
@@ -613,6 +640,17 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
+	if err := ensureSQLiteColumns(db, "security_review_slices", []sqliteColumnMigration{
+		{Name: "changed_files_json", Definition: "changed_files_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "changed_line_ranges_json", Definition: "changed_line_ranges_json TEXT NOT NULL DEFAULT '[]'"},
+	}); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumns(db, "security_dropped_findings", []sqliteColumnMigration{
+		{Name: "layer", Definition: "layer TEXT NOT NULL DEFAULT ''"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSecurityReviewSlicesScopedPrimaryKey(db); err != nil {
 		return err
 	}
@@ -622,6 +660,10 @@ func migrate(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo
 		ON security_review_slices(namespace, repository_scan, status, updated_at DESC)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_security_dropped_findings_layer
+		ON security_dropped_findings(namespace, repository_scan, layer, created_at DESC)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_source_proposal
@@ -725,6 +767,8 @@ func ensureSecurityReviewSlicesScopedPrimaryKey(db *sql.DB) error {
 		tests_json        TEXT NOT NULL DEFAULT '[]',
 		tags_json         TEXT NOT NULL DEFAULT '[]',
 		trust_boundaries_json TEXT NOT NULL DEFAULT '[]',
+		changed_files_json TEXT NOT NULL DEFAULT '[]',
+		changed_line_ranges_json TEXT NOT NULL DEFAULT '[]',
 		last_scan_run_id  TEXT NOT NULL DEFAULT '',
 		last_reviewed_at  TIMESTAMP,
 		created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -736,10 +780,10 @@ func ensureSecurityReviewSlicesScopedPrimaryKey(db *sql.DB) error {
 	if _, err := tx.Exec(`INSERT INTO security_review_slices_migration
 		(id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		 trust_boundaries_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
+		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at)
 		SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		 entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
-		 trust_boundaries_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
+		 trust_boundaries_json, changed_files_json, changed_line_ranges_json, last_scan_run_id, last_reviewed_at, created_at, updated_at
 		FROM security_review_slices`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}

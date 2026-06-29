@@ -43,7 +43,7 @@ import (
 	"github.com/sozercan/orka/internal/tools"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/workerenv"
-	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -56,7 +56,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
-	utilruntime.Must(sandboxextv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -133,6 +133,7 @@ func main() {
 	var contextTokenProviderUseScopes string
 	var contextTokenSecretReadScopes string
 	var contextTokenSecretCredentialReadScopes string
+	var contextTokenConfigMapReadScopes string
 	var contextTokenAgentReadScopes string
 	var contextTokenAgentWriteScopes string
 	var contextTokenMemoryReadScopes string
@@ -243,7 +244,7 @@ func main() {
 		"Agent sandbox router base URL used by worker Jobs for workspace claims.")
 	flag.StringVar(&agentSandboxConfig.DefaultTemplate, "agent-sandbox-default-template",
 		agentSandboxConfig.DefaultTemplate,
-		"Default execution workspace template name used when a Task omits execution.workspace.templateRef.name.")
+		"Default agent-sandbox SandboxWarmPool name used when a Task omits execution.workspace.templateRef.name.")
 	flag.StringVar(&agentSandboxConfig.WarmPoolPolicy, "agent-sandbox-warm-pool-policy",
 		agentSandboxConfig.WarmPoolPolicy,
 		"Agent sandbox warm pool policy (disabled, template).")
@@ -364,6 +365,10 @@ func main() {
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_CREDENTIAL_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize using Secret data as outbound credentials. "+
 			"Defaults to orka:secrets:credentials:read.")
+	flag.StringVar(&contextTokenConfigMapReadScopes, "context-token-configmap-read-scopes",
+		os.Getenv("ORKA_CONTEXT_TOKEN_CONFIGMAP_READ_SCOPES"),
+		"Comma-separated context-token scopes that authorize ConfigMap reads used as operation inputs. "+
+			"Defaults to orka:configmaps:read.")
 	flag.StringVar(&contextTokenAgentReadScopes, "context-token-agent-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_AGENT_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize Agent reads. Defaults to orka:agents:read.")
@@ -427,8 +432,10 @@ func main() {
 	flag.StringVar(&contextTokenToolTokenTTL, "context-token-tool-token-ttl",
 		os.Getenv("ORKA_CONTEXT_TOKEN_TOOL_TOKEN_TTL"),
 		"Requested TTL for outbound tool TxTokens. Defaults to 2m when TTS is enabled.")
+	flag.BoolVar(&enableTracing, "enable-telemetry", false,
+		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
-		"Enable OpenTelemetry tracing. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
+		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
 
 	opts := zap.Options{
 		Development: true,
@@ -492,6 +499,7 @@ func main() {
 		ProviderUseScopes:          contextTokenProviderUseScopes,
 		SecretReadScopes:           contextTokenSecretReadScopes,
 		SecretCredentialReadScopes: contextTokenSecretCredentialReadScopes,
+		ConfigMapReadScopes:        contextTokenConfigMapReadScopes,
 		AgentReadScopes:            contextTokenAgentReadScopes,
 		AgentWriteScopes:           contextTokenAgentWriteScopes,
 		MemoryReadScopes:           contextTokenMemoryReadScopes,
@@ -679,6 +687,7 @@ func main() {
 		"general", generalWorkerImage,
 	)
 	jobBuilder.ControllerURL = controllerURL
+	jobBuilder.EnableTelemetry = enableTracing
 	// Auto-discover controller URL from in-cluster service if not explicitly set
 	if jobBuilder.ControllerURL == "" {
 		ns := os.Getenv(workerenv.PodNamespace)
@@ -753,6 +762,14 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
+		os.Exit(1)
+	}
+
+	if err := (&controller.AgentRuntimeReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentRuntime")
 		os.Exit(1)
 	}
 

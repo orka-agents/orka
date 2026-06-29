@@ -22,6 +22,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/tracing/genai"
 )
 
 // apiMode tracks which API surface to use.
@@ -33,13 +34,17 @@ const (
 	apiModeChatCompletions         // OpenAI Chat Completions API
 )
 
-const eventTypeFunctionCall = "function_call"
+const (
+	eventTypeFunctionCall   = "function_call"
+	providerTypeOpenAI      = "openai"
+	providerTypeAzureOpenAI = "azure-openai"
+)
 
 func init() {
-	llm.RegisterProvider("openai", func(config llm.ProviderConfig) (llm.Provider, error) {
+	llm.RegisterProvider(providerTypeOpenAI, func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
-	llm.RegisterProvider("azure-openai", func(config llm.ProviderConfig) (llm.Provider, error) {
+	llm.RegisterProvider(providerTypeAzureOpenAI, func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
 }
@@ -50,6 +55,7 @@ func init() {
 type Provider struct {
 	client                              openai.Client
 	baseURL                             string
+	providerType                        string
 	mode                                atomic.Int32 // apiMode
 	allowBareResponsesForbiddenFallback bool
 }
@@ -61,7 +67,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	}
 
 	var opts []option.RequestOption
-	if config.ProviderType == "azure-openai" {
+	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
 		if apiVersion == "" {
 			apiVersion = "2025-03-01-preview"
@@ -77,16 +83,31 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 	client := openai.NewClient(opts...)
 
+	providerType := config.ProviderType
+	if providerType == "" {
+		providerType = providerTypeOpenAI
+	}
+
 	return &Provider{
 		client:                              client,
 		baseURL:                             config.BaseURL,
+		providerType:                        providerType,
 		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
 }
 
-// Name returns the provider name
+// Name returns the provider name. It remains "openai" for Azure because
+// callers historically used this as the implementation family. Use
+// TelemetryProviderName for the concrete GenAI provider identity.
 func (p *Provider) Name() string {
-	return "openai"
+	return providerTypeOpenAI
+}
+
+func (p *Provider) TelemetryProviderName() string {
+	if p.providerType == "" {
+		return genai.ProviderOpenAI
+	}
+	return genai.NormalizeProviderName(p.providerType)
 }
 
 // isUnsupportedAPIError returns true when the error indicates the endpoint
@@ -137,7 +158,7 @@ func isUnsupportedAPIError(err error) bool {
 }
 
 func isCustomOpenAIBaseURL(providerType, baseURL string) bool {
-	if providerType != "" && providerType != "openai" {
+	if providerType != "" && providerType != providerTypeOpenAI {
 		return false
 	}
 	baseURL = strings.TrimSpace(baseURL)
@@ -343,6 +364,8 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	}
 
 	result := &llm.CompletionResponse{
+		Provider:     p.TelemetryProviderName(),
+		ID:           resp.ID,
 		Content:      resp.OutputText(),
 		StopReason:   string(resp.Status),
 		InputTokens:  int(resp.Usage.InputTokens),
@@ -578,10 +601,10 @@ func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSen
 	return true
 }
 
-func streamResponsesEvents(stream responseStream, send streamSender) {
+func streamResponsesEvents(stream responseStream, providerName string, send streamSender) {
 	tracker := newResponseFuncCallTracker()
 	for stream.Next() {
-		if !handleResponsesStreamEvent(stream.Current(), tracker, send) {
+		if !handleResponsesStreamEvent(stream.Current(), tracker, providerName, send) {
 			return
 		}
 	}
@@ -592,7 +615,7 @@ func streamResponsesEvents(stream responseStream, send streamSender) {
 	send(llm.StreamChunk{Done: true})
 }
 
-func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	switch evt.Type {
 	case "response.output_text.delta":
 		return handleResponseTextDelta(evt, send)
@@ -605,7 +628,7 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 	case "response.output_item.done":
 		return handleResponseOutputItem(evt, tracker, send, true)
 	case "response.completed":
-		return handleResponseCompleted(evt, tracker, send)
+		return handleResponseCompleted(evt, tracker, providerName, send)
 	case "response.failed", "response.incomplete":
 		send(llm.StreamChunk{Done: true, StopReason: evt.Type})
 		return false
@@ -656,7 +679,7 @@ func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *r
 	return tracker.emit(fc, send)
 }
 
-func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, send streamSender) bool {
+func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
 	stopReason := "stop"
 	for i, item := range evt.Response.Output {
 		if item.Type != eventTypeFunctionCall {
@@ -669,7 +692,14 @@ func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *re
 			return false
 		}
 	}
-	send(llm.StreamChunk{Done: true, StopReason: stopReason})
+	send(llm.StreamChunk{
+		Done:         true,
+		StopReason:   stopReason,
+		InputTokens:  int(evt.Response.Usage.InputTokens),
+		OutputTokens: int(evt.Response.Usage.OutputTokens),
+		Model:        evt.Response.Model,
+		Provider:     providerName,
+	})
 	return false
 }
 
@@ -679,7 +709,7 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		defer close(ch)
 
 		send := newStreamSender(ctx, ch)
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), send)
+		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, buildResponsesParams(req)), p.TelemetryProviderName(), send)
 	}()
 	return ch
 }
@@ -819,7 +849,7 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 		return nil, toProviderError(err)
 	}
 
-	result := &llm.CompletionResponse{Model: resp.Model}
+	result := &llm.CompletionResponse{Model: resp.Model, Provider: p.TelemetryProviderName(), ID: resp.ID}
 	result.InputTokens = int(resp.Usage.PromptTokens)
 	result.OutputTokens = int(resp.Usage.CompletionTokens)
 	if len(resp.Choices) > 0 {
@@ -840,6 +870,10 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 }
 
 func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.CompletionRequest) <-chan llm.StreamChunk {
+	return p.streamChatCompletionsWithUsage(ctx, req, true)
+}
+
+func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.CompletionRequest, includeUsage bool) <-chan llm.StreamChunk {
 	ch := make(chan llm.StreamChunk)
 	go func() {
 		defer close(ch)
@@ -857,6 +891,11 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 			Model:    req.Model,
 			Messages: convertMessages(req.Messages, req.SystemPrompt),
 		}
+		if includeUsage {
+			params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
+				IncludeUsage: openai.Bool(true),
+			}
+		}
 		if req.MaxTokens > 0 {
 			params.MaxCompletionTokens = openai.Int(int64(req.MaxTokens))
 		}
@@ -872,6 +911,9 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
+		finishReason := ""
+		var inputTokens, outputTokens int
+		streamModel := req.Model
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -899,19 +941,56 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 				}
 			}
 
+			if strings.TrimSpace(chunk.Model) != "" {
+				streamModel = chunk.Model
+			}
+			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+				inputTokens = int(chunk.Usage.PromptTokens)
+				outputTokens = int(chunk.Usage.CompletionTokens)
+			}
+
 			if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
-				send(llm.StreamChunk{Done: true, StopReason: chunk.Choices[0].FinishReason})
-				return
+				finishReason = chunk.Choices[0].FinishReason
 			}
 		}
 
 		if err := stream.Err(); err != nil {
-			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
+			providerErr := toProviderError(err)
+			if includeUsage && isUnsupportedStreamOptionsError(providerErr) {
+				for chunk := range p.streamChatCompletionsWithUsage(ctx, req, false) {
+					if !send(chunk) {
+						return
+					}
+				}
+				return
+			}
+			send(llm.StreamChunk{Error: providerErr, Done: true})
 			return
 		}
-		send(llm.StreamChunk{Done: true})
+		send(llm.StreamChunk{
+			Done:         true,
+			StopReason:   finishReason,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			Model:        streamModel,
+			Provider:     p.TelemetryProviderName(),
+		})
 	}()
 	return ch
+}
+
+func isUnsupportedStreamOptionsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "stream_options") && !strings.Contains(msg, "include_usage") {
+		return false
+	}
+	return strings.Contains(msg, "unsupported") ||
+		strings.Contains(msg, "unknown") ||
+		strings.Contains(msg, "unrecognized") ||
+		strings.Contains(msg, "invalid")
 }
 
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status

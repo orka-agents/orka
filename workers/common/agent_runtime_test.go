@@ -27,6 +27,8 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -863,6 +865,46 @@ func TestRunAgent_ExecutorSuccess(t *testing.T) {
 	err := RunAgent("test-agent", "/tmp/ws", 50, executor)
 	if err != nil {
 		t.Fatalf("RunAgent should succeed, got: %v", err)
+	}
+}
+
+func TestRunAgentEmitsTaskRunSpanFromTraceparent(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	parentCtx, parentSpan := tracing.Tracer("test").Start(context.Background(), "parent")
+	carrier := tracing.InjectContext(parentCtx)
+	t.Setenv(workerenv.TraceParent, carrier.Get("traceparent"))
+	t.Setenv(workerenv.AgentName, "agent-a")
+	setBasicRunAgentEnv(t, "trace-task")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+	restoreRecorder := setRunAgentEventRecorderForTest(NewFakeEventRecorder())
+	defer restoreRecorder()
+
+	if err := RunAgent("codex", t.TempDir(), 50, func(context.Context, *AgentConfig) (string, error) {
+		return "done", nil
+	}); err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	parentSpan.End()
+	taskRun := testutil.SpanNamed(spans.Recorder.Ended(), "task.run")
+	if taskRun == nil {
+		t.Fatal("missing task.run span")
+	}
+	if got, want := taskRun.Parent().SpanID(), parentSpan.SpanContext().SpanID(); got != want {
+		t.Fatalf("task.run parent = %s, want %s", got, want)
+	}
+	attrs := testutil.AttributeMap(taskRun)
+	if got := attrs[tracing.AttrTaskID].AsString(); got != "trace-task" {
+		t.Fatalf("%s = %q", tracing.AttrTaskID, got)
+	}
+	if got := attrs[tracing.AttrAgentName].AsString(); got != "agent-a" {
+		t.Fatalf("%s = %q", tracing.AttrAgentName, got)
 	}
 }
 

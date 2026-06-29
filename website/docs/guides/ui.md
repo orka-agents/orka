@@ -48,7 +48,7 @@ Production:
 |------|-------|-------------|
 | Dashboard | `/` | Overview with task/session/agent/tool counts and recent tasks |
 | Tasks | `/tasks` | Create, monitor, and manage tasks with log streaming |
-| Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs |
+| Task Detail | `/tasks/:taskId` | Task metadata, spec, status, result viewer, logs, execution timeline, trace, and approvals; fork provenance when forked |
 | Create Task | `/tasks/new` | Form with type selector (container/AI/agent) and conditional fields |
 | Board / Kanban | `/kanban` | Kanban board for task status and work-in-progress tracking |
 | Live | `/live` | Live agent grid for active task execution and status updates |
@@ -57,7 +57,7 @@ Production:
 | Repository Security Detail | `/security/:repoId` | Threat model editor, scan history, finding tables, and recommended remediation view |
 | Security Finding Detail | `/security/findings/:findingId` | Evidence, validation status, patch proposal, dismissal/reopen, and remediation PR actions |
 | Sessions | `/sessions` | Browse sessions with message count and token stats |
-| Session Detail | `/sessions/:sessionId` | Transcript viewer with chat-like message rendering |
+| Session Detail | `/sessions/:sessionId` | Transcript viewer plus an aggregated execution timeline across the session's tasks |
 | Agents | `/agents` | Card grid of agents with model and tool info |
 | Agent Detail | `/agents/:agentId` | Full agent configuration view |
 | Create Agent | `/agents/new` | Agent creation form |
@@ -65,6 +65,37 @@ Production:
 | Tool Detail | `/tools/:toolName` | Tool spec with JSON Schema parameters |
 | Chat | `/chat` | Interactive chat with SSE streaming and tool execution |
 | Login | `/login` | Token input for ServiceAccount authentication |
+
+## Execution events
+
+Task and session detail pages surface the evented execution backbone (see the
+[Execution Events reference](../reference/execution-events.md) for the underlying
+APIs):
+
+- **Timeline tab** — the semantic execution event stream for a task, loaded from
+  `GET /tasks/:id/events` and followed live over `GET /tasks/:id/stream`. Events
+  are deduplicated by sequence, grouped by category, and filterable by category,
+  severity, and free-text search. Redacted/truncated payloads are marked and the
+  raw (already-redacted) payload is available behind a disclosure toggle and a
+  copy-JSON action. Live follow stops on the terminal `stream_complete` frame.
+- **Trace tab** — an explainable, grouped view from `GET /tasks/:id/trace`:
+  lifecycle summary, model requests, tool calls, child tasks (linkable), workspace,
+  artifacts, approvals, fork provenance, and errors/warnings, with a raw-timeline
+  fallback when no structured groups exist.
+- **Approvals tab** — pending high-risk approvals from `GET /tasks/:id/approvals`
+  with approve/decline actions (optional reason) posted to
+  `POST /tasks/:id/approvals/:approvalID/decision`. Buttons disable while a
+  decision is in flight; conflicts (decided elsewhere/expired) surface inline.
+- **Fork from a checkpoint** — each timeline row offers "Fork from here", which
+  opens a dialog seeded with that event's sequence and posts to
+  `POST /tasks/:id/fork`. Forked tasks show a provenance card derived from their
+  `orka.ai/fork-source-task` and `orka.ai/fork-source-seq` annotations.
+- **Session timeline** — session detail aggregates events across the session's
+  tasks from `GET /sessions/:id/events` / `GET /sessions/:id/stream`, with each
+  row linking to its originating task.
+
+These surfaces hide gracefully (with a clear message) when execution event storage
+is not enabled on the server (`501 Not Implemented`).
 
 ## Authentication
 
@@ -85,6 +116,7 @@ All API requests include `Authorization: Bearer <token>`.
 - **Error handling**: Global error boundary, toast notifications, 401 redirect
 - **Responsive design**: Mobile-responsive sidebar, tables, and cards
 - **Auto-refresh**: TanStack Query `refetchInterval` for live status updates
+- **Live event streams**: SSE-backed task/session execution timelines that reconnect from the last sequence and recover history after refresh
 - **Cursor pagination**: Kubernetes-style `continue` token pagination
 
 ## Development
@@ -147,6 +179,7 @@ ui/
 │   │   ├── ui/                  # shadcn/ui primitives
 │   │   ├── layout/              # Sidebar, header, root layout
 │   │   ├── tasks/               # Task list/detail, Kanban board, live agent grid
+│   │   ├── events/              # Execution event timeline, trace, severity primitives
 │   │   ├── security/            # Repository scans, threat models, findings, patch proposals
 │   │   ├── sessions/            # Session list, detail, transcript
 │   │   ├── agents/              # Agent list, detail, create form

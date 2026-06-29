@@ -175,8 +175,8 @@ func TestListTasksTool_Execute_InvalidJSON(t *testing.T) {
 	if res.Success {
 		t.Error("expected failure for invalid JSON")
 	}
-	if res.ErrorType != "invalid_arguments" {
-		t.Errorf("expected errorType 'invalid_arguments', got %q", res.ErrorType)
+	if res.ErrorType != errTypeInvalidArgs {
+		t.Errorf("expected errorType invalid_arguments, got %q", res.ErrorType)
 	}
 }
 

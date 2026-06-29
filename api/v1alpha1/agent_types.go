@@ -72,10 +72,15 @@ type AgentSpec struct {
 }
 
 // AgentCLIRuntime defines agent CLI runtime configuration for an Agent.
+// +kubebuilder:validation:XValidation:rule="has(self.type) != has(self.runtimeRef)",message="exactly one of type or runtimeRef is required"
 type AgentCLIRuntime struct {
-	// Type specifies which CLI runtime to use
-	// +kubebuilder:validation:Required
-	Type AgentRuntimeType `json:"type"`
+	// Type specifies which built-in CLI runtime to use. Use runtimeRef for admin-registered custom runtimes.
+	// +optional
+	Type AgentRuntimeType `json:"type,omitempty"`
+
+	// RuntimeRef selects an admin-governed AgentRuntime for custom/BYO harness runtimes.
+	// +optional
+	RuntimeRef *AgentRuntimeReference `json:"runtimeRef,omitempty"`
 
 	// DefaultMaxTurns is the default maximum agent loop iterations for tasks using this Agent
 	// +kubebuilder:validation:Minimum=1
@@ -232,6 +237,12 @@ type CoordinationConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxIterations int32 `json:"maxIterations,omitempty"`
+
+	// ApprovalRequiredTools lists custom tool names that require a human approval before execution.
+	// This field is only honored when coordination is enabled and autonomous mode is true.
+	// Built-in tools such as request_approval, delegate_task, and web_search are rejected.
+	// +optional
+	ApprovalRequiredTools []string `json:"approvalRequiredTools,omitempty"`
 }
 
 // AllowedAgent defines an agent that can be delegated to

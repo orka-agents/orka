@@ -115,7 +115,7 @@ func TestUploadArtifactAllowsHarnessWrapperControlPlaneUpload(t *testing.T) {
 		Namespace: "orka-system",
 		Username:  "system:serviceaccount:orka-system:agent-harness-wrapper",
 	}
-	require.NoError(t, h.verifyHarnessWrapperArtifactUpload(context.Background(), userInfo, "default", "wrapped-task"))
+	require.NoError(t, h.internalCallerAuthorizer().verifyHarnessWrapperArtifactUpload(context.Background(), userInfo, "default", "wrapped-task"))
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, userInfo)

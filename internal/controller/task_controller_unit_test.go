@@ -32,6 +32,7 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -43,6 +44,8 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
+	orkatracing "github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 	"github.com/sozercan/orka/internal/workspace"
 )
@@ -62,6 +65,7 @@ func newTestScheme() *runtime.Scheme {
 	_ = coordinationv1.AddToScheme(s)
 	_ = rbacv1.AddToScheme(s)
 	_ = sandboxextv1alpha1.AddToScheme(s)
+	_ = sandboxextv1beta1.AddToScheme(s)
 	return s
 }
 
@@ -69,7 +73,7 @@ func newTestScheme() *runtime.Scheme {
 func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskReconciler {
 	fb := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).
+		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}, &corev1alpha1.AgentRuntime{}).
 		WithIndex(&corev1.Event{}, eventInvolvedObjectNameField, eventInvolvedObjectNameIndex).
 		WithIndex(&corev1.Event{}, eventReasonField, eventReasonIndex)
 	if len(objs) > 0 {
@@ -482,6 +486,274 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskRejectsApprovalRequiredTools(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-runtime-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "only supported for type: ai") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want runtime approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsCredentialSecretRefs(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "agent secretRef",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-creds"}
+			},
+			wantError: "agent secretRef",
+		},
+		{
+			name: "task secretRef",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-creds"}
+			},
+			wantError: "task secretRef",
+		},
+		{
+			name: "workspace gitSecretRef",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+					GitRepo:      "https://github.com/example/repo",
+					GitSecretRef: &corev1.LocalObjectReference{Name: "git-creds"},
+				}}
+			},
+			wantError: "gitSecretRef",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+				},
+			}
+			tt.mutate(task, agent)
+			err := r.validateTaskAgentCompatibility(task, agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
+		wantError string
+	}{
+		{
+			name: "agent defaultAllowedTools",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				agent.Spec.Runtime.DefaultAllowedTools = []string{"bash"}
+			},
+			wantError: "defaultAllowedTools",
+		},
+		{
+			name: "agent defaultAllowBash",
+			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
+				allow := false
+				agent.Spec.Runtime.DefaultAllowBash = &allow
+			},
+			wantError: "defaultAllowBash",
+		},
+		{
+			name: "task allowedTools",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read"}}
+			},
+			wantError: "allowedTools",
+		},
+		{
+			name: "task allowBash",
+			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
+				allow := false
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowBash: &allow}
+			},
+			wantError: "allowBash",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"}}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+				},
+			}
+			tt.mutate(task, agent)
+			err := r.validateTaskAgentCompatibility(task, agent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RuntimeRefRejectsPriorTaskRef(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Type:         corev1alpha1.TaskTypeAgent,
+			Prompt:       "do stuff",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "priorTaskRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want priorTaskRef rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support runtimeRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only runtimeRef rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_StaleFrozenRuntimeRefStatusIgnoredWithoutPlannedTurn(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Type:         corev1alpha1.TaskTypeAgent,
+			Prompt:       "continue",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
+		},
+		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "stale-runtime"}},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for stale frozen runtimeRef status", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ActiveFrozenRuntimeRefStillRejectsPriorTaskRef(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			harnessWrapperTurnIDAnnotation:  "turn-1",
+			harnessWrapperRuntimeAnnotation: "runtime-1",
+			harnessWrapperCorrelationIDAnno: "corr-1",
+		}},
+		Spec: corev1alpha1.TaskSpec{
+			Type:         corev1alpha1.TaskTypeAgent,
+			Prompt:       "continue",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
+		},
+		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "active-runtime"}},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "priorTaskRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want priorTaskRef rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskRuntimeRefValid(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for runtimeRef", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskRuntimeTypeAndRefRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:       corev1alpha1.AgentRuntimeCodex,
+				RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"},
+			},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "both runtime.type and runtime.runtimeRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want type/runtimeRef conflict", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskRuntimeNeitherTypeNorRefRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "exactly one of type or runtimeRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing type/runtimeRef rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeAndProvider(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -587,6 +859,124 @@ func TestValidateTaskAgentCompatibility_AITaskWithRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_RequestApprovalToolRequiresAutonomous(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		task  *corev1alpha1.Task
+		agent *corev1alpha1.Agent
+	}{
+		{
+			name: "agent tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}},
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+				},
+			},
+		},
+		{
+			name: "task tool",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				AI:   &corev1alpha1.AISpec{Tools: []string{"request_approval"}},
+			}},
+			agent: &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &TaskReconciler{}
+			if err := r.validateTaskAgentCompatibility(tt.task, tt.agent); err == nil ||
+				!strings.Contains(err.Error(), "enabled autonomous") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous request_approval rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RequestApprovalAllowedForAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Tools: []corev1alpha1.ToolReference{{Name: "request_approval"}},
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:    true,
+				Autonomous: true,
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireAutonomous(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRequireCoordinationEnabled(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Autonomous:            true,
+				ApprovalRequiredTools: []string{"dispatch_work_order"},
+			},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+		!strings.Contains(err.Error(), "enabled autonomous") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want enabled autonomous approval rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ApprovalRequiredToolsRejectBuiltIns(t *testing.T) {
+	for _, toolName := range []string{"request_approval", "create_container_task", "web_search", "file_read", "web_fetch", "list_issues", "get_issue", "list_pull_requests", "recall_memory", "search_transcript", "delegate_task", "send_message", "check_messages", "post_review_comment", "check_pr_review_marker", "comment_on_issue", "update_agent"} {
+		t.Run(toolName, func(t *testing.T) {
+			r := &TaskReconciler{}
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "approval-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						Autonomous:            true,
+						ApprovalRequiredTools: []string{toolName},
+					},
+				},
+			}
+			if err := r.validateTaskAgentCompatibility(task, agent); err == nil ||
+				!strings.Contains(err.Error(), "cannot include built-in tool") {
+				t.Fatalf("validateTaskAgentCompatibility() error = %v, want built-in rejection", err)
+			}
+		})
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -601,7 +991,7 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 // validateExecutionWorkspace (pure logic)
 // ---------------------------------------------------------------------------
 
-func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testing.T) {
+func TestResolveExecutionWorkspaceRequestValidatesSandboxWarmPoolExists(t *testing.T) {
 	scheme := newTestScheme()
 
 	executionWorkspace := func(name string, namespace string) *corev1alpha1.ExecutionWorkspaceSpec {
@@ -629,11 +1019,11 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	}
 
-	t.Run("existing template in task namespace is accepted", func(t *testing.T) {
-		template := &sandboxextv1alpha1.SandboxTemplate{
+	t.Run("existing warm pool in task namespace is accepted", func(t *testing.T) {
+		warmPool := &sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "task-template", Namespace: defaultNS},
 		}
-		r := newUnitReconciler(scheme, template)
+		r := newUnitReconciler(scheme, warmPool)
 		r.AgentSandboxEnabled = true
 
 		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-ok", executionWorkspace("task-template", "")))
@@ -645,25 +1035,25 @@ func TestResolveExecutionWorkspaceRequestValidatesSandboxTemplateExists(t *testi
 		}
 	})
 
-	t.Run("missing template fails before job creation", func(t *testing.T) {
+	t.Run("missing warm pool fails before job creation", func(t *testing.T) {
 		r := newUnitReconciler(scheme)
 		r.AgentSandboxEnabled = true
 
 		_, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-missing", executionWorkspace("missing-template", "")))
 		if err == nil {
-			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing template error")
+			t.Fatal("resolveExecutionWorkspaceRequest() error = nil, want missing warm pool error")
 		}
-		want := `execution workspace template "missing-template" not found in namespace "default"`
+		want := `execution workspace warm pool "missing-template" not found in namespace "default"`
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err.Error(), want)
 		}
 	})
 
-	t.Run("explicit template namespace is accepted as claim namespace", func(t *testing.T) {
-		template := &sandboxextv1alpha1.SandboxTemplate{
+	t.Run("explicit warm pool namespace is accepted as claim namespace", func(t *testing.T) {
+		warmPool := &sandboxextv1beta1.SandboxWarmPool{
 			ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "sandbox-templates"},
 		}
-		r := newUnitReconciler(scheme, template)
+		r := newUnitReconciler(scheme, warmPool)
 		r.AgentSandboxEnabled = true
 
 		request, err := r.resolveExecutionWorkspaceRequest(context.Background(), task("task-cross-ns", executionWorkspace("shared-template", "sandbox-templates")))
@@ -3792,7 +4182,7 @@ func TestCreateTaskJob_RBACReconcileFailureEmitsWarningAndContinues(t *testing.T
 
 	fc := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}).
+		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.Agent{}, &corev1alpha1.AgentRuntime{}).
 		WithObjects(task).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
@@ -4522,6 +4912,57 @@ func TestHandleScheduled_CopiesCoordinationToolInjectionDisableAnnotation(t *tes
 	}
 }
 
+func TestHandleScheduled_StampsChildWithSchedulerTrace(t *testing.T) {
+	if shutdown, err := orkatracing.Init("test", false); err == nil {
+		t.Cleanup(func() { _ = shutdown(context.Background()) })
+	} else {
+		t.Fatalf("init tracing: %v", err)
+	}
+	testutil.NewSpanHarness(t)
+	ctx, span := orkatracing.Tracer("test").Start(context.Background(), "scheduler")
+	defer span.End()
+
+	scheme := newTestScheme()
+	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())
+	startingDeadlineSeconds := int64(300)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sched-trace",
+			Namespace:         "default",
+			UID:               "12345678-abcd-efgh-ijkl-1234567890ab",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC()),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:                    corev1alpha1.TaskTypeAI,
+			Prompt:                  "hello",
+			Schedule:                "* * * * *",
+			StartingDeadlineSeconds: &startingDeadlineSeconds,
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseScheduled,
+			LastScheduleTime: &lastSchedule,
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+
+	if _, err := r.handleScheduled(ctx, task); err != nil {
+		t.Fatalf("handleScheduled() error = %v", err)
+	}
+
+	var childList corev1alpha1.TaskList
+	if err := r.List(ctx, &childList, client.InNamespace(task.Namespace), client.MatchingLabels{
+		labels.LabelParentTask: labels.SelectorValue(task.Name),
+	}); err != nil {
+		t.Fatalf("list child tasks: %v", err)
+	}
+	if len(childList.Items) != 1 {
+		t.Fatalf("expected 1 scheduled child task, got %d", len(childList.Items))
+	}
+	if got := childList.Items[0].Annotations[labels.AnnotationTraceParent]; got == "" {
+		t.Fatalf("scheduled child missing %s annotation", labels.AnnotationTraceParent)
+	}
+}
+
 func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.T) {
 	scheme := newTestScheme()
 	lastSchedule := metav1.NewTime(time.Now().Add(-2 * time.Minute).UTC())
@@ -4956,6 +5397,143 @@ func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing
 	assertNoJobsForTask(t, r, task)
 }
 
+func TestHandlePending_AgentRuntimeUnsupportedPlannerFeaturesFailBeforeJobBackend(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutateTask func(*corev1alpha1.Task)
+		want       string
+	}{
+		{
+			name: "transaction",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1"}
+			},
+			want: "transaction token delegation",
+		},
+		{
+			name: "execution placement",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.Execution = &corev1alpha1.ExecutionSpec{RuntimeClassName: "kata"}
+			},
+			want: "execution placement",
+		},
+		{
+			name: "cross namespace prior task",
+			mutateTask: func(task *corev1alpha1.Task) {
+				task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: "prior", Namespace: "other"}
+			},
+			want: "cross-namespace priorTaskRef",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+				},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-" + strings.ReplaceAll(tt.name, " ", "-"), Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeAgent,
+					AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+					Prompt:   "do work",
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+			}
+			tt.mutateTask(task)
+			r := newUnitReconciler(scheme, task, agent)
+			r.EnforceNamespaceIsolation = true
+
+			result, err := r.handlePending(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handlePending() error = %v", err)
+			}
+			if result.RequeueAfter != time.Second {
+				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+			}
+
+			updated := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+				t.Fatalf("Get updated task: %v", err)
+			}
+			if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+				t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+			}
+			if !strings.Contains(updated.Status.Message, tt.want) {
+				t.Fatalf("message = %q, want %q", updated.Status.Message, tt.want)
+			}
+			assertNoJobsForTask(t, r, task)
+		})
+	}
+}
+
+func TestHandlePending_AgentRuntimeValidWorkspaceFailsBeforeJobBackend(t *testing.T) {
+	scheme := newTestScheme()
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	template := &sandboxextv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-template", Namespace: defaultNS},
+	}
+	warmPool := &sandboxextv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: template.Name, Namespace: defaultNS},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-valid-but-unsupported", Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt:   "do work",
+			Execution: &corev1alpha1.ExecutionSpec{
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					Enabled:  true,
+					Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
+					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{
+						Name: template.Name,
+					},
+				},
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, agent, template, warmPool)
+	r.AgentSandboxEnabled = true
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "execution workspace is not supported by harness runtime yet") {
+		t.Fatalf("message = %q, want workspace unsupported failure", updated.Status.Message)
+	}
+	assertExecutionWorkspaceValidationFailedStatus(
+		t,
+		updated.Status.ExecutionWorkspace,
+		corev1alpha1.WorkspaceProviderAgentSandbox,
+		template.Name,
+		"execution workspace is not supported by harness runtime yet",
+	)
+	assertNoJobsForTask(t, r, task)
+}
+
 func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
@@ -5106,7 +5684,7 @@ func TestHandlePending_ExecutionWorkspaceResolutionFailureSetsWorkspaceStatus(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
 	}
-	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace template")
+	assertExecutionWorkspaceValidationFailedStatus(t, updated.Status.ExecutionWorkspace, corev1alpha1.WorkspaceProviderAgentSandbox, "missing-template", "execution workspace warm pool")
 	if !strings.Contains(updated.Status.Message, "failed to resolve execution workspace") {
 		t.Fatalf("message = %q, want resolve execution workspace failure", updated.Status.Message)
 	}
