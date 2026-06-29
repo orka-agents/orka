@@ -69,7 +69,8 @@ var _ = Describe("AgentRuntime external endpoint", Ordered, func() {
 
 	It("runs an agent task through a conformance-gated external AgentRuntime", func() {
 		By("deploying the mock AgentKit-compatible harness endpoint")
-		Expect(applyManifestJSON(agentRuntimeExternalGoodSecret(goodSecretName, runtimeName, harnessToken))).To(Succeed())
+		endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", serviceName, namespace, harnessServicePort)
+		Expect(applyManifestJSON(agentRuntimeExternalGoodSecret(goodSecretName, runtimeName, endpoint, harnessToken))).To(Succeed())
 		Expect(applyManifestJSON(agentRuntimeExternalHarnessDeployment(deploymentName, serviceName, harnessToken))).To(Succeed())
 
 		cmd := exec.Command("kubectl", "rollout", "status", "deployment/"+deploymentName, "-n", namespace, "--timeout=2m")
@@ -77,7 +78,6 @@ var _ = Describe("AgentRuntime external endpoint", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "mock harness deployment should become ready")
 
 		By("registering an external AgentRuntime")
-		endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", serviceName, namespace, harnessServicePort)
 		Expect(applyManifestJSON(agentRuntimeExternalRuntime(runtimeName, endpoint, goodSecretName))).To(Succeed())
 		waitForAgentRuntimeReady(runtimeName, true, 2*time.Minute)
 		assertAgentRuntimeObservedCapabilities(runtimeName, map[string]string{
@@ -137,7 +137,7 @@ var _ = Describe("AgentRuntime external endpoint", Ordered, func() {
 	})
 })
 
-func agentRuntimeExternalGoodSecret(name, runtimeName, value string) map[string]any {
+func agentRuntimeExternalGoodSecret(name, runtimeName, endpoint, value string) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
@@ -147,6 +147,9 @@ func agentRuntimeExternalGoodSecret(name, runtimeName, value string) map[string]
 			"labels": map[string]any{
 				"orka.ai/agent-runtime-auth": "true",
 				"orka.ai/agent-runtime-name": runtimeName,
+			},
+			"annotations": map[string]any{
+				"orka.ai/agent-runtime-endpoint": endpoint,
 			},
 		},
 		"stringData": map[string]any{"token": value},
