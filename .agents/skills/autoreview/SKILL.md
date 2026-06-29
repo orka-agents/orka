@@ -173,12 +173,6 @@ The smoke harness has thin shell wrappers over a shared Python implementation:
 skills\autoreview\scripts\test-review-harness.ps1 -Fixture benign -Engine codex
 ```
 
-Global helper from `agent-scripts`:
-
-```bash
-~/.codex/skills/agent-scripts/autoreview/scripts/autoreview --help
-```
-
 The helper:
 
 - chooses dirty local changes first

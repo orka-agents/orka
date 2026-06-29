@@ -97,7 +97,7 @@ test -x "$kindctl"
    so its `kubectl` discovery sees the repo-scoped cluster:
 
    ```bash
-   orka_kind_deploy="${ORKA_KIND_DEPLOY_BIN:-.codex/skills/orka-kind-deploy/scripts/deploy_orka_kind.sh}"
+   orka_kind_deploy="${ORKA_KIND_DEPLOY_BIN:-.agents/skills/orka-kind-deploy/scripts/deploy_orka_kind.sh}"
    test -x "$orka_kind_deploy"
    eval "$("$kindctl" env)"
    "$orka_kind_deploy"
