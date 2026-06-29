@@ -12,6 +12,10 @@ import { PRCreateDialog } from './pr-create-dialog'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskExecutionPanel } from './task-execution-panel'
+import { TaskEventTimeline } from './task-event-timeline'
+import { TaskTracePanel } from './task-trace-panel'
+import { TaskApprovalPanel } from './task-approval-panel'
+import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
@@ -92,6 +96,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="execution">Execution</TabsTrigger>
+          <TabsTrigger value="timeline">Timeline</TabsTrigger>
+          <TabsTrigger value="trace">Trace</TabsTrigger>
+          <TabsTrigger value="approvals">Approvals</TabsTrigger>
           <TabsTrigger value="result">Result</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
           {(task.status?.iteration ?? 0) > 0 && (
@@ -103,6 +110,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4">
+          <ForkProvenance annotations={task.metadata.annotations} />
           <Card>
             <CardHeader>
               <CardTitle>Metadata</CardTitle>
@@ -286,6 +294,23 @@ export function TaskDetail({ taskId }: { taskId: string }) {
 
         <TabsContent value="execution">
           <TaskExecutionPanel task={task} events={taskEvents} />
+        </TabsContent>
+
+        <TabsContent value="timeline">
+          <TaskEventTimeline
+            key={`${task.metadata.namespace ?? ''}/${taskId}/${task.metadata.uid ?? ''}`}
+            taskId={taskId}
+            taskPhase={task.status?.phase}
+            taskUid={task.metadata.uid}
+          />
+        </TabsContent>
+
+        <TabsContent value="trace">
+          <TaskTracePanel taskId={taskId} taskUid={task.metadata.uid} />
+        </TabsContent>
+
+        <TabsContent value="approvals">
+          <TaskApprovalPanel taskId={taskId} taskPhase={task.status?.phase} taskUid={task.metadata.uid} />
         </TabsContent>
 
         <TabsContent value="logs">

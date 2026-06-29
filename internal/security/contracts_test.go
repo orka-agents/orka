@@ -1,6 +1,7 @@
 package security
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -142,6 +143,70 @@ func TestValidateFindingsV2AcceptsButDoesNotPersistQuoteWithoutWorkspaceRoot(t *
 	}
 	if got.Accepted[0].Evidence[0].Quote != "" {
 		t.Fatalf("accepted quote = %q, want quote omitted from durable evidence", got.Accepted[0].Evidence[0].Quote)
+	}
+}
+
+func TestValidateFindingsV2AcceptsQuoteFromNonPrefixExcerpt(t *testing.T) {
+	quote := "dangerous changed line"
+	finding := validFinding()
+	finding.Evidence[0].StartLine = 20
+	finding.Evidence[0].EndLine = 20
+	finding.Evidence[0].Quote = &quote
+
+	got := ValidateFindingsV2(FindingsV2Artifact{
+		SchemaVersion: SchemaVersionFindingsV2,
+		Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/app", Branch: "main"},
+		Scan:          FindingsV2Scan{Mode: "manual", SliceID: "slice_app"},
+		Findings:      []FindingsV2Finding{finding},
+	}, ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_app",
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "app.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 16, EndLine: 24}},
+			Excerpt:            strings.Join([]string{"line16", "line17", "line18", "line19", "dangerous changed line", "line21", "line22", "line23", "line24"}, "\n") + "\n",
+			Readable:           true,
+		}},
+	}, FindingValidationOptions{
+		Namespace:      "default",
+		RepositoryScan: "repo",
+		ScanRunID:      "scan1",
+		TaskName:       "task1",
+	})
+	if len(got.Accepted) != 1 || len(got.Dropped) != 0 {
+		t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%d, want 1/0; dropped=%#v", len(got.Accepted), len(got.Dropped), got.Dropped)
+	}
+}
+
+func TestValidateFindingsV2RejectsQuoteFromWrongLineInNonPrefixExcerpt(t *testing.T) {
+	quote := "dangerous changed line"
+	finding := validFinding()
+	finding.Evidence[0].StartLine = 24
+	finding.Evidence[0].EndLine = 24
+	finding.Evidence[0].Quote = &quote
+
+	got := ValidateFindingsV2(FindingsV2Artifact{
+		SchemaVersion: SchemaVersionFindingsV2,
+		Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/app", Branch: "main"},
+		Scan:          FindingsV2Scan{Mode: "manual", SliceID: "slice_app"},
+		Findings:      []FindingsV2Finding{finding},
+	}, ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_app",
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "app.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 16, EndLine: 24}},
+			Excerpt:            strings.Join([]string{"line16", "line17", "line18", "line19", "dangerous changed line", "line21", "line22", "line23", "line24"}, "\n") + "\n",
+			Readable:           true,
+		}},
+	}, FindingValidationOptions{
+		Namespace:      "default",
+		RepositoryScan: "repo",
+		ScanRunID:      "scan1",
+		TaskName:       "task1",
+	})
+	if len(got.Accepted) != 0 || len(got.Dropped) != 1 || !strings.Contains(got.Dropped[0].Reason, "quote does not match") {
+		t.Fatalf("ValidateFindingsV2() accepted=%d dropped=%#v, want quote mismatch drop", len(got.Accepted), got.Dropped)
 	}
 }
 
@@ -403,6 +468,63 @@ func TestBuildReviewContextBoundsPromptAndManifest(t *testing.T) {
 	}
 }
 
+func TestBuildReviewContextIncludesChangedLineRanges(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "package main\n\nfunc main() {}\n")
+	slice := store.ReviewSlice{
+		ID:             "slice_app",
+		RepositoryScan: "repo",
+		Title:          "App",
+		Kind:           "package",
+		OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:   []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{{
+			Path:      "app.go",
+			StartLine: 3,
+			EndLine:   3,
+		}},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if !strings.Contains(prompt, "Changed-code focus") || !strings.Contains(prompt, "app.go:3-3") || !strings.Contains(prompt, "newly introduced") {
+		t.Fatalf("prompt missing changed-line focus:\n%s", prompt)
+	}
+	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].Path != "app.go" {
+		t.Fatalf("manifest changed ranges = %#v, want app.go range", manifest.ChangedLineRanges)
+	}
+}
+
+func TestReviewContextManifestRoundTripsChangedRanges(t *testing.T) {
+	manifest := ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_app",
+		ChangedFiles:  []string{"app.go"},
+		ChangedLineRanges: []ChangedLineRange{{
+			Path:      "app.go",
+			StartLine: 2,
+			EndLine:   4,
+		}},
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "app.go",
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 10}},
+			Readable:           true,
+		}},
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	got, err := ParseReviewContextManifest(data)
+	if err != nil {
+		t.Fatalf("ParseReviewContextManifest() error = %v", err)
+	}
+	if len(got.ChangedLineRanges) != 1 || got.ChangedLineRanges[0].StartLine != 2 {
+		t.Fatalf("changed ranges = %#v, want round trip", got.ChangedLineRanges)
+	}
+}
+
 func validFinding() FindingsV2Finding {
 	return FindingsV2Finding{
 		Title:       "Finding",
@@ -438,5 +560,135 @@ func TestDroppedFindingSampleJSON(t *testing.T) {
 	}
 	if got["title"] != "bad" {
 		t.Fatalf("sample = %#v, want title", got)
+	}
+}
+
+func TestBuildReviewContextUsesChangedLineRangesForLateFileExcerpt(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", strings.Repeat("line\n", 40))
+	slice := store.ReviewSlice{
+		ID:                "slice_app",
+		RepositoryScan:    "repo",
+		Title:             "App",
+		Kind:              "package",
+		OwnedFiles:        []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:      []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{{Path: "app.go", StartLine: 20, EndLine: 30}},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{MaxFiles: 1, MaxBytes: 5000})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if len(manifest.IncludedFiles) != 1 || len(manifest.IncludedFiles[0].IncludedLineRanges) != 1 {
+		t.Fatalf("included ranges = %#v", manifest.IncludedFiles)
+	}
+	included := manifest.IncludedFiles[0].IncludedLineRanges[0]
+	if included.StartLine > 20 || included.EndLine < 30 {
+		t.Fatalf("included range = %#v, want it to cover changed lines 20-30", included)
+	}
+	if included.StartLine != 20 || included.EndLine != 34 {
+		t.Fatalf("included range = %#v, want bounded context around changed lines", included)
+	}
+	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].StartLine != 20 || manifest.ChangedLineRanges[0].EndLine != 30 {
+		t.Fatalf("changed ranges = %#v, want 20-30 preserved", manifest.ChangedLineRanges)
+	}
+	if !strings.Contains(prompt, "    20  line") || !strings.Contains(prompt, "app.go:20-30") {
+		t.Fatalf("prompt missing late changed lines/range:\n%s", prompt)
+	}
+}
+
+func TestBuildReviewContextIncludesLongChangedLineWithinBudget(t *testing.T) {
+	root := t.TempDir()
+	longLine := strings.Repeat("a", 5000)
+	writeFile(t, root, "app.go", "before\n"+longLine+"\nafter\n")
+	slice := store.ReviewSlice{
+		ID:                "slice_app",
+		RepositoryScan:    "repo",
+		Title:             "App",
+		Kind:              "package",
+		OwnedFiles:        []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:      []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{{Path: "app.go", StartLine: 2, EndLine: 2}},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{MaxFiles: 1, MaxBytes: 7000})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if len(manifest.IncludedFiles) != 1 || len(manifest.IncludedFiles[0].IncludedLineRanges) != 1 {
+		t.Fatalf("included files = %#v", manifest.IncludedFiles)
+	}
+	if !strings.Contains(prompt, strings.Repeat("a", 4500)) {
+		t.Fatalf("prompt did not include long changed line within budget")
+	}
+	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].StartLine != 2 {
+		t.Fatalf("changed ranges = %#v, want line 2 preserved", manifest.ChangedLineRanges)
+	}
+}
+
+func TestBuildReviewContextPrioritizesChangedLineOverLongPrecontext(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", strings.Repeat("x", 5000)+"\nchanged\nafter\n")
+	slice := store.ReviewSlice{
+		ID:                "slice_app",
+		RepositoryScan:    "repo",
+		Title:             "App",
+		Kind:              "package",
+		OwnedFiles:        []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:      []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{{Path: "app.go", StartLine: 2, EndLine: 2}},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{MaxFiles: 1, MaxBytes: 1200})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if !strings.Contains(prompt, "     2  changed") {
+		t.Fatalf("prompt omitted changed line after long precontext:\n%s", prompt)
+	}
+	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].StartLine != 2 {
+		t.Fatalf("changed ranges = %#v, want changed line preserved", manifest.ChangedLineRanges)
+	}
+}
+
+func TestReadBoundedLogicalLineStopsSkippedLineAtBudget(t *testing.T) {
+	reader := bufio.NewReaderSize(strings.NewReader(strings.Repeat("x", 32*1024)+"\nchanged\n"), 1024)
+	_, truncated, readAny, consumedBytes, err := readBoundedLogicalLine(reader, false, 2048)
+	if err != nil {
+		t.Fatalf("readBoundedLogicalLine() error = %v", err)
+	}
+	if !readAny || !truncated {
+		t.Fatalf("readAny=%v truncated=%v, want skipped line truncated at budget", readAny, truncated)
+	}
+	if consumedBytes > 4096 {
+		t.Fatalf("consumedBytes = %d, want bounded close to skip budget", consumedBytes)
+	}
+}
+
+func TestBuildReviewContextPreservesCapturedRangeWhenLaterRangeExceedsSeekLimit(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.go", "first\n"+strings.Repeat("x", maxReviewContextChangedSeekBytes+4096)+"\nsecond\n")
+	slice := store.ReviewSlice{
+		ID:             "slice_app",
+		RepositoryScan: "repo",
+		Title:          "App",
+		Kind:           "package",
+		OwnedFiles:     []store.ReviewSliceFile{{Path: "app.go"}},
+		ChangedFiles:   []string{"app.go"},
+		ChangedLineRanges: []store.ChangedLineRange{
+			{Path: "app.go", StartLine: 1, EndLine: 1},
+			{Path: "app.go", StartLine: 3, EndLine: 3},
+		},
+	}
+	prompt, manifest, err := BuildReviewContext(root, slice, ReviewContextOptions{MaxFiles: 1, MaxBytes: 2000})
+	if err != nil {
+		t.Fatalf("BuildReviewContext() error = %v", err)
+	}
+	if !strings.Contains(prompt, "     1  first") {
+		t.Fatalf("prompt omitted captured first range:\n%s", prompt)
+	}
+	if len(manifest.IncludedFiles) != 1 || !manifest.IncludedFiles[0].Truncated {
+		t.Fatalf("included files = %#v, want one truncated partial excerpt", manifest.IncludedFiles)
+	}
+	if len(manifest.ChangedLineRanges) != 1 || manifest.ChangedLineRanges[0].StartLine != 1 {
+		t.Fatalf("changed ranges = %#v, want reachable first range preserved", manifest.ChangedLineRanges)
 	}
 }

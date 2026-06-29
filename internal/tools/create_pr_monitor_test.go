@@ -20,6 +20,8 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -182,6 +184,46 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	}
 	if !strings.Contains(task.Spec.Prompt, "Focus on regressions.") {
 		t.Errorf("prompt missing extra instructions: %s", task.Spec.Prompt)
+	}
+}
+
+func TestCreatePRMonitorTool_ExecuteStampsTraceContext(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	_ = testutil.NewSpanHarness(t)
+	_, gitSecret := githubRepoTaskWithSecret("https://github.com/sozercan/orka")
+	fc := newFakeClient(
+		&corev1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
+			Spec: corev1alpha1.AgentSpec{
+				Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			},
+		},
+		gitSecret,
+	)
+	baseCtx := newCreatePRMonitorToolContext(fc)
+	parentCtx, parentSpan := tracing.Tracer("test").Start(context.Background(), "chat-tool")
+	defer parentSpan.End()
+	ctx := WithToolContext(parentCtx, GetToolContext(baseCtx))
+
+	_, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
+		nameField:      "trace-pr-monitor",
+		repoURLField:   "https://github.com/sozercan/orka",
+		scheduleField:  "*/15 * * * *",
+		agentRefField:  "reviewer",
+		"gitSecretRef": gitSecret.Name,
+	}))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var task corev1alpha1.Task
+	if err := fc.Get(context.Background(), types.NamespacedName{Name: "pr-monitor-task", Namespace: defaultNamespace}, &task); err != nil {
+		t.Fatalf("failed to get created task: %v", err)
+	}
+	if task.Annotations[labels.AnnotationTraceParent] == "" {
+		t.Fatalf("missing %s annotation", labels.AnnotationTraceParent)
 	}
 }
 

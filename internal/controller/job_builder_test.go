@@ -1824,6 +1824,34 @@ func TestAddSecretVolumes_AgentSecret(t *testing.T) {
 	}
 }
 
+func TestAddSecretVolumes_AgentEnvFromReservesTraceContextEnv(t *testing.T) {
+	jb := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "uid-1234-5678"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{
+			SecretRef: &corev1.LocalObjectReference{Name: testAgentSecretName},
+		},
+	}
+	job, _ := jb.Build(context.Background(), task, nil, nil)
+	if err := jb.addSecretVolumes(context.Background(), job, task, agent, nil); err != nil {
+		t.Fatalf("addSecretVolumes() error = %v", err)
+	}
+
+	for _, name := range []string{workerenv.TraceParent, workerenv.TraceState, workerenv.TraceBaggage} {
+		got, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, name)
+		if !ok || got.Value != "" || got.ValueFrom != nil {
+			t.Fatalf("reserved trace env %s = %#v, found=%v", name, got, ok)
+		}
+	}
+	if _, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.EnableTelemetry); ok {
+		t.Fatalf("%s should not be blank-reserved for agent envFrom", workerenv.EnableTelemetry)
+	}
+}
+
 func TestAddSecretVolumes_AIAgentEnvFromReservesTelemetryEnv(t *testing.T) {
 	jb := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2575,6 +2603,7 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 			Prompt: "Coordinate incident",
 			Env: []corev1.EnvVar{
 				{Name: workerenv.TaskUID, Value: "spoofed-uid"},
+				{Name: workerenv.AgentName, Value: "spoofed-agent"},
 				{Name: workerenv.AITools, Value: "request_approval"},
 				{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue},
 				{Name: workerenv.AutonomousMode, Value: scheduledRunLabelValue},
@@ -2583,10 +2612,16 @@ func TestJobBuilder_buildEnvVars_TaskEnvCannotSpoofApprovalState(t *testing.T) {
 			},
 		},
 	}
-	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"}}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "real-agent", Namespace: defaultNS},
+		Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: "gpt-4"}},
+	}
 	envVars := builder.buildEnvVarsWithOptions(context.Background(), task, agent, nil, JobBuildOptions{})
 	if env, ok := findEnvVar(envVars, workerenv.TaskUID); !ok || env.Value != "real-uid" {
 		t.Fatalf("%s = %#v, found=%t; want real-uid", workerenv.TaskUID, env, ok)
+	}
+	if env, ok := findEnvVar(envVars, workerenv.AgentName); !ok || env.Value != "real-agent" {
+		t.Fatalf("%s = %#v, found=%t; want real-agent", workerenv.AgentName, env, ok)
 	}
 	for _, name := range []string{
 		workerenv.AITools,
@@ -2756,6 +2791,64 @@ func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAITelemetryEnv(t *testing.T)
 	}
 	if got, ok := findEnvVar(envVars, "CUSTOM_ENV"); !ok || got.Value != "kept" {
 		t.Fatalf("CUSTOM_ENV = %#v, found=%v", got, ok)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAgentTelemetryEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:   corev1alpha1.TaskTypeAgent,
+			Prompt: "p",
+			Env: []corev1.EnvVar{
+				{Name: workerenv.EnableTelemetry, Value: "true"},
+				{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "otel-collector:4317"},
+				{Name: workerenv.TraceParent, Value: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"},
+				{Name: workerenv.TraceState, Value: "vendor=value"},
+				{Name: "CUSTOM_ENV", Value: "kept"},
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	for _, name := range []string{workerenv.TraceParent, workerenv.TraceState} {
+		if _, ok := findEnvVar(envVars, name); ok {
+			t.Fatalf("task-supplied %s should be ignored for agent workers", name)
+		}
+	}
+	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != "true" {
+		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
+	}
+	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); !ok || got.Value != "otel-collector:4317" {
+		t.Fatalf("OTEL_EXPORTER_OTLP_ENDPOINT = %#v, found=%v", got, ok)
+	}
+	if got, ok := findEnvVar(envVars, "CUSTOM_ENV"); !ok || got.Value != "kept" {
+		t.Fatalf("CUSTOM_ENV = %#v, found=%v", got, ok)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_PreservesContainerTelemetryEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox",
+			Command: []string{"true"},
+			Env: []corev1.EnvVar{
+				{Name: workerenv.EnableTelemetry, Value: "true"},
+				{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "service.name=user-container"},
+			},
+		},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != "true" {
+		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
+	}
+	if got, ok := findEnvVar(envVars, "OTEL_RESOURCE_ATTRIBUTES"); !ok || got.Value != "service.name=user-container" {
+		t.Fatalf("OTEL_RESOURCE_ATTRIBUTES = %#v, found=%v", got, ok)
 	}
 }
 

@@ -26,7 +26,6 @@ import (
 	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
@@ -379,30 +378,8 @@ func (r *TaskReconciler) resolveAgentRuntimeBearerTokenFromRef(
 
 //nolint:gocyclo // Coordinates idempotent turn planning, wrapper start, and Running transition.
 func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
-	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
-	if err != nil {
-		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
-	}
-	if workspaceRequest != nil {
-		err := fmt.Errorf("execution workspace is not supported by harness runtime yet")
-		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
-			return ctrl.Result{}, statusErr
-		}
-		return r.failTask(ctx, task, err.Error())
-	}
-	if execution := resolveExecution(task, agent); execution != nil {
-		return r.failTask(ctx, task, "agent execution placement is not supported by harness runtime yet")
-	}
-	if task.Spec.PriorTaskRef != nil && r.EnforceNamespaceIsolation {
-		priorNS := strings.TrimSpace(task.Spec.PriorTaskRef.Namespace)
-		if priorNS != "" && priorNS != task.Namespace {
-			return r.failTask(ctx, task, "cross-namespace priorTaskRef is not supported by harness runtime when namespace isolation is enforced")
-		}
-	}
-
+	// Agent execution planning owns path compatibility and rejection decisions.
+	// This method starts or resumes an already-approved harness-wrapper turn.
 	now := metav1.Now()
 	attempts := task.Status.Attempts + 1
 	if taskHasPlannedHarnessWrapperTurn(task) && !harnessWrapperPlannedTurnMatchesTask(task, agent, attempts) {
@@ -417,10 +394,10 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	}
 	var request harness.StartTurnRequest
 	var target harnessRuntimeTarget
+	var err error
 	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if !taskHasHarnessWrapperTurn(task) {
-			var err error
 			request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 			if err != nil {
 				return r.failTask(ctx, task, err.Error())
@@ -436,7 +413,6 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
 		request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
 	} else {
-		var err error
 		request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 		if err != nil {
 			return r.failTask(ctx, task, err.Error())
@@ -455,6 +431,13 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		if err := r.patchHarnessRuntimeStatus(ctx, task, target); err != nil {
 			return ctrl.Result{}, err
 		}
+		// Persist the deterministic turn identity in a separate reconcile before
+		// accepting the turn. The Running path requires the planned identity
+		// annotations/status to be durable; keeping planning and start in one
+		// reconcile can leave a flaky observed state where started=true is visible
+		// but the identity annotations are not, causing handleRunning to fail the
+		// task as missing its harness runtime turn identity.
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
 	turnAccepted := startedPlannedTurn
 	if !startedPlannedTurn {
@@ -487,7 +470,8 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		// turn as accepted and proceeding to the Running transition. Check persisted
 		// frames before live capabilities so accepted turns remain recoverable if the
 		// runtime rolls after emitting frames but before started=true is persisted.
-		hasFrames, framesErr := r.harnessWrapperTurnHasPersistedFrames(ctx, task, request.TurnID)
+		journal := r.harnessWrapperTurnJournal(ctx, task)
+		hasFrames, framesErr := journal.HasPersistedFrames(ctx, request.TurnID)
 		if framesErr != nil {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
@@ -589,6 +573,27 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 }
 
+func (r *TaskReconciler) harnessWrapperTurnJournal(ctx context.Context, task *corev1alpha1.Task) harness.TurnJournal {
+	journal := harness.TurnJournal{EventStore: r.ExecutionEventStore}
+	if task == nil {
+		return journal
+	}
+	journal.MapContext = harness.EventMapContext{
+		Namespace: task.Namespace,
+		TaskName:  task.Name,
+		// Use the real-session-only helper here (not harnessWrapperSessionName,
+		// which falls back to task.Name): this SessionName is PERSISTED as the
+		// execution event's session key, so a task-name fallback would collide a
+		// SessionRef-less task's events into any real Session of the same name.
+		// The StartTurn/CancelTurn request sites intentionally keep
+		// harnessWrapperSessionName because the protocol requires a non-empty
+		// identifier there (it is not a stored timeline key).
+		SessionName: r.executionEventSessionName(ctx, task),
+		AgentName:   harnessWrapperTaskAgentName(task),
+	}
+	return journal
+}
+
 //nolint:gocyclo // Handles stream polling, event mapping, and terminal task classification in one reconcile step.
 func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -616,22 +621,10 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness runtime endpoint: %v", err))
 	}
 	result := harness.TurnRunResult{}
-	mapCtx := harness.EventMapContext{
-		Namespace: task.Namespace,
-		TaskName:  task.Name,
-		// Use the real-session-only helper here (not harnessWrapperSessionName,
-		// which falls back to task.Name): this SessionName is PERSISTED as the
-		// execution event's session key, so a task-name fallback would collide a
-		// SessionRef-less task's events into any real Session of the same name.
-		// The StartTurn/CancelTurn request sites below intentionally keep
-		// harnessWrapperSessionName because the protocol requires a non-empty
-		// identifier there (it is not a stored timeline key).
-		SessionName: r.executionEventSessionName(ctx, task),
-		AgentName:   harnessWrapperTaskAgentName(task),
-	}
+	journal := r.harnessWrapperTurnJournal(ctx, task)
 	afterSeq := harnessWrapperLastFrameSeq(task)
 	lastFrameSeq := afterSeq
-	existingFrameKeys, err := r.existingHarnessFrameKeys(ctx, task)
+	journalState, err := journal.Open(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -642,19 +635,12 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 			return fmt.Errorf("harness frame identity does not match running turn")
 		}
 		result.Frames = append(result.Frames, frame)
-		key := harness.MappedFrameKey(frame)
-		_, alreadyAppended := existingFrameKeys[key]
-		if !alreadyAppended {
-			mapped, err := harness.MapFrameToExecutionEvent(frame, mapCtx)
-			if err != nil {
-				return err
-			}
-			appended, err := r.ExecutionEventStore.AppendExecutionEvent(streamCtx, mapped)
-			if err != nil {
-				return fmt.Errorf("append mapped harness event: %w", err)
-			}
+		appended, appendedNew, err := journalState.AppendFrameIfNew(streamCtx, frame)
+		if err != nil {
+			return err
+		}
+		if appendedNew {
 			result.Events = append(result.Events, *appended)
-			existingFrameKeys[key] = struct{}{}
 		}
 		if frame.Seq > lastFrameSeq {
 			lastFrameSeq = frame.Seq
@@ -761,91 +747,6 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn ended without result")
 	}
 	return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "harness wrapper task completed successfully")
-}
-
-func (r *TaskReconciler) existingHarnessFrameKeys(ctx context.Context, task *corev1alpha1.Task) (map[string]struct{}, error) {
-	keys := map[string]struct{}{}
-	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return keys, nil
-	}
-	var afterSeq int64
-	for {
-		eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  task.Namespace,
-			StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID:   task.Name,
-			AfterSeq:   afterSeq,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list mapped harness events: %w", err)
-		}
-		if len(eventsList) == 0 {
-			break
-		}
-		for _, event := range eventsList {
-			if event.Seq > afterSeq {
-				afterSeq = event.Seq
-			}
-			identity, ok := harness.MappedFrameIdentityFromEvent(event)
-			if !ok {
-				continue
-			}
-			keys[identity.Key()] = struct{}{}
-		}
-		if len(eventsList) < store.MaxExecutionEventLimit {
-			break
-		}
-	}
-	return keys, nil
-}
-
-// harnessWrapperTurnHasPersistedFrames reports whether the event store already
-// holds at least one mapped frame for the given turn ID on this task's stream.
-// Because the event store is the controller's durable database (not wrapper
-// memory), a positive result means the turn was already accepted and ran — even
-// across a wrapper pod restart that wiped its in-memory turn map. The controller
-// uses this to recover instead of re-issuing StartTurn (which would duplicate
-// external side effects) when the "started" marker was never persisted.
-func (r *TaskReconciler) harnessWrapperTurnHasPersistedFrames(ctx context.Context, task *corev1alpha1.Task, turnID harness.HarnessTurnID) (bool, error) {
-	if r == nil || r.ExecutionEventStore == nil || task == nil {
-		return false, nil
-	}
-	wantTurnID := strings.TrimSpace(string(turnID))
-	if wantTurnID == "" {
-		return false, nil
-	}
-	var afterSeq int64
-	for {
-		eventsList, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-			Namespace:  task.Namespace,
-			StreamType: store.ExecutionEventStreamTypeTask,
-			StreamID:   task.Name,
-			AfterSeq:   afterSeq,
-			Limit:      store.MaxExecutionEventLimit,
-		})
-		if err != nil {
-			return false, fmt.Errorf("list mapped harness events: %w", err)
-		}
-		if len(eventsList) == 0 {
-			return false, nil
-		}
-		for _, event := range eventsList {
-			if event.Seq > afterSeq {
-				afterSeq = event.Seq
-			}
-			identity, ok := harness.MappedFrameIdentityFromEvent(event)
-			if !ok {
-				continue
-			}
-			if identity.HasTurnID(turnID) {
-				return true, nil
-			}
-		}
-		if len(eventsList) < store.MaxExecutionEventLimit {
-			return false, nil
-		}
-	}
 }
 
 func harnessWrapperAuthRetries(task *corev1alpha1.Task) int {
@@ -1276,12 +1177,13 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
+	runtimeIdentity := harnessWrapperRuntimeSessionIdentity(task, agent, runtimeName)
 	return harness.StartTurnRequest{
 		Version:          harness.ProtocolVersion,
 		Namespace:        task.Namespace,
 		TaskName:         task.Name,
 		SessionName:      harnessWrapperSessionName(task),
-		RuntimeSessionID: harnessWrapperRuntimeSessionID(task, runtimeName),
+		RuntimeSessionID: runtimeIdentity.ID,
 		TurnID:           turnID,
 		CorrelationID:    correlationID,
 		Deadline:         deadline.UTC(),
@@ -1311,7 +1213,16 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		metadata["runtimeRef"] = runtimeRefName
 		metadata["wrapper"] = "external-endpoint"
 	}
+	if task != nil && task.Annotations != nil {
+		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
+			metadata["traceparent"] = traceparent
+		}
+		if tracestate := strings.TrimSpace(task.Annotations[labels.AnnotationTraceState]); tracestate != "" {
+			metadata["tracestate"] = tracestate
+		}
+	}
 	if agent != nil {
+		metadata["agentName"] = agent.Name
 		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
 			metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
 		}
@@ -1595,6 +1506,11 @@ func (r *TaskReconciler) harnessWrapperBaseTurnEnv(ctx context.Context, task *co
 			priorNS = task.Namespace
 		}
 		env = append(env, harness.TurnEnvVar{Name: workerenv.PriorTaskNamespace, Value: priorNS})
+	}
+	if task.Annotations != nil {
+		if traceparent := strings.TrimSpace(task.Annotations[labels.AnnotationTraceParent]); traceparent != "" {
+			env = setHarnessTurnEnv(env, workerenv.TraceParent, traceparent)
+		}
 	}
 	if parentTask := labels.ParentTaskName(task.Labels, task.Annotations); parentTask != "" {
 		env = append(env, harness.TurnEnvVar{Name: workerenv.ParentTask, Value: parentTask})
@@ -1997,21 +1913,31 @@ func harnessWrapperTurnIDPrefix(value string) string {
 	return prefix
 }
 
-func harnessWrapperRuntimeSessionID(task *corev1alpha1.Task, runtimeName string) harness.RuntimeSessionID {
-	parts := []string{"default", "default", strings.TrimSpace(runtimeName)}
+func harnessWrapperRuntimeSessionIdentity(task *corev1alpha1.Task, agent *corev1alpha1.Agent, runtimeName string) harness.RuntimeSessionIdentity {
+	input := harness.RuntimeSessionIdentityInput{
+		Namespace:   "default",
+		SessionName: "default",
+		RuntimeName: runtimeName,
+		Provider:    harness.ProviderKindKubernetesService,
+	}
 	if task != nil {
-		parts[0] = task.Namespace
-		if task.Spec.SessionRef != nil && strings.TrimSpace(task.Spec.SessionRef.Name) != "" {
-			parts[1] = strings.TrimSpace(task.Spec.SessionRef.Name)
-		} else {
-			identity := strings.TrimSpace(string(task.UID))
-			if identity == "" {
-				identity = task.Name
-			}
-			parts[1] = task.Name + ":" + identity
+		input.Namespace = task.Namespace
+		input.TaskName = task.Name
+		input.TaskUID = string(task.UID)
+		input.ActiveTask = task.Name
+		input.SessionName = ""
+		if task.Spec.SessionRef != nil {
+			input.SessionName = task.Spec.SessionRef.Name
 		}
 	}
-	return harness.RuntimeSessionID(strings.Join(parts, ":"))
+	if agent != nil {
+		input.AgentName = agent.Name
+	}
+	return harness.ResolveRuntimeSessionIdentity(input)
+}
+
+func harnessWrapperRuntimeSessionID(task *corev1alpha1.Task, runtimeName string) harness.RuntimeSessionID {
+	return harnessWrapperRuntimeSessionIdentity(task, nil, runtimeName).ID
 }
 
 func harnessWrapperSessionName(task *corev1alpha1.Task) string {

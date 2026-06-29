@@ -89,16 +89,30 @@ bash scripts/agent-substrate-e2e.sh
 
 Telemetry is enabled with `--enable-telemetry` (or the legacy alias
 `--enable-tracing`) and exported through `OTEL_EXPORTER_OTLP_ENDPOINT`. When the
-controller flag is enabled, AI worker Jobs receive `ORKA_ENABLE_TELEMETRY=true`
-and the non-secret standard OTLP environment. OTLP endpoint variables alone do
-not enable Kubernetes worker telemetry.
+controller flag is enabled and a worker-reachable OTLP endpoint is configured,
+AI worker Jobs receive `ORKA_ENABLE_TELEMETRY=true`, `ORKA_TRACEPARENT`, and the
+non-secret standard OTLP environment. Agent-runtime and harness-wrapper
+telemetry is explicit opt-in on those workloads; OTLP endpoint variables alone
+do not enable Kubernetes worker telemetry. Delegated child Tasks continue the
+active parent trace through Task annotations.
 
 GenAI semantic-convention constants live in `internal/tracing/genai` rather than
 upstream `semconv` because the GenAI conventions are still Development-stage.
 Run focused telemetry tests with:
 
 ```bash
-go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ -run 'Tracing|Telemetry|GenAI|ExecuteTool|TraceContext' -v
+go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ ./internal/worker ./workers/ai ./workers/harness/cliwrapper -run 'Tracing|Telemetry|GenAI|ExecuteTool|TraceContext|Traceparent|TaskRun|DelegateTrace' -v
+```
+
+The live Kind e2e coverage for collector export lives in
+`test/e2e/otel_genai_test.go`. It patches the controller with
+`--enable-telemetry`, points it at an in-cluster OpenTelemetry Collector, and
+asserts that AI worker Jobs export GenAI model/tool spans and metrics.
+
+Run disabled-telemetry hot-path benchmarks with:
+
+```bash
+go test ./internal/llm ./internal/tools ./internal/worker -run '^$' -bench 'Telemetry|Tracing|ExecuteTool|ToolExecutor' -benchmem
 ```
 
 ## UI Development

@@ -30,10 +30,65 @@ export const handlers = [
     return HttpResponse.json({ items: [], metadata: {} })
   }),
 
+  // Execution events
   http.get(`${API}/tasks/:id/events`, ({ params }) => {
     return HttpResponse.json({
       namespace: 'default',
       streamType: 'task',
+      streamID: params.id,
+      afterSeq: 0,
+      latestSeq: 0,
+      events: [],
+    })
+  }),
+  http.get(`${API}/tasks/:id/trace`, ({ params }) => {
+    return HttpResponse.json({
+      task: { namespace: 'default', name: params.id, resultAvailable: false },
+      latestSeq: 0,
+      generatedAt: '2026-06-13T00:00:00Z',
+      timeline: [],
+      modelRequests: [],
+      toolCalls: [],
+      childTasks: [],
+      workspace: [],
+      artifacts: [],
+      errors: [],
+      warnings: [],
+    })
+  }),
+  http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
+    return HttpResponse.json({ namespace: 'default', taskName: params.id, approvals: [] })
+  }),
+  http.post(`${API}/tasks/:id/approvals/:approvalID/decision`, ({ params }) => {
+    return HttpResponse.json({
+      id: params.approvalID,
+      action: 'tool',
+      status: 'approved',
+      createdAt: '2026-06-13T00:00:00Z',
+    })
+  }),
+  http.post(`${API}/tasks/:id/fork`, ({ params }) => {
+    return HttpResponse.json(
+      {
+        namespace: 'default',
+        sourceTaskName: params.id,
+        newTaskName: `${params.id}-fork-abcd`,
+        afterSeq: 0,
+        forkContext: {
+          sourceNamespace: 'default',
+          sourceTask: params.id,
+          afterSeq: 0,
+          events: [],
+          truncated: false,
+        },
+      },
+      { status: 201 },
+    )
+  }),
+  http.get(`${API}/sessions/:id/events`, ({ params }) => {
+    return HttpResponse.json({
+      namespace: 'default',
+      streamType: 'session',
       streamID: params.id,
       afterSeq: 0,
       latestSeq: 0,

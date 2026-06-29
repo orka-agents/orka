@@ -488,7 +488,12 @@ func doJSONRequest(t *testing.T, app *fiber.App, target string, body any) *http.
 	}
 	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := app.Test(req)
+	// Fiber's app.Test defaults to a 1s deadline. This is an in-process JSON POST
+	// that returns immediately under normal conditions, but a loaded CI runner can
+	// starve the server goroutine past 1s and surface a spurious "i/o timeout".
+	// Use a generous explicit deadline so the helper measures handler behavior, not
+	// scheduler latency.
+	resp, err := app.Test(req, fiber.TestConfig{Timeout: 30 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("app.Test: %v", err)
 	}

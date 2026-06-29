@@ -28,7 +28,12 @@ import (
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/contexttoken"
+	"github.com/sozercan/orka/internal/tracing"
+	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/sozercan/orka/internal/tracing/testutil"
 	"github.com/sozercan/orka/internal/workerenv"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const (
@@ -2127,4 +2132,216 @@ func TestToolExecutor_Execute_IdempotencyKeyReservedHeaderConflict(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "reserved header") {
 		t.Fatalf("Execute() error = %v, want reserved header conflict", err)
 	}
+}
+
+func TestToolExecutor_Execute_InjectsTraceparentAndEmitsHTTPToolSpan(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	metrics := testutil.NewMetricHarness(t)
+	var gotTraceparent string
+	var gotBaggage string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("traceparent")
+		gotBaggage = r.Header.Get("baggage")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{client: server.Client(), namespace: "team-a", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec:       corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}},
+	}
+	ctx, parent := tracing.Tracer("test").Start(context.Background(), "agent.step")
+	member, err := baggage.NewMember("tenant", "acme")
+	if err != nil {
+		t.Fatalf("baggage member: %v", err)
+	}
+	bag, err := baggage.New(member)
+	if err != nil {
+		t.Fatalf("baggage: %v", err)
+	}
+	ctx = baggage.ContextWithBaggage(ctx, bag)
+	ctx = WithToolCallID(ctx, "call-http")
+	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
+	parent.End()
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("result = %q", result)
+	}
+	if !validTraceparent(gotTraceparent) {
+		t.Fatalf("traceparent = %q, want valid W3C header", gotTraceparent)
+	}
+	if gotBaggage != "" {
+		t.Fatalf("baggage header = %q, want empty", gotBaggage)
+	}
+	span := testutil.SpanNamed(spans.Recorder.Ended(), "execute_tool lookup")
+	if span == nil {
+		t.Fatal("missing HTTP tool span")
+	}
+	attrs := testutil.AttributeMap(span)
+	if got := attrs[tracing.AttrToolKind].AsString(); got != tracing.ToolKindHTTP {
+		t.Fatalf("%s = %q", tracing.AttrToolKind, got)
+	}
+	if got := attrs[tracing.AttrToolResultSizeBytes].AsInt64(); got != int64(len(result)) {
+		t.Fatalf("result size = %d", got)
+	}
+	if got := attrs[genai.AttrToolCallID].AsString(); got != "call-http" {
+		t.Fatalf("tool call id = %q", got)
+	}
+	if countMetricDataPoints(metrics.Collect(t), genai.MetricExecuteToolDuration) != 1 {
+		t.Fatalf("missing %s datapoint", genai.MetricExecuteToolDuration)
+	}
+}
+
+func TestToolExecutor_Execute_MCPSubstrateActorInjectsTraceparent(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	_ = testutil.NewSpanHarness(t)
+	const sessionID = "session-trace"
+	var traceparents []string
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceparents = append(traceparents, r.Header.Get("traceparent"))
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusAccepted)
+			calls++
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request %d: %v", calls, err)
+		}
+		switch calls {
+		case 0:
+			if got := body["method"]; got != mcpInitializeMethod {
+				t.Fatalf("method = %v, want %s", got, mcpInitializeMethod)
+			}
+			w.Header().Set(mcpSessionIDHeader, sessionID)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2025-06-18"}}`))
+		case 1:
+			if got := body["method"]; got != mcpInitializedNotificationMethod {
+				t.Fatalf("method = %v, want %s", got, mcpInitializedNotificationMethod)
+			}
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{}}`))
+		case 2:
+			if got := body["method"]; got != mcpToolsCallMethod {
+				t.Fatalf("method = %v, want %s", got, mcpToolsCallMethod)
+			}
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"ok"}]}}`))
+		default:
+			t.Fatalf("unexpected MCP request %d", calls)
+		}
+		calls++
+	}))
+	defer server.Close()
+
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "lookup"},
+		Spec: corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{
+			TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template"},
+		}}},
+		Status: corev1alpha1.ToolStatus{Endpoint: server.URL + "/mcp", Actor: &corev1alpha1.ToolActorStatus{RouteHost: "actor-1.actors.test"}},
+	}
+	ctx, parent := tracing.Tracer("test").Start(context.Background(), "agent.step")
+	member, err := baggage.NewMember("tenant", "acme")
+	if err != nil {
+		t.Fatalf("baggage member: %v", err)
+	}
+	bag, err := baggage.New(member)
+	if err != nil {
+		t.Fatalf("baggage: %v", err)
+	}
+	ctx = baggage.ContextWithBaggage(ctx, bag)
+	ctx = WithToolCallID(ctx, "call-http")
+	result, err := executor.Execute(ctx, tool, json.RawMessage(`{"x":1}`))
+	parent.End()
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "ok" {
+		t.Fatalf("result = %q, want ok", result)
+	}
+	if len(traceparents) != 4 {
+		t.Fatalf("traceparent count = %d, want 4", len(traceparents))
+	}
+	for i, traceparent := range traceparents {
+		if !validTraceparent(traceparent) {
+			t.Fatalf("traceparent[%d] = %q, want valid W3C header", i, traceparent)
+		}
+		if traceparent != traceparents[0] {
+			t.Fatalf("traceparent[%d] = %q, want %q", i, traceparent, traceparents[0])
+		}
+	}
+}
+
+func validTraceparent(value string) bool {
+	parts := strings.Split(value, "-")
+	return len(parts) == 4 && parts[0] == "00" && len(parts[1]) == 32 && len(parts[2]) == 16 && len(parts[3]) == 2
+}
+
+func TestToolExecutor_Execute_HTTPErrorRecordsErrorType(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spans := testutil.NewSpanHarness(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`bad gateway sensitive-body-marker`))
+	}))
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "failing_http"}, Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+	ctx, parent := tracing.Tracer("test").Start(context.Background(), "agent.step")
+	_, err := executor.Execute(ctx, tool, json.RawMessage(`{}`))
+	parent.End()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want HTTP error")
+	}
+	span := testutil.SpanNamed(spans.Recorder.Ended(), "execute_tool failing_http")
+	if span == nil {
+		t.Fatal("missing HTTP tool span")
+	}
+	attrs := testutil.AttributeMap(span)
+	if got := attrs["error.type"].AsString(); got != "http_status_502" {
+		t.Fatalf("error.type = %q", got)
+	}
+	if strings.Contains(span.Status().Description, "sensitive-body-marker") {
+		t.Fatalf("span status leaked response body: %q", span.Status().Description)
+	}
+	for _, event := range span.Events() {
+		if strings.Contains(event.Name, "sensitive-body-marker") {
+			t.Fatalf("span event leaked response body: %#v", event)
+		}
+		for _, kv := range event.Attributes {
+			if strings.Contains(kv.Value.AsString(), "sensitive-body-marker") {
+				t.Fatalf("span event attribute leaked response body: %#v", event)
+			}
+		}
+	}
+}
+
+func countMetricDataPoints(rm metricdata.ResourceMetrics, name string) int {
+	count := 0
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != name {
+				continue
+			}
+			switch data := metric.Data.(type) {
+			case metricdata.Histogram[int64]:
+				count += len(data.DataPoints)
+			case metricdata.Histogram[float64]:
+				count += len(data.DataPoints)
+			}
+		}
+	}
+	return count
 }

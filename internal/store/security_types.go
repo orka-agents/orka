@@ -4,24 +4,27 @@ import "time"
 
 // ScanRun represents a single repository security scan execution.
 type ScanRun struct {
-	ID                 string     `json:"id"`
-	Namespace          string     `json:"namespace"`
-	RepositoryScan     string     `json:"repositoryScan"`
-	TaskName           string     `json:"taskName"`
-	Mode               string     `json:"mode"`
-	Phase              string     `json:"phase"`
-	StartedAt          time.Time  `json:"startedAt"`
-	CompletedAt        *time.Time `json:"completedAt,omitempty"`
-	BaseCommit         string     `json:"baseCommit,omitempty"`
-	HeadCommit         string     `json:"headCommit,omitempty"`
-	CommitCount        int        `json:"commitCount"`
-	SliceCount         int        `json:"sliceCount"`
-	ReviewedSliceCount int        `json:"reviewedSliceCount"`
-	SkippedSliceCount  int        `json:"skippedSliceCount"`
-	AcceptedFindings   int        `json:"acceptedFindings"`
-	DroppedFindings    int        `json:"droppedFindings"`
-	Summary            string     `json:"summary,omitempty"`
-	ErrorMessage       string     `json:"errorMessage,omitempty"`
+	ID                   string     `json:"id"`
+	Namespace            string     `json:"namespace"`
+	RepositoryScan       string     `json:"repositoryScan"`
+	TaskName             string     `json:"taskName"`
+	Mode                 string     `json:"mode"`
+	Phase                string     `json:"phase"`
+	StartedAt            time.Time  `json:"startedAt"`
+	CompletedAt          *time.Time `json:"completedAt,omitempty"`
+	BaseCommit           string     `json:"baseCommit,omitempty"`
+	HeadCommit           string     `json:"headCommit,omitempty"`
+	CommitCount          int        `json:"commitCount"`
+	SliceCount           int        `json:"sliceCount"`
+	ReviewedSliceCount   int        `json:"reviewedSliceCount"`
+	SkippedSliceCount    int        `json:"skippedSliceCount"`
+	AcceptedFindings     int        `json:"acceptedFindings"`
+	DroppedFindings      int        `json:"droppedFindings"`
+	ScannerPolicyVersion string     `json:"scannerPolicyVersion,omitempty"`
+	PolicyDigest         string     `json:"policyDigest,omitempty"`
+	IdempotencyKey       string     `json:"idempotencyKey,omitempty"`
+	Summary              string     `json:"summary,omitempty"`
+	ErrorMessage         string     `json:"errorMessage,omitempty"`
 }
 
 // ThreatModel stores the latest generated or user-edited threat model.
@@ -125,6 +128,13 @@ type FindingFilter struct {
 	Cursor           string
 }
 
+// ChangedLineRange identifies lines introduced or modified between two scan commits.
+type ChangedLineRange struct {
+	Path      string `json:"path"`
+	StartLine int    `json:"startLine"`
+	EndLine   int    `json:"endLine"`
+}
+
 // ReviewSliceFile references a repository file included in review slice metadata.
 type ReviewSliceFile struct {
 	Path    string `json:"path"`
@@ -142,26 +152,28 @@ type ReviewSliceTest struct {
 
 // ReviewSlice describes a deterministic, bounded repository review unit.
 type ReviewSlice struct {
-	SchemaVersion   int               `json:"schemaVersion"`
-	ID              string            `json:"id"`
-	Namespace       string            `json:"namespace,omitempty"`
-	RepositoryScan  string            `json:"repositoryScan"`
-	Source          string            `json:"source"`
-	Title           string            `json:"title"`
-	Summary         string            `json:"summary"`
-	Kind            string            `json:"kind"`
-	Entrypoints     []ReviewSliceFile `json:"entrypoints,omitempty"`
-	OwnedFiles      []ReviewSliceFile `json:"ownedFiles,omitempty"`
-	ContextFiles    []ReviewSliceFile `json:"contextFiles,omitempty"`
-	Tests           []ReviewSliceTest `json:"tests,omitempty"`
-	Tags            []string          `json:"tags,omitempty"`
-	TrustBoundaries []string          `json:"trustBoundaries,omitempty"`
-	Confidence      string            `json:"confidence"`
-	Status          string            `json:"status"`
-	LastScanRunID   string            `json:"lastScanRunID,omitempty"`
-	LastReviewedAt  *time.Time        `json:"lastReviewedAt,omitempty"`
-	CreatedAt       time.Time         `json:"createdAt,omitempty"`
-	UpdatedAt       time.Time         `json:"updatedAt,omitempty"`
+	SchemaVersion     int                `json:"schemaVersion"`
+	ID                string             `json:"id"`
+	Namespace         string             `json:"namespace,omitempty"`
+	RepositoryScan    string             `json:"repositoryScan"`
+	Source            string             `json:"source"`
+	Title             string             `json:"title"`
+	Summary           string             `json:"summary"`
+	Kind              string             `json:"kind"`
+	Entrypoints       []ReviewSliceFile  `json:"entrypoints,omitempty"`
+	OwnedFiles        []ReviewSliceFile  `json:"ownedFiles,omitempty"`
+	ContextFiles      []ReviewSliceFile  `json:"contextFiles,omitempty"`
+	Tests             []ReviewSliceTest  `json:"tests,omitempty"`
+	ChangedFiles      []string           `json:"changedFiles,omitempty"`
+	ChangedLineRanges []ChangedLineRange `json:"changedLineRanges,omitempty"`
+	Tags              []string           `json:"tags,omitempty"`
+	TrustBoundaries   []string           `json:"trustBoundaries,omitempty"`
+	Confidence        string             `json:"confidence"`
+	Status            string             `json:"status"`
+	LastScanRunID     string             `json:"lastScanRunID,omitempty"`
+	LastReviewedAt    *time.Time         `json:"lastReviewedAt,omitempty"`
+	CreatedAt         time.Time          `json:"createdAt,omitempty"`
+	UpdatedAt         time.Time          `json:"updatedAt,omitempty"`
 }
 
 // ReviewSliceFilter constrains review slice queries.
@@ -183,6 +195,7 @@ type DroppedFinding struct {
 	TaskName       string    `json:"taskName"`
 	SliceID        string    `json:"sliceID,omitempty"`
 	Reason         string    `json:"reason"`
+	Layer          string    `json:"layer,omitempty"`
 	SampleJSON     string    `json:"sampleJSON,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
@@ -193,6 +206,9 @@ type DroppedFindingFilter struct {
 	RepositoryScan string
 	ScanRunID      string
 	SliceID        string
+	Layer          string
+	Reason         string
+	ReasonContains string
 	Limit          int
 	Cursor         string
 }

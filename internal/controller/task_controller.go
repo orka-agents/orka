@@ -618,13 +618,17 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
-		if reason := agentTaskJobBackendUnsupportedReason(task, agent); reason != "" {
-			return r.failTask(ctx, task, reason)
-		}
-		if taskHasPlannedHarnessWrapperTurn(task) {
+		plan := r.planAgentExecution(ctx, task, agent)
+		switch plan.path {
+		case agentExecutionPathRejected:
+			return r.rejectPlannedAgentExecution(ctx, task, plan)
+		case agentExecutionPathWorkerJob:
+			return r.createTaskJob(ctx, task, agent, provider)
+		case agentExecutionPathHarnessWrapper:
 			return r.runHarnessWrapperTask(ctx, task, agent)
+		default:
+			return ctrl.Result{}, fmt.Errorf("unknown agent execution path %q", plan.path)
 		}
-		return r.runHarnessWrapperTask(ctx, task, agent)
 	}
 
 	return r.createTaskJob(ctx, task, agent, provider)
@@ -636,29 +640,6 @@ func taskTransactionTokenPending(task *corev1alpha1.Task) bool {
 	}
 	pending, err := strconv.ParseBool(task.Annotations[labels.AnnotationTransactionTokenPending])
 	return err == nil && pending
-}
-
-func agentTaskJobBackendUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
-	if task == nil {
-		return ""
-	}
-	switch {
-	case task.Spec.Transaction != nil:
-		return "agent CLI runtime tasks do not support transaction token delegation with the harness wrapper yet"
-	case effectiveAgentResources(task, agent):
-		return "agent CLI runtime tasks do not support custom Kubernetes resources with the harness wrapper yet"
-	case resolveExecution(task, agent) != nil:
-		return "agent CLI runtime tasks do not support execution placement with the harness wrapper yet"
-	default:
-		return ""
-	}
-}
-
-func effectiveAgentResources(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	if task != nil && (len(task.Spec.Resources.Requests) > 0 || len(task.Spec.Resources.Limits) > 0) {
-		return true
-	}
-	return agent != nil && (len(agent.Spec.Resources.Requests) > 0 || len(agent.Spec.Resources.Limits) > 0)
 }
 
 func (r *TaskReconciler) handleTransactionTokenPending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {

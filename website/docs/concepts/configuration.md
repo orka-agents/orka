@@ -144,6 +144,15 @@ spec:
   timeZone: "UTC"               # optional IANA time zone
   historyDays: 30                # optional initial history window
   validationMode: light          # off, light, or full
+  validationMaxFindingsPerRun: 8 # optional auto-validation task cap for light mode
+  validationMinSeverity: medium  # optional auto-validation severity threshold
+  validationMinConfidence: medium # optional auto-validation confidence threshold
+  customScanInstructionsRef:     # optional ConfigMap-backed additive scanner instructions
+    name: repo-security-policy
+    key: policy                  # optional; defaults to policy
+  falsePositivePolicyRef:        # optional ConfigMap-backed false-positive policy
+    name: repo-security-policy
+    key: false-positives
   analysisAgentRef:
     name: security-reviewer
   patchAgentRef:                 # optional; defaults to the analysis agent when omitted
@@ -170,10 +179,17 @@ spec:
 | `timeZone` | string | No | IANA time zone used by `schedule`. |
 | `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
 | `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
+| `validationMaxFindingsPerRun` | int32 | No | Maximum automatic validation tasks to enqueue per scan run in `light` mode. |
+| `validationMinSeverity` | string | No | Minimum severity eligible for automatic validation. Defaults are mode-dependent. |
+| `validationMinConfidence` | string | No | Minimum confidence eligible for automatic validation. Defaults are mode-dependent. |
+| `customScanInstructionsRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive scanner instructions. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
+| `falsePositivePolicyRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive false-positive policy text. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
 | `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
 | `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
-| `maxFindingsPerRun` | int32 | No | Bounds scan output volume. |
+| `maxFindingsPerRun` | int32 | No | Bounds accepted scan findings per run after validation and deterministic dropped-finding filters. |
 | `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
+
+`PolicyConfigMapKeyRef` uses `name` plus optional `key`; when `key` is omitted, Orka reads the `policy` key. Policy ConfigMap values are capped at 32 KiB and rejected if they look like they contain secrets, tokens, private keys, or credentials. Custom policy text is additive only; it cannot disable Orka's default evidence, no-secret, or finding-quality rules.
 
 **Status fields:**
 
@@ -814,7 +830,7 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--health-probe-bind-address` | `:8081` | Health probe address |
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
-| `--enable-tracing` | `false` | Enable OpenTelemetry distributed tracing (requires `OTEL_EXPORTER_OTLP_ENDPOINT`) |
+| `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
 
 ### Agent Sandbox Controller Settings
 
@@ -940,37 +956,65 @@ monitoring:
 
 Context-token metrics are described in more detail in [Kontxt TxToken integration](kontxt.md#observability). All context-token labels use low-cardinality values only.
 
-## OpenTelemetry Tracing
+## OpenTelemetry telemetry
 
-Orka supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+Orka supports opt-in OpenTelemetry traces and GenAI metrics for debugging,
+performance analysis, and backend cost/latency dashboards. Telemetry is
+disabled by default and uses OpenTelemetry no-op providers until enabled.
 
-### Enabling Tracing
+### Enabling telemetry
 
-Add the `--enable-tracing` flag to the controller:
+Add the `--enable-telemetry` flag to the controller and configure an OTLP
+collector endpoint. The legacy `--enable-tracing` alias enables the same traces
+and metrics:
 
 ```yaml
 args:
-  - --enable-tracing
+  - --enable-telemetry
 env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
     value: "jaeger-collector.observability.svc:4317"
+  - name: OTEL_EXPORTER_OTLP_INSECURE
+    value: "true"
 ```
 
 | Flag / Environment Variable | Default | Description |
 |------------------------------|---------|-------------|
-| `--enable-tracing` | `false` | Enable OpenTelemetry tracing |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+| `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default `localhost:4317` | OTLP collector endpoint for traces and metrics |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Trace-specific OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics-specific OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | SDK default gRPC | Set to `http/protobuf` for OTLP/HTTP collectors |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | unset | Signal-specific exporter protocol overrides |
+| `OTEL_EXPORTER_OTLP_INSECURE` and signal-specific insecure vars | SDK default | Disable TLS for in-cluster/dev collectors that require it |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK default | Standard OpenTelemetry sampler configuration |
+
+Controller-local defaults such as `localhost:4317` are valid only for the
+controller process. AI worker Jobs receive telemetry enablement only when the
+controller has a non-loopback, worker-reachable OTLP endpoint. The controller
+copies non-secret OTLP endpoint/protocol/insecure/timeout/compression settings
+to AI worker Pods and intentionally does not copy OTLP headers, certificate or
+client-key env vars, `OTEL_RESOURCE_ATTRIBUTES`, or baggage.
+
+Harness-wrapper and agent-runtime worker telemetry is explicit opt-in. Set
+`ORKA_ENABLE_TELEMETRY=true` and OTLP exporter env on those workloads when you
+want their process-local `task.run` spans exported.
 
 ### Instrumented Components
 
 | Tracer | Span | Attributes |
 |--------|------|------------|
-| `orka.api` | `GET /api/v1/tasks` | `http.method`, `http.route`, `http.status_code`, `http.request_id` |
-| `orka.chat` | `chat.request` | `session.id`, `chat.provider`, `chat.model` |
-| `orka.chat` | `chat.tool_loop.iteration` | `chat.iteration` |
-| `orka.llm` | `llm.complete` | `llm.provider`, `llm.model`, `llm.input_tokens`, `llm.output_tokens` |
-| `orka.tools` | `tool.execute` | `tool.name`, `tool.success` |
-| `orka.controller` | `task.reconcile` | `task.name`, `task.namespace`, `task.type` |
+| `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
+| `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
+| `orka.worker` / `orka.harness` | `task.run` | `orka.task.id`, `orka.task.namespace`, `orka.tenant`, `orka.agent.name` when known |
+| `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
+| `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
+| `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
+| `orka.controller` | `task.reconcile` | task name, namespace, type, and propagated trace context |
+
+Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
+executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
+children. Tool spans do not include raw arguments or result bodies.
 
 ### Example: Jaeger Setup
 

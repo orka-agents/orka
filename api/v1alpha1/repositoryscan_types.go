@@ -11,6 +11,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// PolicyConfigMapKeyRef references a key in a same-namespace ConfigMap that contains scanner policy text.
+type PolicyConfigMapKeyRef struct {
+	// Name is the ConfigMap name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Key is the ConfigMap data key. Defaults to "policy" when omitted.
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
 // RepositoryScanSpec defines the desired state of RepositoryScan.
 type RepositoryScanSpec struct {
 	// Provider is the source control provider. GitHub is the only supported v1 provider.
@@ -72,6 +83,29 @@ type RepositoryScanSpec struct {
 	// +kubebuilder:default=light
 	// +optional
 	ValidationMode string `json:"validationMode,omitempty"`
+
+	// ValidationMaxFindingsPerRun bounds automatic validation tasks for light mode.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ValidationMaxFindingsPerRun *int32 `json:"validationMaxFindingsPerRun,omitempty"`
+
+	// ValidationMinSeverity is the minimum severity eligible for automatic validation.
+	// +kubebuilder:validation:Enum=critical;high;medium;low
+	// +optional
+	ValidationMinSeverity string `json:"validationMinSeverity,omitempty"`
+
+	// ValidationMinConfidence is the minimum confidence eligible for automatic validation.
+	// +kubebuilder:validation:Enum=high;medium;low
+	// +optional
+	ValidationMinConfidence string `json:"validationMinConfidence,omitempty"`
+
+	// CustomScanInstructionsRef references additive scanner instructions in a same-namespace ConfigMap.
+	// +optional
+	CustomScanInstructionsRef *PolicyConfigMapKeyRef `json:"customScanInstructionsRef,omitempty"`
+
+	// FalsePositivePolicyRef references additive false-positive policy in a same-namespace ConfigMap.
+	// +optional
+	FalsePositivePolicyRef *PolicyConfigMapKeyRef `json:"falsePositivePolicyRef,omitempty"`
 
 	// AnalysisAgentRef is the agent used for scan runs.
 	AnalysisAgentRef AgentReference `json:"analysisAgentRef"`
