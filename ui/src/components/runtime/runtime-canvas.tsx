@@ -53,6 +53,15 @@ export function RuntimeCanvas() {
   const truncated =
     (data?.metadata?.remainingItemCount ?? 0) > 0 || Boolean(data?.metadata?.continue)
 
+  const refreshCanvas = () => {
+    queryClient.invalidateQueries({ queryKey: ['tasks'] })
+    if (active) {
+      queryClient.invalidateQueries({
+        queryKey: ['taskEvents', active.metadata.name, namespace, active.metadata.uid ?? ''],
+      })
+    }
+  }
+
   const controls = (
     <div className="flex items-center gap-2">
       <Button
@@ -67,7 +76,7 @@ export function RuntimeCanvas() {
       <Button
         variant="outline"
         size="sm"
-        onClick={() => queryClient.invalidateQueries({ queryKey: ['tasks'] })}
+        onClick={refreshCanvas}
       >
         <RefreshCw className="size-3.5" />
         Refresh

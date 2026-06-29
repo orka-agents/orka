@@ -44,8 +44,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     following ? 5000 : false,
     task?.metadata.uid,
   )
-  // Fork needs execution-event storage; a 501 on the events query means it's off.
-  const forkSupported = !(taskEventsError instanceof ApiError && taskEventsError.status === 501)
+  // Fork and the runtime timeline need execution-event storage; a 501 means it's off.
+  const taskEventsUnsupported = taskEventsError instanceof ApiError && taskEventsError.status === 501
+  const forkSupported = !taskEventsUnsupported
   const taskEvents = taskEventsResponse?.events ?? []
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
@@ -170,6 +171,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             following={following}
             onToggleFollow={() => setFollowing((f) => !f)}
             forkSupported={forkSupported}
+            streamStatus={taskEventsUnsupported ? 'unsupported' : undefined}
             latestSeq={taskEventsResponse?.latestSeq}
           />
         </TabsContent>

@@ -157,6 +157,27 @@ describe('TaskDetail', () => {
     expect(screen.getByText('Derived checks')).toBeInTheDocument()
   })
 
+  it('surfaces disabled execution-event storage in the Runtime timeline', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    server.use(
+      http.get('/api/v1/tasks/:id/events', () =>
+        HttpResponse.json({ error: 'execution events disabled' }, { status: 501 }),
+      ),
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'unsupported-events', namespace: 'default', uid: 'uid-unsupported' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+
+    render(<TaskDetail taskId="unsupported-events" />)
+
+    expect(await screen.findByText('Live stream not enabled')).toBeInTheDocument()
+    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+  })
+
   it('falls back to runtime tab when ?tab names an unavailable panel', async () => {
     mockSearch.current = { tab: 'children' } // task has no children → no children panel
     server.use(

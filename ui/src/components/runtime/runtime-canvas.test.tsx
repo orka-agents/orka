@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
+import userEvent from '@testing-library/user-event'
 import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
@@ -75,6 +76,29 @@ describe('RuntimeCanvas', () => {
     )
     render(<RuntimeCanvas />)
     await waitFor(() => expect(screen.getByText('ran web_search')).toBeInTheDocument())
+  })
+
+  it('refreshes the active task spotlight event while following is paused', async () => {
+    const user = userEvent.setup()
+    let eventCalls = 0
+    server.use(
+      http.get('/api/v1/tasks', () => HttpResponse.json({ items: [running('r1')], metadata: {} })),
+      http.get('/api/v1/tasks/r1/events', () => {
+        const summary = eventCalls++ === 0 ? 'old tool output' : 'fresh tool output'
+        return HttpResponse.json({
+          namespace: 'default', streamType: 'task', streamID: 'r1', afterSeq: 0, latestSeq: eventCalls,
+          events: [{ id: `e-${eventCalls}`, namespace: 'default', streamType: 'task', streamID: 'r1', seq: eventCalls, type: 'ToolCallCompleted', severity: 'info', summary, createdAt: new Date().toISOString() }],
+        })
+      }),
+    )
+
+    render(<RuntimeCanvas />)
+
+    await waitFor(() => expect(screen.getByText('old tool output')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /following/i }))
+    await user.click(screen.getByRole('button', { name: /refresh/i }))
+
+    await waitFor(() => expect(screen.getByText('fresh tool output')).toBeInTheDocument())
   })
 
   it('shows empty state with only terminal tasks (header 0 active, no roster agents)', async () => {
