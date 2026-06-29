@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as RuntimeSimulatorRouteImport } from './routes/runtime-simulator'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as LiveRouteImport } from './routes/live'
 import { Route as KanbanRouteImport } from './routes/kanban'
@@ -32,6 +33,11 @@ import { Route as AgentsAgentIdRouteImport } from './routes/agents/$agentId'
 import { Route as SecurityFindingsFindingIdRouteImport } from './routes/security/findings/$findingId'
 import { Route as MonitorsCreateNewRouteImport } from './routes/monitors/create/new'
 
+const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
+  id: '/runtime-simulator',
+  path: '/runtime-simulator',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
@@ -150,6 +156,7 @@ export interface FileRoutesByFullPath {
   '/kanban': typeof KanbanRoute
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
+  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
@@ -174,6 +181,7 @@ export interface FileRoutesByTo {
   '/kanban': typeof KanbanRoute
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
+  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
@@ -199,6 +207,7 @@ export interface FileRoutesById {
   '/kanban': typeof KanbanRoute
   '/live': typeof LiveRoute
   '/login': typeof LoginRoute
+  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
   '/monitors/$monitorId': typeof MonitorsMonitorIdRoute
@@ -225,6 +234,7 @@ export interface FileRouteTypes {
     | '/kanban'
     | '/live'
     | '/login'
+    | '/runtime-simulator'
     | '/agents/$agentId'
     | '/agents/new'
     | '/monitors/$monitorId'
@@ -249,6 +259,7 @@ export interface FileRouteTypes {
     | '/kanban'
     | '/live'
     | '/login'
+    | '/runtime-simulator'
     | '/agents/$agentId'
     | '/agents/new'
     | '/monitors/$monitorId'
@@ -273,6 +284,7 @@ export interface FileRouteTypes {
     | '/kanban'
     | '/live'
     | '/login'
+    | '/runtime-simulator'
     | '/agents/$agentId'
     | '/agents/new'
     | '/monitors/$monitorId'
@@ -298,6 +310,7 @@ export interface RootRouteChildren {
   KanbanRoute: typeof KanbanRoute
   LiveRoute: typeof LiveRoute
   LoginRoute: typeof LoginRoute
+  RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
   MonitorsMonitorIdRoute: typeof MonitorsMonitorIdRoute
@@ -319,6 +332,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/runtime-simulator': {
+      id: '/runtime-simulator'
+      path: '/runtime-simulator'
+      fullPath: '/runtime-simulator'
+      preLoaderRoute: typeof RuntimeSimulatorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -482,6 +502,7 @@ const rootRouteChildren: RootRouteChildren = {
   KanbanRoute: KanbanRoute,
   LiveRoute: LiveRoute,
   LoginRoute: LoginRoute,
+  RuntimeSimulatorRoute: RuntimeSimulatorRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,
   MonitorsMonitorIdRoute: MonitorsMonitorIdRoute,

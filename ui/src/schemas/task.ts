@@ -64,7 +64,10 @@ export const agentRuntimeSpecSchema = z.object({
 })
 
 export const resultRefSchema = z.object({
-  configMapName: z.string(),
+  // Backend ResultReference serializes as { available: bool }; older callers
+  // referenced ConfigMap fields, so keep them optional for tolerance.
+  available: z.boolean().optional(),
+  configMapName: z.string().optional(),
   key: z.string().optional(),
 })
 
@@ -73,6 +76,38 @@ export const childTaskStatusSchema = z.object({
   agent: z.string(),
   phase: taskPhaseSchema,
   result: z.string().optional(),
+})
+
+// Mirrors the safe, non-secret surface of api/v1alpha1 ExecutionWorkspaceStatus.
+// Provider credentials and unsafe identifiers are deliberately excluded — only
+// provider-neutral lifecycle/placement/density metadata is parsed for UI.
+export const executionWorkspacePlacementSchema = z.object({
+  workerNamespace: z.string().optional(),
+  workerPool: z.string().optional(),
+  workerPodName: z.string().optional(),
+})
+
+export const executionWorkspaceDensitySchema = z.object({
+  workerCount: z.number().optional(),
+  actorCount: z.number().optional(),
+  runningActorCount: z.number().optional(),
+  suspendedActorCount: z.number().optional(),
+  actorsPerWorker: z.string().optional(),
+})
+
+export const executionWorkspaceStatusSchema = z.object({
+  provider: z.string().optional(),
+  templateRef: z.object({ name: z.string().optional() }).optional(),
+  phase: z.string().optional(),
+  reason: z.string().optional(),
+  reusePolicy: z.string().optional(),
+  cleanupPolicy: z.string().optional(),
+  reused: z.boolean().optional(),
+  placement: executionWorkspacePlacementSchema.optional(),
+  density: executionWorkspaceDensitySchema.optional(),
+  resumeLatency: z.string().optional(),
+  message: z.string().optional(),
+  lastUpdateTime: z.string().optional(),
 })
 
 export const taskSpecSchema = z.object({
@@ -106,6 +141,7 @@ export const taskStatusSchema = z.object({
   message: z.string().optional(),
   childTasks: z.array(childTaskStatusSchema).optional(),
   conditions: z.array(conditionSchema).optional(),
+  executionWorkspace: executionWorkspaceStatusSchema.optional(),
 })
 
 export const k8sMetadataSchema = z.object({
@@ -130,6 +166,7 @@ export type TaskSpec = z.infer<typeof taskSpecSchema>
 export type TaskStatus = z.infer<typeof taskStatusSchema>
 export type TaskType = z.infer<typeof taskTypeSchema>
 export type TaskPhase = z.infer<typeof taskPhaseSchema>
+export type ExecutionWorkspaceStatus = z.infer<typeof executionWorkspaceStatusSchema>
 
 export const planStateSchema = z.object({
   summary: z.string().optional(),
