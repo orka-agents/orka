@@ -90,7 +90,7 @@ func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T)
 }
 
 func TestAgentRuntimeReconcilerRechecksUnauthenticatedMutationOnReadyRuntime(t *testing.T) {
-	var requireAuth bool = true
+	requireAuth := true
 	turns := map[harness.HarnessTurnID]harness.StartTurnRequest{}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {

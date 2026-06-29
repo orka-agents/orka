@@ -1144,10 +1144,6 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
 	plannedMetadata := harnessWrapperPlannedMetadata(task, agentHarnessRuntimeName(agent))
-	runtimeName := strings.TrimSpace(plannedMetadata["runtime"])
-	if runtimeName == "" {
-		runtimeName = agentHarnessRuntimeName(agent)
-	}
 	attempts := harnessWrapperCurrentAttempt(task)
 	request, err := r.harnessWrapperStartTurnRequest(ctx, task, agent, now, attempts)
 	if err != nil {
