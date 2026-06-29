@@ -36,9 +36,10 @@ kind create cluster
 
 ## Installation
 
-This skill is vendored into the repo at `.agents/skills/kindctl/` and surfaced to
-each harness (`.claude`, `.codex`, `.copilot`) via a `skills/kindctl` symlink, so no
-install step is required. Invoke the wrapper by its repo-relative path:
+This skill is vendored into the repo at `.agents/skills/kindctl/`. If another
+harness needs to expose it, create an external `skills/kindctl` symlink that points
+back to this canonical directory; this repo does not keep `.codex` or `.copilot`
+mirrors. Invoke the wrapper by its repo-relative path:
 
 ```sh
 .agents/skills/kindctl/bin/kindctl <command>

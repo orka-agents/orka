@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
   push:
     paths-ignore:
-      - ".codex/**"
+      - ".agents/**"
       - ".claude/**"
   pull_request:
     paths-ignore:
-      - ".codex/**"
+      - ".agents/**"
       - ".claude/**"
 
 permissions:

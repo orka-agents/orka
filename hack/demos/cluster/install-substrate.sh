@@ -236,7 +236,7 @@ if [[ "${AGENTIC}" == "1" ]]; then
   # session. We do NOT pass a token secret here.
   vekil_script=""
   for candidate in \
-    "${repo_root}/.codex/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh" \
+    "${repo_root}/.agents/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh" \
     "${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"; do
     if [[ -x "${candidate}" ]]; then
       vekil_script="${candidate}"
@@ -252,7 +252,7 @@ if [[ "${AGENTIC}" == "1" ]]; then
     log "  kubectl --context ${ctx} -n ${VEKIL_NS} logs deploy/vekil | grep 'login/device'"
     log "  (visit the URL, enter the code; then /readyz returns 200)"
   else
-    die "vekil deploy script not found under .codex/skills or .claude/skills; install the skill or deploy an in-cluster OpenAI-compatible proxy before Demo 70"
+    die "vekil deploy script not found under .agents/skills or .claude/skills; install the skill or deploy an in-cluster OpenAI-compatible proxy before Demo 70"
   fi
   vekil_url="http://vekil.${VEKIL_NS}.svc.cluster.local:1337/v1"
 
