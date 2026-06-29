@@ -33,13 +33,13 @@ function epochMs(ts?: string): number | null {
   return Number.isNaN(ms) ? null : ms
 }
 
-/** A task's latest event seq, keyed by task name. Higher = more recent. */
-export type LatestEventSeqByTask = Record<string, number>
+/** Latest observed event time (epoch ms), keyed by task name. Higher = more recent. */
+export type LatestActivityByTask = Record<string, number>
 
 /**
  * Deterministic ordering for "most recently active" first. Tie-breaks descend a
  * fixed ladder so the result is stable even when fields are missing:
- *   1. latest event seq (when provided)   — what just advanced
+ *   1. latest event time (when provided)  — what just advanced
  *   2. status.startTime                    — newest start
  *   3. metadata.creationTimestamp          — newest created
  *   4. metadata.name (ascending)           — stable final tiebreak
@@ -47,11 +47,11 @@ export type LatestEventSeqByTask = Record<string, number>
 export function compareByActivity(
   a: Task,
   b: Task,
-  latestSeq: LatestEventSeqByTask = {},
+  latestActivity: LatestActivityByTask = {},
 ): number {
-  const seqA = latestSeq[a.metadata.name] ?? -1
-  const seqB = latestSeq[b.metadata.name] ?? -1
-  if (seqA !== seqB) return seqB - seqA
+  const activityA = latestActivity[a.metadata.name] ?? -1
+  const activityB = latestActivity[b.metadata.name] ?? -1
+  if (activityA !== activityB) return activityB - activityA
 
   const startA = epochMs(a.status?.startTime)
   const startB = epochMs(b.status?.startTime)
@@ -71,11 +71,11 @@ export function compareByActivity(
  */
 export function selectActiveTask(
   tasks: Task[],
-  latestSeq: LatestEventSeqByTask = {},
+  latestActivity: LatestActivityByTask = {},
 ): Task | null {
   const running = tasks.filter(isLiveTask)
   if (running.length === 0) return null
-  return [...running].sort((a, b) => compareByActivity(a, b, latestSeq))[0]
+  return [...running].sort((a, b) => compareByActivity(a, b, latestActivity))[0]
 }
 
 export interface AgentGroup {
@@ -90,7 +90,7 @@ export interface AgentGroup {
  */
 export function groupTasksByAgent(
   tasks: Task[],
-  latestSeq: LatestEventSeqByTask = {},
+  latestActivity: LatestActivityByTask = {},
 ): AgentGroup[] {
   const byAgent = new Map<string, Task[]>()
   for (const task of tasks) {
@@ -101,12 +101,12 @@ export function groupTasksByAgent(
   }
   const groups = Array.from(byAgent, ([agent, group]) => ({
     agent,
-    tasks: [...group].sort((a, b) => compareByActivity(a, b, latestSeq)),
+    tasks: [...group].sort((a, b) => compareByActivity(a, b, latestActivity)),
   }))
   return groups.sort((a, b) => {
     if (a.agent === UNASSIGNED_AGENT) return 1
     if (b.agent === UNASSIGNED_AGENT) return -1
-    return compareByActivity(a.tasks[0], b.tasks[0], latestSeq)
+    return compareByActivity(a.tasks[0], b.tasks[0], latestActivity)
   })
 }
 

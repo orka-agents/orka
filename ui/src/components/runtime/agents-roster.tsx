@@ -9,7 +9,7 @@ import {
   groupTasksByAgent,
   taskKey,
   UNASSIGNED_AGENT,
-  type LatestEventSeqByTask,
+  type LatestActivityByTask,
 } from '@/lib/runtime-activity'
 import type { Task } from '@/schemas/task'
 
@@ -17,15 +17,15 @@ interface AgentsRosterProps {
   tasks: Task[]
   /** Name of the task currently spotlit, for highlight. */
   activeTaskName?: string
-  latestSeq?: LatestEventSeqByTask
+  latestActivity?: LatestActivityByTask
 }
 
 /**
  * Running/recent tasks grouped by owning agent, with an "unassigned" bucket for
  * agent-less tasks. The spotlit task's row is highlighted with the live rail.
  */
-export function AgentsRoster({ tasks, activeTaskName, latestSeq }: AgentsRosterProps) {
-  const groups = groupTasksByAgent(tasks, latestSeq)
+export function AgentsRoster({ tasks, activeTaskName, latestActivity }: AgentsRosterProps) {
+  const groups = groupTasksByAgent(tasks, latestActivity)
 
   return (
     <Card>

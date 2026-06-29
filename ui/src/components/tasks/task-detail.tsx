@@ -82,19 +82,13 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
   const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
   const terminalTraceRefetchKey = useRef<string | null>(null)
+  const terminalArtifactRefetchKey = useRef<string | null>(null)
   const { data: trace, refetch: refetchTrace } = useTaskTrace(
     taskId,
     runtimeActive,
     task?.metadata.uid,
     traceRefetchInterval,
   )
-  useEffect(() => {
-    if (!runtimeActive || !taskTerminal || !task?.metadata.uid) return
-    const key = `${task.metadata.uid}/${task.status?.phase ?? ''}`
-    if (terminalTraceRefetchKey.current === key) return
-    terminalTraceRefetchKey.current = key
-    refetchTrace()
-  }, [refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
   // Poll approvals while live so a new blocking approval surfaces in the runtime
   // health panel; stops once terminal (matches TaskApprovalPanel semantics).
   const approvalRefetchInterval = following ? 5000 : undefined
@@ -107,12 +101,24 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
   )
   const artifactRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
-  const { data: artifactsResp } = useTaskArtifacts(
+  const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
     taskId,
     runtimeActive,
     task?.metadata.uid,
     artifactRefetchInterval,
   )
+  useEffect(() => {
+    if (!runtimeActive || !taskTerminal || !task?.metadata.uid) return
+    const key = `${task.metadata.uid}/${task.status?.phase ?? ''}`
+    if (terminalTraceRefetchKey.current !== key) {
+      terminalTraceRefetchKey.current = key
+      refetchTrace()
+    }
+    if (terminalArtifactRefetchKey.current !== key) {
+      terminalArtifactRefetchKey.current = key
+      refetchArtifacts()
+    }
+  }, [refetchArtifacts, refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
 
   if (isLoading) {
     return (

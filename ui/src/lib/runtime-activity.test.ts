@@ -36,9 +36,9 @@ describe('runtime-activity', () => {
     expect(selectActiveTask([task('s', { status: { phase: 'Succeeded' } })])).toBeNull()
   })
 
-  it('selectActiveTask prefers most-recent event seq', () => {
+  it('selectActiveTask prefers most-recent event activity time', () => {
     const tasks = [task('old'), task('hot')]
-    expect(selectActiveTask(tasks, { hot: 99, old: 1 })?.metadata.name).toBe('hot')
+    expect(selectActiveTask(tasks, { hot: 2000, old: 1000 })?.metadata.name).toBe('hot')
   })
 
   it('selectActiveTask falls back to newest startTime then name when no seq', () => {

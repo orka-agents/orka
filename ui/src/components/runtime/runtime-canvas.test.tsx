@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
 import userEvent from '@testing-library/user-event'
+import { render as rawRender } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
@@ -64,6 +66,63 @@ describe('RuntimeCanvas', () => {
     render(<RuntimeCanvas />)
     // ascending name fallback => 'a' spotlit; render must not crash on missing startTime
     await waitFor(() => expect(screen.getAllByText('a').length).toBeGreaterThan(0))
+  })
+
+  it('does not fetch non-spotlight running task event streams while computing activity', async () => {
+    let selectedCalls = 0
+    let backgroundCalls = 0
+    server.use(
+      http.get('/api/v1/tasks', () => HttpResponse.json({
+        items: [
+          running('selected', { startTime: '2026-06-28T11:00:00Z' }),
+          running('background', { startTime: '2026-06-28T10:00:00Z' }),
+        ],
+        metadata: {},
+      })),
+      http.get('/api/v1/tasks/selected/events', () => {
+        selectedCalls += 1
+        return HttpResponse.json({ namespace: 'default', streamType: 'task', streamID: 'selected', afterSeq: 0, latestSeq: 0, events: [] })
+      }),
+      http.get('/api/v1/tasks/background/events', () => {
+        backgroundCalls += 1
+        return HttpResponse.json({ error: 'events disabled' }, { status: 501 })
+      }),
+    )
+
+    render(<RuntimeCanvas />)
+
+    await waitFor(() => expect(selectedCalls).toBeGreaterThanOrEqual(1))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(backgroundCalls).toBe(0)
+  })
+
+  it('selects the active task from cached latest event activity, not only start time', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity }, mutations: { retry: false } },
+    })
+    queryClient.setQueryData(['taskEvents', 'older-active', 'default', 'older-active'], {
+      namespace: 'default', streamType: 'task', streamID: 'older-active', afterSeq: 0, latestSeq: 9,
+      events: [{ id: 'e9', namespace: 'default', streamType: 'task', streamID: 'older-active', seq: 9, type: 'ToolCallCompleted', severity: 'info', summary: 'older task just ran a tool', createdAt: '2026-06-28T12:00:00Z' }],
+    })
+    queryClient.setQueryData(['taskEvents', 'newer-idle', 'default', 'newer-idle'], {
+      namespace: 'default', streamType: 'task', streamID: 'newer-idle', afterSeq: 0, latestSeq: 1,
+      events: [{ id: 'e1', namespace: 'default', streamType: 'task', streamID: 'newer-idle', seq: 1, type: 'TaskStarted', severity: 'info', summary: 'newer task started', createdAt: '2026-06-28T11:05:00Z' }],
+    })
+    server.use(http.get('/api/v1/tasks', () => HttpResponse.json({
+      items: [
+        running('older-active', { startTime: '2026-06-28T10:00:00Z' }),
+        running('newer-idle', { startTime: '2026-06-28T11:00:00Z' }),
+      ],
+      metadata: {},
+    })))
+
+    rawRender(
+      <QueryClientProvider client={queryClient}>
+        <RuntimeCanvas />
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByText('older task just ran a tool')).toBeInTheDocument())
   })
 
   it('surfaces the active task latest event summary in the spotlight', async () => {

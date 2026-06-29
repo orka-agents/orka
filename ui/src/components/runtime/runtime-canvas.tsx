@@ -9,7 +9,7 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { useTaskListAll, useTaskEvents } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui'
-import { isLiveTask, selectActiveTask } from '@/lib/runtime-activity'
+import { isLiveTask, selectActiveTask, type LatestActivityByTask } from '@/lib/runtime-activity'
 import type { Task } from '@/schemas/task'
 import { ActivitySpotlight } from './activity-spotlight'
 import { AgentsRoster } from './agents-roster'
@@ -46,7 +46,20 @@ export function RuntimeCanvas() {
 
   const tasks = data?.items ?? []
   const runningTasks = tasks.filter(isLiveTask)
-  const active = selectActiveTask(tasks)
+  // Read task-event caches populated by focused views (notably the spotlight)
+  // without issuing one history request per running task. Without a backend
+  // aggregate/latest-activity endpoint, unknown tasks fall back to status/start-time
+  // ordering instead of creating namespace-wide event scans.
+  const latestActivity = runningTasks.reduce<LatestActivityByTask>((acc, task) => {
+    const queryKey = ['taskEvents', task.metadata.name, namespace, task.metadata.uid ?? ''] as const
+    const cached = queryClient.getQueryData<{ events?: { createdAt?: string }[] }>(queryKey)
+    const events = cached?.events ?? []
+    const latestEvent = events[events.length - 1]
+    const eventTime = latestEvent?.createdAt ? new Date(latestEvent.createdAt).getTime() : NaN
+    if (!Number.isNaN(eventTime)) acc[task.metadata.name] = eventTime
+    return acc
+  }, {})
+  const active = selectActiveTask(tasks, latestActivity)
   const refreshCanvas = () => {
     queryClient.invalidateQueries({ queryKey: ['tasks'] })
     if (active) {
@@ -108,7 +121,7 @@ export function RuntimeCanvas() {
             <ActiveSpotlight task={active} following={following} />
             <TaskFlowPanel task={active} tasks={runningTasks} />
           </div>
-          <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} />
+          <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} latestActivity={latestActivity} />
         </div>
       )}
     </div>
