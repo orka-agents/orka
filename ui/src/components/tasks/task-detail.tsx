@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -81,12 +81,20 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const taskRunning = task?.status?.phase === 'Running'
   const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
   const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
-  const { data: trace } = useTaskTrace(
+  const terminalTraceRefetchKey = useRef<string | null>(null)
+  const { data: trace, refetch: refetchTrace } = useTaskTrace(
     taskId,
     runtimeActive,
     task?.metadata.uid,
     traceRefetchInterval,
   )
+  useEffect(() => {
+    if (!runtimeActive || !taskTerminal || !task?.metadata.uid) return
+    const key = `${task.metadata.uid}/${task.status?.phase ?? ''}`
+    if (terminalTraceRefetchKey.current === key) return
+    terminalTraceRefetchKey.current = key
+    refetchTrace()
+  }, [refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
   // Poll approvals while live so a new blocking approval surfaces in the runtime
   // health panel; stops once terminal (matches TaskApprovalPanel semantics).
   const approvalRefetchInterval = following ? 5000 : undefined

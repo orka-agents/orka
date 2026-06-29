@@ -8,11 +8,37 @@ interface ListResponse<T> {
   metadata: { continue?: string; remainingItemCount?: number }
 }
 
+function fetchTaskListPage(namespace: string, limit: string, continueToken?: string) {
+  const params: Record<string, string> = { namespace, limit }
+  if (continueToken) params.continue = continueToken
+  return api.get<ListResponse<Task>>('/tasks', params)
+}
+
 export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['tasks', namespace, limit],
-    queryFn: () => api.get<ListResponse<Task>>('/tasks', { namespace, limit }),
+    queryFn: () => fetchTaskListPage(namespace, limit),
+    refetchInterval,
+  })
+}
+
+export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['tasks', 'all', namespace, pageLimit],
+    queryFn: async () => {
+      const items: Task[] = []
+      let metadata: ListResponse<Task>['metadata'] = {}
+      let continueToken: string | undefined
+      do {
+        const page = await fetchTaskListPage(namespace, pageLimit, continueToken)
+        items.push(...page.items)
+        metadata = page.metadata ?? {}
+        continueToken = metadata.continue
+      } while (continueToken)
+      return { items, metadata }
+    },
     refetchInterval,
   })
 }

@@ -11,6 +11,7 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import {
   useTaskList,
+  useTaskListAll,
   useTask,
   useTaskResult,
   useCreateTask,
@@ -36,6 +37,28 @@ describe('useTaskList', () => {
     const { result } = renderHook(() => useTaskList(), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data).toEqual({ items: [], metadata: {} })
+  })
+})
+
+describe('useTaskListAll', () => {
+  it('follows continue tokens and returns all task pages', async () => {
+    const seen: (string | null)[] = []
+    server.use(http.get('/api/v1/tasks', ({ request }) => {
+      const token = new URL(request.url).searchParams.get('continue')
+      seen.push(token)
+      if (!token) {
+        return HttpResponse.json({ items: [], metadata: { continue: 'next-page' } })
+      }
+      return HttpResponse.json({
+        items: [{ metadata: { name: 'late-running', namespace: 'default', uid: 'late' }, spec: { type: 'agent' }, status: { phase: 'Running' } }],
+        metadata: {},
+      })
+    }))
+
+    const { result } = renderHook(() => useTaskListAll('100', false), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.data?.items[0]?.metadata.name).toBe('late-running'))
+    expect(seen).toEqual([null, 'next-page'])
   })
 })
 

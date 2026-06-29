@@ -8,7 +8,7 @@ import { SonarPing } from '@/components/ui/sonar-ping'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { StatusDot } from '@/components/ui/status-dot'
-import { useTaskList, useTaskEvents } from '@/hooks/use-tasks'
+import { useTaskListAll, useTaskEvents } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui'
 import { isLiveTask, selectActiveTask } from '@/lib/runtime-activity'
 import type { Task } from '@/schemas/task'
@@ -43,7 +43,7 @@ export function RuntimeCanvas() {
   const namespace = useUIStore((s) => s.namespace)
   const queryClient = useQueryClient()
   const [following, setFollowing] = useState(true)
-  const { data, isLoading } = useTaskList('25', following ? 10000 : false)
+  const { data, isLoading } = useTaskListAll('100', following ? 10000 : false)
 
   const tasks = data?.items ?? []
   const runningTasks = tasks.filter(isLiveTask)
