@@ -238,6 +238,50 @@ func TestAgentRuntimeReconcilerRejectsUnlabeledBearerSecret(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeReconcilerRejectsBearerSecretWithoutEndpointBinding(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL())
+	secret.Annotations = nil
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false")
+	}
+	if !strings.Contains(updated.Status.Message, agentRuntimeAuthEndpointAnnotation) {
+		t.Fatalf("Message = %q, want missing endpoint binding annotation", updated.Status.Message)
+	}
+}
+
+func TestAgentRuntimeReconcilerRejectsBearerSecretEndpointMismatch(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL())
+	secret.Annotations[agentRuntimeAuthEndpointAnnotation] = "http://different-runtime.default.svc.cluster.local:8080"
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false")
+	}
+	if !strings.Contains(updated.Status.Message, "annotated for endpoint") {
+		t.Fatalf("Message = %q, want endpoint mismatch", updated.Status.Message)
+	}
+}
+
 func TestAgentRuntimeReconcilerReportsMissingBearerSecret(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
 	defer server.Close()
@@ -341,7 +385,7 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit-harness-token", Namespace: "default", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: "fibey-agentkit"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit-harness-token", Namespace: "default", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: "fibey-agentkit"}, Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint}},
 		Data:       map[string][]byte{"token": []byte("x")},
 	}
 	return runtime, secret

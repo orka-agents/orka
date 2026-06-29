@@ -113,6 +113,12 @@ func TestCheckFailsWhenDuplicateStartAccepted(t *testing.T) {
 	if !strings.Contains(result.Message, "duplicate start turn was accepted") {
 		t.Fatalf("Message = %q, want duplicate start rejection", result.Message)
 	}
+	server.mu.Lock()
+	cancelCount := server.cancelCount
+	server.mu.Unlock()
+	if cancelCount == 0 {
+		t.Fatal("cancel count = 0, want duplicate-accepted turn cleanup")
+	}
 }
 
 func TestCheckFailsWhenProbeFrameLimitExceeded(t *testing.T) {
@@ -126,6 +132,21 @@ func TestCheckFailsWhenProbeFrameLimitExceeded(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "frame count exceeded") {
 		t.Fatalf("Message = %q, want frame count limit", result.Message)
+	}
+}
+
+func TestCheckFailsWhenProbeFrameByteLimitExceeded(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.outputFrames = maxProbeFrames / 2
+	server.outputText = strings.Repeat("x", maxProbeFrameBytes/(maxProbeFrames/2)+1024)
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "frame bytes exceeded") {
+		t.Fatalf("Message = %q, want frame byte limit", result.Message)
 	}
 }
 
@@ -165,6 +186,8 @@ type agentKitOrkaFixture struct {
 	frameType           harness.FrameType
 	allowDuplicateStart bool
 	outputFrames        int
+	outputText          string
+	cancelCount         int
 	mu                  sync.Mutex
 	turns               map[harness.HarnessTurnID]harness.StartTurnRequest
 }
@@ -287,6 +310,9 @@ func (f *agentKitOrkaFixture) turnResource(w http.ResponseWriter, r *http.Reques
 	case "events":
 		f.events(w, request)
 	case "cancel":
+		f.mu.Lock()
+		f.cancelCount++
+		f.mu.Unlock()
 		harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{
 			Version:          harness.ProtocolVersion,
 			Accepted:         true,
@@ -309,8 +335,12 @@ func (f *agentKitOrkaFixture) events(w http.ResponseWriter, request harness.Star
 	for i := range outputFrames {
 		seq := int64(i + 2)
 		output := agentKitFrame(request, seq, f.frameType, "runtime output", nil)
-		output.ContentText = "AgentKit Orka fixture output"
-		output.Content = json.RawMessage(`{"message":"AgentKit Orka fixture output"}`)
+		outputText := f.outputText
+		if outputText == "" {
+			outputText = "AgentKit Orka fixture output"
+		}
+		output.ContentText = outputText
+		output.Content = json.RawMessage(fmt.Sprintf(`{"message":%q}`, outputText))
 		_ = harness.WriteSSEFrame(w, output)
 	}
 	completedSeq := int64(outputFrames + 2)

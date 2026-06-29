@@ -440,6 +440,10 @@ func TestHarnessWrapperPlannedBuiltInRetryUsesFrozenRuntimeMetadata(t *testing.T
 				harness.WriteError(w, http.StatusBadRequest, fmt.Sprintf("runtimeSessionID = %q", request.RuntimeSessionID))
 				return
 			}
+			if got := request.Metadata["systemPrompt"]; got != "private instructions" {
+				harness.WriteError(w, http.StatusBadRequest, fmt.Sprintf("systemPrompt metadata = %q, want private instructions", got))
+				return
+			}
 			streamPath, _ := harness.EventStreamPath(request.TurnID)
 			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
 				Version:          harness.ProtocolVersion,
@@ -465,6 +469,8 @@ func TestHarnessWrapperPlannedBuiltInRetryUsesFrozenRuntimeMetadata(t *testing.T
 		harnessWrapperMetadataAnno:      `{"runtime":"codex","wrapper":"cli","contractVersion":"orka.harness.v1"}`,
 	}
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+	agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "private instructions"}
+	task.Annotations[harnessWrapperMetadataAnno] = `{"runtime":"codex","wrapper":"cli","contractVersion":"orka.harness.v1","maxTurns":"50"}`
 	r := newUnitReconciler(newTestScheme(), task, agent)
 
 	result, err := r.handlePending(context.Background(), task)
@@ -876,7 +882,7 @@ func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, ResourceVersion: "1", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}},
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, ResourceVersion: "1", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}, Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint}},
 		Data:       map[string][]byte{"token": []byte("x")},
 	}
 	return runtime, secret

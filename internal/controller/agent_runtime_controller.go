@@ -37,8 +37,9 @@ const (
 	agentRuntimeProbeTimeout   = 10 * time.Second
 	agentRuntimeRequeue        = 30 * time.Second
 
-	agentRuntimeAuthUseLabel     = "orka.ai/agent-runtime-auth"
-	agentRuntimeAuthRefNameLabel = "orka.ai/agent-runtime-name"
+	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"
+	agentRuntimeAuthRefNameLabel       = "orka.ai/agent-runtime-name"
+	agentRuntimeAuthEndpointAnnotation = "orka.ai/agent-runtime-endpoint"
 )
 
 // AgentRuntimeReconciler reconciles AgentRuntime registry entries.
@@ -151,8 +152,9 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	return nil
 }
 
-func validateAgentRuntimeBearerSecretUse(runtimeName string, secret *corev1.Secret) error {
+func validateAgentRuntimeBearerSecretUse(runtimeName string, endpoint string, secret *corev1.Secret) error {
 	runtimeName = strings.TrimSpace(runtimeName)
+	endpoint = strings.TrimSpace(endpoint)
 	if secret == nil {
 		return fmt.Errorf("bearer token Secret is required")
 	}
@@ -161,6 +163,13 @@ func validateAgentRuntimeBearerSecretUse(runtimeName string, secret *corev1.Secr
 	}
 	if allowed := strings.TrimSpace(secret.Labels[agentRuntimeAuthRefNameLabel]); allowed != "" && allowed != runtimeName {
 		return fmt.Errorf("bearer token Secret %q is labeled for AgentRuntime %q, not %q", secret.Name, allowed, runtimeName)
+	}
+	boundEndpoint := strings.TrimSpace(secret.Annotations[agentRuntimeAuthEndpointAnnotation])
+	if boundEndpoint == "" {
+		return fmt.Errorf("bearer token Secret %q must be annotated %s=<deployment.endpoint> before an AgentRuntime can use it", secret.Name, agentRuntimeAuthEndpointAnnotation)
+	}
+	if boundEndpoint != endpoint {
+		return fmt.Errorf("bearer token Secret %q is annotated for endpoint %q, not %q", secret.Name, sanitizeAgentRuntimeEndpointForStatus(boundEndpoint), sanitizeAgentRuntimeEndpointForStatus(endpoint))
 	}
 	return nil
 }
@@ -174,7 +183,7 @@ func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, ru
 		}
 		return "", "", fmt.Errorf("read bearer token Secret %q: %w", ref.Name, err)
 	}
-	if err := validateAgentRuntimeBearerSecretUse(runtime.Name, secret); err != nil {
+	if err := validateAgentRuntimeBearerSecretUse(runtime.Name, runtime.Spec.Deployment.Endpoint, secret); err != nil {
 		return "", "", err
 	}
 	value := strings.TrimSpace(string(secret.Data[ref.Key]))
@@ -299,6 +308,14 @@ func (r *AgentRuntimeReconciler) updateAgentRuntimeStatus(
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: agentRuntimeRequeue}, nil
+}
+
+func sanitizeAgentRuntimeEndpointForStatus(endpoint string) string {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return events.RedactExecutionEventText(strings.TrimSpace(endpoint))
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 func sanitizeAgentRuntimeStatusMessage(message string) string {

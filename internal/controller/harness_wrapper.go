@@ -222,7 +222,7 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 ) (harnessRuntimeTarget, error) {
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if frozen, ok := harnessRuntimeTargetFromStatus(task); ok {
-			token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.AuthRefName, frozen.AuthRefField)
+			token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.Endpoint, frozen.AuthRefName, frozen.AuthRefField)
 			if err != nil {
 				return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
 			}
@@ -347,13 +347,14 @@ func (r *TaskReconciler) resolveAgentRuntimeBearerToken(ctx context.Context, run
 		return "", "", fmt.Errorf("AgentRuntime is required")
 	}
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
-	return r.resolveAgentRuntimeBearerTokenFromRef(ctx, runtime.Namespace, runtime.Name, ref.Name, ref.Key)
+	return r.resolveAgentRuntimeBearerTokenFromRef(ctx, runtime.Namespace, runtime.Name, runtime.Spec.Deployment.Endpoint, ref.Name, ref.Key)
 }
 
 func (r *TaskReconciler) resolveAgentRuntimeBearerTokenFromRef(
 	ctx context.Context,
 	namespace string,
 	runtimeName string,
+	endpoint string,
 	refName string,
 	refField string,
 ) (string, string, error) {
@@ -366,7 +367,7 @@ func (r *TaskReconciler) resolveAgentRuntimeBearerTokenFromRef(
 		}
 		return "", "", fmt.Errorf("read AgentRuntime %q bearer token Secret %q: %w", runtimeName, refName, err)
 	}
-	if err := validateAgentRuntimeBearerSecretUse(runtimeName, secret); err != nil {
+	if err := validateAgentRuntimeBearerSecretUse(runtimeName, endpoint, secret); err != nil {
 		return "", "", err
 	}
 	value := strings.TrimSpace(string(secret.Data[refField]))
@@ -1153,7 +1154,12 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
 	request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
 	request.Deadline = deadline.UTC()
-	request.Metadata = plannedMetadata
+	if request.Metadata == nil {
+		request.Metadata = map[string]string{}
+	}
+	for key, value := range plannedMetadata {
+		request.Metadata[key] = value
+	}
 	return request, nil
 }
 

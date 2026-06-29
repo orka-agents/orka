@@ -73,8 +73,9 @@ type AgentRuntimeBearerAuthReference struct {
 // AgentRuntimeClientAuth configures Orka's client authentication to the harness endpoint.
 type AgentRuntimeClientAuth struct {
 	// BearerAuthRef points to the bearer token Secret used for mutating harness endpoints.
-	// The referenced Secret must opt in with label orka.ai/agent-runtime-auth=true;
-	// it may also set orka.ai/agent-runtime-name=<runtime> to restrict use to one AgentRuntime.
+	// The referenced Secret must opt in with label orka.ai/agent-runtime-auth=true,
+	// may set orka.ai/agent-runtime-name=<runtime> to restrict use to one AgentRuntime,
+	// and must set annotation orka.ai/agent-runtime-endpoint=<deployment.endpoint> to bind the token to one endpoint.
 	// +kubebuilder:validation:Required
 	BearerAuthRef AgentRuntimeBearerAuthReference `json:"bearerTokenSecretRef"`
 }

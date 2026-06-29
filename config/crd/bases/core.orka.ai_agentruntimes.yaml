@@ -87,8 +87,9 @@ spec:
                   bearerTokenSecretRef:
                     description: |-
                       BearerAuthRef points to the bearer token Secret used for mutating harness endpoints.
-                      The referenced Secret must opt in with label orka.ai/agent-runtime-auth=true;
-                      it may also set orka.ai/agent-runtime-name=<runtime> to restrict use to one AgentRuntime.
+                      The referenced Secret must opt in with label orka.ai/agent-runtime-auth=true,
+                      may set orka.ai/agent-runtime-name=<runtime> to restrict use to one AgentRuntime,
+                      and must set annotation orka.ai/agent-runtime-endpoint=<deployment.endpoint> to bind the token to one endpoint.
                     properties:
                       key:
                         description: Key is the Secret data key containing the bearer

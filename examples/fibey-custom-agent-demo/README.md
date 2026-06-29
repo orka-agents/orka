@@ -26,11 +26,15 @@ env:
       key: token
 ```
 
-The same Secret is referenced by `AgentRuntime.spec.clientAuth.bearerTokenSecretRef` and must keep the labels:
+The same Secret is referenced by `AgentRuntime.spec.clientAuth.bearerTokenSecretRef` and must keep these labels and annotations:
 
 ```yaml
-orka.ai/agent-runtime-auth: "true"
-orka.ai/agent-runtime-name: fibey-agentkit
+metadata:
+  labels:
+    orka.ai/agent-runtime-auth: "true"
+    orka.ai/agent-runtime-name: fibey-agentkit
+  annotations:
+    orka.ai/agent-runtime-endpoint: http://fibey-agentkit.default.svc.cluster.local:8080
 ```
 
 After applying the manifests, the expected readiness check is:
@@ -51,7 +55,7 @@ kubectl get task fibey-quincy-north-alert -o yaml
 
 Expected flow:
 
-1. `AgentRuntime/fibey-agentkit` reads only a harness token Secret labeled `orka.ai/agent-runtime-auth: "true"` (and optionally scoped with `orka.ai/agent-runtime-name`) before probing `/v1/health` and `/v1/capabilities` and becoming Ready.
+1. `AgentRuntime/fibey-agentkit` reads only a harness token Secret labeled `orka.ai/agent-runtime-auth: "true"`, scoped with `orka.ai/agent-runtime-name`, and endpoint-bound with `orka.ai/agent-runtime-endpoint` before probing `/v1/health` and `/v1/capabilities` and becoming Ready.
 2. `Agent/fibey-custom` selects the runtime by `runtimeRef`.
 3. `Task/fibey-quincy-north-alert` starts a harness turn against the mock endpoint.
 4. The task timeline shows `TurnStarted`, `RuntimeOutput`, and `TurnCompleted` events.

@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -144,7 +145,9 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	if strings.TrimSpace(started.EventStreamPath) == "" {
 		result.addFailure("start turn response eventStreamPath is required")
 	}
-	assertDuplicateStartRejected(ctx, client, result, request)
+	if !assertDuplicateStartRejected(ctx, client, result, request) {
+		return
+	}
 	if target.RequireAuth {
 		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
 	}
@@ -181,15 +184,19 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	}
 }
 
-func assertDuplicateStartRejected(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest) {
+func assertDuplicateStartRejected(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest) bool {
 	_, err := client.StartTurn(ctx, request)
 	if err == nil {
 		result.addFailure("duplicate start turn was accepted")
-		return
+		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start was accepted")
+		return false
 	}
 	if !isDuplicateStartRejectedError(err) {
 		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection", err))
+		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start returned an unexpected error")
+		return false
 	}
+	return true
 }
 
 func isDuplicateStartRejectedError(err error) bool {
@@ -201,6 +208,10 @@ func isDuplicateStartRejectedError(err error) bool {
 }
 
 func approximateProbeFrameBytes(frame harness.HarnessEventFrame) int {
+	encoded, err := json.Marshal(frame)
+	if err == nil {
+		return len(encoded)
+	}
 	size := len(frame.Version) + len(frame.Type) + len(frame.RuntimeSessionID) + len(frame.TurnID) + len(frame.CorrelationID) +
 		len(frame.Severity) + len(frame.Summary) + len(frame.Content) + len(frame.ContentText) + len(frame.ToolName) +
 		len(frame.ToolCallID) + len(frame.ApprovalID)
