@@ -147,6 +147,36 @@ describe('use-execution-events hooks', () => {
     expect(capturedPath).toBe('/api/v1/sessions/sess/events')
   })
 
+  it('useTaskTrace polls when a refetch interval is provided', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/tk/trace', () => {
+      calls += 1
+      return HttpResponse.json({
+        task: { namespace: 'default', name: 'tk', resultAvailable: false },
+        latestSeq: calls, generatedAt: '2026-06-13T00:00:00Z', timeline: [],
+        modelRequests: [], toolCalls: [], childTasks: [], workspace: [], artifacts: [], errors: [], warnings: [],
+      })
+    }))
+
+    renderHook(() => useTaskTrace('tk', true, 'uid-trace', 20), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(calls).toBeGreaterThan(1))
+  })
+
+  it('useTaskTrace does not retry or poll when trace storage is unsupported', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/tk/trace', () => {
+      calls += 1
+      return HttpResponse.json({ error: 'not enabled' }, { status: 501 })
+    }))
+
+    const { result } = renderHook(() => useTaskTrace('tk', true, 'uid-unsupported', 20), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.error).toBeTruthy())
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls).toBe(1)
+  })
+
   it('useTaskTrace fetches the trace payload', async () => {
     server.use(
       http.get(`${API}/tasks/:id/trace`, ({ params }) =>

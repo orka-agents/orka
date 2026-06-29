@@ -226,8 +226,12 @@ describe('resultRefSchema', () => {
     expect(resultRefSchema.parse({ configMapName: 'result-cm' })).toEqual({ configMapName: 'result-cm' })
   })
 
-  it('rejects missing configMapName', () => {
-    expect(() => resultRefSchema.parse({})).toThrow()
+  it('parses the API result reference shape ({ available })', () => {
+    expect(resultRefSchema.parse({ available: true })).toEqual({ available: true })
+  })
+
+  it('parses an empty result reference (all fields optional)', () => {
+    expect(resultRefSchema.parse({})).toEqual({})
   })
 })
 
@@ -413,5 +417,23 @@ describe('exported types', () => {
   it('TaskPhase type matches schema', () => {
     const p: TaskPhase = 'Failed'
     expect(taskPhaseSchema.parse(p)).toBe('Failed')
+  })
+
+  it('parses executionWorkspace status (safe fields) and ignores extras', () => {
+    const status = taskStatusSchema.parse({
+      phase: 'Running',
+      executionWorkspace: {
+        provider: 'substrate',
+        phase: 'Ready',
+        reused: true,
+        placement: { workerPool: 'pool-a' },
+        density: { actorCount: 3, actorsPerWorker: '1.5' },
+        message: 'attached',
+        secretToken: 'should-be-stripped',
+      },
+    })
+    expect(status.executionWorkspace?.provider).toBe('substrate')
+    expect(status.executionWorkspace?.placement?.workerPool).toBe('pool-a')
+    expect((status.executionWorkspace as Record<string, unknown>).secretToken).toBeUndefined()
   })
 })

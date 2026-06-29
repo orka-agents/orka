@@ -13,6 +13,8 @@ interface GraphNode {
   type?: TaskType | string
   children: GraphNode[]
   telemetry?: string
+  /** Child result summary, if any. */
+  result?: string
 }
 
 /**
@@ -28,6 +30,7 @@ function buildGraph(task: Task, events: ExecutionEvent[] = []): GraphNode {
     name: c.name,
     agent: c.agent,
     phase: c.phase,
+    result: c.result,
     children: [] as GraphNode[],
   }))
   const latestModelEvent = [...events]
@@ -99,6 +102,14 @@ function TreeNode({
         {node.telemetry && (
           <span className="truncate rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
             {node.telemetry}
+          </span>
+        )}
+        {node.result && (
+          <span
+            className="truncate rounded-full bg-status-succeeded-bg px-2 py-0.5 text-[10px] text-status-succeeded"
+            title={node.result}
+          >
+            {node.result}
           </span>
         )}
         <span
