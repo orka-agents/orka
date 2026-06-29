@@ -1367,16 +1367,30 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  runtimeRef:
+                    description: RuntimeRef selects an admin-governed AgentRuntime
+                      for custom/BYO harness runtimes.
+                    properties:
+                      name:
+                        description: Name is the AgentRuntime name. RuntimeRefs are
+                          resolved in the task namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   type:
-                    description: Type specifies which CLI runtime to use
+                    description: Type specifies which built-in CLI runtime to use.
+                      Use runtimeRef for admin-registered custom runtimes.
                     enum:
                     - copilot
                     - claude
                     - codex
                     type: string
-                required:
-                - type
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one of type or runtimeRef is required
+                  rule: has(self.type) != has(self.runtimeRef)
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:

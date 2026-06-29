@@ -1,0 +1,100 @@
+name: AgentRuntime External Endpoint E2E
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/agentruntime-external-e2e.yml"
+      - "api/**"
+      - "cmd/**"
+      - "config/**"
+      - "examples/harness/**"
+      - "internal/controller/**"
+      - "internal/harness/**"
+      - "test/e2e/**"
+      - "test/utils/**"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+  pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/agentruntime-external-e2e.yml"
+      - "api/**"
+      - "cmd/**"
+      - "config/**"
+      - "examples/harness/**"
+      - "internal/controller/**"
+      - "internal/harness/**"
+      - "test/e2e/**"
+      - "test/utils/**"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentruntime-external-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agentruntime-external-e2e:
+    name: AgentRuntime external endpoint
+    runs-on: ubuntu-latest
+    env:
+      E2E_AGENTRUNTIME_EXTERNAL: "true"
+      E2E_GO_TEST_TIMEOUT: 25m
+      KIND_CLUSTER: orka-agentruntime-external-e2e
+      KIND_VERSION: v0.31.0
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Free disk space for Docker-heavy E2E
+        run: |
+          set -euxo pipefail
+          echo "Disk usage before cleanup"
+          df -h
+          docker system df || true
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift
+
+          docker system prune -af || true
+          docker builder prune -af || true
+
+          echo "Disk usage after cleanup"
+          df -h
+          docker system df || true
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install kind
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify kind installation
+        run: kind version
+
+      - name: Run AgentRuntime external endpoint E2E
+        run: |
+          set -euxo pipefail
+          trap 'kind delete cluster --name "${KIND_CLUSTER}" || true' EXIT
+          make setup-test-e2e KIND_CLUSTER="${KIND_CLUSTER}"
+          go test -tags=e2e ./test/e2e/ \
+            -timeout "${E2E_GO_TEST_TIMEOUT}" \
+            -v \
+            -ginkgo.v \
+            -ginkgo.focus "AgentRuntime external endpoint"

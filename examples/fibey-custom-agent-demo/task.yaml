@@ -1,0 +1,11 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: fibey-quincy-north-alert
+spec:
+  type: agent
+  agentRef:
+    name: fibey-custom
+  prompt: |
+    Quincy North alert: pump telemetry is anomalous after overnight maintenance.
+    Investigate likely cause, summarize evidence, and propose the safest next action.

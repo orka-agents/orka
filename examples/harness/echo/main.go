@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,8 +15,10 @@ import (
 )
 
 type server struct {
-	mu    sync.Mutex
-	turns map[harness.HarnessTurnID]harness.StartTurnRequest
+	runtimeName string
+	authToken   string
+	mu          sync.Mutex
+	turns       map[harness.HarnessTurnID]harness.StartTurnRequest
 }
 
 func main() {
@@ -23,7 +26,15 @@ func main() {
 	if addr == "" {
 		addr = ":8090"
 	}
-	s := &server{turns: map[harness.HarnessTurnID]harness.StartTurnRequest{}}
+	runtimeName := strings.TrimSpace(os.Getenv("ORKA_EXAMPLE_HARNESS_RUNTIME_NAME"))
+	if runtimeName == "" {
+		runtimeName = "orka-example-echo-harness"
+	}
+	s := &server{
+		runtimeName: runtimeName,
+		authToken:   (strings.TrimSpace(os.Getenv("ORKA_EXAMPLE_HARNESS_BEARER_TOKEN"))),
+		turns:       map[harness.HarnessTurnID]harness.StartTurnRequest{},
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.health)
 	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)
@@ -47,7 +58,7 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 		Version:                 harness.ProtocolVersion,
 		ProtocolVersion:         harness.ProtocolVersion,
 		Transport:               harness.HTTPTransport,
-		RuntimeName:             "orka-example-echo-harness",
+		RuntimeName:             s.runtimeName,
 		ProviderKind:            harness.ProviderKindKubernetesService,
 		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
 		SupportsCancel:          true,
@@ -56,7 +67,22 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *server) authorized(w http.ResponseWriter, r *http.Request) bool {
+	if strings.TrimSpace(s.authToken) == "" {
+		return true
+	}
+	got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(s.authToken)) != 1 {
+		harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	return true
+}
+
 func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -71,6 +97,11 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	if _, exists := s.turns[request.TurnID]; exists {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+		return
+	}
 	s.turns[request.TurnID] = request
 	s.mu.Unlock()
 	harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
@@ -84,6 +115,9 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) turn(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(w, r) {
+		return
+	}
 	trimmed := strings.TrimPrefix(r.URL.Path, harness.TurnsPath+"/")
 	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
 	if len(parts) != 2 {

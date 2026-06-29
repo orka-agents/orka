@@ -16,6 +16,10 @@
 !workers/
 !workers/**/
 !workers/**/*.go
+!examples/
+!examples/harness/
+!examples/harness/echo/
+!examples/harness/echo/*.go
 !*.go
 **/*_test.go
 
