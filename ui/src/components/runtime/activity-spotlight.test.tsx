@@ -36,6 +36,13 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('Paused')).toBeInTheDocument()
   })
 
+  it('prefers latest event summary over a running status message', () => {
+    const ev = { summary: 'tool call completed' } as ExecutionEvent
+    render(<ActivitySpotlight task={task('r-status', { status: { phase: 'Running', message: 'generic running status' } })} latestEvent={ev} following />)
+    expect(screen.getByText('tool call completed')).toBeInTheDocument()
+    expect(screen.queryByText('generic running status')).not.toBeInTheDocument()
+  })
+
   it('shows latest event summary when no status message', () => {
     const ev = { summary: 'tool call completed' } as ExecutionEvent
     render(<ActivitySpotlight task={task('r3')} latestEvent={ev} following />)

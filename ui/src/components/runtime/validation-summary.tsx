@@ -53,7 +53,7 @@ export function ValidationSummary({ task, trace, approvals, artifacts }: Validat
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between gap-2">
           <CardTitle className="text-sm font-medium">Derived checks</CardTitle>
-          <Badge variant={banner.variant} className={cn('gap-1', banner.color)}>
+          <Badge variant={banner.variant} className={cn('gap-1', rollup !== 'fail' && banner.color)}>
             <banner.Icon className="size-3" aria-hidden="true" />
             {ROLLUP_LABEL[rollup]}
           </Badge>

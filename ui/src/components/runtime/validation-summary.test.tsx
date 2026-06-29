@@ -76,6 +76,13 @@ describe('ValidationSummary', () => {
     expect(screen.getAllByText('Trace unavailable').length).toBeGreaterThan(0)
   })
 
+  it('keeps the failing rollup badge foreground readable', () => {
+    render(<ValidationSummary task={task('Failed')} trace={trace({ errors: [{ message: 'boom' }] })} />)
+    const badge = screen.getByText('Derived checks failing').closest('[data-slot="badge"]')
+    expect(badge?.className).toContain('text-white')
+    expect(badge?.className).not.toContain('text-status-failed')
+  })
+
   it('conveys status with sr-only text, not color alone', () => {
     render(<ValidationSummary task={task('Failed')} trace={trace({ errors: [{ message: 'x' }] })} />)
     expect(screen.getAllByText(/— Fail/).length).toBeGreaterThan(0)

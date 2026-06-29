@@ -11,6 +11,7 @@ interface LiveStatePanelProps {
 // Skip keys that look credential-bearing OR are known large/spec-bearing
 // annotations (kubectl last-applied embeds the full spec, including env).
 const SECRET_KEY_PATTERN = /token|secret|key|password|cred|auth/i
+const SECRET_VALUE_PATTERN = /(?:sk-[A-Za-z0-9_-]{6,}|github_pat_|gh[pousr]_[A-Za-z0-9_]{6,}|xox[baprs]-|AIza[0-9A-Za-z_-]{10,}|AKIA[0-9A-Z]{8,}|Bearer\s+\S+|Basic\s+\S+|(?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i
 const UNSAFE_KEY_PATTERN = /last-applied-configuration|kubectl\.kubernetes\.io/i
 // Values long enough to plausibly carry an embedded blob/token are dropped too.
 const MAX_VALUE_CHARS = 80
@@ -18,7 +19,11 @@ const MAX_VALUE_CHARS = 80
 function nonSecretEntries(record?: Record<string, string>): [string, string][] {
   if (!record) return []
   return Object.entries(record).filter(
-    ([k, v]) => !SECRET_KEY_PATTERN.test(k) && !UNSAFE_KEY_PATTERN.test(k) && v.length <= MAX_VALUE_CHARS,
+    ([k, v]) =>
+      !SECRET_KEY_PATTERN.test(k) &&
+      !UNSAFE_KEY_PATTERN.test(k) &&
+      !SECRET_VALUE_PATTERN.test(v) &&
+      v.length <= MAX_VALUE_CHARS,
   )
 }
 

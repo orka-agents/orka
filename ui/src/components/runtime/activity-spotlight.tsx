@@ -25,13 +25,17 @@ interface ActivitySpotlightProps {
  */
 export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpotlightProps) {
   const [now, setNow] = useState(() => Date.now())
-  const headline = task?.status?.message ?? latestEvent?.summary
+  const phase = task?.status?.phase
+  const running = phase === 'Running'
+  const headline = running
+    ? latestEvent?.summary ?? task?.status?.message
+    : task?.status?.message ?? latestEvent?.summary
   const justUpdated = useFreshness(headline)
 
   useEffect(() => {
     // Only tick for a running task with a clock: terminal tasks freeze at
     // completionTime, waiting tasks are not active, and startTime-less tasks render "—".
-    if (!task || task.status?.phase !== 'Running' || elapsedSeconds(task, now) === null) return
+    if (!task || phase !== 'Running' || elapsedSeconds(task, now) === null) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -55,8 +59,7 @@ export function ActivitySpotlight({ task, latestEvent, following }: ActivitySpot
   // For terminal tasks freeze the clock at completionTime (the run's duration);
   // a running task ticks against now. Pending/Scheduled tasks are waiting, not
   // active, even when opened in the task detail Runtime tab.
-  const terminal = isTerminal(task.status?.phase)
-  const running = task.status?.phase === 'Running'
+  const terminal = isTerminal(phase)
   const endMs = terminal && task.status?.completionTime ? new Date(task.status.completionTime).getTime() : now
   const elapsed = formatElapsed(running || terminal ? elapsedSeconds(task, endMs) : null)
   const heading = terminal ? 'Last run' : running ? 'Active now' : 'Waiting'

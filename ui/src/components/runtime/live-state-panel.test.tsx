@@ -8,7 +8,7 @@ const fullTask: Task = {
     name: 'parent',
     namespace: 'default',
     labels: { 'app.kubernetes.io/name': 'orka' },
-    annotations: { 'orka.ai/note': 'visible-note', 'orka.ai/api-token': 'sk-should-hide' },
+    annotations: { 'orka.ai/note': 'visible-note', 'orka.ai/api-token': 'sk-should-hide', 'orka.ai/description': 'sk-should-hide' },
   },
   spec: { type: 'agent', sessionRef: { name: 'session-7' } },
   status: {
@@ -45,6 +45,7 @@ describe('LiveStatePanel', () => {
     expect(screen.getByText('visible-note')).toBeInTheDocument()
     expect(screen.queryByText('sk-should-hide')).not.toBeInTheDocument()
     expect(screen.queryByText('orka.ai/api-token')).not.toBeInTheDocument()
+    expect(screen.queryByText('orka.ai/description')).not.toBeInTheDocument()
     expect(screen.getByText('read-only')).toBeInTheDocument()
   })
 
