@@ -51,11 +51,9 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "listTaskApprovals", namespace, taskName); err != nil {
-		return err
-	}
-	task, err := h.loadReadableTask(c, namespace, taskName, "listTaskApprovals")
+	task, err := h.taskAccess().loadReadable(c, "listTaskApprovals", namespace, taskName)
 	if err != nil {
+
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -82,7 +80,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "decideTaskApproval", h.contextTokenAuthorization.TaskUpdateScopes); err != nil {
 		return err
 	}
-	task, err := h.loadReadableTask(c, namespace, taskName, "decideTaskApproval")
+	task, err := h.taskAccess().loadAuthorized(c, "decideTaskApproval", namespace, taskName)
 	if err != nil {
 		return err
 	}

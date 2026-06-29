@@ -38,23 +38,8 @@ type Server struct {
 	runner  CommandRunner
 	now     func() time.Time
 
-	mu          sync.RWMutex
-	turns       map[harness.HarnessTurnID]*turnState
-	activeTurns int
-	// consumedTurns is a bounded set of turn IDs that have been accepted and then
-	// evicted, so a duplicate StartTurn for an already-run-and-evicted turn is
-	// rejected deterministically (409) instead of being re-executed. This closes
-	// the at-least-once external side-effect window when the controller retries a
-	// StartTurn whose "started" marker it failed to persist after the turn had
-	// already completed and been evicted from s.turns. Bounded FIFO so memory is
-	// capped; it does NOT survive a wrapper process restart (the controller's
-	// event-store check is the cross-restart backstop).
-	consumedTurns map[harness.HarnessTurnID]struct{}
-	consumedOrder []harness.HarnessTurnID
+	turnRegistry *turnRegistry
 }
-
-// maxConsumedTurnIDs bounds the in-memory tombstone of consumed turn IDs.
-const maxConsumedTurnIDs = 1024
 
 type RuntimeSupportProvider interface {
 	SupportedRuntimes() []string
@@ -86,12 +71,11 @@ func NewServer(cfg Config, adapter RuntimeAdapter, opts ...ServerOption) (*Serve
 		}
 	}
 	s := &Server{
-		config:        cfg,
-		adapter:       adapter,
-		runner:        NewCommandRunner(cfg),
-		now:           time.Now,
-		turns:         map[harness.HarnessTurnID]*turnState{},
-		consumedTurns: map[harness.HarnessTurnID]struct{}{},
+		config:       cfg,
+		adapter:      adapter,
+		runner:       NewCommandRunner(cfg),
+		now:          time.Now,
+		turnRegistry: newTurnRegistry(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -133,11 +117,7 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 
 func (s *Server) finishTurn(turn *turnState) {
 	turn.close()
-	s.mu.Lock()
-	if s.activeTurns > 0 {
-		s.activeTurns--
-	}
-	s.mu.Unlock()
+	s.turnRegistry.finishActive()
 	s.scheduleTurnEviction(turn)
 }
 
@@ -158,28 +138,8 @@ func (s *Server) evictTurn(turn *turnState) {
 		s.scheduleTurnEviction(turn)
 		return
 	}
-	s.mu.Lock()
-	if current := s.turns[turn.request.TurnID]; current == turn {
-		delete(s.turns, turn.request.TurnID)
-	}
-	s.markTurnConsumedLocked(turn.request.TurnID)
-	s.mu.Unlock()
+	s.turnRegistry.evict(turn)
 	turn.cleanupOutput()
-}
-
-// markTurnConsumedLocked records a turn ID as consumed (accepted then evicted) in
-// a bounded FIFO set. Caller must hold s.mu.
-func (s *Server) markTurnConsumedLocked(id harness.HarnessTurnID) {
-	if _, ok := s.consumedTurns[id]; ok {
-		return
-	}
-	s.consumedTurns[id] = struct{}{}
-	s.consumedOrder = append(s.consumedOrder, id)
-	for len(s.consumedOrder) > maxConsumedTurnIDs {
-		oldest := s.consumedOrder[0]
-		s.consumedOrder = s.consumedOrder[1:]
-		delete(s.consumedTurns, oldest)
-	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -265,29 +225,23 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state := newTurnState(request, s.now)
-	s.mu.Lock()
-	if _, exists := s.turns[request.TurnID]; exists {
-		s.mu.Unlock()
-		writeSafeError(w, http.StatusConflict, "turn already exists")
+	state, err := s.turnRegistry.admit(request, s.now)
+	if err != nil {
+		switch {
+		case errors.Is(err, errTurnAlreadyExists):
+			writeSafeError(w, http.StatusConflict, "turn already exists")
+		case errors.Is(err, errTurnAlreadyCompleted):
+			// This turn ID was already accepted and run to completion (then evicted).
+			// Re-accepting it would duplicate external side effects (branch push, PR
+			// creation, token spend), so reject deterministically.
+			writeSafeError(w, http.StatusConflict, "turn already completed")
+		case errors.Is(err, errMaximumConcurrentTurns):
+			writeSafeError(w, http.StatusConflict, "maximum concurrent turns reached")
+		default:
+			writeSafeError(w, http.StatusInternalServerError, "failed to admit turn")
+		}
 		return
 	}
-	if _, consumed := s.consumedTurns[request.TurnID]; consumed {
-		s.mu.Unlock()
-		// This turn ID was already accepted and run to completion (then evicted).
-		// Re-accepting it would duplicate external side effects (branch push, PR
-		// creation, token spend), so reject deterministically.
-		writeSafeError(w, http.StatusConflict, "turn already completed")
-		return
-	}
-	if s.activeTurns >= 1 {
-		s.mu.Unlock()
-		writeSafeError(w, http.StatusConflict, "maximum concurrent turns reached")
-		return
-	}
-	s.turns[request.TurnID] = state
-	s.activeTurns++
-	s.mu.Unlock()
 
 	go s.runTurn(state)
 	harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
@@ -313,9 +267,7 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.mu.RLock()
-	turn := s.turns[turnID]
-	s.mu.RUnlock()
+	turn := s.turnRegistry.lookup(turnID)
 	if turn == nil {
 		writeSafeError(w, http.StatusNotFound, "turn not found")
 		return
@@ -423,9 +375,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, turn *turn
 func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	defer s.finishTurn(turn)
 	ctx := extractHarnessTurnTraceContext(turn.ctx, turn.request)
-	if !turn.request.Deadline.IsZero() {
+	if deadline := turn.deadline(); !deadline.IsZero() {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, turn.request.Deadline)
+		ctx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
 	agentName := strings.TrimSpace(turn.request.Metadata["agentName"])
@@ -442,7 +394,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		}
 		taskSpan.End()
 	}()
-	turnCtx := turnContextFromRequest(s.adapter.Name(), s.config, turn.request)
+	turnCtx := turn.materializeContext(s.adapter.Name(), s.config)
 	if eventing, ok := s.adapter.(EventingAdapter); ok {
 		_, err := eventing.RunTurn(ctx, turnCtx, func(frame harness.HarnessEventFrame) error {
 			turn.appendFrame(s.normalizeFrame(turn, frame))
@@ -808,9 +760,9 @@ func (s *Server) frame(turn *turnState, typ harness.FrameType, summary string, t
 	frame := harness.HarnessEventFrame{
 		Version:          harness.ProtocolVersion,
 		Type:             typ,
-		RuntimeSessionID: turn.request.RuntimeSessionID,
-		TurnID:           turn.request.TurnID,
-		CorrelationID:    turn.request.CorrelationID,
+		RuntimeSessionID: turn.runtimeSessionID(),
+		TurnID:           turn.id(),
+		CorrelationID:    turn.correlationID(),
 		CreatedAt:        s.now().UTC(),
 		Severity:         events.ExecutionEventSeverityInfo,
 		Summary:          events.RedactExecutionEventText(summary),
@@ -834,13 +786,13 @@ func (s *Server) normalizeFrame(turn *turnState, frame harness.HarnessEventFrame
 		frame.Version = harness.ProtocolVersion
 	}
 	if frame.RuntimeSessionID == "" {
-		frame.RuntimeSessionID = turn.request.RuntimeSessionID
+		frame.RuntimeSessionID = turn.runtimeSessionID()
 	}
 	if frame.TurnID == "" {
-		frame.TurnID = turn.request.TurnID
+		frame.TurnID = turn.id()
 	}
 	if frame.CorrelationID == "" {
-		frame.CorrelationID = turn.request.CorrelationID
+		frame.CorrelationID = turn.correlationID()
 	}
 	if frame.CreatedAt.IsZero() {
 		frame.CreatedAt = s.now().UTC()
@@ -1062,11 +1014,22 @@ func writeSafeError(w http.ResponseWriter, status int, message string) {
 	harness.WriteError(w, status, events.RedactExecutionEventText(message))
 }
 
+type turnIdentity struct {
+	namespace        string
+	taskName         string
+	sessionName      string
+	runtimeSessionID harness.RuntimeSessionID
+	turnID           harness.HarnessTurnID
+	correlationID    string
+	deadline         time.Time
+}
+
 type turnState struct {
-	request harness.StartTurnRequest
-	ctx     context.Context
-	cancel  context.CancelFunc
-	now     func() time.Time
+	request  harness.StartTurnRequest
+	identity turnIdentity
+	ctx      context.Context
+	cancel   context.CancelFunc
+	now      func() time.Time
 
 	mu              sync.Mutex
 	frames          []harness.HarnessEventFrame
@@ -1079,7 +1042,49 @@ type turnState struct {
 
 func newTurnState(request harness.StartTurnRequest, now func() time.Time) *turnState {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &turnState{request: request, ctx: ctx, cancel: cancel, now: now}
+	return &turnState{
+		request:  request,
+		identity: identityFromStartTurnRequest(request),
+		ctx:      ctx,
+		cancel:   cancel,
+		now:      now,
+	}
+}
+
+func identityFromStartTurnRequest(request harness.StartTurnRequest) turnIdentity {
+	return turnIdentity{
+		namespace:        request.Namespace,
+		taskName:         request.TaskName,
+		sessionName:      request.SessionName,
+		runtimeSessionID: request.RuntimeSessionID,
+		turnID:           request.TurnID,
+		correlationID:    request.CorrelationID,
+		deadline:         request.Deadline,
+	}
+}
+
+func (t *turnState) id() harness.HarnessTurnID {
+	return t.identity.turnID
+}
+
+func (t *turnState) runtimeSessionID() harness.RuntimeSessionID {
+	return t.identity.runtimeSessionID
+}
+
+func (t *turnState) correlationID() string {
+	return t.identity.correlationID
+}
+
+func (t *turnState) deadline() time.Time {
+	return t.identity.deadline
+}
+
+func (t *turnState) materializeContext(runtimeName string, cfg Config) TurnContext {
+	t.mu.Lock()
+	request := t.request
+	t.request.Input.Env = nil
+	t.mu.Unlock()
+	return turnContextFromRequest(runtimeName, cfg, request)
 }
 
 func (t *turnState) storeOutput(result string) (string, error) {
@@ -1200,15 +1205,15 @@ func (t *turnState) hasTerminal() bool {
 }
 
 func (t *turnState) matchesCancel(request harness.CancelTurnRequest) error {
-	if request.RuntimeSessionID != t.request.RuntimeSessionID {
+	if request.RuntimeSessionID != t.identity.runtimeSessionID {
 		return fmt.Errorf("cancel runtime session %q does not match turn runtime session", request.RuntimeSessionID)
 	}
-	if request.TurnID != t.request.TurnID {
+	if request.TurnID != t.identity.turnID {
 		return fmt.Errorf("cancel turn %q does not match started turn", request.TurnID)
 	}
-	if request.Namespace != t.request.Namespace ||
-		request.TaskName != t.request.TaskName ||
-		request.SessionName != t.request.SessionName {
+	if request.Namespace != t.identity.namespace ||
+		request.TaskName != t.identity.taskName ||
+		request.SessionName != t.identity.sessionName {
 		return fmt.Errorf("cancel request does not match started turn owner")
 	}
 	return nil

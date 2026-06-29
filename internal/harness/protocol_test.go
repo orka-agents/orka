@@ -7,11 +7,16 @@ import (
 	"time"
 )
 
+const (
+	protocolTestNamespace = "default"
+	protocolTestTaskName  = "task-a"
+)
+
 func TestStartTurnRequestValidationAndJSONRoundTrip(t *testing.T) {
 	request := StartTurnRequest{
 		Version:           ProtocolVersion,
-		Namespace:         "default",
-		TaskName:          "task-a",
+		Namespace:         protocolTestNamespace,
+		TaskName:          protocolTestTaskName,
 		SessionName:       "session-a",
 		RuntimeSessionID:  "runtime-a",
 		TurnID:            "turn-a",
@@ -21,7 +26,7 @@ func TestStartTurnRequestValidationAndJSONRoundTrip(t *testing.T) {
 		ToolPolicyRef:     &PolicyRef{Name: "default-tools"},
 		ApprovalPolicyRef: &PolicyRef{Name: "default-approvals"},
 		EventCursor:       7,
-		Input:             TurnInput{Prompt: "hello", ContextRefs: []ContextRef{{Kind: "event", Name: "task-a", Seq: 7}}},
+		Input:             TurnInput{Prompt: "hello", ContextRefs: []ContextRef{{Kind: "event", Name: protocolTestTaskName, Seq: 7}}},
 		ToolExecutionMode: ToolExecutionModeObserved,
 	}
 	if err := request.Validate(); err != nil {
@@ -64,9 +69,9 @@ func TestStartTurnRequestValidationErrorsAreDeterministic(t *testing.T) {
 		case "version is required":
 			request.Version = ProtocolVersion
 		case "namespace is required":
-			request.Namespace = "default"
+			request.Namespace = protocolTestNamespace
 		case "task name is required":
-			request.TaskName = "task-a"
+			request.TaskName = protocolTestTaskName
 		case "session name is required":
 			request.SessionName = "session-a"
 		case "runtime session id is required":
