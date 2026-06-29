@@ -11,6 +11,7 @@ vi.mock('zustand/middleware', () => ({
 import { useUIStore } from '@/stores/ui'
 import {
   useTaskList,
+  useTaskListAll,
   useTask,
   useTaskResult,
   useCreateTask,
@@ -39,6 +40,28 @@ describe('useTaskList', () => {
   })
 })
 
+describe('useTaskListAll', () => {
+  it('follows continue tokens and returns all task pages', async () => {
+    const seen: (string | null)[] = []
+    server.use(http.get('/api/v1/tasks', ({ request }) => {
+      const token = new URL(request.url).searchParams.get('continue')
+      seen.push(token)
+      if (!token) {
+        return HttpResponse.json({ items: [], metadata: { continue: 'next-page' } })
+      }
+      return HttpResponse.json({
+        items: [{ metadata: { name: 'late-running', namespace: 'default', uid: 'late' }, spec: { type: 'agent' }, status: { phase: 'Running' } }],
+        metadata: {},
+      })
+    }))
+
+    const { result } = renderHook(() => useTaskListAll('100', false), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(result.current.data?.items[0]?.metadata.name).toBe('late-running'))
+    expect(seen).toEqual([null, 'next-page'])
+  })
+})
+
 describe('useTask', () => {
   it('returns a single task by id', async () => {
     const { result } = renderHook(() => useTask('my-task'), { wrapper: createWrapper() })
@@ -47,6 +70,22 @@ describe('useTask', () => {
       metadata: { name: 'my-task', namespace: 'default' },
       status: { phase: 'Succeeded' },
     })
+  })
+
+  it('uses the supplied refetch interval for task detail polling', async () => {
+    let calls = 0
+    server.use(http.get('/api/v1/tasks/poll-task', () => {
+      calls += 1
+      return HttpResponse.json({
+        metadata: { name: 'poll-task', namespace: 'default', uid: 'uid-poll' },
+        spec: { type: 'container', image: 'alpine' },
+        status: { phase: 'Running' },
+      })
+    }))
+
+    renderHook(() => useTask('poll-task', 20), { wrapper: createWrapper() })
+
+    await waitFor(() => expect(calls).toBeGreaterThan(1))
   })
 })
 

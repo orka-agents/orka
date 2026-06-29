@@ -89,9 +89,10 @@ All later operations derive the same name again from the current directory.
 
 ## Install
 
-This skill is vendored into this repository at `.agents/skills/kindctl/` and is
-surfaced to each harness (`.claude`, `.codex`, `.copilot`) through a
-`skills/kindctl` symlink, so no separate install step is required here.
+This skill is vendored into this repository at `.agents/skills/kindctl/`. If a
+separate harness needs it, expose it with an external `skills/kindctl` symlink that
+points back to this canonical directory; this repo does not keep `.codex` or
+`.copilot` mirrors.
 
 Call the wrapper by its repo-relative path:
 

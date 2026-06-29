@@ -176,4 +176,12 @@ describe('ExecutionGraph', () => {
     // root button carries an svg (type icon and/or dot)
     expect(container.querySelector('[role="treeitem"] svg')).toBeInTheDocument()
   })
+
+  it('renders a result chip for a child task with a result', () => {
+    const task = makeTask({
+      status: { phase: 'Running', childTasks: [{ name: 'c1', agent: 'r', phase: 'Succeeded', result: 'done-42' }] },
+    })
+    render(<ExecutionGraph task={task} />)
+    expect(screen.getByText('done-42')).toBeInTheDocument()
+  })
 })

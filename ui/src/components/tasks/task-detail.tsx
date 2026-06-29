@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -18,9 +19,12 @@ import { TaskApprovalPanel } from './task-approval-panel'
 import { ForkProvenance } from './fork-provenance'
 import { ExecutionGraph } from './execution-graph'
 import { RunTimeline } from './run-timeline'
+import { TaskRuntimeView } from '@/components/runtime/task-runtime-view'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
-import { useNavigate } from '@tanstack/react-router'
-import { toast } from 'sonner'
+import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
+import { useTaskArtifacts } from '@/hooks/use-task-artifacts'
+import { ApiError } from '@/lib/api-client'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 
 function timeAgo(ts?: string): string {
   if (!ts) return '-'
@@ -33,26 +37,88 @@ function timeAgo(ts?: string): string {
 
 
 export function TaskDetail({ taskId }: { taskId: string }) {
-  const { data: task, isLoading } = useTask(taskId)
-  const { data: taskEventsResponse } = useTaskEvents(
+  const [following, setFollowing] = useState(true)
+  const { data: task, isLoading } = useTask(taskId, following ? 5000 : false)
+  const { data: taskEventsResponse, error: taskEventsError, failureReason: taskEventsFailureReason } = useTaskEvents(
     taskId,
-    5000,
+    following ? 5000 : false,
     task?.metadata.uid,
   )
+  // Fork and the runtime timeline need execution-event storage; a 501 means it's off.
+  // While retries are pending, failureReason carries the current fetch failure.
+  const taskEventsIssue = taskEventsError ?? taskEventsFailureReason
+  const taskEventsUnsupported = taskEventsIssue instanceof ApiError && taskEventsIssue.status === 501
+  const taskEventsFailed = Boolean(taskEventsIssue) && !taskEventsUnsupported
+  const taskEventsStreamStatus = taskEventsUnsupported ? 'unsupported' : taskEventsFailed ? 'error' : undefined
+  const forkSupported = !taskEventsUnsupported && !taskEventsFailed
   const taskEvents = taskEventsResponse?.events ?? []
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
-
-  const handleDelete = async () => {
-    if (!task || !confirm(`Delete task "${task.metadata.name}"?`)) return
-    try {
-      await deleteTask.mutateAsync(task.metadata.name)
-      toast.success('Task deleted')
-      navigate({ to: '/tasks' })
-    } catch (err) {
-      toast.error(`Failed to delete task: ${err instanceof Error ? err.message : 'Unknown error'}`)
-    }
+  const search = useSearch({ from: '/tasks/$taskId' })
+  // Local override gives instant tab response; it is cleared whenever the URL
+  // search changes (deep link, back/forward, external link) so the URL stays the
+  // source of truth and the override can't permanently shadow it.
+  const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
+  if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
+  const availableTabs = new Set(['runtime', 'overview', 'execution', 'timeline', 'trace', 'approvals', 'result', 'logs'])
+  if ((task?.status?.iteration ?? 0) > 0) availableTabs.add('plan')
+  if ((task?.status?.childTasks?.length ?? 0) > 0) availableTabs.add('children')
+  const requestedTab = tabState.override ?? search.tab ?? 'runtime'
+  const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'runtime'
+  const setTab = (tab: string) => {
+    setTabState({ override: tab, seen: search.tab })
+    navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
   }
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  // Scope the armed delete to the loaded task's namespace+uid+name; a namespace
+  // switch or same-name/new-uid recreation drops a stale confirm so it can't
+  // delete a different task than the one armed.
+  const deleteIdentity = `${task?.metadata.namespace ?? ''}/${task?.metadata.uid ?? ''}/${taskId}`
+  const deleteArmed = confirmDelete === deleteIdentity
+  // Runtime-tab data: fetched only when that tab is active so other tabs don't
+  // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
+  const runtimeActive = activeTab === 'runtime'
+  const taskRunning = task?.status?.phase === 'Running'
+  const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
+  const traceRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
+  const terminalTraceRefetchKey = useRef<string | null>(null)
+  const terminalArtifactRefetchKey = useRef<string | null>(null)
+  const { data: trace, refetch: refetchTrace } = useTaskTrace(
+    taskId,
+    runtimeActive,
+    task?.metadata.uid,
+    traceRefetchInterval,
+  )
+  // Poll approvals while live so a new blocking approval surfaces in the runtime
+  // health panel; stops once terminal (matches TaskApprovalPanel semantics).
+  const approvalRefetchInterval = following ? 5000 : undefined
+  const { data: approvalsResp } = useTaskApprovals(
+    taskId,
+    runtimeActive,
+    approvalRefetchInterval,
+    taskRunning,
+    taskTerminal,
+    task?.metadata.uid,
+  )
+  const artifactRefetchInterval = runtimeActive && taskRunning && following ? 5000 : false
+  const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
+    taskId,
+    runtimeActive,
+    task?.metadata.uid,
+    artifactRefetchInterval,
+  )
+  useEffect(() => {
+    if (!runtimeActive || !taskTerminal || !task?.metadata.uid) return
+    const key = `${task.metadata.uid}/${task.status?.phase ?? ''}`
+    if (terminalTraceRefetchKey.current !== key) {
+      terminalTraceRefetchKey.current = key
+      refetchTrace()
+    }
+    if (terminalArtifactRefetchKey.current !== key) {
+      terminalArtifactRefetchKey.current = key
+      refetchArtifacts()
+    }
+  }, [refetchArtifacts, refetchTrace, runtimeActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
 
   if (isLoading) {
     return (
@@ -91,18 +157,33 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 pushBranch={task.spec.agentRuntime.workspace.pushBranch}
               />
             )}
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleDelete}
-          >
-            <Trash2 className="mr-2 h-4 w-4" /> Delete
-          </Button>
+          {deleteArmed ? (
+            <span className="flex items-center gap-1">
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={async () => {
+                  await deleteTask.mutateAsync(task.metadata.name)
+                  navigate({ to: '/tasks' })
+                }}
+              >
+                Confirm delete
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </Button>
+            </span>
+          ) : (
+            <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(deleteIdentity)}>
+              <Trash2 className="mr-2 h-4 w-4" /> Delete
+            </Button>
+          )}
         </div>
       </div>
 
-      <Tabs defaultValue="overview">
+      <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
+          <TabsTrigger value="runtime">Runtime</TabsTrigger>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="execution">Execution</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
@@ -117,6 +198,22 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             <TabsTrigger value="children">Children</TabsTrigger>
           )}
         </TabsList>
+
+        <TabsContent value="runtime" className="space-y-4">
+          <TaskRuntimeView
+            task={task}
+            events={taskEvents}
+            trace={trace}
+            approvals={approvalsResp?.approvals}
+            artifacts={artifactsResp?.artifacts}
+            following={following}
+            onToggleFollow={() => setFollowing((f) => !f)}
+            forkSupported={forkSupported}
+            streamStatus={taskEventsStreamStatus}
+            latestSeq={taskEventsResponse?.latestSeq}
+            artifactRefetchInterval={artifactRefetchInterval}
+          />
+        </TabsContent>
 
         <TabsContent value="overview" className="space-y-4">
           <ForkProvenance annotations={task.metadata.annotations} />

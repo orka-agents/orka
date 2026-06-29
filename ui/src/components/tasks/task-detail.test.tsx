@@ -9,6 +9,7 @@ vi.mock('zustand/middleware', () => ({
 }))
 
 const mockNavigate = vi.fn()
+const mockSearch: { current: { tab?: string } } = { current: { tab: 'overview' } }
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
@@ -16,6 +17,7 @@ vi.mock('@tanstack/react-router', async () => {
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => mockNavigate,
     useLocation: () => ({ pathname: '/tasks/test-task' }),
+    useSearch: () => mockSearch.current,
   }
 })
 
@@ -28,6 +30,7 @@ describe('TaskDetail', () => {
     useUIStore.setState({ sidebarCollapsed: false, theme: 'light', namespace: 'default' })
     useAuthStore.setState({ token: 'test-token' })
     mockNavigate.mockClear()
+    mockSearch.current = { tab: 'overview' }
   })
 
   it('loading state shows skeletons', () => {
@@ -131,13 +134,89 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('Overview')).toBeInTheDocument()
     })
+    expect(screen.getByText('Runtime')).toBeInTheDocument()
     expect(screen.getByText('Result')).toBeInTheDocument()
     expect(screen.getByText('Logs')).toBeInTheDocument()
   })
 
+  it('switches to the Runtime tab and shows runtime panels', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'rt-task', namespace: 'default', uid: 'uid-rt' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="rt-task" />)
+    await waitFor(() => expect(screen.getByText('rt-task')).toBeInTheDocument())
+    await user.click(screen.getByRole('tab', { name: /runtime/i }))
+    expect(await screen.findByText('Task flow')).toBeInTheDocument()
+    expect(screen.getByText('Derived checks')).toBeInTheDocument()
+  })
+
+  it('surfaces task event fetch failures in the Runtime timeline', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    server.use(
+      http.get('/api/v1/tasks/:id/events', () =>
+        HttpResponse.json({ error: 'backend unavailable' }, { status: 500 }),
+      ),
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'event-error', namespace: 'default', uid: 'uid-event-error' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+
+    render(<TaskDetail taskId="event-error" />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to load events')
+    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+  })
+
+  it('surfaces disabled execution-event storage in the Runtime timeline', async () => {
+    mockSearch.current = { tab: 'runtime' }
+    server.use(
+      http.get('/api/v1/tasks/:id/events', () =>
+        HttpResponse.json({ error: 'execution events disabled' }, { status: 501 }),
+      ),
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'unsupported-events', namespace: 'default', uid: 'uid-unsupported' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+
+    render(<TaskDetail taskId="unsupported-events" />)
+
+    expect(await screen.findByText('Live stream not enabled')).toBeInTheDocument()
+    expect(screen.queryByText('No events')).not.toBeInTheDocument()
+  })
+
+  it('falls back to runtime tab when ?tab names an unavailable panel', async () => {
+    mockSearch.current = { tab: 'children' } // task has no children → no children panel
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'no-kids', namespace: 'default', uid: 'uid-nk' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Running' },
+        }),
+      ),
+    )
+    render(<TaskDetail taskId="no-kids" />)
+    // No blank body: runtime panels render instead of an empty children panel.
+    expect(await screen.findByText('Task flow')).toBeInTheDocument()
+  })
+
   it('delete button removes task and navigates', async () => {
     const user = userEvent.setup()
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/tasks/:id', () =>
         HttpResponse.json({
@@ -151,12 +230,11 @@ describe('TaskDetail', () => {
     await waitFor(() => {
       expect(screen.getByText('del-task')).toBeInTheDocument()
     })
-    await user.click(screen.getByRole('button', { name: /delete/i }))
-    expect(confirmSpy).toHaveBeenCalledWith('Delete task "del-task"?')
+    await user.click(screen.getByRole('button', { name: /^delete/i }))
+    await user.click(screen.getByRole('button', { name: /confirm delete/i }))
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/tasks' })
     })
-    confirmSpy.mockRestore()
   })
 
   it('shows conditions when present', async () => {
