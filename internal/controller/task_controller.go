@@ -42,6 +42,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
 	execevents "github.com/sozercan/orka/internal/events"
+	"github.com/sozercan/orka/internal/harness"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tools"
@@ -91,30 +92,32 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                          client.Reader
-	Scheme                             *runtime.Scheme
-	JobBuilder                         *JobBuilder
-	SessionManager                     *SessionManager
-	WebhookNotifier                    *WebhookNotifier
-	Recorder                           record.EventRecorder
-	KubeClient                         kubernetes.Interface
-	ResultStore                        store.ResultStore
-	PlanStore                          store.PlanStore
-	MessageStore                       store.MessageStore
-	ArtifactStore                      store.ArtifactStore
-	ExecutionEventStore                store.ExecutionEventStore
-	EnforceNamespaceIsolation          bool
-	MaxTasksPerNamespace               int32
-	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
-	AgentSandboxEnabled                bool
-	AgentSandboxConfig                 AgentSandboxConfig
-	SubstrateEnabled                   bool
-	SubstrateConfig                    SubstrateConfig
-	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
-	AIWorkerClusterRoleName            string
-	VendorWorkerClusterRoleName        string
-	ContainerWorkerClusterRoleName     string
-	WorkerClusterRoleBindingNamePrefix string
+	APIReader                            client.Reader
+	Scheme                               *runtime.Scheme
+	JobBuilder                           *JobBuilder
+	SessionManager                       *SessionManager
+	WebhookNotifier                      *WebhookNotifier
+	Recorder                             record.EventRecorder
+	KubeClient                           kubernetes.Interface
+	ResultStore                          store.ResultStore
+	PlanStore                            store.PlanStore
+	MessageStore                         store.MessageStore
+	ArtifactStore                        store.ArtifactStore
+	ExecutionEventStore                  store.ExecutionEventStore
+	RuntimeSessionStore                  harness.RuntimeSessionStore
+	HarnessEndpointAllowInsecureLoopback bool
+	EnforceNamespaceIsolation            bool
+	MaxTasksPerNamespace                 int32
+	ExecutionWorkspaceDefaultProvider    corev1alpha1.WorkspaceProvider
+	AgentSandboxEnabled                  bool
+	AgentSandboxConfig                   AgentSandboxConfig
+	SubstrateEnabled                     bool
+	SubstrateConfig                      SubstrateConfig
+	SubstrateExecutorFactory             func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	AIWorkerClusterRoleName              string
+	VendorWorkerClusterRoleName          string
+	ContainerWorkerClusterRoleName       string
+	WorkerClusterRoleBindingNamePrefix   string
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -298,6 +301,14 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case corev1alpha1.TaskPhaseScheduled:
 		return r.handleScheduled(ctx, task)
 	case corev1alpha1.TaskPhaseRunning:
+		if taskUsesHarnessProvider(task) {
+			if harnessTaskHasControllerStarted(task) {
+				return r.resumeHarnessTask(ctx, task)
+			}
+			if !harnessTaskHasControllerTurnAnnotations(task) && strings.TrimSpace(task.Status.JobName) == "" {
+				return r.retryTask(ctx, task)
+			}
+		}
 		return r.handleRunning(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return r.handleCompleted(ctx, task)
@@ -434,6 +445,27 @@ func executionEventTypeForTaskPhase(phase corev1alpha1.TaskPhase) string {
 	}
 }
 
+func harnessProviderDeletionCancelShouldBlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apierrors.IsNotFound(err) || isHarnessNotFound(err) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"harness endpoint host must",
+		"externalname services are not supported",
+		"must be annotated",
+		"must not include query or fragment",
+	} {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 // handleDeletion handles Task cleanup when deleted
 func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) { //nolint:unparam // Result is always nil but kept for interface consistency
 	log := logf.FromContext(ctx)
@@ -471,6 +503,17 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete parent messages", "task", task.Name)
 			}
+		}
+
+		if cancelErr := r.cancelHarnessProviderTurn(ctx, task, "task deleted"); cancelErr != nil {
+			log.Error(cancelErr, "failed to cancel deleted harness provider turn", "task", task.Name)
+			if harnessProviderDeletionCancelShouldBlock(cancelErr) {
+				return ctrl.Result{}, cancelErr
+			}
+		}
+		if err := r.markAnnotatedHarnessRuntimeSessionUnhealthy(ctx, task, "task deleted before harness runtime completed"); err != nil {
+			log.Error(err, "failed to release harness runtime session for deleted task", "task", task.Name)
+			return ctrl.Result{}, err
 		}
 
 		// Clean up execution timeline events before allowing a future task with the
@@ -550,6 +593,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
 	}
+	if taskUsesHarnessProvider(task) && harnessTaskHasControllerStarted(task) {
+		return r.handlePendingHarnessTaskInProgress(ctx, task)
+	}
 
 	// Check session lock if session is referenced
 	if task.Spec.SessionRef != nil {
@@ -608,6 +654,13 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	// Validate coordination constraints for child tasks
 	if result, err, done := r.validateCoordinationConstraints(ctx, task); done {
 		return result, err
+	}
+
+	if taskUsesHarnessProvider(task) {
+		if task.Spec.Transaction != nil {
+			return r.failTask(ctx, task, "service harness tasks do not support transaction token delegation yet")
+		}
+		return r.runHarnessTask(ctx, task)
 	}
 
 	// Resolve provider if referenced
@@ -2038,6 +2091,13 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		if cancelErr := r.cancelHarnessProviderTurn(ctx, task, "task cancelled"); cancelErr != nil {
+			log.Error(cancelErr, "failed to cancel service harness runtime turn for cancelled task")
+		}
+		if err := r.finalizeHarnessRuntimeSession(ctx, task, nil, nil, true); err != nil {
+			log.Error(err, "failed to release service harness runtime session for cancelled task")
+			return ctrl.Result{}, err
+		}
 		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
 			if isAgentRuntimeDependencyNotReady(cancelErr) {
 				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {

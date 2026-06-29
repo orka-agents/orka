@@ -606,6 +606,9 @@ func TestServerStoresOversizedCompletedResultOutOfBand(t *testing.T) {
 	if len([]byte(last.Completed.Result)) > maxTerminalResultBytes {
 		t.Fatalf("completed preview length = %d, want <= %d", len([]byte(last.Completed.Result)), maxTerminalResultBytes)
 	}
+	if !last.Completed.ResultTruncated {
+		t.Fatal("ResultTruncated = false, want true for oversized outputRef preview")
+	}
 	data, err := client.FetchTurnOutput(context.Background(), request.TurnID, last.Completed.OutputRef)
 	if err != nil {
 		t.Fatalf("FetchTurnOutput: %v", err)

@@ -75,6 +75,23 @@ func TestGetAPIKey_EnvVar(t *testing.T) {
 	}
 }
 
+func TestWithApprovalEventStorePopulatesSessionIDFromEnv(t *testing.T) {
+	t.Setenv(workerenv.SessionName, "session-a")
+	t.Setenv(workerenv.ControllerURL, "http://orka.default.svc")
+	ctx := withApprovalEventStore(&toolspkg.ToolContext{SessionID: ""})
+	if ctx == nil || ctx.ExecutionEventStore == nil {
+		t.Fatalf("withApprovalEventStore() = %#v, want event store", ctx)
+	}
+	if ctx.SessionID != "session-a" {
+		t.Fatalf("SessionID = %q, want session-a", ctx.SessionID)
+	}
+
+	existing := withApprovalEventStore(&toolspkg.ToolContext{SessionID: "session-existing"})
+	if existing.SessionID != "session-existing" {
+		t.Fatalf("existing SessionID overwritten to %q", existing.SessionID)
+	}
+}
+
 func TestGetAPIKey_NotFound(t *testing.T) {
 	// Clear environment variables
 	originalAnthropic := os.Getenv("ANTHROPIC_API_KEY")

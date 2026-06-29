@@ -126,13 +126,16 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if !task.DeletionTimestamp.IsZero() {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
-	if isTerminalInternalTaskPhase(task.Status.Phase) {
+	if isTerminalInternalTaskPhase(task.Status.Phase) && current.Action != "create_pull_request" {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
 	sessionName, err := h.existingSessionNameForTask(c.Context(), namespace, task)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+	}
+	if requestSessionName := h.existingApprovalRequestSessionName(c.Context(), namespace, listed, approvalID); requestSessionName != "" {
+		sessionName = requestSessionName
 	}
 	actor := approvalDecisionActor(GetUserInfo(c))
 	content, err := json.Marshal(map[string]string{
@@ -228,6 +231,29 @@ func (h *Handlers) patchTaskApprovalDecisionAnnotation(ctx context.Context, name
 
 func (h *Handlers) listTaskApprovalEvents(ctx context.Context, namespace, taskName string) ([]store.ExecutionEvent, error) {
 	return newTaskTimelineReader(h.executionEventStore, namespace, taskName).listMatching(ctx, approvals.EventTypes())
+}
+
+func (h *Handlers) existingApprovalRequestSessionName(ctx context.Context, namespace string, listed []store.ExecutionEvent, approvalID string) string {
+	sessionName := approvalRequestSessionName(listed, approvalID)
+	if sessionName == "" || h.sessionStore == nil {
+		return ""
+	}
+	if _, err := h.sessionStore.GetSession(ctx, namespace, sessionName); err != nil {
+		return ""
+	}
+	return sessionName
+}
+
+func approvalRequestSessionName(listed []store.ExecutionEvent, approvalID string) string {
+	for _, event := range listed {
+		if event.Type != events.ExecutionEventTypeApprovalRequested {
+			continue
+		}
+		if store.ApprovalIDFromExecutionEvent(event) == approvalID {
+			return strings.TrimSpace(event.SessionName)
+		}
+	}
+	return ""
 }
 
 func approvalDecisionActor(userInfo *UserInfo) string {

@@ -13,6 +13,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -38,23 +39,33 @@ const (
 
 // InternalHandlers contains handlers for internal worker endpoints.
 type InternalHandlers struct {
-	k8sClient           client.Client
-	resultStore         store.ResultStore
-	sessionStore        store.SessionStore
-	planStore           store.PlanStore
-	messageStore        store.MessageStore
-	artifactStore       store.ArtifactStore
-	executionEventStore store.ExecutionEventStore
-	memoryStore         store.MemoryStore
-	memoryProposalStore store.MemoryProposalStore
+	k8sClient                   client.Client
+	resultStore                 store.ResultStore
+	sessionStore                store.SessionStore
+	planStore                   store.PlanStore
+	messageStore                store.MessageStore
+	artifactStore               store.ArtifactStore
+	executionEventStore         store.ExecutionEventStore
+	memoryStore                 store.MemoryStore
+	memoryProposalStore         store.MemoryProposalStore
+	brokeredToolMu              sync.Mutex
+	brokeredToolResults         map[string]brokeredToolHTTPRecord
+	brokeredToolPending         map[string]string
+	allowInsecureBrokerLoopback bool
+}
+
+type brokeredToolHTTPRecord struct {
+	RequestDigest string
+	Result        json.RawMessage
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
 type InternalHandlersConfig struct {
-	Client              client.Client
-	MemoryStore         store.MemoryStore
-	MemoryProposalStore store.MemoryProposalStore
-	ExecutionEventStore store.ExecutionEventStore
+	Client                      client.Client
+	MemoryStore                 store.MemoryStore
+	MemoryProposalStore         store.MemoryProposalStore
+	ExecutionEventStore         store.ExecutionEventStore
+	AllowInsecureBrokerLoopback bool
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -71,6 +82,7 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.memoryStore = configs[0].MemoryStore
 		h.memoryProposalStore = configs[0].MemoryProposalStore
 		h.executionEventStore = configs[0].ExecutionEventStore
+		h.allowInsecureBrokerLoopback = configs[0].AllowInsecureBrokerLoopback
 	}
 	return h
 }

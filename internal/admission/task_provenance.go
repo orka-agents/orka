@@ -62,6 +62,14 @@ var (
 		labels.AnnotationTraceParent,
 		labels.AnnotationTraceState,
 		labels.AnnotationTraceBaggage,
+		labels.AnnotationSessionForkRequestDigest,
+		labels.AnnotationHarnessEndpointPinned,
+		labels.AnnotationHarnessReusePolicyPinned,
+		labels.AnnotationHarnessRuntimeSession,
+		labels.AnnotationHarnessTurn,
+		labels.AnnotationHarnessCorrelation,
+		labels.AnnotationHarnessTurnStartedAt,
+		labels.AnnotationHarnessTurnIdentityStartedAt,
 	}
 )
 

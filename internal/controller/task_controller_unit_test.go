@@ -95,6 +95,7 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		ResultStore:         ss,
 		PlanStore:           ss,
 		ExecutionEventStore: ss,
+		RuntimeSessionStore: ss,
 	}
 }
 
@@ -3134,6 +3135,61 @@ func TestHandleDeletionKeepsFinalizerWhenExecutionEventCleanupFails(t *testing.T
 	}
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		t.Fatal("task finalizer was removed after execution event cleanup failed")
+	}
+}
+
+func TestRecordTaskLifecycleEventOmitsDeletedSessionForOldTask(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-task", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: "session-1"},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := r.SessionManager.store.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		ActiveTask:  task.Name,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateSession(old): %v", err)
+	}
+	if err := r.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeTaskStarted, events.ExecutionEventSeverityInfo, "started"); err != nil {
+		t.Fatalf("recordTaskLifecycleEvent(started): %v", err)
+	}
+	if err := r.SessionManager.store.DeleteSession(ctx, "default", "session-1"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if err := r.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeTaskFailed, events.ExecutionEventSeverityError, "late"); err != nil {
+		t.Fatalf("recordTaskLifecycleEvent(late): %v", err)
+	}
+	if err := r.SessionManager.store.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		ActiveTask:  "new-task",
+		CreatedAt:   now.Add(time.Second),
+		UpdatedAt:   now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("CreateSession(new): %v", err)
+	}
+	if err := r.recordTaskLifecycleEvent(ctx, task, events.ExecutionEventTypeWorkerStarted, events.ExecutionEventSeverityInfo, "late again"); err != nil {
+		t.Fatalf("recordTaskLifecycleEvent(late again): %v", err)
+	}
+
+	listed, latest, err := r.ExecutionEventStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 0 || len(listed) != 0 {
+		t.Fatalf("session events latest=%d listed=%#v, want no stale old-task events", latest, listed)
 	}
 }
 

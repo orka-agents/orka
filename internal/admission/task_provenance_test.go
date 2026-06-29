@@ -161,6 +161,13 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			contains: labels.AnnotationTraceParent,
 		},
 		{
+			name:     "untrusted update adding harness runtime annotation denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withHarnessRuntimeAnnotation(oldTask.DeepCopy()),
+			contains: labels.AnnotationHarnessRuntimeSession,
+		},
+		{
 			name:    "trusted controller can update provenance",
 			user:    trustedControllerUser,
 			oldTask: oldTask,
@@ -299,6 +306,14 @@ func withTraceAnnotation(task *corev1alpha1.Task, traceparent string) *corev1alp
 
 func withImage(task *corev1alpha1.Task, image string) *corev1alpha1.Task {
 	task.Spec.Image = image
+	return task
+}
+
+func withHarnessRuntimeAnnotation(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationHarnessRuntimeSession] = "runtime-a"
 	return task
 }
 

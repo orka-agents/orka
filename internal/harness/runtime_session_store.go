@@ -48,5 +48,14 @@ type RuntimeSessionStore interface {
 	GetRuntimeSession(ctx context.Context, namespace string, id RuntimeSessionID) (*RuntimeSession, error)
 	ListRuntimeSessions(ctx context.Context, filter RuntimeSessionFilter) ([]RuntimeSession, string, error)
 	TransitionRuntimeSession(ctx context.Context, transition RuntimeSessionTransition) (*RuntimeSession, error)
-	DeleteRuntimeSession(ctx context.Context, namespace string, id RuntimeSessionID) error
+	PruneDeletedRuntimeSession(ctx context.Context, namespace string, id RuntimeSessionID) error
+
+	ClaimRuntimeSession(ctx context.Context, namespace, sessionName string, provider ProviderKind, agentName, activeTask string, allowReuse bool, now time.Time) (*RuntimeSession, error)
+	MarkRuntimeSessionActiveTurn(ctx context.Context, namespace string, id RuntimeSessionID, activeTask string, now time.Time) (*RuntimeSession, error)
+	MarkRuntimeSessionIdle(ctx context.Context, namespace string, id RuntimeSessionID, now time.Time) (*RuntimeSession, error)
+	RetainRuntimeSession(ctx context.Context, namespace string, id RuntimeSessionID, now time.Time) (*RuntimeSession, error)
+	ReleaseRuntimeSession(ctx context.Context, namespace string, id RuntimeSessionID, cleanupPolicy RuntimeCleanupPolicy, now time.Time) (*RuntimeSession, error)
+	DeleteRuntimeSession(ctx context.Context, namespace string, id RuntimeSessionID, now time.Time) (*RuntimeSession, error)
+	MarkRuntimeSessionFailed(ctx context.Context, namespace string, id RuntimeSessionID, state RuntimeSessionState, reason string, now time.Time) (*RuntimeSession, error)
+	CleanupIdleRuntimeSessions(ctx context.Context, now time.Time) ([]RuntimeSession, error)
 }

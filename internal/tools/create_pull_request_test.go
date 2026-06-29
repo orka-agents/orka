@@ -101,14 +101,15 @@ func TestCreatePullRequestTool_MissingTask(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testNonexistentName,
 		HeadBranch: testFeatureBranch,
 		BaseBranch: testBranch,
 		Title:      testPullRequestTitle,
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct), args)
 	if err == nil {
 		t.Fatal("expected error for missing task")
 	}
@@ -134,14 +135,15 @@ func TestCreatePullRequestTool_NoWorkspace(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testCoderTaskName,
 		HeadBranch: testFeatureBranch,
 		BaseBranch: testBranch,
 		Title:      testPullRequestTitle,
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct), args)
 	if err == nil {
 		t.Fatal("expected error for task without workspace")
 	}
@@ -212,15 +214,16 @@ func TestCreatePullRequestTool_Success(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testCoderTaskName,
 		HeadBranch: testEditMessageBranch,
 		BaseBranch: testBranch,
 		Title:      testEditCommitTitle,
 		Body:       "Implements #19",
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct, server.URL), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -314,15 +317,16 @@ func TestCreatePullRequestTool_ExistingPR(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testCoderTaskName,
 		HeadBranch: testEditMessageBranch,
 		BaseBranch: testBranch,
 		Title:      testEditCommitTitle,
 		Body:       "Implements #19",
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	result, err := tool.Execute(context.Background(), args)
+	result, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct, server.URL), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -401,14 +405,15 @@ func TestCreatePullRequestTool_NoGitRepo(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testCoderTaskName,
 		HeadBranch: testFeatureBranch,
 		BaseBranch: testBranch,
 		Title:      testPullRequestTitle,
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct), args)
 	if err == nil {
 		t.Fatal("expected error for no gitRepo")
 	}
@@ -440,14 +445,15 @@ func TestCreatePullRequestTool_NoGitSecretRefWithoutFallbackToken(t *testing.T) 
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testCoderTaskName,
 		HeadBranch: testFeatureBranch,
 		BaseBranch: testBranch,
 		Title:      testPullRequestTitle,
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct), args)
 	if err == nil {
 		t.Fatal("expected error for no token")
 	}
@@ -484,14 +490,15 @@ func TestCreatePullRequestTool_EmptyToken(t *testing.T) {
 
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
-	args, _ := json.Marshal(CreatePullRequestArgs{
+	argsStruct := CreatePullRequestArgs{
 		TaskName:   testCoderTaskName,
 		HeadBranch: testFeatureBranch,
 		BaseBranch: testBranch,
 		Title:      testPullRequestTitle,
-	})
+	}
+	args, _ := json.Marshal(argsStruct)
 
-	_, err := tool.Execute(context.Background(), args)
+	_, err := tool.Execute(createPullRequestApprovedContext(t, argsStruct), args)
 	if err == nil {
 		t.Fatal("expected error for empty token")
 	}

@@ -18,6 +18,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/tracing/genai"
 	"go.opentelemetry.io/otel/attribute"
@@ -37,6 +38,7 @@ type ToolContext struct {
 	TaskID                    string
 	TaskUID                   string
 	ToolCallID                string
+	ExecutionEventStore       store.ExecutionEventStore
 	Tenant                    string
 	Provider                  string
 	ProviderType              string
@@ -385,12 +387,20 @@ var DefaultRegistry = NewRegistry()
 
 // RegisterBuiltinTools registers all built-in tools
 func RegisterBuiltinTools() {
-	DefaultRegistry.Register(NewWebSearchTool())
-	DefaultRegistry.Register(NewCodeExecTool())
-	DefaultRegistry.Register(NewFileReadTool())
-	DefaultRegistry.Register(NewWebFetchTool())
-	DefaultRegistry.Register(NewFileWriteTool())
-	DefaultRegistry.Register(NewRequestApprovalTool())
+	RegisterBuiltinToolsTo(DefaultRegistry)
+}
+
+// RegisterBuiltinToolsTo registers built-in tools into a specific registry.
+func RegisterBuiltinToolsTo(r *Registry) {
+	if r == nil {
+		return
+	}
+	r.Register(NewWebSearchTool())
+	r.Register(NewCodeExecTool())
+	r.Register(NewFileReadTool())
+	r.Register(NewWebFetchTool())
+	r.Register(NewFileWriteTool())
+	r.Register(NewRequestApprovalTool())
 }
 
 // RegisterCoordinationTools registers coordination tools that require a K8s client

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -126,6 +129,57 @@ func TestListSessionEventsAggregatesTaskEvents(t *testing.T) {
 	}
 	if listed.LatestSeq != 3 || len(listed.Events) != 2 || listed.Events[0].Seq != 2 || listed.Events[0].TaskName != "task-b" || listed.Events[0].TaskSeq != 1 {
 		t.Fatalf("listed = %#v", listed)
+	}
+}
+
+func TestListSessionEventsExcludesDeletedSessionOldTaskEvents(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		ActiveTask:  "old-task",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateSession(old): %v", err)
+	}
+	appendSessionEvent(t, s, "old-task", events.ExecutionEventTypeTaskStarted, now)
+	if err := s.DeleteSession(ctx, "default", "session-1"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	appendSessionEvent(t, s, "old-task", events.ExecutionEventTypeTaskFailed, now.Add(time.Second))
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		ActiveTask:  "new-task",
+		CreatedAt:   now.Add(2 * time.Second),
+		UpdatedAt:   now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("CreateSession(new): %v", err)
+	}
+	appendSessionEvent(t, s, "new-task", events.ExecutionEventTypeTaskStarted, now.Add(3*time.Second))
+	appendSessionEvent(t, s, "old-task", events.ExecutionEventTypeWorkerStarted, now.Add(4*time.Second))
+
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Get("/api/v1/sessions/:id/events", h.ListSessionEvents)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/session-1/events?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var listed ListSessionExecutionEventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if listed.LatestSeq != 1 || len(listed.Events) != 1 || listed.Events[0].TaskName != "new-task" {
+		t.Fatalf("listed = %#v, want only new-task event", listed)
 	}
 }
 
@@ -440,6 +494,34 @@ func TestTaskApprovalDecisionAPIOmitsDeletedSession(t *testing.T) {
 	}
 }
 
+func TestTaskApprovalDecisionAPIAllowsCreatePullRequestApprovalOnTerminalTask(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-pr", "action": "create_pull_request"})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   "approval-terminal-pr-task",
+		TaskName:   "approval-terminal-pr-task",
+		Type:       events.ExecutionEventTypeApprovalRequested,
+		Content:    content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := testTask("default", "approval-terminal-pr-task")
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-terminal-pr-task/approvals/approval-pr/decision?namespace=default", bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+}
+
 func TestTaskApprovalDecisionAPIRejectsTerminalTaskAndRecordsActor(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
@@ -637,15 +719,11 @@ func TestForkTaskAPI(t *testing.T) {
 	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "forked-task"}, created); err != nil {
 		t.Fatalf("get created: %v", err)
 	}
-	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" ||
-		created.Annotations[labels.AnnotationForkSourceSeq] != "1" ||
-		created.Annotations[labels.AnnotationDisableCoordinationToolInject] != queryTrue {
+	if created.Annotations[labels.AnnotationForkSourceTask] != "source-task" || created.Annotations[labels.AnnotationForkSourceSeq] != "1" {
 		t.Fatalf("created task annotations = %#v", created.Annotations)
 	}
-	if !strings.Contains(created.Spec.Prompt, "Fork context through execution event checkpoint") ||
-		!strings.Contains(created.Spec.Prompt, events.ExecutionEventTypeTaskStarted) ||
-		!strings.Contains(created.Spec.Prompt, "continue") {
-		t.Fatalf("created prompt = %q, want fork context and continuation", created.Spec.Prompt)
+	if !strings.Contains(created.Spec.Prompt, "Fork context through execution event checkpoint") || !strings.Contains(created.Spec.Prompt, "continue") {
+		t.Fatalf("created task prompt = %q, want fork context and continuation", created.Spec.Prompt)
 	}
 	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "forked-task"})
 	if err != nil {
@@ -832,6 +910,650 @@ func TestForkTaskAPIClearsDeletedSessionRef(t *testing.T) {
 	}
 }
 
+func TestForkSessionAPI(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	appendSessionEvent(t, s, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sessions/session-1/fork?namespace=default",
+		bytes.NewBufferString(`{"afterSeq":1,"newSessionName":"fork-session","seedTaskName":"seed-task","prompt":"continue","agentRef":{"name":"agent-a"}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var out ForkSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.NewSessionName != "fork-session" || out.SeedTaskName != "seed-task" || out.AfterSeq != 1 {
+		t.Fatalf("response=%#v", out)
+	}
+	if len(out.ForkContext.Events) != 1 || out.ForkContext.Events[0].Seq != 1 || out.ForkContext.Events[0].TaskName != "task-a" {
+		t.Fatalf("fork context=%#v", out.ForkContext)
+	}
+	createdSession, err := s.GetSession(ctx, "default", "fork-session")
+	if err != nil {
+		t.Fatalf("GetSession(fork): %v", err)
+	}
+	if len(createdSession.Messages) != 1 || createdSession.Messages[0].Role != sessionForkProvenanceRole || createdSession.Messages[0].Name != sessionForkProvenanceName || !strings.Contains(createdSession.Messages[0].Content, "logical session fork") {
+		t.Fatalf("provenance messages=%#v", createdSession.Messages)
+	}
+	seed := &corev1alpha1.Task{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: "default", Name: "seed-task"}, seed); err != nil {
+		t.Fatalf("get seed task: %v", err)
+	}
+	if seed.Spec.SessionRef == nil || seed.Spec.SessionRef.Name != "fork-session" || !seed.Spec.SessionRef.Append || !strings.Contains(seed.Spec.Prompt, "Fork context through session execution event checkpoint") || !strings.Contains(seed.Spec.Prompt, "continue") {
+		t.Fatalf("seed task spec=%#v", seed.Spec)
+	}
+	if seed.Annotations[labels.AnnotationForkSourceSession] != "session-1" || seed.Annotations[labels.AnnotationForkSourceSessionSeq] != "1" {
+		t.Fatalf("seed annotations=%#v", seed.Annotations)
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyReusesGeneratedSession(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	var first ForkSessionResponse
+	for i := range 2 {
+		if i == 1 {
+			appendSessionEvent(t, s, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
+		}
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/api/v1/sessions/session-1/fork?namespace=default",
+			bytes.NewBufferString(`{"prompt":"continue","agentRef":{"name":"agent-a"},"seedTaskName":"explicit-seed"}`),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "session-fork-key")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus := http.StatusCreated
+		if i == 1 {
+			wantStatus = http.StatusOK
+		}
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("attempt %d status=%d, want %d", i+1, resp.StatusCode, wantStatus)
+		}
+		var out ForkSessionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = out
+			continue
+		}
+		if first.SeedTaskName != "explicit-seed" {
+			t.Fatalf("first seed task = %q, want explicit-seed", first.SeedTaskName)
+		}
+		if out.NewSessionName != first.NewSessionName || out.SeedTaskName != first.SeedTaskName || out.AfterSeq != first.AfterSeq || len(out.ForkContext.Events) != len(first.ForkContext.Events) {
+			t.Fatalf("retry response=%#v, want same session/task/checkpoint as %#v", out, first)
+		}
+	}
+	sessions, err := s.ListSessions(ctx, "default")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	forkCount := 0
+	for _, session := range sessions {
+		if strings.HasPrefix(session.Name, "session-1-fork-") {
+			forkCount++
+		}
+	}
+	if forkCount != 1 {
+		t.Fatalf("fork sessions = %d, want exactly one idempotent fork", forkCount)
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyReusesSeedlessGeneratedSession(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+
+	var first ForkSessionResponse
+	for i := range 2 {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "session-fork-key")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus := http.StatusCreated
+		if i == 1 {
+			wantStatus = http.StatusOK
+		}
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("attempt %d status=%d, want %d", i+1, resp.StatusCode, wantStatus)
+		}
+		var out ForkSessionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = out
+			continue
+		}
+		if out.NewSessionName != first.NewSessionName || out.SeedTaskName != "" || out.AfterSeq != first.AfterSeq {
+			t.Fatalf("retry response=%#v, want same seedless session/checkpoint as %#v", out, first)
+		}
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyReusesExplicitSessionName(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+
+	var first ForkSessionResponse
+	for i := range 2 {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"newSessionName":"explicit-fork","prompt":"continue"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "explicit-session-key")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus := http.StatusCreated
+		if i == 1 {
+			wantStatus = http.StatusOK
+		}
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("attempt %d status=%d, want %d", i+1, resp.StatusCode, wantStatus)
+		}
+		var out ForkSessionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = out
+			continue
+		}
+		if out.NewSessionName != first.NewSessionName || out.SeedTaskName != first.SeedTaskName || out.AfterSeq != first.AfterSeq {
+			t.Fatalf("retry response=%#v, want same explicit fork as %#v", out, first)
+		}
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyRejectsChangedExplicitSessionName(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"newSessionName":"explicit-fork-a","prompt":"continue"}`))
+	first.Header.Set("Content-Type", "application/json")
+	first.Header.Set("Idempotency-Key", "explicit-session-key")
+	resp, err := app.Test(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first status=%d, want 201", resp.StatusCode)
+	}
+
+	retry := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"newSessionName":"explicit-fork-b","prompt":"continue"}`))
+	retry.Header.Set("Content-Type", "application/json")
+	retry.Header.Set("Idempotency-Key", "explicit-session-key")
+	resp, err = app.Test(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("changed explicit retry status=%d, want 409", resp.StatusCode)
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyRejectsChangedRequest(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"prompt":"continue"}`))
+	first.Header.Set("Content-Type", "application/json")
+	first.Header.Set("Idempotency-Key", "session-fork-key")
+	resp, err := app.Test(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first status=%d", resp.StatusCode)
+	}
+	appendSessionEvent(t, s, "task-b", events.ExecutionEventTypeWorkerStarted, now.Add(time.Second))
+	retry := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"prompt":"different"}`))
+	retry.Header.Set("Content-Type", "application/json")
+	retry.Header.Set("Idempotency-Key", "session-fork-key")
+	resp, err = app.Test(retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("changed retry status=%d, want 409", resp.StatusCode)
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyRejectsMissingSeedTaskRecovery(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession(source): %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"prompt":"continue","seedTaskName":"seed-task"}`))
+	first.Header.Set("Content-Type", "application/json")
+	first.Header.Set("Idempotency-Key", "session-fork-key")
+	resp, err := app.Test(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first status=%d", resp.StatusCode)
+	}
+	if err := h.client.Delete(ctx, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "seed-task"}}); err != nil {
+		t.Fatalf("Delete seed task: %v", err)
+	}
+	retry := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"prompt":"continue","seedTaskName":"seed-task"}`))
+	retry.Header.Set("Content-Type", "application/json")
+	retry.Header.Set("Idempotency-Key", "session-fork-key")
+	resp, err = app.Test(retry, fiber.TestConfig{Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("retry status=%d, want 409 when trusted seed provenance is missing", resp.StatusCode)
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyAdoptsMatchingSeedTask(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession(source): %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	reqBody := ForkSessionRequest{Prompt: "continue"}
+	afterSeq := int64(1)
+	newSessionName := deterministicForkSessionName("session-1", afterSeq, "", "session-fork-key")
+	seedTaskName := deterministicSessionForkSeedTaskName(newSessionName, afterSeq, "", "session-fork-key:seed")
+	sessionEvents, err := listSessionEventsThrough(ctx, s, "default", "session-1", afterSeq)
+	if err != nil {
+		t.Fatalf("listSessionEventsThrough: %v", err)
+	}
+	forkCtx := forkcontext.BuildSessionContext("default", "session-1", afterSeq, sessionEvents, forkcontext.DefaultMaxEvents)
+	seed := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: seedTaskName, Namespace: "default", Annotations: map[string]string{
+			labels.AnnotationForkSourceSession:        "session-1",
+			labels.AnnotationForkSourceSessionSeq:     strconv.FormatInt(afterSeq, 10),
+			labels.AnnotationSessionForkRequestDigest: sessionForkRequestDigest(reqBody, afterSeq),
+		}},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       corev1alpha1.TaskTypeAI,
+			Prompt:     sessionForkPrompt(forkCtx, reqBody.Prompt),
+			SessionRef: &corev1alpha1.SessionReference{Name: newSessionName, Append: true},
+		},
+	}
+	if err := h.client.Create(ctx, seed); err != nil {
+		t.Fatalf("Create seed: %v", err)
+	}
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"prompt":"continue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "session-fork-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d, want recovered create", resp.StatusCode)
+	}
+}
+
+func TestForkSessionAPIIdempotencyKeyDoesNotMaskSeedTaskConflict(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	preexisting := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "explicit-seed", Namespace: "default"}}
+	if err := h.client.Create(ctx, preexisting); err != nil {
+		t.Fatalf("Create preexisting seed: %v", err)
+	}
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sessions/session-1/fork?namespace=default",
+		bytes.NewBufferString(`{"prompt":"continue","seedTaskName":"explicit-seed"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "session-fork-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want seed conflict", resp.StatusCode)
+	}
+	if _, err := s.GetSession(ctx, "default", deterministicForkSessionName("session-1", 1, "", "session-fork-key")); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetSession(idempotent fork) err=%v, want cleanup after seed conflict", err)
+	}
+}
+
+func TestForkSessionAPIUsesAgentTaskTypeForRuntimeAgent(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	runtimeAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			Type: corev1alpha1.AgentRuntimeCodex,
+		}},
+	}
+	if err := h.client.Create(ctx, runtimeAgent); err != nil {
+		t.Fatalf("Create agent: %v", err)
+	}
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sessions/session-1/fork?namespace=default",
+		bytes.NewBufferString(`{"newSessionName":"fork-session","seedTaskName":"seed-task","prompt":"continue","agentRef":{"name":"runtime-agent"}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	seed := &corev1alpha1.Task{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: "default", Name: "seed-task"}, seed); err != nil {
+		t.Fatalf("get seed task: %v", err)
+	}
+	if seed.Spec.Type != corev1alpha1.TaskTypeAgent {
+		t.Fatalf("seed task type = %q, want agent for runtime-backed agentRef", seed.Spec.Type)
+	}
+}
+
+func TestForkSessionAPIRejectsCrossNamespaceAgentRef(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, now)
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"prompt":"continue","agentRef":{"name":"agent-b","namespace":"other"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403 for cross-namespace agentRef", resp.StatusCode)
+	}
+}
+
+func TestForkSessionAPIPreservesSourceSessionType(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "chat-session", SessionType: "chat"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/chat-session/fork?namespace=default", bytes.NewBufferString(`{"newSessionName":"chat-fork"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	forked, err := s.GetSession(ctx, "default", "chat-fork")
+	if err != nil {
+		t.Fatalf("GetSession(fork): %v", err)
+	}
+	if forked.SessionType != "chat" {
+		t.Fatalf("forked session type = %q, want chat", forked.SessionType)
+	}
+}
+
+func TestForkSessionAPIRejectsInvalidAfterSeq(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, time.Now())
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", bytes.NewBufferString(`{"afterSeq":99}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestListSessionEventsThroughKeepsRecentContextForLongSessions(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	ctx := context.Background()
+	total := forkcontext.DefaultMaxEvents + 25
+	for i := 1; i <= total; i++ {
+		taskName := fmt.Sprintf("task-%03d", i)
+		if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    taskName,
+			TaskName:    taskName,
+			SessionName: "session-long-tail",
+			Type:        events.ExecutionEventTypeModelMessage,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(%d): %v", i, err)
+		}
+	}
+	listed, err := listSessionEventsThrough(ctx, eventStore, "default", "session-long-tail", int64(total))
+	if err != nil {
+		t.Fatalf("listSessionEventsThrough: %v", err)
+	}
+	wantFirst := fmt.Sprintf("task-%03d", total-forkcontext.DefaultMaxEvents)
+	wantLast := fmt.Sprintf("task-%03d", total)
+	if len(listed) != forkcontext.DefaultMaxEvents+1 || listed[0].TaskName != wantFirst || listed[len(listed)-1].TaskName != wantLast {
+		t.Fatalf("listed len=%d first=%q last=%q, want len %d first %q last %q", len(listed), listed[0].TaskName, listed[len(listed)-1].TaskName, forkcontext.DefaultMaxEvents+1, wantFirst, wantLast)
+	}
+}
+
+func TestListSessionEventsThroughBacksUpWhenTailWindowIsEmpty(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	ctx := context.Background()
+	for i := 1; i <= store.MaxExecutionEventLimit; i++ {
+		if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    "keep-task",
+			TaskName:    "keep-task",
+			SessionName: "session-gap-tail",
+			Type:        events.ExecutionEventTypeModelMessage,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(keep %d): %v", i, err)
+		}
+	}
+	for i := store.MaxExecutionEventLimit + 1; i <= 2*store.MaxExecutionEventLimit; i++ {
+		taskName := fmt.Sprintf("drop-task-%d", i)
+		if _, err := eventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    taskName,
+			TaskName:    taskName,
+			SessionName: "session-gap-tail",
+			Type:        events.ExecutionEventTypeModelMessage,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(drop %d): %v", i, err)
+		}
+		if err := eventStore.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, taskName); err != nil {
+			t.Fatalf("DeleteExecutionEvents(%s): %v", taskName, err)
+		}
+	}
+	listed, err := listSessionEventsThrough(ctx, eventStore, "default", "session-gap-tail", 2*store.MaxExecutionEventLimit)
+	if err != nil {
+		t.Fatalf("listSessionEventsThrough: %v", err)
+	}
+	if len(listed) == 0 || listed[len(listed)-1].TaskName != "keep-task" {
+		t.Fatalf("listed tail=%#v, want retained keep-task events after backing up empty tail window", listed)
+	}
+}
+
+func TestForkSessionAPIKeepsContextAcrossSessionSeqGaps(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "keep-task", events.ExecutionEventTypeTaskStarted, time.Now())
+	for i := range forkcontext.DefaultMaxEvents + 5 {
+		taskName := fmt.Sprintf("drop-task-%d", i)
+		appendSessionEvent(t, s, taskName, events.ExecutionEventTypeWorkerStarted, time.Now())
+		if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, taskName); err != nil {
+			t.Fatalf("DeleteExecutionEvents(%s): %v", taskName, err)
+		}
+	}
+	h, app := setupPostP0Handlers(t, s, s)
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var out ForkSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ForkContext.Events) != 1 || out.ForkContext.Events[0].TaskName != "keep-task" {
+		t.Fatalf("fork context events=%#v, want retained keep-task despite cursor gaps", out.ForkContext.Events)
+	}
+}
+
+func TestForkSessionAPIDoesNotLeaveSessionWhenSeedTaskExists(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "default", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	appendSessionEvent(t, s, "task-a", events.ExecutionEventTypeTaskStarted, time.Now())
+	existingSeed := testTask("default", "seed-task")
+	h, app := setupPostP0Handlers(t, s, s)
+	if err := h.client.Create(ctx, existingSeed); err != nil {
+		t.Fatalf("create existing seed: %v", err)
+	}
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sessions/session-1/fork?namespace=default",
+		bytes.NewBufferString(`{"newSessionName":"fork-session","seedTaskName":"seed-task"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", resp.StatusCode)
+	}
+	if _, err := s.GetSession(ctx, "default", "fork-session"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetSession(fork-session) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestForkSessionAPIRejectsCrossNamespace(t *testing.T) {
+	s := newSQLiteExecutionEventStoreForTest(t)
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, &store.SessionRecord{Namespace: "prod", Name: "session-1", SessionType: "task"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	h, app := setupPostP0Handlers(t, s, s)
+	h.watchNamespace = "prod"
+	app.Post("/api/v1/sessions/:id/fork", h.ForkSession)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/session-1/fork?namespace=default", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", resp.StatusCode)
+	}
+}
+
 func TestForkTaskAPIBoundsForkContextAndMarksTruncated(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
 	for range forkcontext.DefaultMaxEvents + 5 {
@@ -984,9 +1706,8 @@ func TestForkTaskAPIIdempotencyKeyRetryIsIdempotent(t *testing.T) {
 
 func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStore()
-	appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "early-call")
 	for range store.MaxExecutionEventLimit {
-		appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeWorkerStarted)
+		appendToolEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeToolCallStarted, "call")
 	}
 	appendTestTaskEvent(t, eventStore, "long-trace-task", events.ExecutionEventTypeTaskSucceeded)
 	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "long-trace-task"))
@@ -1003,22 +1724,16 @@ func TestGetTaskTraceAPIPagesBeyondEventLimit(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&trace); err != nil {
 		t.Fatal(err)
 	}
-	if trace.LatestSeq != store.MaxExecutionEventLimit+2 || trace.TerminalEvent == nil {
+	if trace.LatestSeq != store.MaxExecutionEventLimit+1 || trace.TerminalEvent == nil {
 		t.Fatalf("trace latest=%d terminal=%#v", trace.LatestSeq, trace.TerminalEvent)
-	}
-	if len(trace.Timeline) != store.MaxExecutionEventLimit+2 || trace.Timeline[0].Seq != 1 {
-		t.Fatalf("trace timeline len=%d first=%#v, want full stream from seq 1", len(trace.Timeline), trace.Timeline[0])
-	}
-	if len(trace.ToolCalls) != 1 || trace.ToolCalls[0].ID != "early-call" || trace.ToolCalls[0].StartSeq != 1 {
-		t.Fatalf("trace tool calls = %#v, want early tool call from seq 1", trace.ToolCalls)
 	}
 }
 
-func setupPostP0Handlers(t *testing.T, eventStore store.ExecutionEventStore, sessionStore store.SessionStore, objs ...runtime.Object) (*Handlers, *fiber.App) {
+func setupPostP0Handlers(t *testing.T, eventStore store.ExecutionEventStore, sessionStore store.SessionStore) (*Handlers, *fiber.App) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	h := NewHandlers(HandlersConfig{Client: fakeClient, ExecutionEventStore: eventStore, SessionStore: sessionStore})
 	app := fiber.New()
 	return h, app

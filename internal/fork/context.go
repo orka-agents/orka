@@ -15,7 +15,8 @@ const (
 
 type Context struct {
 	SourceNamespace string         `json:"sourceNamespace"`
-	SourceTask      string         `json:"sourceTask"`
+	SourceTask      string         `json:"sourceTask,omitempty"`
+	SourceSession   string         `json:"sourceSession,omitempty"`
 	AfterSeq        int64          `json:"afterSeq"`
 	Events          []EventSummary `json:"events"`
 	Truncated       bool           `json:"truncated"`
@@ -26,6 +27,8 @@ type EventSummary struct {
 	Type        string          `json:"type"`
 	Severity    string          `json:"severity"`
 	Summary     string          `json:"summary,omitempty"`
+	TaskName    string          `json:"taskName,omitempty"`
+	TaskSeq     int64           `json:"taskSeq,omitempty"`
 	ToolName    string          `json:"toolName,omitempty"`
 	ToolCallID  string          `json:"toolCallID,omitempty"`
 	Content     json.RawMessage `json:"content,omitempty"`
@@ -82,6 +85,49 @@ func BuildContextWithLimits(
 	return ctx
 }
 
+// BuildSessionContext returns a bounded, already-sanitized summary of session
+// events up to a session-level checkpoint sequence.
+func BuildSessionContext(namespace, sessionName string, afterSeq int64, events []store.SessionExecutionEvent, maxEvents int) Context {
+	return BuildSessionContextWithLimits(namespace, sessionName, afterSeq, events, maxEvents, DefaultMaxContextBytes)
+}
+
+func BuildSessionContextWithLimits(
+	namespace,
+	sessionName string,
+	afterSeq int64,
+	events []store.SessionExecutionEvent,
+	maxEvents int,
+	maxBytes int,
+) Context {
+	if maxEvents <= 0 {
+		maxEvents = DefaultMaxEvents
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxContextBytes
+	}
+	ordered := make([]store.SessionExecutionEvent, 0, len(events))
+	for _, event := range events {
+		if event.SessionSeq <= afterSeq {
+			ordered = append(ordered, event)
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].SessionSeq < ordered[j].SessionSeq })
+	truncated := false
+	if len(ordered) > maxEvents {
+		truncated = true
+		ordered = ordered[len(ordered)-maxEvents:]
+	}
+	ctx := Context{SourceNamespace: namespace, SourceSession: sessionName, AfterSeq: afterSeq, Truncated: truncated}
+	for i := len(ordered) - 1; i >= 0; i-- {
+		kept, compacted := prependEventWithinLimit(&ctx, eventSummaryFromSession(ordered[i]), maxBytes)
+		if !kept || compacted {
+			truncated = true
+		}
+	}
+	ctx.Truncated = truncated
+	return ctx
+}
+
 func prependEventWithinLimit(ctx *Context, summary EventSummary, maxBytes int) (kept bool, compacted bool) {
 	candidate := append([]EventSummary{summary}, ctx.Events...)
 	ctx.Events = candidate
@@ -119,23 +165,45 @@ func eventSummaryFromStore(event store.ExecutionEvent) EventSummary {
 	}
 }
 
+func eventSummaryFromSession(event store.SessionExecutionEvent) EventSummary {
+	return EventSummary{
+		Seq:         event.SessionSeq,
+		Type:        event.Type,
+		Severity:    event.Severity,
+		Summary:     event.Summary,
+		TaskName:    event.TaskName,
+		TaskSeq:     event.TaskSeq,
+		ToolName:    event.ToolName,
+		ToolCallID:  event.ToolCallID,
+		Content:     cloneRaw(event.Content),
+		ContentText: event.ContentText,
+	}
+}
+
 func marshaledContextLen(ctx Context) int {
-	data, err := json.Marshal(ctx)
+	encoded, err := json.Marshal(ctx)
 	if err != nil {
 		return maxInt
 	}
-	return len(data)
+	return len(encoded)
 }
 
 const maxInt = int(^uint(0) >> 1)
 
 func truncateForkContextText(value string, maxChars int) string {
-	value = strings.TrimSpace(value)
-	runes := []rune(value)
-	if maxChars <= 0 || len(runes) <= maxChars {
-		return value
+	if maxChars <= 0 {
+		return ""
 	}
-	return string(runes[:maxChars]) + "...[truncated]"
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= maxChars {
+		return string(runes)
+	}
+	marker := "...[truncated]"
+	markerRunes := []rune(marker)
+	if maxChars <= len(markerRunes) {
+		return string(markerRunes[:maxChars])
+	}
+	return string(runes[:maxChars-len(markerRunes)]) + marker
 }
 
 func ValidateAfterSeq(afterSeq int64, events []store.ExecutionEvent) bool {

@@ -163,6 +163,62 @@ func newSessionFollowCmd() *cobra.Command {
 	return newExecutionFollowCmd("follow <session>", "Follow session execution events", "/api/v1/sessions")
 }
 
+func newSessionForkCmd() *cobra.Command {
+	var after int64 = -1
+	var newName, seedTaskName, agent, prompt string
+	cmd := &cobra.Command{
+		Use:   "fork <session>",
+		Short: "Fork a session from an execution event checkpoint",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bodyMap := map[string]any{}
+			if cmd.Flags().Changed("after") {
+				bodyMap["afterSeq"] = after
+			}
+			if newName != "" {
+				bodyMap["newSessionName"] = newName
+			}
+			if seedTaskName != "" {
+				bodyMap["seedTaskName"] = seedTaskName
+			}
+			if agent != "" {
+				bodyMap["agentRef"] = map[string]string{"name": agent}
+			}
+			if prompt != "" {
+				bodyMap["prompt"] = prompt
+			}
+			body, _ := json.Marshal(bodyMap)
+			c := newClientFromCmd(cmd)
+			path := "/api/v1/sessions/" + url.PathEscape(args[0]) + "/fork"
+			result, err := c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
+			if err != nil {
+				return err
+			}
+			format, err := outputFormat(cmd)
+			if err != nil {
+				return err
+			}
+			if format != outputTable {
+				return printStructured(cmd, result)
+			}
+			m, _ := result.(map[string]any)
+			created := anyString(m["newSessionName"])
+			fmt.Fprintf(cmd.OutOrStdout(), "Forked session created: %s\n", created) //nolint:errcheck
+			if seed := anyString(m["seedTaskName"]); seed != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Seed task created: %s\n", seed) //nolint:errcheck
+			}
+			return nil
+		},
+	}
+	cmd.Flags().Int64Var(&after, "after", -1, "Session checkpoint sequence (default: latest)")
+	cmd.Flags().StringVar(&newName, "name", "", "Forked session name")
+	cmd.Flags().StringVar(&seedTaskName, "seed-task", "", "Optional seed task name")
+	cmd.Flags().StringVar(&agent, "agent", "", "Optional seed task agent reference")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "Optional seed task prompt")
+	addOutputFlag(cmd, outputTable)
+	return cmd
+}
+
 func newExecutionEventsCmd(use, short, basePath string, includeType bool) *cobra.Command {
 	var after int64
 	var limit int

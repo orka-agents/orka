@@ -24,6 +24,7 @@ import (
 	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
+	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
 func TestInternalSubmitExecutionEvent(t *testing.T) {
@@ -133,6 +134,62 @@ func TestInternalSubmitExecutionEventTaskOwnership(t *testing.T) {
 	)
 	if mismatchResp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("mismatched session status = %d, want 400", mismatchResp.StatusCode)
+	}
+}
+
+func TestInternalSubmitExecutionEventStripsDeletedSessionForActiveTask(t *testing.T) {
+	const sessionName = "deleted-session"
+	task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: sessionName}
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	if err := ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace:   "default",
+		Name:        sessionName,
+		SessionType: "task",
+		ActiveTask:  task.Name,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := ss.DeleteSession(context.Background(), "default", sessionName); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	h := NewInternalHandlers(nil, ss, nil, nil, nil, InternalHandlersConfig{
+		Client:              testInternalExecutionEventClient(t, task, job, pod),
+		ExecutionEventStore: ss,
+	})
+	app := setupInternalExecutionEventAppWithHandler(h, testInternalExecutionEventWorkerUser("owned-task-pod"))
+
+	resp := doJSONRequest(
+		t,
+		app,
+		"/internal/v1/events/default/task/owned-task",
+		map[string]any{"type": events.ExecutionEventTypeWorkerFailed, "sessionName": sessionName},
+	)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 for deleted-session active task event", resp.StatusCode)
+	}
+	stored, err := ss.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{
+		Namespace:  "default",
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListExecutionEvents: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("stored len = %d, want 1", len(stored))
+	}
+	if stored[0].TaskName != task.Name {
+		t.Fatalf("stored taskName = %q, want %q", stored[0].TaskName, task.Name)
+	}
+	if stored[0].SessionName != "" {
+		t.Fatalf("stored sessionName = %q, want stripped", stored[0].SessionName)
 	}
 }
 
@@ -248,7 +305,7 @@ func TestInternalSubmitExecutionEventValidationAndAuth(t *testing.T) {
 			want: http.StatusBadRequest,
 		},
 		{
-			name: "approval terminal event denied",
+			name: "approval decision event denied",
 			path: "/internal/v1/events/default/task/task-1",
 			body: map[string]any{
 				"type":    events.ExecutionEventTypeApprovalApproved,

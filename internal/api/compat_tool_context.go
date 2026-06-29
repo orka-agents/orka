@@ -55,6 +55,7 @@ type compatProxyToolContextConfig struct {
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ResultStore               store.ResultStore
+	ExecutionEventStore       store.ExecutionEventStore
 	GenerateTaskName          func() string
 	Profile                   compatProxyToolContextProfile
 	AuthContext               *ContextToken
@@ -74,6 +75,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		WatchNamespace:            cfg.WatchNamespace,
 		EnforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
 		ResultStore:               cfg.ResultStore,
+		ExecutionEventStore:       cfg.ExecutionEventStore,
 		GenerateTaskName:          cfg.GenerateTaskName,
 		TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": cfg.Profile.SourceLabel} },
 		CheckTaskLimit: func() *tools.ChatToolError {

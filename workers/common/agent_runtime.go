@@ -38,24 +38,25 @@ import (
 
 // AgentConfig holds worker configuration from environment variables.
 type AgentConfig struct {
-	TaskName           string
-	TaskNamespace      string
-	TransactionID      string
-	TransactionProfile string
-	Prompt             string
-	Model              string
-	SystemPrompt       string
-	MaxTurns           int
-	AllowedTools       []string
-	DisallowedTools    []string
-	GitRepo            string
-	GitBranch          string
-	GitRef             string
-	PRBaseBranch       string
-	PRBaseRepo         string
-	PRBaseSHA          string
-	SubPath            string
-	TimeoutSeconds     int
+	TaskName             string
+	TaskNamespace        string
+	TransactionID        string
+	TransactionProfile   string
+	RuntimeEventRecorder EventRecorder
+	Prompt               string
+	Model                string
+	SystemPrompt         string
+	MaxTurns             int
+	AllowedTools         []string
+	DisallowedTools      []string
+	GitRepo              string
+	GitBranch            string
+	GitRef               string
+	PRBaseBranch         string
+	PRBaseRepo           string
+	PRBaseSHA            string
+	SubPath              string
+	TimeoutSeconds       int
 
 	securityReviewContextArtifact string
 	securityReviewContextManifest []byte
@@ -684,6 +685,7 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	taskName = cfg.TaskName
+	cfg.RuntimeEventRecorder = eventRecorder
 
 	ctx, taskSpan, tracingShutdown, err := startAgentTaskRunTelemetry(ctx, name, cfg)
 	if err != nil {
@@ -884,6 +886,93 @@ func agentRuntimeEventContent(values map[string]any) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(data)
+}
+
+// RecordAgentRuntimeMetadata emits runtime-specific, non-lifecycle metadata for
+// a concrete agent implementation. It deliberately uses a distinct event type so
+// runtime-specific producers do not duplicate the common AgentRuntimeStarted /
+// AgentRuntimeCompleted lifecycle events emitted by RunAgent.
+func RecordAgentRuntimeMetadata(
+	ctx context.Context,
+	recorder EventRecorder,
+	taskName string,
+	agentName string,
+	summary string,
+	content map[string]any,
+) {
+	recordAgentRuntimeSpecificEvent(ctx, recorder, events.ExecutionEventTypeAgentRuntimeMetadata,
+		events.ExecutionEventSeverityInfo, taskName, agentName, summary, content)
+}
+
+// RecordAgentRuntimeSandboxFallback emits a distinct event when a runtime falls
+// back to a less isolated sandbox mode after detecting sandbox unavailability.
+func RecordAgentRuntimeSandboxFallback(
+	ctx context.Context,
+	recorder EventRecorder,
+	taskName string,
+	agentName string,
+	summary string,
+	content map[string]any,
+) {
+	recordAgentRuntimeSpecificEvent(ctx, recorder, events.ExecutionEventTypeAgentRuntimeSandboxFallback,
+		events.ExecutionEventSeverityWarning, taskName, agentName, summary, content)
+}
+
+// RedactedEventPreview returns a redacted, size-bounded text preview suitable
+// for event metadata fields such as failure stderr snippets.
+func RedactedEventPreview(value string, maxChars int) string {
+	preview, _, _ := events.RedactAndTruncateExecutionEventText(strings.TrimSpace(value), maxChars)
+	return preview
+}
+
+const runtimeStderrCategoryNone = "none"
+
+// RuntimeStderrCategory returns a low-cardinality category for runtime stderr
+// without persisting arbitrary stderr text in durable execution events.
+func RuntimeStderrCategory(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return runtimeStderrCategoryNone
+	}
+	switch {
+	case strings.Contains(normalized, "permission denied"),
+		strings.Contains(normalized, "operation not permitted"),
+		strings.Contains(normalized, "no permissions"):
+		return "permission"
+	case strings.Contains(normalized, "timed out"), strings.Contains(normalized, "timeout"):
+		return "timeout"
+	case strings.Contains(normalized, "rate limit"), strings.Contains(normalized, "too many requests"):
+		return "rate_limit"
+	case strings.Contains(normalized, "unauthorized"), strings.Contains(normalized, "authentication"):
+		return "authentication"
+	default:
+		return "stderr"
+	}
+}
+
+func recordAgentRuntimeSpecificEvent(
+	ctx context.Context,
+	recorder EventRecorder,
+	typ string,
+	severity string,
+	taskName string,
+	agentName string,
+	summary string,
+	content map[string]any,
+) {
+	if content == nil {
+		content = map[string]any{}
+	}
+	if _, ok := content["runtime"]; !ok && agentName != "" {
+		content["runtime"] = agentName
+	}
+	RecordEvent(ctx, recorder, typ,
+		WithEventSeverity(severity),
+		WithEventTaskName(taskName),
+		WithEventAgentName(agentName),
+		WithEventSummary(summary),
+		WithEventContent(agentRuntimeEventContent(content)),
+	)
 }
 
 func recordAgentArtifactUploadEvent(recorder EventRecorder, agentName, taskName string, success bool, err error) {

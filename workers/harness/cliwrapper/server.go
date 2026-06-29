@@ -885,9 +885,10 @@ func (s *Server) completedFrame(turn *turnState, result TurnResult) (harness.Har
 	}
 	preview := redactAndTruncateBytes(result.Result, previewLimit)
 	frame := s.frame(turn, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{
-		Result:        preview,
-		OutputRef:     events.RedactExecutionEventText(outputRef),
-		RetainSession: false,
+		Result:          preview,
+		OutputRef:       events.RedactExecutionEventText(outputRef),
+		RetainSession:   false,
+		ResultTruncated: preview != result.Result,
 	})
 	if len(result.Metadata) > 0 {
 		for k, v := range result.Metadata {

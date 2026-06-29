@@ -310,7 +310,7 @@ func run() (err error) {
 	// Execute the agent loop
 	result, err := executeAgentLoopWithEvents(
 		ctx, llmProvider, messages, systemPrompt, model,
-		llmTools, customTools, toolExecutor, eventRecorder, baseToolCtx,
+		llmTools, customTools, toolExecutor, eventRecorder, withApprovalEventStore(baseToolCtx),
 	)
 	if err != nil {
 		return fmt.Errorf("agent execution failed: %w", err)
@@ -375,6 +375,16 @@ func createK8sClient() (client.Client, error) {
 	}
 
 	return k8sClient, nil
+}
+
+func withApprovalEventStore(tc *tools.ToolContext) *tools.ToolContext {
+	if tc != nil {
+		if strings.TrimSpace(tc.SessionID) == "" {
+			tc.SessionID = strings.TrimSpace(os.Getenv(workerenv.SessionName))
+		}
+		tc.ExecutionEventStore = common.NewHTTPExecutionEventStoreFromEnv()
+	}
+	return tc
 }
 
 // loadCustomTools loads Tool CRDs from the cluster

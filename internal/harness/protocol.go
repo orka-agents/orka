@@ -210,18 +210,20 @@ type HarnessEventFrame struct {
 }
 
 type TurnCompleted struct {
-	Result        string `json:"result,omitempty"`
-	OutputRef     string `json:"outputRef,omitempty"`
-	FinalEventSeq int64  `json:"finalEventSeq,omitempty"`
-	RetainSession bool   `json:"retainSession,omitempty"`
+	Result          string `json:"result,omitempty"`
+	OutputRef       string `json:"outputRef,omitempty"`
+	FinalEventSeq   int64  `json:"finalEventSeq,omitempty"`
+	RetainSession   bool   `json:"retainSession,omitempty"`
+	ResultTruncated bool   `json:"resultTruncated,omitempty"`
 }
 
 type TurnFailed struct {
-	Reason    string `json:"reason"`
-	Message   string `json:"message,omitempty"`
-	Result    string `json:"result,omitempty"`
-	OutputRef string `json:"outputRef,omitempty"`
-	Retryable bool   `json:"retryable,omitempty"`
+	Reason          string `json:"reason"`
+	Message         string `json:"message,omitempty"`
+	Result          string `json:"result,omitempty"`
+	OutputRef       string `json:"outputRef,omitempty"`
+	Retryable       bool   `json:"retryable,omitempty"`
+	ResultTruncated bool   `json:"resultTruncated,omitempty"`
 }
 
 type ErrorInfo struct {

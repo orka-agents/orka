@@ -20,9 +20,9 @@ func TestTaskPostP0EventCommandsRegistered(t *testing.T) {
 	}
 }
 
-func TestSessionEventCommandsRegistered(t *testing.T) {
+func TestSessionForkAndEventCommandsRegistered(t *testing.T) {
 	cmd := newSessionCmd()
-	want := map[string]bool{"events": false, "follow": false}
+	want := map[string]bool{"events": false, "follow": false, "fork": false}
 	for _, sub := range cmd.Commands() {
 		if _, ok := want[sub.Name()]; ok {
 			want[sub.Name()] = true

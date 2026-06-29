@@ -13,6 +13,9 @@ const (
 	ExecutionEventTypeWorkerStarted                 = "WorkerStarted"
 	ExecutionEventTypeWorkerCompleted               = "WorkerCompleted"
 	ExecutionEventTypeWorkerFailed                  = "WorkerFailed"
+	ExecutionEventTypeContainerCommandStarted       = "ContainerCommandStarted"
+	ExecutionEventTypeContainerCommandCompleted     = "ContainerCommandCompleted"
+	ExecutionEventTypeContainerCommandFailed        = "ContainerCommandFailed"
 	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
 	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
 	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
@@ -26,6 +29,8 @@ const (
 	ExecutionEventTypeWorkspacePreparationFailed    = "WorkspacePreparationFailed"
 	ExecutionEventTypeAgentRuntimeStarted           = "AgentRuntimeStarted"
 	ExecutionEventTypeAgentRuntimeCommandStarted    = "AgentRuntimeCommandStarted"
+	ExecutionEventTypeAgentRuntimeMetadata          = "AgentRuntimeMetadata"
+	ExecutionEventTypeAgentRuntimeSandboxFallback   = "AgentRuntimeSandboxFallback"
 	ExecutionEventTypeAgentRuntimeCompleted         = "AgentRuntimeCompleted"
 	ExecutionEventTypeAgentRuntimeFailed            = "AgentRuntimeFailed"
 	ExecutionEventTypeAgentRuntimeCancelled         = "AgentRuntimeCancelled"
@@ -66,6 +71,9 @@ var executionEventTypes = []string{
 	ExecutionEventTypeWorkerStarted,
 	ExecutionEventTypeWorkerCompleted,
 	ExecutionEventTypeWorkerFailed,
+	ExecutionEventTypeContainerCommandStarted,
+	ExecutionEventTypeContainerCommandCompleted,
+	ExecutionEventTypeContainerCommandFailed,
 	ExecutionEventTypeModelRequestStarted,
 	ExecutionEventTypeModelRequestCompleted,
 	ExecutionEventTypeModelRequestFailed,
@@ -79,6 +87,8 @@ var executionEventTypes = []string{
 	ExecutionEventTypeWorkspacePreparationFailed,
 	ExecutionEventTypeAgentRuntimeStarted,
 	ExecutionEventTypeAgentRuntimeCommandStarted,
+	ExecutionEventTypeAgentRuntimeMetadata,
+	ExecutionEventTypeAgentRuntimeSandboxFallback,
 	ExecutionEventTypeAgentRuntimeCompleted,
 	ExecutionEventTypeAgentRuntimeFailed,
 	ExecutionEventTypeAgentRuntimeCancelled,

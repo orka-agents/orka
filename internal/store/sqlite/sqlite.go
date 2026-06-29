@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sozercan/orka/internal/store"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -175,6 +176,13 @@ func migrate(db *sql.DB) error {
 			session_name TEXT NOT NULL,
 			latest_seq   INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, session_name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS execution_event_deleted_session_tasks (
+			namespace    TEXT NOT NULL,
+			session_name TEXT NOT NULL,
+			task_name    TEXT NOT NULL,
+			deleted_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, session_name, task_name)
 		)`,
 		`CREATE TABLE IF NOT EXISTS memories (
 			id                 TEXT PRIMARY KEY,
@@ -592,6 +600,15 @@ func migrate(db *sql.DB) error {
 	)`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS execution_event_deleted_session_tasks (
+		namespace    TEXT NOT NULL,
+		session_name TEXT NOT NULL,
+		task_name    TEXT NOT NULL,
+		deleted_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (namespace, session_name, task_name)
+	)`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
+	}
 	if err := backfillExecutionEventSessionCursors(db); err != nil {
 		return err
 	}
@@ -844,6 +861,7 @@ type Store struct {
 	db               *sql.DB
 	dbPath           string
 	executionEventMu sync.Mutex
+	executionSLOs    *store.ExecutionEventSLODeriver
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
@@ -857,7 +875,7 @@ type Store struct {
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	return &Store{db: db, dbPath: dbPath}
+	return &Store{db: db, dbPath: dbPath, executionSLOs: store.NewExecutionEventSLODeriver()}
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,

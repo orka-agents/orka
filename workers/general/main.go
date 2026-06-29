@@ -22,7 +22,9 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/security"
 	securityslices "github.com/sozercan/orka/internal/security/slices"
 	"github.com/sozercan/orka/internal/workerenv"
@@ -42,9 +44,15 @@ func main() {
 	}
 }
 
-func run() (err error) {
+var newGeneralEventRecorder = common.NewHTTPEventRecorderFromEnv
+
+var exitProcess = os.Exit
+
+func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	eventRecorder := newGeneralEventRecorder()
 
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
@@ -54,32 +62,20 @@ func run() (err error) {
 	}
 
 	baseEnv := workerenv.ParseBaseEnv(os.Getenv)
-	taskName := baseEnv.TaskName
-	taskNamespace := baseEnv.TaskNamespace
-	eventRecorder := common.NewHTTPEventRecorderFromEnv()
-	defer func() {
-		if err != nil {
-			recordGeneralWorkerFailed(eventRecorder, taskName, err)
-			return
-		}
-		common.RecordEventWithTimeout(eventRecorder, "WorkerCompleted", 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("General worker completed"),
-		)
-	}()
-
 	transactionLogFields := workerenv.TransactionLogFields(
 		baseEnv.TransactionID, baseEnv.TransactionProfile,
 	)
 	fmt.Printf("Worker general started task=%s/%s%s\n",
-		taskNamespace, taskName, transactionLogFields)
-	common.RecordEvent(ctx, eventRecorder, "WorkerStarted",
-		common.WithEventTaskName(taskName),
-		common.WithEventSummary("General worker started"),
+		baseEnv.TaskNamespace, baseEnv.TaskName, transactionLogFields)
+	recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeWorkerStarted,
+		events.ExecutionEventSeverityInfo,
+		"general worker started",
+		map[string]any{"worker": "general"},
 	)
 
 	workDir, err := prepareWorkspaceIfConfigured(ctx)
 	if err != nil {
+		recordGeneralWorkerFailure(ctx, eventRecorder, baseEnv, "prepare workspace failed", err, nil)
 		return err
 	}
 
@@ -90,18 +86,28 @@ func run() (err error) {
 	} else {
 		cmdStr := os.Getenv(workerenv.Command)
 		if cmdStr == "" {
+			err := fmt.Errorf("no command specified")
+			recordGeneralWorkerFailure(ctx, eventRecorder, baseEnv, "no command specified", err, nil)
 			return fmt.Errorf("no command specified")
 		}
 		command = strings.Fields(cmdStr)
 	}
 
 	if len(command) == 0 {
-		return fmt.Errorf("command cannot be empty")
+		err := fmt.Errorf("command cannot be empty")
+		recordGeneralWorkerFailure(ctx, eventRecorder, baseEnv, "command cannot be empty", err, nil)
+		return err
 	}
 
 	// Execute the command and print output to stdout/stderr.
 	// The controller captures pod logs and writes them to a result ConfigMap.
 	var stdout, stderr bytes.Buffer
+	startedAt := time.Now()
+	recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeContainerCommandStarted,
+		events.ExecutionEventSeverityInfo,
+		fmt.Sprintf("container command started: %s", commandExecutableSummary(command)),
+		generalCommandEventContent(command, workDir, commandRunMetadata{}),
+	)
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Stdout = &stdout
@@ -112,6 +118,22 @@ func run() (err error) {
 	}
 
 	err = cmd.Run()
+	duration := time.Since(startedAt)
+	runMetadata := commandRunMetadata{
+		Duration:    duration,
+		StdoutBytes: stdout.Len(),
+		StderrBytes: stderr.Len(),
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = -1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		runMetadata.ExitCode = &exitCode
+	} else {
+		runMetadata.ExitCode = &exitCode
+	}
 
 	if stdout.Len() > 0 {
 		fmt.Print(stdout.String())
@@ -120,57 +142,146 @@ func run() (err error) {
 		fmt.Fprint(os.Stderr, stderr.String())
 	}
 
-	output := stdout.String() + stderr.String()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if submitErr := submitResult(workDir, output); submitErr == nil {
-				recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
-			}
-			recordGeneralWorkerFailed(
-				eventRecorder,
-				taskName,
-				fmt.Errorf("command exited with code %d: %w", exitErr.ExitCode(), err),
+			recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeContainerCommandFailed,
+				events.ExecutionEventSeverityError,
+				fmt.Sprintf("container command failed: %s", commandExecutableSummary(command)),
+				generalCommandEventContent(command, workDir, runMetadata),
 			)
-			os.Exit(exitErr.ExitCode())
+			if submitErr := submitResult(workDir, stdout.String()+stderr.String()); submitErr == nil {
+				recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeResultSubmitted,
+					events.ExecutionEventSeverityInfo,
+					"command result submitted",
+					map[string]any{"stdoutBytes": stdout.Len(), "stderrBytes": stderr.Len()},
+				)
+			}
+			recordGeneralWorkerFailure(ctx, eventRecorder, baseEnv, "general worker failed", err,
+				generalCommandEventContent(command, workDir, runMetadata))
+			exitProcess(exitErr.ExitCode())
+			return nil
 		}
+		recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeContainerCommandFailed,
+			events.ExecutionEventSeverityError,
+			fmt.Sprintf("container command failed: %s", commandExecutableSummary(command)),
+			generalCommandEventContent(command, workDir, runMetadata),
+		)
+		recordGeneralWorkerFailure(ctx, eventRecorder, baseEnv, "general worker failed", err,
+			generalCommandEventContent(command, workDir, runMetadata))
 		return err
 	}
+	recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeContainerCommandCompleted,
+		events.ExecutionEventSeverityInfo,
+		fmt.Sprintf("container command completed: %s", commandExecutableSummary(command)),
+		generalCommandEventContent(command, workDir, runMetadata),
+	)
 
-	if err := submitResult(workDir, output); err != nil {
+	if err := submitResult(workDir, stdout.String()+stderr.String()); err != nil {
+		recordGeneralWorkerFailure(ctx, eventRecorder, baseEnv, "submit result failed", err,
+			generalCommandEventContent(command, workDir, runMetadata))
 		return err
 	}
-	recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
+	recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeResultSubmitted,
+		events.ExecutionEventSeverityInfo,
+		"command result submitted",
+		map[string]any{"stdoutBytes": stdout.Len(), "stderrBytes": stderr.Len()},
+	)
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
-		taskNamespace, taskName, transactionLogFields)
+		baseEnv.TaskNamespace, baseEnv.TaskName, transactionLogFields)
+	recordGeneralEvent(ctx, eventRecorder, baseEnv, events.ExecutionEventTypeWorkerCompleted,
+		events.ExecutionEventSeverityInfo,
+		"general worker completed",
+		map[string]any{"worker": "general", "stdoutBytes": stdout.Len(), "stderrBytes": stderr.Len()},
+	)
 	return nil
 }
 
-func recordGeneralResultSubmitted(recorder common.EventRecorder, taskName string, resultLength int) {
-	common.RecordEventWithTimeout(recorder, "ResultSubmitted", 0,
-		common.WithEventTaskName(taskName),
-		common.WithEventSummary("General worker submitted result"),
-		common.WithEventContent(generalEventContent(map[string]any{"resultLength": resultLength})),
-	)
+type commandRunMetadata struct {
+	Duration    time.Duration
+	ExitCode    *int
+	StdoutBytes int
+	StderrBytes int
 }
 
-func recordGeneralWorkerFailed(recorder common.EventRecorder, taskName string, err error) {
-	if err == nil {
+func recordGeneralWorkerFailure(
+	ctx context.Context,
+	recorder common.EventRecorder,
+	baseEnv workerenv.BaseEnv,
+	summary string,
+	err error,
+	content map[string]any,
+) {
+	if content == nil {
+		content = map[string]any{}
+	}
+	content["worker"] = "general"
+	if err != nil {
+		content["error"] = err.Error()
+	}
+	recordGeneralEvent(ctx, recorder, baseEnv, events.ExecutionEventTypeWorkerFailed,
+		events.ExecutionEventSeverityError, summary, content)
+}
+
+func recordGeneralEvent(
+	ctx context.Context,
+	recorder common.EventRecorder,
+	baseEnv workerenv.BaseEnv,
+	typ string,
+	severity string,
+	summary string,
+	content map[string]any,
+) {
+	var raw json.RawMessage
+	if len(content) > 0 {
+		if data, err := json.Marshal(content); err == nil {
+			raw = data
+		}
+	}
+	opts := []common.EventOption{
+		common.WithEventSeverity(severity),
+		common.WithEventTaskName(baseEnv.TaskName),
+		common.WithEventSessionName(os.Getenv(workerenv.SessionName)),
+		common.WithEventSummary(summary),
+		common.WithEventContent(raw),
+	}
+	if ctx != nil && ctx.Err() != nil {
+		common.RecordEventWithTimeout(recorder, typ, 0, opts...)
 		return
 	}
-	common.RecordEventWithTimeout(recorder, "WorkerFailed", 0,
-		common.WithEventSeverity("error"),
-		common.WithEventTaskName(taskName),
-		common.WithEventSummary(err.Error()),
-	)
+	common.RecordEvent(ctx, recorder, typ, opts...)
 }
 
-func generalEventContent(value map[string]any) json.RawMessage {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return nil
+func generalCommandEventContent(command []string, workDir string, run commandRunMetadata) map[string]any {
+	content := map[string]any{
+		"executable":        commandExecutableSummary(command),
+		"argsCount":         max(len(command)-1, 0),
+		"workdirConfigured": workDir != "",
 	}
-	return data
+	if run.Duration > 0 {
+		content["durationMs"] = run.Duration.Milliseconds()
+	}
+	if run.ExitCode != nil {
+		content["exitCode"] = *run.ExitCode
+	}
+	if run.StdoutBytes > 0 {
+		content["stdoutBytes"] = run.StdoutBytes
+	}
+	if run.StderrBytes > 0 {
+		content["stderrBytes"] = run.StderrBytes
+	}
+	return content
+}
+
+func commandExecutableSummary(command []string) string {
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return "unknown"
+	}
+	executable := filepath.Base(command[0])
+	if executable == "." || executable == string(filepath.Separator) || executable == "" {
+		executable = strings.TrimSpace(command[0])
+	}
+	return executable
 }
 
 func prepareWorkspaceIfConfigured(ctx context.Context) (string, error) {

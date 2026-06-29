@@ -37,6 +37,7 @@ type AnthropicCompatHandler struct {
 	config                    ChatConfig
 	resolver                  *ProviderResolver
 	resultStore               store.ResultStore
+	executionEventStore       store.ExecutionEventStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 }
 
@@ -315,6 +316,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			WatchNamespace:            h.watchNamespace,
 			EnforceNamespaceIsolation: h.enforceNamespaceIsolation,
 			ResultStore:               h.resultStore,
+			ExecutionEventStore:       h.executionEventStore,
 			GenerateTaskName:          func() string { return fmt.Sprintf("proxy-%s", uuid.New().String()[:8]) },
 			Profile:                   anthropicCompatProxyToolContextProfile,
 			AuthContext:               contextToken,

@@ -56,6 +56,7 @@ type ExecutionEventFilter struct {
 	StreamID    string
 	TaskName    string
 	SessionName string
+	ToolCallID  string
 	EventTypes  []string
 	AfterSeq    int64
 	Limit       int
@@ -66,6 +67,7 @@ type ExecutionEventFilter struct {
 type SessionExecutionEventFilter struct {
 	Namespace   string
 	SessionName string
+	ToolCallID  string
 	EventTypes  []string
 	AfterSeq    int64
 	Limit       int
@@ -88,6 +90,7 @@ func (f ExecutionEventFilter) Normalized() ExecutionEventFilter {
 	f.StreamID = strings.TrimSpace(f.StreamID)
 	f.TaskName = strings.TrimSpace(f.TaskName)
 	f.SessionName = strings.TrimSpace(f.SessionName)
+	f.ToolCallID = strings.TrimSpace(f.ToolCallID)
 	if f.Limit <= 0 {
 		f.Limit = DefaultExecutionEventLimit
 	} else if f.Limit > MaxExecutionEventLimit {
@@ -126,6 +129,7 @@ func (f ExecutionEventFilter) Validate() error {
 func (f SessionExecutionEventFilter) Normalized() SessionExecutionEventFilter {
 	f.Namespace = strings.TrimSpace(f.Namespace)
 	f.SessionName = strings.TrimSpace(f.SessionName)
+	f.ToolCallID = strings.TrimSpace(f.ToolCallID)
 	if f.Limit <= 0 {
 		f.Limit = DefaultExecutionEventLimit
 	} else if f.Limit > MaxExecutionEventLimit {
@@ -285,6 +289,7 @@ type FakeExecutionEventStore struct {
 	events        []ExecutionEvent
 	latest        map[executionEventStreamKey]int64
 	latestSession map[sessionExecutionEventKey]int64
+	sloDeriver    *ExecutionEventSLODeriver
 }
 
 var _ ExecutionEventStore = (*FakeExecutionEventStore)(nil)
@@ -303,6 +308,7 @@ func NewFakeExecutionEventStoreWithClock(now func() time.Time) *FakeExecutionEve
 		now:           now,
 		latest:        make(map[executionEventStreamKey]int64),
 		latestSession: make(map[sessionExecutionEventKey]int64),
+		sloDeriver:    NewExecutionEventSLODeriver(),
 	}
 }
 
@@ -386,6 +392,9 @@ func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, even
 	redacted, truncated := ExecutionEventPayloadSanitizationSignals(&copy)
 	metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
 	success = true
+	if s.sloDeriver != nil {
+		s.sloDeriver.Derive([]ExecutionEvent{copy})
+	}
 	return &copy, nil
 }
 
@@ -426,6 +435,9 @@ func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filte
 			continue
 		}
 		if filter.SessionName != "" && event.SessionName != filter.SessionName {
+			continue
+		}
+		if filter.ToolCallID != "" && event.ToolCallID != filter.ToolCallID {
 			continue
 		}
 		if len(types) > 0 {
@@ -489,6 +501,9 @@ func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context
 		event = cloneExecutionEvent(event)
 		sessionSeq := fakeExecutionEventSessionSeq(event)
 		if sessionSeq <= filter.AfterSeq {
+			continue
+		}
+		if filter.ToolCallID != "" && event.ToolCallID != filter.ToolCallID {
 			continue
 		}
 		if len(types) > 0 {

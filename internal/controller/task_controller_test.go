@@ -27,7 +27,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	execevents "github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/labels"
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/store/sqlite"
 )
 
@@ -39,14 +41,16 @@ func newReconciler() *TaskReconciler {
 	}
 	ss := sqlite.NewStore(db, ":memory:")
 	return &TaskReconciler{
-		Client:          k8sClient,
-		Scheme:          k8sClient.Scheme(),
-		JobBuilder:      NewJobBuilder(k8sClient),
-		SessionManager:  NewSessionManager(ss),
-		WebhookNotifier: NewWebhookNotifier(),
-		Recorder:        record.NewFakeRecorder(100),
-		ResultStore:     ss,
-		PlanStore:       ss,
+		Client:              k8sClient,
+		Scheme:              k8sClient.Scheme(),
+		JobBuilder:          NewJobBuilder(k8sClient),
+		SessionManager:      NewSessionManager(ss),
+		WebhookNotifier:     NewWebhookNotifier(),
+		Recorder:            record.NewFakeRecorder(100),
+		ResultStore:         ss,
+		PlanStore:           ss,
+		ExecutionEventStore: ss,
+		RuntimeSessionStore: ss,
 	}
 }
 
@@ -124,6 +128,14 @@ var _ = Describe("Task Controller", func() {
 
 			// Save result to store
 			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("some-result"))).To(Succeed())
+			_, err := r.ExecutionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+				Namespace:  ns,
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   taskName,
+				TaskName:   taskName,
+				Type:       execevents.ExecutionEventTypeTaskStarted,
+			})
+			Expect(err).NotTo(HaveOccurred())
 
 			// Create the task with finalizer
 			task := &corev1alpha1.Task{
@@ -161,6 +173,15 @@ var _ = Describe("Task Controller", func() {
 			// Result should be deleted from store
 			_, err = r.ResultStore.GetResult(ctx, ns, taskName)
 			Expect(err).To(HaveOccurred())
+
+			// Execution events are task-coupled retention and should be deleted too.
+			listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+				Namespace:  ns,
+				StreamType: store.ExecutionEventStreamTypeTask,
+				StreamID:   taskName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(listed).To(BeEmpty())
 
 			// Task should be gone (finalizer removed → deletion completes)
 			err = k8sClient.Get(ctx, nn, &corev1alpha1.Task{})
