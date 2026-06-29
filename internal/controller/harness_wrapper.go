@@ -397,21 +397,28 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	var err error
 	startedPlannedTurn := false
 	if taskHasPlannedHarnessWrapperTurn(task) {
-		if !taskHasHarnessWrapperTurn(task) {
-			request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
-			if err != nil {
-				return r.failTask(ctx, task, err.Error())
-			}
-		} else {
+		if taskHasHarnessWrapperTurn(task) {
 			startedPlannedTurn = true
-			request, err = r.plannedHarnessWrapperStartTurnRequest(ctx, task, agent, now.Time)
-			if err != nil {
-				return r.failTask(ctx, task, err.Error())
-			}
 		}
-		request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
-		request.RuntimeSessionID = harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
-		request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
+		request, err = r.plannedHarnessWrapperStartTurnRequest(ctx, task, agent, now.Time)
+		if err != nil {
+			return r.failTask(ctx, task, err.Error())
+		}
+		targetAgent := agent
+		if strings.TrimSpace(request.Metadata["runtimeRef"]) == "" {
+			plannedRuntime := corev1alpha1.AgentRuntimeType(strings.TrimSpace(request.Metadata["runtime"]))
+			if plannedRuntime == "" {
+				plannedRuntime = corev1alpha1.AgentRuntimeClaude
+			}
+			targetAgent = &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: plannedRuntime}}}
+		}
+		target, err = r.resolveHarnessRuntimeTarget(ctx, task, targetAgent)
+		if err != nil {
+			if isAgentRuntimeDependencyNotReady(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
+		}
 	} else {
 		request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 		if err != nil {
@@ -1083,7 +1090,11 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 		return false
 	}
 	message := err.Error()
-	for _, marker := range []string{"(401)", "(403)", "(404)", "(410)", "turn not found", "unauthorized"} {
+	for _, marker := range []string{
+		"(401)", "(403)", "(404)", "(410)", "turn not found", "unauthorized",
+		"harness frame identity does not match", "invalid harness frame", "invalid harness frame content JSON",
+		"decode harness frame",
+	} {
 		if strings.Contains(message, marker) {
 			return true
 		}
@@ -1132,7 +1143,11 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	if task.Spec.Timeout != nil {
 		deadline = now.Add(task.Spec.Timeout.Duration)
 	}
-	runtimeName := agentHarnessRuntimeName(agent)
+	plannedMetadata := harnessWrapperPlannedMetadata(task, agentHarnessRuntimeName(agent))
+	runtimeName := strings.TrimSpace(plannedMetadata["runtime"])
+	if runtimeName == "" {
+		runtimeName = agentHarnessRuntimeName(agent)
+	}
 	attempts := harnessWrapperCurrentAttempt(task)
 	request, err := r.harnessWrapperStartTurnRequest(ctx, task, agent, now, attempts)
 	if err != nil {
@@ -1142,9 +1157,7 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	request.TurnID = harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
 	request.CorrelationID = strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
 	request.Deadline = deadline.UTC()
-	if request.Metadata == nil {
-		request.Metadata = harnessWrapperPlannedMetadata(task, runtimeName)
-	}
+	request.Metadata = plannedMetadata
 	return request, nil
 }
 

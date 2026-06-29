@@ -172,6 +172,11 @@ func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Reque
 	}
 	turn := &fakeTurn{request: request, cancelled: make(chan struct{})}
 	s.mu.Lock()
+	if _, exists := s.turns[request.TurnID]; exists {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+		return
+	}
 	s.turns[request.TurnID] = turn
 	s.mu.Unlock()
 	harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{

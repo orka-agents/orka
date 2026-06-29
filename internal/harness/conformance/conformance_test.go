@@ -101,6 +101,34 @@ func TestCheckFailsWhenTerminalFrameOmitted(t *testing.T) {
 	}
 }
 
+func TestCheckFailsWhenDuplicateStartAccepted(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.allowDuplicateStart = true
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "duplicate start turn was accepted") {
+		t.Fatalf("Message = %q, want duplicate start rejection", result.Message)
+	}
+}
+
+func TestCheckFailsWhenProbeFrameLimitExceeded(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.outputFrames = maxProbeFrames + 1
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "frame count exceeded") {
+		t.Fatalf("Message = %q, want frame count limit", result.Message)
+	}
+}
+
 func TestCheckFailsWhenStartTurnResponseOmitsEventStreamPath(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.omitEventStreamPath = true
@@ -135,6 +163,8 @@ type agentKitOrkaFixture struct {
 	authValue           string
 	omitEventStreamPath bool
 	frameType           harness.FrameType
+	allowDuplicateStart bool
+	outputFrames        int
 	mu                  sync.Mutex
 	turns               map[harness.HarnessTurnID]harness.StartTurnRequest
 }
@@ -142,10 +172,11 @@ type agentKitOrkaFixture struct {
 func newAgentKitOrkaFixture(t *testing.T) *agentKitOrkaFixture {
 	t.Helper()
 	fixture := &agentKitOrkaFixture{
-		runtimeName: "fibey-agentkit",
-		authValue:   "x",
-		frameType:   harness.FrameRuntimeOutput,
-		turns:       map[harness.HarnessTurnID]harness.StartTurnRequest{},
+		runtimeName:  "fibey-agentkit",
+		authValue:    "x",
+		frameType:    harness.FrameRuntimeOutput,
+		outputFrames: 1,
+		turns:        map[harness.HarnessTurnID]harness.StartTurnRequest{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, fixture.health)
@@ -215,6 +246,11 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	f.mu.Lock()
+	if _, exists := f.turns[request.TurnID]; exists && !f.allowDuplicateStart {
+		f.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already exists")
+		return
+	}
 	f.turns[request.TurnID] = request
 	f.mu.Unlock()
 	response := harness.StartTurnResponse{
@@ -266,12 +302,20 @@ func (f *agentKitOrkaFixture) turnResource(w http.ResponseWriter, r *http.Reques
 func (f *agentKitOrkaFixture) events(w http.ResponseWriter, request harness.StartTurnRequest) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	_ = harness.WriteSSEFrame(w, agentKitFrame(request, 1, harness.FrameTurnStarted, "turn started", nil))
-	output := agentKitFrame(request, 2, f.frameType, "runtime output", nil)
-	output.ContentText = "AgentKit Orka fixture output"
-	output.Content = json.RawMessage(`{"message":"AgentKit Orka fixture output"}`)
-	_ = harness.WriteSSEFrame(w, output)
-	completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: 3}
-	_ = harness.WriteSSEFrame(w, agentKitFrame(request, 3, harness.FrameTurnCompleted, "turn completed", completed))
+	outputFrames := f.outputFrames
+	if outputFrames <= 0 {
+		outputFrames = 1
+	}
+	for i := range outputFrames {
+		seq := int64(i + 2)
+		output := agentKitFrame(request, seq, f.frameType, "runtime output", nil)
+		output.ContentText = "AgentKit Orka fixture output"
+		output.Content = json.RawMessage(`{"message":"AgentKit Orka fixture output"}`)
+		_ = harness.WriteSSEFrame(w, output)
+	}
+	completedSeq := int64(outputFrames + 2)
+	completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: completedSeq}
+	_ = harness.WriteSSEFrame(w, agentKitFrame(request, completedSeq, harness.FrameTurnCompleted, "turn completed", completed))
 	_ = harness.WriteSSEDone(w)
 }
 

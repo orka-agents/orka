@@ -2,8 +2,12 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -82,6 +86,112 @@ func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T)
 	}
 	if !strings.Contains(updated.Status.Message, "401") && !strings.Contains(updated.Status.Message, "unauthorized") {
 		t.Fatalf("Message = %q, want auth failure", updated.Status.Message)
+	}
+}
+
+func TestAgentRuntimeReconcilerRechecksUnauthenticatedMutationOnReadyRuntime(t *testing.T) {
+	var requireAuth bool = true
+	turns := map[harness.HarnessTurnID]harness.StartTurnRequest{}
+	mux := http.NewServeMux()
+	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
+		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
+			Version:   harness.ProtocolVersion,
+			Status:    harness.HealthStatusOK,
+			Ready:     true,
+			CheckedAt: time.Now().UTC(),
+		})
+	})
+	mux.HandleFunc(harness.CapabilitiesPath, func(w http.ResponseWriter, r *http.Request) {
+		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+			Version:                 harness.ProtocolVersion,
+			ProtocolVersion:         harness.ProtocolVersion,
+			Transport:               harness.HTTPTransport,
+			RuntimeName:             "fibey-agentkit",
+			ProviderKind:            harness.ProviderKindKubernetesService,
+			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+			SupportsCancel:          true,
+			SupportsRuntimeSessions: true,
+		})
+	})
+	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var request harness.StartTurnRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			harness.WriteError(w, http.StatusBadRequest, "invalid JSON request")
+			return
+		}
+		if _, exists := turns[request.TurnID]; exists {
+			harness.WriteError(w, http.StatusConflict, "turn already exists")
+			return
+		}
+		turns[request.TurnID] = request
+		eventsPath, _ := harness.EventStreamPath(request.TurnID)
+		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+			Version:          harness.ProtocolVersion,
+			Accepted:         true,
+			RuntimeSessionID: request.RuntimeSessionID,
+			TurnID:           request.TurnID,
+			CorrelationID:    request.CorrelationID,
+			EventStreamPath:  eventsPath,
+		})
+	})
+	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+		if err != nil {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		request, ok := turns[turnID]
+		if !ok {
+			harness.WriteError(w, http.StatusNotFound, "turn not found")
+			return
+		}
+		switch resource {
+		case "events":
+			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{
+				Version:          harness.ProtocolVersion,
+				Type:             harness.FrameTurnCompleted,
+				RuntimeSessionID: request.RuntimeSessionID,
+				TurnID:           request.TurnID,
+				CorrelationID:    request.CorrelationID,
+				Seq:              1,
+				Completed:        &harness.TurnCompleted{Result: "ok", FinalEventSeq: 1},
+			})
+			_ = harness.WriteSSEDone(w)
+		case "cancel":
+			harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID})
+		default:
+			harness.WriteError(w, http.StatusNotFound, "not found")
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	requireAuth = false
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false after unauthenticated StartTurn became accepted")
+	}
+	if !strings.Contains(updated.Status.Message, "unauthenticated start turn was accepted") {
+		t.Fatalf("Message = %q, want unauthenticated start failure", updated.Status.Message)
 	}
 }
 

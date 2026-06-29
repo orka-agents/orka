@@ -653,6 +653,54 @@ func TestValidateTaskAgentCompatibility_ReadOnlyRuntimeRefRejected(t *testing.T)
 	}
 }
 
+func TestValidateTaskAgentCompatibility_StaleFrozenRuntimeRefStatusIgnoredWithoutPlannedTurn(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{
+			Type:         corev1alpha1.TaskTypeAgent,
+			Prompt:       "continue",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
+		},
+		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "stale-runtime"}},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for stale frozen runtimeRef status", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ActiveFrozenRuntimeRefStillRejectsPriorTaskRef(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			harnessWrapperTurnIDAnnotation:  "turn-1",
+			harnessWrapperRuntimeAnnotation: "runtime-1",
+			harnessWrapperCorrelationIDAnno: "corr-1",
+		}},
+		Spec: corev1alpha1.TaskSpec{
+			Type:         corev1alpha1.TaskTypeAgent,
+			Prompt:       "continue",
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "prior"},
+		},
+		Status: corev1alpha1.TaskStatus{HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{RuntimeRefName: "active-runtime"}},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "priorTaskRef") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want priorTaskRef rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_AgentTaskRuntimeRefValid(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{

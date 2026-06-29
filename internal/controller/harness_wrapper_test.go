@@ -407,6 +407,85 @@ func TestHarnessWrapperStartTurnUsesComputedAttemptForTurnID(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperPlannedBuiltInRetryUsesFrozenRuntimeMetadata(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	turnID := harnessWrapperTurnID(task, 1)
+	runtimeID := harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeCodex))
+	var startCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version:                 harness.ProtocolVersion,
+				ProtocolVersion:         harness.ProtocolVersion,
+				Transport:               harness.HTTPTransport,
+				RuntimeName:             "codex",
+				ProviderKind:            harness.ProviderKindKubernetesService,
+				ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+				SupportsCancel:          true,
+				SupportsRuntimeSessions: true,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == harness.TurnsPath:
+			startCalls++
+			var request harness.StartTurnRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if got := request.Metadata["runtime"]; got != "codex" {
+				harness.WriteError(w, http.StatusBadRequest, fmt.Sprintf("runtime metadata = %q, want codex", got))
+				return
+			}
+			if request.RuntimeSessionID != runtimeID {
+				harness.WriteError(w, http.StatusBadRequest, fmt.Sprintf("runtimeSessionID = %q", request.RuntimeSessionID))
+				return
+			}
+			streamPath, _ := harness.EventStreamPath(request.TurnID)
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{
+				Version:          harness.ProtocolVersion,
+				Accepted:         true,
+				RuntimeSessionID: request.RuntimeSessionID,
+				TurnID:           request.TurnID,
+				CorrelationID:    request.CorrelationID,
+				EventStreamPath:  streamPath,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(turnID),
+		harnessWrapperRuntimeAnnotation: string(runtimeID),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+		harnessWrapperLastFrameSeqAnno:  "0",
+		harnessWrapperStartedAnno:       "false",
+		harnessWrapperMetadataAnno:      `{"runtime":"codex","wrapper":"cli","contractVersion":"orka.harness.v1"}`,
+	}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+	r := newUnitReconciler(newTestScheme(), task, agent)
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("RequeueAfter = %s, want positive delay", result.RequeueAfter)
+	}
+	if startCalls != 1 {
+		t.Fatalf("StartTurn calls = %d, want 1", startCalls)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("phase = %s, want Running (message=%s)", updated.Status.Phase, updated.Status.Message)
+	}
+}
+
 func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
 	startCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1333,6 +1412,18 @@ func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
 	}
 	if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (401): unauthorized")) {
 		t.Fatal("unauthorized stream error should not be classified as missing turn")
+	}
+}
+
+func TestHarnessWrapperStreamTerminalErrorClassification(t *testing.T) {
+	for _, message := range []string{
+		"harness frame identity does not match running turn",
+		"invalid harness frame: turn completed payload is required",
+		"stream_frames failed: decode harness frame: invalid character",
+	} {
+		if !harnessWrapperStreamErrorIsTerminal(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should be terminal", message)
+		}
 	}
 }
 

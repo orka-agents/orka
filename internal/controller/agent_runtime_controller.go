@@ -87,6 +87,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		BaseURL:        runtime.Spec.Deployment.Endpoint,
 		BearerToken:    token,
 		ControlTimeout: agentRuntimeProbeTimeout,
+		RequireAuth:    true,
 	})
 	observed := observedCapabilitiesFromConformance(preflight.ObservedCapabilities)
 	if !preflight.Passed {

@@ -17,6 +17,8 @@ const (
 	defaultProbeTimeout      = 30 * time.Second
 	cleanupProbeTimeout      = 10 * time.Second
 	postTerminalDrainTimeout = 100 * time.Millisecond
+	maxProbeFrames           = 256
+	maxProbeFrameBytes       = 4 << 20
 )
 
 // Target identifies a harness endpoint to probe. BearerToken is used only for
@@ -91,11 +93,26 @@ func Check(ctx context.Context, target Target) Result {
 		if target.ProbeTurn {
 			runTurnProbe(ctx, target, &result, baseURL, controlTimeout)
 		} else if target.RequireAuth {
-			result.addFailure("RequireAuth requires ProbeTurn")
+			runAuthProbe(ctx, target, &result, baseURL, controlTimeout)
 		}
 	}
 	result.finalize()
 	return result
+}
+
+func runAuthProbe(ctx context.Context, target Target, result *Result, baseURL string, controlTimeout time.Duration) {
+	if strings.TrimSpace(target.BearerToken) == "" {
+		result.addFailure("bearer token is required for authenticated harness conformance")
+		return
+	}
+	request := defaultStartTurnRequest("conformance-auth")
+	if result.ObservedCapabilities != nil && strings.TrimSpace(result.ObservedCapabilities.RuntimeName) != "" {
+		request.Metadata["runtime"] = strings.TrimSpace(result.ObservedCapabilities.RuntimeName)
+	}
+	if target.StartTurnRequest != nil {
+		request = *target.StartTurnRequest
+	}
+	assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request)
 }
 
 func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL string, controlTimeout time.Duration) {
@@ -127,15 +144,24 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	if strings.TrimSpace(started.EventStreamPath) == "" {
 		result.addFailure("start turn response eventStreamPath is required")
 	}
+	assertDuplicateStartRejected(ctx, client, result, request)
 	if target.RequireAuth {
 		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
 	}
 	frames := []harness.HarnessEventFrame{}
+	var frameBytes int
 	streamCtx, cancel := context.WithTimeout(ctx, controlTimeout)
 	defer cancel()
 	terminalSeen := false
 	terminalDrainScheduled := false
 	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+		if len(frames) >= maxProbeFrames {
+			return fmt.Errorf("conformance probe frame count exceeded %d", maxProbeFrames)
+		}
+		frameBytes += approximateProbeFrameBytes(frame)
+		if frameBytes > maxProbeFrameBytes {
+			return fmt.Errorf("conformance probe frame bytes exceeded %d", maxProbeFrameBytes)
+		}
 		frames = append(frames, frame)
 		if isProbeTerminalFrame(frame.Type) {
 			terminalSeen = true
@@ -153,6 +179,35 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	if !validateProbeFrames(result, request, frames) {
 		cancelProbeTurn(ctx, client, result, request, "conformance probe did not complete")
 	}
+}
+
+func assertDuplicateStartRejected(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest) {
+	_, err := client.StartTurn(ctx, request)
+	if err == nil {
+		result.addFailure("duplicate start turn was accepted")
+		return
+	}
+	if !isDuplicateStartRejectedError(err) {
+		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection", err))
+	}
+}
+
+func isDuplicateStartRejectedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "turn already exists") || strings.Contains(message, "turn already completed")
+}
+
+func approximateProbeFrameBytes(frame harness.HarnessEventFrame) int {
+	size := len(frame.Version) + len(frame.Type) + len(frame.RuntimeSessionID) + len(frame.TurnID) + len(frame.CorrelationID) +
+		len(frame.Severity) + len(frame.Summary) + len(frame.Content) + len(frame.ContentText) + len(frame.ToolName) +
+		len(frame.ToolCallID) + len(frame.ApprovalID)
+	for key, value := range frame.Metadata {
+		size += len(key) + len(value)
+	}
+	return size
 }
 
 func assertUnauthenticatedStartRejected(
