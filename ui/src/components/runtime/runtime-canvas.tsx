@@ -7,7 +7,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { SonarPing } from '@/components/ui/sonar-ping'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
-import { StatusDot } from '@/components/ui/status-dot'
 import { useTaskListAll, useTaskEvents } from '@/hooks/use-tasks'
 import { useUIStore } from '@/stores/ui'
 import { isLiveTask, selectActiveTask } from '@/lib/runtime-activity'
@@ -48,11 +47,6 @@ export function RuntimeCanvas() {
   const tasks = data?.items ?? []
   const runningTasks = tasks.filter(isLiveTask)
   const active = selectActiveTask(tasks)
-  // remainingItemCount is best-effort/optional and is nulled under token
-  // filtering; a continue token alone still means more pages exist.
-  const truncated =
-    (data?.metadata?.remainingItemCount ?? 0) > 0 || Boolean(data?.metadata?.continue)
-
   const refreshCanvas = () => {
     queryClient.invalidateQueries({ queryKey: ['tasks'] })
     if (active) {
@@ -116,12 +110,6 @@ export function RuntimeCanvas() {
           </div>
           <AgentsRoster tasks={runningTasks} activeTaskName={active?.metadata.name} />
         </div>
-      )}
-
-      {truncated && (
-        <p className="text-xs text-muted-foreground">
-          <StatusDot phase="Pending" hideLabel /> Showing the first {tasks.length} tasks in “{namespace}”; more exist.
-        </p>
       )}
     </div>
   )
