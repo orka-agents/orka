@@ -550,7 +550,6 @@ stop_orka_api_port_forward() {
   pid="$(cat "${pid_file}")"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
     kill "${pid}" >/dev/null 2>&1 || true
-    wait "${pid}" 2>/dev/null || true
   fi
   rm -f "${pid_file}"
 }
