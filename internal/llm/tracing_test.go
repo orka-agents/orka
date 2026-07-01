@@ -12,11 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/tracing/genai"
@@ -252,6 +255,111 @@ func TestTracingProviderCompleteEmitsGenAISpan(t *testing.T) {
 	if got := histogramPointCount(rm, genai.MetricClientTokenUsage); got != 2 {
 		t.Fatalf("token usage datapoints = %d, want 2", got)
 	}
+}
+
+func TestTracingProviderInitializesAfterTelemetryConfigured(t *testing.T) {
+	setNoopTelemetry(t)
+
+	tp := NewTracingProvider(&telemetryProvider{
+		name:          "openai",
+		telemetryName: "openai",
+		resp: &CompletionResponse{
+			Content:      "ok",
+			Model:        "gpt-4o",
+			InputTokens:  3,
+			OutputTokens: 5,
+		},
+	})
+	h := testutil.NewSpanHarness(t)
+	mh := testutil.NewMetricHarness(t)
+
+	resp, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"})
+	if err != nil || resp == nil {
+		t.Fatalf("Complete() resp=%#v err=%v", resp, err)
+	}
+	if span := testutil.SpanNamed(h.Recorder.Ended(), "chat gpt-4o"); span == nil {
+		t.Fatal("missing chat span after telemetry provider was configured")
+	}
+	rm := mh.Collect(t)
+	if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {
+		t.Fatalf("operation duration datapoints = %d, want 1", got)
+	}
+}
+
+func TestTracingProviderInitializesSignalsIndependently(t *testing.T) {
+	t.Run("metrics after tracer", func(t *testing.T) {
+		setNoopTelemetry(t)
+		h := testutil.NewSpanHarness(t)
+		tp := NewTracingProvider(&telemetryProvider{
+			name:          "openai",
+			telemetryName: "openai",
+			resp: &CompletionResponse{
+				Content:      "ok",
+				Model:        "gpt-4o",
+				InputTokens:  3,
+				OutputTokens: 5,
+			},
+		})
+
+		if _, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"}); err != nil {
+			t.Fatalf("Complete() error = %v", err)
+		}
+		if span := testutil.SpanNamed(h.Recorder.Ended(), "chat gpt-4o"); span == nil {
+			t.Fatal("missing chat span with tracer configured")
+		}
+
+		mh := testutil.NewMetricHarness(t)
+		if _, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"}); err != nil {
+			t.Fatalf("Complete() after meter configured error = %v", err)
+		}
+		rm := mh.Collect(t)
+		if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {
+			t.Fatalf("operation duration datapoints = %d, want 1", got)
+		}
+	})
+
+	t.Run("tracer after metrics", func(t *testing.T) {
+		setNoopTelemetry(t)
+		mh := testutil.NewMetricHarness(t)
+		tp := NewTracingProvider(&telemetryProvider{
+			name:          "openai",
+			telemetryName: "openai",
+			resp: &CompletionResponse{
+				Content:      "ok",
+				Model:        "gpt-4o",
+				InputTokens:  3,
+				OutputTokens: 5,
+			},
+		})
+
+		if _, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"}); err != nil {
+			t.Fatalf("Complete() error = %v", err)
+		}
+		rm := mh.Collect(t)
+		if got := histogramPointCount(rm, genai.MetricClientOperationDuration); got != 1 {
+			t.Fatalf("operation duration datapoints = %d, want 1", got)
+		}
+
+		h := testutil.NewSpanHarness(t)
+		if _, err := tp.Complete(context.Background(), &CompletionRequest{Model: "gpt-4o"}); err != nil {
+			t.Fatalf("Complete() after tracer configured error = %v", err)
+		}
+		if span := testutil.SpanNamed(h.Recorder.Ended(), "chat gpt-4o"); span == nil {
+			t.Fatal("missing chat span after tracer configured")
+		}
+	})
+}
+
+func setNoopTelemetry(t *testing.T) {
+	t.Helper()
+	previousTracerProvider := otel.GetTracerProvider()
+	previousMeterProvider := otel.GetMeterProvider()
+	otel.SetTracerProvider(tracenoop.NewTracerProvider())
+	otel.SetMeterProvider(metricnoop.NewMeterProvider())
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previousTracerProvider)
+		otel.SetMeterProvider(previousMeterProvider)
+	})
 }
 
 func TestTracingProviderCompleteSkipsTokenUsageWhenCountsMissing(t *testing.T) {
