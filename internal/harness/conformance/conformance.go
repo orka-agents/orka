@@ -242,6 +242,12 @@ func runBrokeredProbe(
 		request.Metadata = map[string]string{}
 	}
 	request.Input.Prompt = fmt.Sprintf("Orka brokered %s conformance probe. Request one brokered tool and complete after the result.", profile)
+	request.Input.Tools = []harness.ToolDefinition{{
+		Name:          "conformance_" + string(profile),
+		Description:   "Synthetic Orka conformance tool schema",
+		BrokeredClass: profile,
+		Parameters:    json.RawMessage(`{"type":"object","additionalProperties":true}`),
+	}}
 	if result.ObservedCapabilities != nil && strings.TrimSpace(result.ObservedCapabilities.RuntimeName) != "" {
 		request.Metadata["runtime"] = strings.TrimSpace(result.ObservedCapabilities.RuntimeName)
 	}

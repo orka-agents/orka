@@ -75,6 +75,9 @@ const (
 	// ConditionTypeJobCreated indicates a Job has been created
 	ConditionTypeJobCreated = "JobCreated"
 
+	// ConditionTypeWaitingForApproval indicates a running task is parked on a human approval.
+	ConditionTypeWaitingForApproval = "WaitingForApproval"
+
 	// jobCreationVisibilityGracePeriod avoids failing a task when the controller cache
 	// has not observed the Job immediately after create.
 	jobCreationVisibilityGracePeriod = 30 * time.Second
@@ -2237,6 +2240,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		t.Status.CompletionTime = &now
 		t.Status.Message = message
 		t.Status.ResultRef = resultRef
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeWaitingForApproval,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            "task is terminal",
+		})
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeComplete,
 			Status:             conditionStatus,

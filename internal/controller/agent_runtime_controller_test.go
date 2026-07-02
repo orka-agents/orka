@@ -79,7 +79,12 @@ func TestValidateAgentRuntimeRequiredCapabilitiesChecksBrokeredProfiles(t *testi
 	}
 }
 
-func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeNotReadyUntilConformanceExists(t *testing.T) {
+func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConformancePasses(t *testing.T) {
+	type turnState struct {
+		request   harness.StartTurnRequest
+		continued chan harness.ContinueTurnRequest
+	}
+	turns := map[harness.HarnessTurnID]*turnState{}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
 		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
@@ -108,7 +113,52 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeNotReadyUntilConformanceE
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		harness.WriteError(w, http.StatusNotImplemented, "brokered conformance not implemented")
+		var request harness.StartTurnRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		turns[request.TurnID] = &turnState{request: request, continued: make(chan harness.ContinueTurnRequest, 1)}
+		eventsPath, _ := harness.EventStreamPath(request.TurnID)
+		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, EventStreamPath: eventsPath})
+	})
+	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+		if err != nil {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		turn := turns[turnID]
+		if turn == nil {
+			harness.WriteError(w, http.StatusNotFound, "turn not found")
+			return
+		}
+		switch resource {
+		case harness.TurnResourceEvents:
+			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnStarted, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 1})
+			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 2, ToolName: "conformance_read", ToolCallID: "call-1", Content: json.RawMessage(`{"probe":true}`)})
+			select {
+			case continued := <-turn.continued:
+				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolResultReceived, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 3, ToolName: "conformance_read", ToolCallID: "call-1", Content: continued.ToolResults[0].Output})
+				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnCompleted, RuntimeSessionID: turn.request.RuntimeSessionID, TurnID: turn.request.TurnID, CorrelationID: turn.request.CorrelationID, Seq: 4, Completed: &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}})
+			case <-time.After(2 * time.Second):
+			}
+			_ = harness.WriteSSEDone(w)
+		case harness.TurnResourceContinue:
+			var request harness.ContinueTurnRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
+				return
+			}
+			turn.continued <- request
+			harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID})
+		default:
+			harness.WriteError(w, http.StatusNotFound, "not found")
+		}
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -130,11 +180,11 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeNotReadyUntilConformanceE
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
 		t.Fatalf("Get AgentRuntime: %v", err)
 	}
-	if updated.Status.Ready {
-		t.Fatalf("Ready = true, want false until brokered turn conformance exists")
+	if !updated.Status.Ready {
+		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
 	}
-	if !strings.Contains(updated.Status.Message, "brokered-only turn conformance is not implemented") {
-		t.Fatalf("Message = %q, want brokered-only conformance message", updated.Status.Message)
+	if updated.Status.ObservedCapabilities == nil || len(updated.Status.ObservedCapabilities.ToolExecutionModes) != 1 || updated.Status.ObservedCapabilities.ToolExecutionModes[0] != corev1alpha1.AgentRuntimeToolExecutionModeBrokered {
+		t.Fatalf("ObservedCapabilities = %#v, want brokered-only", updated.Status.ObservedCapabilities)
 	}
 }
 
@@ -566,6 +616,52 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 		Data:       map[string][]byte{"token": []byte("x")},
 	}
 	return runtime, secret
+}
+
+func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret("http://runtime.example.com")
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if err := validateAgentRuntimeSpec(runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeSpec() error = %v", err)
+	}
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy() = %v, want https requirement", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(cluster-local) error = %v", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "http://runtime.default:8080"
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}}
+	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(service-namespace) error = %v", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "http://runtime.dev:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(namespace-like external) = %v, want https requirement", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "http://runtime.svc.attacker.com"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-looking external) = %v, want https requirement", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("validateAgentRuntimeSpec(credentials) = %v, want credentials rejection", err)
+	}
+}
+
+func TestValidateAgentRuntimeExecutableCapabilitiesRequiresBrokeredContinuation(t *testing.T) {
+	err := validateAgentRuntimeExecutableCapabilities(&harness.CapabilitiesResponse{
+		RuntimeName:             "runtime-a",
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
+		BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+		SupportsCancel:          true,
+		SupportsRuntimeSessions: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "supportsContinuation") {
+		t.Fatalf("validateAgentRuntimeExecutableCapabilities() error = %v, want continuation requirement", err)
+	}
 }
 
 func TestValidateObservedHarnessCapabilitiesRequiresCancelAndSessions(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/events"
@@ -25,9 +26,40 @@ import (
 	"github.com/sozercan/orka/internal/workerenv"
 )
 
-const harnessWrapperBrokeredToolTimeout = 30 * time.Second
+const (
+	harnessWrapperBrokeredToolTimeout = 30 * time.Second
+	harnessBrokeredToolDelegateTask   = "delegate_task"
+	harnessBrokeredToolWaitForTasks   = "wait_for_tasks"
+	harnessBrokeredToolCancelTask     = "cancel_task"
+	harnessBrokeredToolSendMessage    = "send_message"
+	harnessBrokeredToolCheckMessages  = "check_messages"
+)
 
 var errHarnessBrokeredApprovalPending = errors.New("brokered tool call awaiting approval")
+
+type harnessBrokeredApprovalPendingError struct {
+	approvalID string
+	toolName   string
+}
+
+func (e harnessBrokeredApprovalPendingError) Error() string {
+	if strings.TrimSpace(e.approvalID) == "" {
+		return errHarnessBrokeredApprovalPending.Error()
+	}
+	return fmt.Sprintf("brokered tool call awaiting approval %s", e.approvalID)
+}
+
+func (e harnessBrokeredApprovalPendingError) Is(target error) bool {
+	return target == errHarnessBrokeredApprovalPending
+}
+
+func harnessBrokeredPendingApproval(err error) (string, string, bool) {
+	var pending harnessBrokeredApprovalPendingError
+	if errors.As(err, &pending) {
+		return strings.TrimSpace(pending.approvalID), strings.TrimSpace(pending.toolName), true
+	}
+	return "", "", false
+}
 
 func harnessWrapperBrokeredToolNames(task *corev1alpha1.Task) []string {
 	if task != nil && task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.AllowedTools) > 0 {
@@ -69,7 +101,7 @@ func harnessWrapperToolExecutionMode(task *corev1alpha1.Task, agent *corev1alpha
 
 func isHarnessBrokeredCoordinationToolName(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "delegate_task", "wait_for_tasks", "cancel_task", "send_message", "check_messages":
+	case harnessBrokeredToolDelegateTask, harnessBrokeredToolWaitForTasks, harnessBrokeredToolCancelTask, harnessBrokeredToolSendMessage, harnessBrokeredToolCheckMessages:
 		return true
 	default:
 		return false
@@ -78,15 +110,15 @@ func isHarnessBrokeredCoordinationToolName(name string) bool {
 
 func (r *TaskReconciler) harnessBrokeredCoordinationTool(name string) toolspkg.Tool {
 	switch strings.TrimSpace(name) {
-	case "delegate_task":
+	case harnessBrokeredToolDelegateTask:
 		return toolspkg.NewDelegateTaskTool(r.Client)
-	case "wait_for_tasks":
+	case harnessBrokeredToolWaitForTasks:
 		return toolspkg.NewWaitForTasksTool(r.Client)
-	case "cancel_task":
+	case harnessBrokeredToolCancelTask:
 		return toolspkg.NewCancelTaskTool(r.Client)
-	case "send_message":
+	case harnessBrokeredToolSendMessage:
 		return toolspkg.NewSendMessageTool()
-	case "check_messages":
+	case harnessBrokeredToolCheckMessages:
 		return toolspkg.NewCheckMessagesTool()
 	default:
 		return nil
@@ -208,7 +240,16 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		result.Error = brokeredToolError("invalid_tool_call", err)
 		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil))
 	}
-	if previous, ok, err := r.previousHarnessBrokeredToolResult(ctx, task, frame, idempotencyKey); err != nil {
+	args := frame.Content
+	if len(args) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	argsDigest, err := approvals.TargetArgsDigest(args)
+	if err != nil {
+		result.Error = brokeredToolError("invalid_tool_arguments", err)
+		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, map[string]any{"targetArgsDigestError": true}))
+	}
+	if previous, ok, err := r.previousHarnessBrokeredToolResult(ctx, task, frame, idempotencyKey, argsDigest); err != nil {
 		return result, err
 	} else if ok {
 		return previous, nil
@@ -260,9 +301,10 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	}
 	execIdempotencyKey := idempotencyKey
 	approvalID := ""
-	args := frame.Content
-	if len(args) == 0 {
-		args = json.RawMessage(`{}`)
+	if err := validateBrokeredToolArguments(tool, args); err != nil {
+		result.Error = brokeredToolError("invalid_tool_arguments", err)
+		content := brokeredToolEventContent(result, map[string]any{"targetArgsDigest": argsDigest})
+		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
 	}
 	switch tool.Spec.BrokeredToolClass {
 	case corev1alpha1.AgentRuntimeBrokeredToolClassRead:
@@ -279,7 +321,7 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		if !approved {
 			result.Approved = false
 			result.Error = &harness.ErrorInfo{Code: "approval_declined", Message: "approval declined"}
-			content := brokeredToolEventContent(result, map[string]any{"approvalID": decisionApprovalID})
+			content := brokeredToolEventContent(result, map[string]any{"approvalID": decisionApprovalID, "targetArgsDigest": argsDigest, "approved": false})
 			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, "approval declined", content)
 		}
 		execIdempotencyKey = decisionApprovalID
@@ -289,6 +331,31 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		result.Error = brokeredToolError("tool_class_not_allowed", err)
 		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil))
 	}
+	if tool.Spec.BrokeredToolClass == corev1alpha1.AgentRuntimeBrokeredToolClassWrite {
+		if started, err := r.hasUnresolvedHarnessBrokeredToolExecution(ctx, task, frame, idempotencyKey, argsDigest); err != nil {
+			return result, err
+		} else if started {
+			err := fmt.Errorf("brokered write tool %q has an unresolved prior execution ledger entry", toolName)
+			result.Error = brokeredToolError("tool_execution_outcome_unknown", err)
+			content := brokeredToolEventContent(result, map[string]any{
+				"targetArgsDigest":        argsDigest,
+				"approvalID":              approvalID,
+				"executionIdempotencyKey": execIdempotencyKey,
+				"outcomeUnknown":          true,
+			})
+			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
+		}
+		content := brokeredToolEventContent(result, map[string]any{
+			"targetArgsDigest":        argsDigest,
+			"approvalID":              approvalID,
+			"executionIdempotencyKey": execIdempotencyKey,
+			"brokeredClass":           string(tool.Spec.BrokeredToolClass),
+			"executionState":          "started",
+		})
+		if err := r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallStarted, "brokered write tool execution started", content); err != nil {
+			return result, err
+		}
+	}
 	execCtx, cancel := context.WithTimeout(ctx, harnessWrapperBrokeredToolTimeout)
 	defer cancel()
 	execCtx = worker.WithToolCallID(execCtx, frame.ToolCallID)
@@ -297,13 +364,21 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	output, err := executor.Execute(execCtx, tool, args)
 	if err != nil {
 		result.Error = brokeredToolError("tool_execution_failed", err)
-		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil))
+		content := brokeredToolEventContent(result, map[string]any{
+			"targetArgsDigest":        argsDigest,
+			"approvalID":              approvalID,
+			"executionIdempotencyKey": execIdempotencyKey,
+			"toolRequestAttempted":    worker.ToolRequestWasAttempted(err),
+		})
+		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
 	}
 	result.Output = brokeredToolOutput(output)
 	content := brokeredToolEventContent(result, map[string]any{
-		"resultLength":  len(output),
-		"brokeredClass": string(tool.Spec.BrokeredToolClass),
-		"approvalID":    approvalID,
+		"targetArgsDigest":        argsDigest,
+		"executionIdempotencyKey": execIdempotencyKey,
+		"resultLength":            len(output),
+		"brokeredClass":           string(tool.Spec.BrokeredToolClass),
+		"approvalID":              approvalID,
 	})
 	return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallCompleted, "brokered tool call completed", content)
 }
@@ -327,7 +402,7 @@ func (r *TaskReconciler) ensureHarnessBrokeredWriteApproval(
 		if err := r.recordHarnessBrokeredApprovalRequested(ctx, task, frame, target); err != nil {
 			return false, target.ApprovalID, err
 		}
-		return false, target.ApprovalID, errHarnessBrokeredApprovalPending
+		return false, target.ApprovalID, harnessBrokeredApprovalPendingError{approvalID: target.ApprovalID, toolName: tool.Name}
 	}
 	if approval.TargetArgsDigest != target.TargetArgsDigest || approval.TargetSpecDigest != target.TargetSpecDigest {
 		return false, target.ApprovalID, fmt.Errorf("approval target changed for %s", target.TargetTool)
@@ -338,7 +413,7 @@ func (r *TaskReconciler) ensureHarnessBrokeredWriteApproval(
 	case approvals.StatusDeclined, approvals.StatusExpired, approvals.StatusCancelled:
 		return false, target.ApprovalID, nil
 	default:
-		return false, target.ApprovalID, errHarnessBrokeredApprovalPending
+		return false, target.ApprovalID, harnessBrokeredApprovalPendingError{approvalID: target.ApprovalID, toolName: tool.Name}
 	}
 }
 
@@ -430,11 +505,59 @@ func (r *TaskReconciler) recordHarnessBrokeredApprovalRequested(
 	return err
 }
 
+func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	frame harness.HarnessEventFrame,
+	idempotencyKey string,
+	argsDigest string,
+) (bool, error) {
+	if r == nil || r.ExecutionEventStore == nil || task == nil {
+		return false, nil
+	}
+	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamID:   task.Name,
+		EventTypes: []string{events.ExecutionEventTypeToolCallStarted, events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed},
+	})
+	if err != nil {
+		return false, fmt.Errorf("read brokered tool ledger: %w", err)
+	}
+	started := false
+	for _, event := range listed {
+		if event.ToolCallID != frame.ToolCallID || event.ToolName != frame.ToolName {
+			continue
+		}
+		var payload struct {
+			Brokered         bool   `json:"brokered"`
+			IdempotencyKey   string `json:"idempotencyKey"`
+			TargetArgsDigest string `json:"targetArgsDigest,omitempty"`
+			ExecutionState   string `json:"executionState,omitempty"`
+		}
+		if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
+			continue
+		}
+		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
+			continue
+		}
+		switch event.Type {
+		case events.ExecutionEventTypeToolCallStarted:
+			if payload.ExecutionState == "started" {
+				started = true
+			}
+		case events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed:
+			started = false
+		}
+	}
+	return started, nil
+}
+
 func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	frame harness.HarnessEventFrame,
 	idempotencyKey string,
+	argsDigest string,
 ) (harness.ToolCallResult, bool, error) {
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
 		return harness.ToolCallResult{}, false, nil
@@ -453,13 +576,31 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 			continue
 		}
 		var payload struct {
-			Brokered       bool               `json:"brokered"`
-			IdempotencyKey string             `json:"idempotencyKey"`
-			ToolResult     json.RawMessage    `json:"toolResult,omitempty"`
-			ToolError      *harness.ErrorInfo `json:"toolError,omitempty"`
+			Brokered         bool               `json:"brokered"`
+			IdempotencyKey   string             `json:"idempotencyKey"`
+			TargetArgsDigest string             `json:"targetArgsDigest,omitempty"`
+			Approved         *bool              `json:"approved,omitempty"`
+			ToolResult       json.RawMessage    `json:"toolResult,omitempty"`
+			ToolError        *harness.ErrorInfo `json:"toolError,omitempty"`
 		}
 		if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
 			continue
+		}
+		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
+			result := harness.ToolCallResult{
+				Version:          harness.ProtocolVersion,
+				RuntimeSessionID: frame.RuntimeSessionID,
+				TurnID:           frame.TurnID,
+				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+				IdempotencyKey:   idempotencyKey,
+				Approved:         false,
+				Error:            &harness.ErrorInfo{Code: "tool_call_arguments_changed", Message: "brokered tool call arguments changed after a result was recorded"},
+			}
+			return result, true, nil
+		}
+		approved := true
+		if payload.Approved != nil {
+			approved = *payload.Approved
 		}
 		result := harness.ToolCallResult{
 			Version:          harness.ProtocolVersion,
@@ -467,7 +608,7 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 			TurnID:           frame.TurnID,
 			ToolCallID:       strings.TrimSpace(frame.ToolCallID),
 			IdempotencyKey:   idempotencyKey,
-			Approved:         true,
+			Approved:         approved,
 			Output:           payload.ToolResult,
 			Error:            payload.ToolError,
 		}
@@ -482,6 +623,7 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 func brokeredToolEventContent(result harness.ToolCallResult, extra map[string]any) map[string]any {
 	content := map[string]any{
 		"idempotencyKey": result.IdempotencyKey,
+		"approved":       result.Approved,
 	}
 	if len(result.Output) > 0 {
 		content["toolResult"] = result.Output
@@ -491,6 +633,34 @@ func brokeredToolEventContent(result harness.ToolCallResult, extra map[string]an
 	}
 	maps.Copy(content, extra)
 	return content
+}
+
+func validateBrokeredToolArguments(tool *corev1alpha1.Tool, args json.RawMessage) error {
+	if len(args) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	var decoded any
+	if err := json.Unmarshal(args, &decoded); err != nil {
+		return fmt.Errorf("brokered tool arguments must be valid JSON: %w", err)
+	}
+	if _, ok := decoded.(map[string]any); !ok {
+		return fmt.Errorf("brokered tool arguments must be a JSON object")
+	}
+	if tool == nil || tool.Spec.Parameters == nil || len(tool.Spec.Parameters.Raw) == 0 {
+		return nil
+	}
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(tool.Spec.Parameters.Raw, &schema); err != nil {
+		return fmt.Errorf("brokered tool schema is invalid JSON: %w", err)
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return fmt.Errorf("brokered tool schema is invalid: %w", err)
+	}
+	if err := resolved.Validate(decoded); err != nil {
+		return fmt.Errorf("brokered tool arguments do not match schema: %w", err)
+	}
+	return nil
 }
 
 func (r *TaskReconciler) continueHarnessBrokeredToolCall(
@@ -524,6 +694,9 @@ func (r *TaskReconciler) continueHarnessBrokeredToolCall(
 	})
 	if err != nil {
 		return fmt.Errorf("continue brokered tool call %q: %w", frame.ToolCallID, err)
+	}
+	if err := r.clearHarnessBrokeredApprovalWaiting(ctx, task, frame.ToolName); err != nil {
+		return err
 	}
 	return nil
 }

@@ -128,7 +128,7 @@ func (s *FakeHarnessServer) handleCapabilities(w http.ResponseWriter, r *http.Re
 		RuntimeName:             s.config.RuntimeName,
 		RuntimeVersion:          s.config.RuntimeVersion,
 		ProviderKind:            s.config.ProviderKind,
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
 		SupportsCancel:          true,
 		SupportsRuntimeSessions: true,
 		MaxConcurrentTurns:      1,

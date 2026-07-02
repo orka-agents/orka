@@ -14,6 +14,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/sozercan/orka/internal/labels"
 	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/workers/common"
 	"github.com/sozercan/orka/workers/harness/cliwrapper"
 )
 
@@ -321,6 +324,121 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	}
 }
 
+func TestHarnessWrapperBrokeredReplayRejectsChangedArguments(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executions.Add(1)
+		_, _ = w.Write([]byte(`{"success":true,"data":{"status":"investigating"}}`))
+	}))
+	defer toolServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	frame := harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: "runtime-session", TurnID: "turn-1", CorrelationID: "corr-1", Seq: 1, ToolName: "read_incident", ToolCallID: "call-1", Content: json.RawMessage(`{"incident":"inc-1"}`)}
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil || result.Error != nil {
+		t.Fatalf("first handle = %#v, %v", result, err)
+	}
+	changed := frame
+	changed.Content = json.RawMessage(`{"incident":"inc-2"}`)
+	result, err = r.handleHarnessBrokeredToolCall(context.Background(), task, agent, changed)
+	if err != nil {
+		t.Fatalf("changed handle error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "tool_call_arguments_changed" {
+		t.Fatalf("result = %#v, want changed arguments error", result)
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("executions = %d, want cached failure without second call", executions.Load())
+	}
+}
+
+func TestHarnessWrapperBrokeredReadRejectsInvalidArgsBeforeExecution(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executions.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			Parameters:        &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","required":["incident"],"properties":{"incident":{"type":"string"}}}`)},
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         "read_incident",
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"other":"value"}`),
+	}
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "invalid_tool_arguments" {
+		t.Fatalf("result = %#v, want invalid_tool_arguments", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("executions = %d, want none", executions.Load())
+	}
+}
+
+func TestHarnessWrapperBrokeredWriteRejectsInvalidArgsBeforeApproval(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"dispatch_work_order"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "dispatch_work_order", Namespace: task.Namespace, ResourceVersion: "1"},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Dispatch technician",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
+			Parameters:        &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","required":["incident"],"properties":{"incident":{"type":"string"}}}`)},
+			HTTP:              &corev1alpha1.HTTPExecution{URL: "http://tool.invalid"},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	frame := brokeredWriteFrame()
+	frame.Content = json.RawMessage(`{"action":"dispatch technician"}`)
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "invalid_tool_arguments" {
+		t.Fatalf("result = %#v, want invalid_tool_arguments", result)
+	}
+	listed, err := r.ExecutionEventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: task.Namespace, StreamID: task.Name, EventTypes: []string{events.ExecutionEventTypeApprovalRequested}})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("approval events = %d, want none", len(listed))
+	}
+}
+
 func TestHarnessWrapperBrokeredToolCallRejectsDisallowedAndUnclassifiedTools(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -511,6 +629,63 @@ func TestHarnessWrapperBrokeredWriteToolRequestsApprovalThenExecutesAfterApprova
 	}
 }
 
+func TestHarnessWrapperBrokeredWriteToolFailsClosedForUnresolvedExecutionLedger(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executions.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"dispatch_work_order"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "dispatch_work_order", Namespace: task.Namespace, ResourceVersion: "1"},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Dispatch technician",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
+			HTTP:              &corev1alpha1.HTTPExecution{URL: toolServer.URL},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	frame := brokeredWriteFrame()
+	_, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if !errors.Is(err, errHarnessBrokeredApprovalPending) {
+		t.Fatalf("first handleHarnessBrokeredToolCall() error = %v, want pending", err)
+	}
+	approvalID := brokeredApprovalIDForTest(t, r, task)
+	appendApprovalDecisionForTest(t, r, task, approvalID, events.ExecutionEventTypeApprovalApproved)
+	idempotencyKey := harness.ToolRequestIdempotencyKey(frame.RuntimeSessionID, frame.TurnID, frame.ToolCallID)
+	content, _ := json.Marshal(map[string]any{
+		"brokered":       true,
+		"idempotencyKey": idempotencyKey,
+		"executionState": "started",
+	})
+	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace:  task.Namespace,
+		StreamID:   task.Name,
+		TaskName:   task.Name,
+		Type:       events.ExecutionEventTypeToolCallStarted,
+		ToolName:   frame.ToolName,
+		ToolCallID: frame.ToolCallID,
+		Content:    content,
+	}); err != nil {
+		t.Fatalf("append unresolved ledger: %v", err)
+	}
+
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "tool_execution_outcome_unknown" {
+		t.Fatalf("result = %#v, want outcome unknown error", result)
+	}
+	if executions.Load() != 0 {
+		t.Fatalf("executions = %d, want fail-closed without duplicate side effect", executions.Load())
+	}
+}
+
 func TestHarnessWrapperBrokeredWriteToolDeclineContinuesWithoutExecution(t *testing.T) {
 	var executions atomic.Int32
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -549,6 +724,13 @@ func TestHarnessWrapperBrokeredWriteToolDeclineContinuesWithoutExecution(t *test
 	}
 	if executions.Load() != 0 {
 		t.Fatalf("executions after decline = %d, want 0", executions.Load())
+	}
+	result, err = r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("decline replay error = %v", err)
+	}
+	if result.Approved || result.Error == nil || result.Error.Code != "approval_declined" {
+		t.Fatalf("decline replay result = %#v, want Approved=false approval_declined", result)
 	}
 }
 
@@ -726,6 +908,36 @@ func brokeredWriteFrame() harness.HarnessEventFrame {
 		ToolName:         "dispatch_work_order",
 		ToolCallID:       "call-write-1",
 		Content:          json.RawMessage(`{"incident":"quincy-north","action":"dispatch technician"}`),
+	}
+}
+
+func TestMarkHarnessBrokeredApprovalWaitingSetsTaskCondition(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Status.Phase = corev1alpha1.TaskPhaseRunning
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	if err := r.markHarnessBrokeredApprovalWaiting(context.Background(), task, "approval-canonical", "dispatch_work_order"); err != nil {
+		t.Fatalf("markHarnessBrokeredApprovalWaiting: %v", err)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeWaitingForApproval)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != "BrokeredToolApprovalPending" {
+		t.Fatalf("WaitingForApproval condition = %#v", cond)
+	}
+	if !strings.Contains(updated.Status.Message, "approval-canonical") {
+		t.Fatalf("status message = %q", updated.Status.Message)
+	}
+	if err := r.clearHarnessBrokeredApprovalWaiting(context.Background(), task, "dispatch_work_order"); err != nil {
+		t.Fatalf("clearHarnessBrokeredApprovalWaiting: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("get cleared task: %v", err)
+	}
+	cond = meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeWaitingForApproval)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "BrokeredToolContinued" {
+		t.Fatalf("cleared WaitingForApproval condition = %#v", cond)
 	}
 }
 
@@ -1660,6 +1872,104 @@ func hasExecutionEventType(eventsList []store.ExecutionEvent, typ string) bool {
 		}
 	}
 	return false
+}
+
+func TestHarnessWrapperCapabilitiesUseInputToolsForRequiredBrokeredClasses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != harness.CapabilitiesPath {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+			Version:                 harness.ProtocolVersion,
+			ProtocolVersion:         harness.ProtocolVersion,
+			Transport:               harness.HTTPTransport,
+			RuntimeName:             "brokered-runtime",
+			ProviderKind:            harness.ProviderKindRemote,
+			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
+			BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+			SupportsRuntimeSessions: true,
+			SupportsContinuation:    true,
+		})
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	request := harness.StartTurnRequest{
+		Metadata:          map[string]string{"runtime": "brokered-runtime", "runtimeRef": "runtime", "brokeredToolClasses": "read"},
+		ToolExecutionMode: harness.ToolExecutionModeBrokered,
+		Input: harness.TurnInput{Tools: []harness.ToolDefinition{{
+			Name:          "dispatch_work_order",
+			BrokeredClass: harness.BrokeredToolClassWrite,
+		}}},
+	}
+	err = (&TaskReconciler{}).validateHarnessWrapperCapabilities(context.Background(), client, request)
+	if err == nil || !strings.Contains(err.Error(), "brokeredToolClass") || !strings.Contains(err.Error(), "write") {
+		t.Fatalf("validateHarnessWrapperCapabilities() = %v, want write class rejection from input.tools", err)
+	}
+}
+
+func TestHarnessWrapperTurnRequestCarriesSafeBrokeredToolSchemas(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident", "delegate_task"}}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident status",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			Parameters:        &apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"incident":{"type":"string"}}}`)},
+			HTTP:              &corev1alpha1.HTTPExecution{URL: "https://tools.example.invalid/read", AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "tool-secret", Key: "token"}},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	if request.ToolExecutionMode != harness.ToolExecutionModeBrokered {
+		t.Fatalf("ToolExecutionMode = %q, want brokered", request.ToolExecutionMode)
+	}
+	if len(request.Input.Tools) != 2 {
+		t.Fatalf("Input.Tools = %#v, want read tool and coordination tool", request.Input.Tools)
+	}
+	byName := map[string]harness.ToolDefinition{}
+	for _, definition := range request.Input.Tools {
+		byName[definition.Name] = definition
+		encoded, _ := json.Marshal(definition)
+		if strings.Contains(string(encoded), "tools.example") || strings.Contains(string(encoded), "tool-secret") {
+			t.Fatalf("tool definition leaked execution details: %s", encoded)
+		}
+	}
+	read := byName["read_incident"]
+	if read.Description != "Read incident status" || read.BrokeredClass != harness.BrokeredToolClassRead || !json.Valid(read.Parameters) {
+		t.Fatalf("read tool definition = %#v", read)
+	}
+	coord := byName["delegate_task"]
+	if coord.BrokeredClass != harness.BrokeredToolClassCoordination || coord.Description == "" {
+		t.Fatalf("coordination tool definition = %#v", coord)
+	}
+}
+
+func TestHarnessWrapperCompletedResultBytesPreservesStructuredPayload(t *testing.T) {
+	encoded := harnessWrapperCompletedResultBytes(&harness.TurnCompleted{
+		Result: "done",
+		Data:   map[string]any{"incident": "quincy-north", "score": float64(0.9)},
+		Artifacts: []harness.ArtifactRef{{
+			Filename:    "evidence.json",
+			ContentType: "application/json",
+			Size:        42,
+		}},
+	})
+	parsed := common.ParseStructuredResult(string(encoded))
+	if parsed.Summary != "done" || parsed.Data["incident"] != "quincy-north" {
+		t.Fatalf("parsed structured result = %#v", parsed)
+	}
+	if len(parsed.Artifacts) != 1 || parsed.Artifacts[0].Filename != "evidence.json" {
+		t.Fatalf("artifacts = %#v", parsed.Artifacts)
+	}
 }
 
 func TestHarnessWrapperTurnRequestCarriesAgentRuntimeSecretEnv(t *testing.T) {

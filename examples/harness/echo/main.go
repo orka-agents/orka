@@ -15,20 +15,21 @@ import (
 )
 
 const (
-	behaviorSuccess           = "success"
-	behaviorReadTool          = "read-tool"
-	behaviorApprovalTool      = "approval-tool"
-	behaviorFailure           = "failure"
-	behaviorTimeout           = "timeout"
-	behaviorCancellation      = "cancellation"
-	remoteRuntimeNameEnv      = "ORKA_REMOTE_HTTP_RUNTIME_NAME"
-	remoteRuntimeBearerEnv    = "ORKA_REMOTE_HTTP_RUNTIME_BEARER_TOKEN"
-	remoteRuntimeAddrEnv      = "ORKA_REMOTE_HTTP_RUNTIME_ADDR"
-	remoteRuntimeScriptEnv    = "ORKA_REMOTE_HTTP_RUNTIME_BEHAVIOR"
-	remoteRuntimeReadToolEnv  = "ORKA_REMOTE_HTTP_RUNTIME_READ_TOOL_NAME"
-	remoteRuntimeWriteToolEnv = "ORKA_REMOTE_HTTP_RUNTIME_WRITE_TOOL_NAME"
-	brokeredReadCallID        = "tool-read-1"
-	brokeredWriteCallID       = "tool-write-1"
+	behaviorSuccess              = "success"
+	behaviorReadTool             = "read-tool"
+	behaviorApprovalTool         = "approval-tool"
+	behaviorFailure              = "failure"
+	behaviorTimeout              = "timeout"
+	behaviorCancellation         = "cancellation"
+	remoteRuntimeNameEnv         = "ORKA_REMOTE_HTTP_RUNTIME_NAME"
+	remoteRuntimeBearerEnv       = "ORKA_REMOTE_HTTP_RUNTIME_BEARER_TOKEN"
+	remoteRuntimeAddrEnv         = "ORKA_REMOTE_HTTP_RUNTIME_ADDR"
+	remoteRuntimeScriptEnv       = "ORKA_REMOTE_HTTP_RUNTIME_BEHAVIOR"
+	remoteRuntimeReadToolEnv     = "ORKA_REMOTE_HTTP_RUNTIME_READ_TOOL_NAME"
+	remoteRuntimeWriteToolEnv    = "ORKA_REMOTE_HTTP_RUNTIME_WRITE_TOOL_NAME"
+	remoteRuntimeBrokeredOnlyEnv = "ORKA_REMOTE_HTTP_RUNTIME_BROKERED_ONLY"
+	brokeredReadCallID           = "tool-read-1"
+	brokeredWriteCallID          = "tool-write-1"
 )
 
 type server struct {
@@ -109,6 +110,15 @@ func firstNonBlank(values ...string) string {
 	return ""
 }
 
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeBehavior(value string) string {
 	switch strings.TrimSpace(value) {
 	case behaviorReadTool, behaviorApprovalTool, behaviorFailure, behaviorTimeout, behaviorCancellation:
@@ -142,6 +152,10 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	modes := []harness.ToolExecutionMode{harness.ToolExecutionModeObserved}
 	classes := []harness.BrokeredToolClass(nil)
+	brokeredOnly := envBool(remoteRuntimeBrokeredOnlyEnv)
+	if brokeredOnly {
+		modes = nil
+	}
 	if s.behavior == behaviorReadTool {
 		modes = append(modes, harness.ToolExecutionModeBrokered)
 		classes = append(classes, harness.BrokeredToolClassRead)
@@ -364,6 +378,10 @@ func (s *server) initialFrames(turn *turnState) []harness.HarnessEventFrame {
 		}
 		output := runtimeOutput(request, 2, "generic HTTP runtime requesting read-only tool")
 		toolName := brokeredToolNameForRequest(request, defaultReadToolName())
+		if !requestIncludesBrokeredToolSchema(request, toolName) {
+			failed := missingToolSchemaFrame(request, 3)
+			return []harness.HarnessEventFrame{start, output, failed}
+		}
 		tool := toolRequested(request, 3, toolName, brokeredReadCallID, `{"incident":"quincy-north"}`)
 		return []harness.HarnessEventFrame{start, output, tool}
 	case behaviorApprovalTool:
@@ -372,6 +390,11 @@ func (s *server) initialFrames(turn *turnState) []harness.HarnessEventFrame {
 		}
 		output := runtimeOutput(request, 2, "generic HTTP runtime requesting approval-gated tool")
 		toolName := brokeredToolNameForRequest(request, defaultWriteToolName())
+		if !requestIncludesBrokeredToolSchema(request, toolName) {
+			failed := missingToolSchemaFrame(request, 3)
+			return []harness.HarnessEventFrame{start, output, failed}
+		}
+
 		tool := toolRequested(
 			request,
 			3,
@@ -379,24 +402,35 @@ func (s *server) initialFrames(turn *turnState) []harness.HarnessEventFrame {
 			brokeredWriteCallID,
 			`{"incident":"quincy-north","action":"dispatch technician"}`,
 		)
-		approval := frame(request, 4, harness.FrameApprovalRequested, "approval required for brokered tool", nil)
-		approval.ToolName = toolName
-		approval.ToolCallID = brokeredWriteCallID
-		approval.ApprovalID = harness.ToolRequestIdempotencyKey(request.RuntimeSessionID, request.TurnID, brokeredWriteCallID)
-		approval.Content = json.RawMessage(fmt.Sprintf(`{"status":"pending","targetTool":%q}`, toolName))
-		return []harness.HarnessEventFrame{start, output, tool, approval}
+		waiting := frame(request, 4, harness.FrameRuntimeLog, "waiting for Orka brokered approval", nil)
+		waiting.Content = json.RawMessage(fmt.Sprintf(`{"status":"waiting_for_orka_approval","targetTool":%q}`, toolName))
+		return []harness.HarnessEventFrame{start, output, tool, waiting}
 	default:
 		return observedSuccessFrames(request, start)
 	}
 }
 
+func missingToolSchemaFrame(request harness.StartTurnRequest, seq int64) harness.HarnessEventFrame {
+	const message = "brokered tool schema was not supplied by Orka"
+	failed := frame(request, seq, harness.FrameTurnFailed, "brokered tool schema missing", nil)
+	failed.Failed = &harness.TurnFailed{Reason: "missing_tool_schema", Message: message}
+	failed.Error = &harness.ErrorInfo{Code: "missing_tool_schema", Message: message}
+	return failed
+}
+
+func requestIncludesBrokeredToolSchema(request harness.StartTurnRequest, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, definition := range request.Input.Tools {
+		if strings.TrimSpace(definition.Name) == name && definition.BrokeredClass != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func brokeredToolNameForRequest(request harness.StartTurnRequest, fallback string) string {
 	if class := strings.TrimSpace(request.Metadata["brokeredToolClass"]); class != "" {
 		return "conformance_" + class
-	}
-	if classes := strings.TrimSpace(request.Metadata["brokeredToolClasses"]); classes != "" &&
-		!strings.Contains(classes, ",") {
-		return "conformance_" + classes
 	}
 	return fallback
 }

@@ -103,6 +103,11 @@ func TestGenericHTTPRuntimeApprovalContinuation(t *testing.T) {
 	}
 	request := validStartTurnRequest()
 	request.ToolExecutionMode = harness.ToolExecutionModeBrokered
+	request.Input.Tools = []harness.ToolDefinition{{
+		Name:          defaultWriteToolName(),
+		BrokeredClass: harness.BrokeredToolClassWrite,
+		Parameters:    json.RawMessage(`{"type":"object"}`),
+	}}
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn() error = %v", err)
 	}
@@ -113,8 +118,10 @@ func TestGenericHTTPRuntimeApprovalContinuation(t *testing.T) {
 		firstFrames = append(firstFrames, frame)
 		return nil
 	})
-	if len(firstFrames) != 4 || firstFrames[len(firstFrames)-1].Type != harness.FrameApprovalRequested {
-		t.Fatalf("first frames = %#v, want approval-pending frame", firstFrames)
+	if len(firstFrames) != 4 ||
+		firstFrames[2].Type != harness.FrameToolCallRequested ||
+		firstFrames[len(firstFrames)-1].Type != harness.FrameRuntimeLog {
+		t.Fatalf("first frames = %#v, want tool request followed by waiting diagnostic", firstFrames)
 	}
 	continued, err := client.ContinueTurn(context.Background(), harness.ContinueTurnRequest{
 		Version:          harness.ProtocolVersion,

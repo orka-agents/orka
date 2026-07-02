@@ -72,7 +72,7 @@ Every DTO carries `version: "orka.harness.v1"`. A missing or unsupported version
 
 ### Required turn fields
 
-`StartTurnRequest` requires namespace, task name, session name, runtime session id, turn id, correlation id, deadline, and a verified auth identity subject or username. Tool and approval policies are safe object references. Raw TxTokens are not valid DTO fields. Resolved literal credentials destined for a controller-managed local runtime subprocess (provider API keys, git tokens already read from a Secret by the controller) ARE permitted in `input.env` (`TurnEnvVar`): that request body is equivalent to mounting a Secret into the wrapper pod. Remote execution backends must not receive production Orka Tool credentials; governed tool access is through brokered Orka calls.
+`StartTurnRequest` requires namespace, task name, session name, runtime session id, turn id, correlation id, deadline, and a verified auth identity subject or username. Tool and approval policies are safe object references. Raw TxTokens are not valid DTO fields. Resolved literal credentials destined for a controller-managed local runtime subprocess (provider API keys, git tokens already read from a Secret by the controller) ARE permitted in `input.env` (`TurnEnvVar`): that request body is equivalent to mounting a Secret into the wrapper pod. Remote execution backends must not receive production Orka Tool credentials; governed tool access is through brokered Orka calls. When brokered tools are allowed, `input.tools` carries only safe schema metadata: tool name, description, brokered class, and JSON parameters. It intentionally omits downstream URLs, headers, Secret refs, and credentials.
 
 ```json
 {
@@ -88,8 +88,16 @@ Every DTO carries `version: "orka.harness.v1"`. A missing or unsupported version
   "toolPolicyRef": {"name": "default-tools"},
   "approvalPolicyRef": {"name": "default-approvals"},
   "eventCursor": 7,
-  "toolExecutionMode": "observed",
-  "input": {"prompt": "summarize this repository"}
+  "toolExecutionMode": "brokered",
+  "input": {
+    "prompt": "summarize this incident",
+    "tools": [{
+      "name": "support-ticket-lookup",
+      "description": "Look up sanitized support evidence",
+      "brokeredClass": "read",
+      "parameters": {"type": "object"}
+    }]
+  }
 }
 ```
 
@@ -103,7 +111,7 @@ Harness frames are mapped to existing Orka execution event types so task/session
 | `RuntimeOutput` | `ModelMessage` | Runtime output is sanitized before persistence. |
 | `ToolCallRequested` | `ToolCallStarted` | `toolName` and `toolCallID` are preserved. |
 | `ToolResultReceived` | `ToolCallCompleted` | Failed tool results can carry safe error content. |
-| `ApprovalRequested` | `ApprovalRequested` | Reuses durable approval event lifecycle. |
+| `ApprovalRequested` | `AgentRuntimeCommandStarted` | Runtime-originated approval frames are diagnostics only; Orka creates canonical `ApprovalRequested` events when broker policy requires approval. |
 | `TurnCompleted` | `AgentRuntimeCompleted` | Terminal turn metadata is included in content. |
 | `TurnFailed` | `AgentRuntimeFailed` | Severity is forced to `error`. |
 | `TurnCancelled` | `AgentRuntimeCancelled` | Cancellation is terminal for the harness turn, but not controller-owned task cancellation. |

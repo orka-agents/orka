@@ -24,6 +24,11 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	urlSchemeHTTP  = "http"
+	urlSchemeHTTPS = "https"
+)
+
 // isAllowedWebhookURL validates that the webhook URL does not target internal/private networks.
 func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawURL, namespace string) error {
 	u, err := url.Parse(rawURL)
@@ -32,7 +37,7 @@ func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawU
 	}
 
 	// Only allow http and https schemes
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != urlSchemeHTTP && u.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("webhook URL scheme %q not allowed, must be http or https", u.Scheme)
 	}
 

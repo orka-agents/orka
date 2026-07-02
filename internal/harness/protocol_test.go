@@ -26,7 +26,12 @@ func TestStartTurnRequestValidationAndJSONRoundTrip(t *testing.T) {
 		ToolPolicyRef:     &PolicyRef{Name: "default-tools"},
 		ApprovalPolicyRef: &PolicyRef{Name: "default-approvals"},
 		EventCursor:       7,
-		Input:             TurnInput{Prompt: "hello", ContextRefs: []ContextRef{{Kind: "event", Name: protocolTestTaskName, Seq: 7}}},
+		Input: TurnInput{Prompt: "hello", ContextRefs: []ContextRef{{Kind: "event", Name: protocolTestTaskName, Seq: 7}}, Tools: []ToolDefinition{{
+			Name:          "read_incident",
+			Description:   "Read incident status",
+			BrokeredClass: BrokeredToolClassRead,
+			Parameters:    json.RawMessage(`{"type":"object","properties":{"incident":{"type":"string"}}}`),
+		}}},
 		ToolExecutionMode: ToolExecutionModeObserved,
 	}
 	if err := request.Validate(); err != nil {
@@ -88,6 +93,32 @@ func TestStartTurnRequestValidationErrorsAreDeterministic(t *testing.T) {
 	}
 	if err := request.Validate(); err != nil {
 		t.Fatalf("Validate() after required fields error = %v", err)
+	}
+}
+
+func TestStartTurnRequestRejectsInvalidToolDefinitions(t *testing.T) {
+	request := StartTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        protocolTestNamespace,
+		TaskName:         protocolTestTaskName,
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     AuthIdentity{Subject: "user:test"},
+		Input: TurnInput{Tools: []ToolDefinition{{
+			Name:          "read_incident",
+			BrokeredClass: BrokeredToolClass("admin"),
+		}}},
+	}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported brokered class") {
+		t.Fatalf("Validate() = %v, want brokered class error", err)
+	}
+	request.Input.Tools[0].BrokeredClass = BrokeredToolClassRead
+	request.Input.Tools[0].Parameters = json.RawMessage(`{"type":`)
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "parameters must be valid JSON") {
+		t.Fatalf("Validate() = %v, want parameter JSON error", err)
 	}
 }
 

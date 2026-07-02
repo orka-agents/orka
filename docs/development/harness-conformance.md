@@ -44,7 +44,7 @@ Required wire fields include:
 
 - Health: `version`, `status`, `ready`, `checkedAt`.
 - Capabilities: `version`, `protocolVersion`, `transport`, `runtimeName`, `providerKind`, and at least one `toolExecutionModes` entry. Brokered capability profiles also advertise `brokeredToolClasses`, `supportsContinuation`, and artifact/limit fields when supported.
-- Current runtimeRef task execution still requires observed-mode turn conformance. Optional brokered read/write profile probes validate `brokeredToolClasses`, `supportsContinuation`, tool-call frames, `/continue`, tool-result acknowledgement, and terminal completion.
+- Observed runtimeRef execution requires observed-mode turn conformance. Brokered-only runtimes are accepted when they advertise brokered classes, support continuation, and pass the advertised brokered profile probes. Brokered read/write/coordination probes validate `brokeredToolClasses`, `supportsContinuation`, tool-call frames, `/continue`, tool-result acknowledgement, and terminal completion.
 - Start turn response: `version`, `accepted: true`, `runtimeSessionID`, `turnID`, `correlationID` when supplied, and `eventStreamPath`.
 - Frames: `version`, known `type`, `runtimeSessionID`, `turnID`, `correlationID`, and positive `seq`.
 - Terminal frames: exactly one of `TurnCompleted`, `TurnFailed`, or `TurnCancelled`; `TurnCompleted` must include `completed`, and `TurnFailed` must include `failed`.
@@ -56,11 +56,11 @@ Required wire fields include:
 - readiness results expose observed capabilities for Kubernetes status;
 - successful turns emit exactly one terminal frame;
 - failed turns map to safe `AgentRuntimeFailed` events;
-- brokered read and write profile probes start brokered turns, require a `ToolCallRequested` frame, send a synthetic Orka `ToolCallResult` through `/continue`, and require a matching `ToolResultReceived` plus terminal completion;
+- brokered read, write, and coordination profile probes start brokered turns, require a `ToolCallRequested` frame, send a synthetic Orka `ToolCallResult` through `/continue`, and require a matching `ToolResultReceived` plus terminal completion;
 - cancellation invokes the cancel endpoint and emits `TurnCancelled` in fixture tests;
 - the reusable readiness/conformance runner rejects unknown frame types; the legacy `harnesstest` mapper fixture still verifies unknown frames become warning diagnostics instead of panics at the event-mapping layer;
 - secret-looking output is redacted before event persistence;
 - client timeouts surface as sanitized typed client errors;
 - broken fixtures such as unsupported protocol versions and omitted terminal frames fail with actionable messages.
 
-The generic HTTP fixture in `examples/harness/echo` is the reference runtime for observed and brokered read/write conformance. Providers that cannot exercise every fake behavior directly should adapt the factory with a local fixture harness and run provider-specific smoke tests for the unavailable behavior.
+The generic HTTP fixture in `examples/harness/echo` is the reference runtime for observed and brokered read/write conformance. Task start requests include safe `input.tools` schemas for allowed brokered tools; these schemas omit execution URLs and credentials. Providers that cannot exercise every fake behavior directly should adapt the factory with a local fixture harness and run provider-specific smoke tests for the unavailable behavior.

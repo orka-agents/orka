@@ -119,6 +119,19 @@ type TurnInput struct {
 	Prompt      string       `json:"prompt,omitempty"`
 	ContextRefs []ContextRef `json:"contextRefs,omitempty"`
 	Env         []TurnEnvVar `json:"env,omitempty"`
+	// Tools carries safe Orka-governed tool schemas that the remote runtime may request
+	// through brokered governance. It intentionally omits downstream execution URLs,
+	// auth references, headers, and credentials; Orka remains the only executor.
+	Tools []ToolDefinition `json:"tools,omitempty"`
+}
+
+// ToolDefinition is the safe schema view exposed to brokered remote runtimes.
+// It is a declaration of what may be requested, not execution authority.
+type ToolDefinition struct {
+	Name          string            `json:"name"`
+	Description   string            `json:"description,omitempty"`
+	BrokeredClass BrokeredToolClass `json:"brokeredClass,omitempty"`
+	Parameters    json.RawMessage   `json:"parameters,omitempty"`
 }
 
 // TurnEnvVar is a resolved, literal environment variable passed to the
@@ -245,18 +258,31 @@ type HarnessEventFrame struct {
 }
 
 type TurnCompleted struct {
-	Result        string `json:"result,omitempty"`
-	OutputRef     string `json:"outputRef,omitempty"`
-	FinalEventSeq int64  `json:"finalEventSeq,omitempty"`
-	RetainSession bool   `json:"retainSession,omitempty"`
+	Result        string         `json:"result,omitempty"`
+	Data          map[string]any `json:"data,omitempty"`
+	Artifacts     []ArtifactRef  `json:"artifacts,omitempty"`
+	OutputRef     string         `json:"outputRef,omitempty"`
+	FinalEventSeq int64          `json:"finalEventSeq,omitempty"`
+	RetainSession bool           `json:"retainSession,omitempty"`
 }
 
 type TurnFailed struct {
-	Reason    string `json:"reason"`
-	Message   string `json:"message,omitempty"`
-	Result    string `json:"result,omitempty"`
-	OutputRef string `json:"outputRef,omitempty"`
-	Retryable bool   `json:"retryable,omitempty"`
+	Reason    string         `json:"reason"`
+	Message   string         `json:"message,omitempty"`
+	Result    string         `json:"result,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	Artifacts []ArtifactRef  `json:"artifacts,omitempty"`
+	OutputRef string         `json:"outputRef,omitempty"`
+	Retryable bool           `json:"retryable,omitempty"`
+}
+
+// ArtifactRef is safe artifact metadata passed through the harness protocol.
+// Artifact bytes remain in Orka-managed storage or at an adapter-provided outputRef.
+type ArtifactRef struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 type ErrorInfo struct {
@@ -347,6 +373,24 @@ func (r StartTurnRequest) Validate() error {
 		if ref.Seq < 0 {
 			return fmt.Errorf("context ref %d seq must be non-negative", i)
 		}
+	}
+	for i, tool := range r.Input.Tools {
+		if err := tool.Validate(); err != nil {
+			return fmt.Errorf("input tool %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (t ToolDefinition) Validate() error {
+	if strings.TrimSpace(t.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if t.BrokeredClass != "" && !IsKnownBrokeredToolClass(t.BrokeredClass) {
+		return fmt.Errorf("unsupported brokered class %q", t.BrokeredClass)
+	}
+	if len(t.Parameters) > 0 && !json.Valid(t.Parameters) {
+		return fmt.Errorf("parameters must be valid JSON")
 	}
 	return nil
 }

@@ -16,7 +16,7 @@ func TestMapFrameToExecutionEventCoversFrozenFrameTypes(t *testing.T) {
 		FrameRuntimeOutput:      events.ExecutionEventTypeModelMessage,
 		FrameToolCallRequested:  events.ExecutionEventTypeToolCallStarted,
 		FrameToolResultReceived: events.ExecutionEventTypeToolCallCompleted,
-		FrameApprovalRequested:  events.ExecutionEventTypeApprovalRequested,
+		FrameApprovalRequested:  events.ExecutionEventTypeAgentRuntimeCommandStarted,
 		FrameTurnCompleted:      events.ExecutionEventTypeAgentRuntimeCompleted,
 		FrameTurnFailed:         events.ExecutionEventTypeAgentRuntimeFailed,
 		FrameTurnCancelled:      events.ExecutionEventTypeAgentRuntimeCancelled,
@@ -44,6 +44,23 @@ func TestMapFrameToExecutionEventCoversFrozenFrameTypes(t *testing.T) {
 				t.Fatalf("event content = %#v, want harness metadata", content)
 			}
 		})
+	}
+}
+
+func TestMapFrameToExecutionEventDoesNotPromoteRuntimeApprovalFrame(t *testing.T) {
+	frame := validFrame(FrameApprovalRequested)
+	frame.ApprovalID = "runtime-made-approval"
+	frame.ToolName = "dispatch_work_order"
+	frame.ToolCallID = "call-1"
+	event, err := MapFrameToExecutionEvent(frame, EventMapContext{Namespace: "default", TaskName: "task-a"})
+	if err != nil {
+		t.Fatalf("MapFrameToExecutionEvent() error = %v", err)
+	}
+	if event.Type == events.ExecutionEventTypeApprovalRequested {
+		t.Fatalf("runtime-originated approval frame became canonical approval event")
+	}
+	if event.Type != events.ExecutionEventTypeAgentRuntimeCommandStarted || event.Severity != events.ExecutionEventSeverityWarning {
+		t.Fatalf("event = %#v, want warning runtime diagnostic", event)
 	}
 }
 
