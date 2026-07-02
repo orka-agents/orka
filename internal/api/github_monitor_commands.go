@@ -35,6 +35,12 @@ const (
 	commandIntentPlan         = "plan"
 	commandIntentFixCI        = "fix_ci"
 	commandIntentUpdateBranch = "update_branch"
+
+	githubPermissionRead     = "read"
+	githubPermissionTriage   = "triage"
+	githubPermissionWrite    = "write"
+	githubPermissionMaintain = "maintain"
+	githubPermissionAdmin    = "admin"
 )
 
 func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte, delivery string, payload githubLabelWebhookPayload, target githubLabelTarget) (githubRepositoryMonitorEventResult, bool, error) {
@@ -442,20 +448,28 @@ func (h *Handlers) repositoryMonitorCommandActorPermission(ctx context.Context, 
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return "", fmt.Errorf("failed to parse GitHub permission response: %w", err)
 	}
-	permission := firstNonEmptyGitHubPermission(parsed.RoleName, parsed.Permission)
+	permission := githubRepositoryPermissionFromResponse(parsed.RoleName, parsed.Permission)
 	if strings.TrimSpace(permission) == "" {
 		return "", fmt.Errorf("GitHub permission response did not include permission")
 	}
 	return strings.ToLower(strings.TrimSpace(permission)), nil
 }
 
-func firstNonEmptyGitHubPermission(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
+func githubRepositoryPermissionFromResponse(roleName, permission string) string {
+	roleName = strings.TrimSpace(roleName)
+	if githubBuiltInRepositoryPermission(roleName) {
+		return roleName
 	}
-	return ""
+	return strings.TrimSpace(permission)
+}
+
+func githubBuiltInRepositoryPermission(permission string) bool {
+	switch strings.ToLower(strings.TrimSpace(permission)) {
+	case githubPermissionRead, githubPermissionTriage, githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin:
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handlers) repositoryMonitorGitHubToken(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, error) {
@@ -485,7 +499,7 @@ func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.Repositor
 		return repositoryMonitorPermissionAllowed(monitor, permission)
 	}
 	permission = strings.ToLower(strings.TrimSpace(permission))
-	if !repositoryMonitorPermissionInList(permission, []string{"triage", "write", "maintain", "admin"}) {
+	if !repositoryMonitorPermissionInList(permission, []string{githubPermissionTriage, githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin}) {
 		return false
 	}
 	policyAllowed := monitor.Spec.Policy.AllowedRepositoryPermissions
@@ -531,12 +545,12 @@ func repositoryMonitorPermissionInList(permission string, allowed []string) bool
 
 func repositoryMonitorPermissionsAtLeast(minimum string) []string {
 	switch strings.ToLower(strings.TrimSpace(minimum)) {
-	case "admin":
-		return []string{"admin"}
-	case "maintain":
-		return []string{"maintain", "admin"}
+	case githubPermissionAdmin:
+		return []string{githubPermissionAdmin}
+	case githubPermissionMaintain:
+		return []string{githubPermissionMaintain, githubPermissionAdmin}
 	default:
-		return []string{"write", "maintain", "admin"}
+		return []string{githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin}
 	}
 }
 

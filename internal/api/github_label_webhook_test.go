@@ -1633,20 +1633,29 @@ func TestGitHubWebhook_DuplicateAcceptedCommandRetriesFailedRunSignal(t *testing
 
 func TestRepositoryMonitorPermissionAllowedEnforcesMinimumAndPolicy(t *testing.T) {
 	monitor := githubWebhookRepositoryMonitor("permission-policy", false)
-	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = "admin"
-	monitor.Spec.Policy.AllowedRepositoryPermissions = []string{"write", "admin"}
-	if repositoryMonitorPermissionAllowed(monitor, "write") {
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionAdmin
+	monitor.Spec.Policy.AllowedRepositoryPermissions = []string{githubPermissionWrite, githubPermissionAdmin}
+	if repositoryMonitorPermissionAllowed(monitor, githubPermissionWrite) {
 		t.Fatal("write permission satisfied policy despite admin minimum")
 	}
-	if !repositoryMonitorPermissionAllowed(monitor, "admin") {
+	if !repositoryMonitorPermissionAllowed(monitor, githubPermissionAdmin) {
 		t.Fatal("admin permission rejected despite satisfying minimum and policy")
 	}
-	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = "maintain"
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionMaintain
 	monitor.Spec.Policy.AllowedRepositoryPermissions = nil
-	if !repositoryMonitorPermissionAllowed(monitor, firstNonEmptyGitHubPermission("maintain", "write")) {
+	if !repositoryMonitorPermissionAllowed(monitor, githubRepositoryPermissionFromResponse(githubPermissionMaintain, githubPermissionWrite)) {
 		t.Fatal("maintain role_name should satisfy maintain minimum even when legacy permission is write")
 	}
-	if !repositoryMonitorPermissionAllowedForIntent(monitor, firstNonEmptyGitHubPermission("triage", "read"), "plan") {
+	if !repositoryMonitorPermissionAllowedForIntent(monitor, githubRepositoryPermissionFromResponse(githubPermissionTriage, githubPermissionRead), "plan") {
 		t.Fatal("triage role_name should satisfy read-only plan command")
+	}
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionWrite
+	monitor.Spec.Policy.AllowedRepositoryPermissions = []string{githubPermissionWrite, githubPermissionAdmin}
+	if !repositoryMonitorPermissionAllowed(monitor, githubRepositoryPermissionFromResponse("release-manager", githubPermissionWrite)) {
+		t.Fatal("custom role_name should fall back to effective write permission")
+	}
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionAdmin
+	if !repositoryMonitorPermissionAllowed(monitor, githubRepositoryPermissionFromResponse("security-admin", githubPermissionAdmin)) {
+		t.Fatal("custom role_name should fall back to effective admin permission")
 	}
 }
