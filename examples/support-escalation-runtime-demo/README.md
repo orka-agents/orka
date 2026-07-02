@@ -19,8 +19,8 @@ Security invariant: the remote runtime does not receive support-system credentia
 Build/load the generic HTTP fixture image first:
 
 ```bash
-docker build -t ghcr.io/sozercan/orka-example-echo-harness:latest -f examples/harness/echo/Dockerfile .
-kind load docker-image ghcr.io/sozercan/orka-example-echo-harness:latest --name <your-kind-cluster>
+docker build -t ghcr.io/orka-agents/orka/example-echo-harness:latest -f examples/harness/echo/Dockerfile .
+kind load docker-image ghcr.io/orka-agents/orka/example-echo-harness:latest --name <your-kind-cluster>
 ```
 
 Apply the demo:

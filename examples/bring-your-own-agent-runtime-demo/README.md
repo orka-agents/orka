@@ -23,8 +23,8 @@ AgentKit Serve adapter changes are intentionally not in this repository. Foundry
 Build and load the reference generic HTTP harness fixture:
 
 ```bash
-docker build -t ghcr.io/sozercan/orka-example-echo-harness:latest -f examples/harness/echo/Dockerfile .
-kind load docker-image ghcr.io/sozercan/orka-example-echo-harness:latest --name <kind-cluster>
+docker build -t ghcr.io/orka-agents/orka/example-echo-harness:latest -f examples/harness/echo/Dockerfile .
+kind load docker-image ghcr.io/orka-agents/orka/example-echo-harness:latest --name <kind-cluster>
 ```
 
 Create the runtime bearer Secret out of band; do not commit real values. The Secret must contain a data key named `token`, must be labeled `orka.ai/agent-runtime-auth=true`, and must be annotated with the exact runtime endpoint:

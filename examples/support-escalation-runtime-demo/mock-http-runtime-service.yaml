@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: harness
-        image: ghcr.io/sozercan/orka-example-echo-harness:latest
+        image: ghcr.io/orka-agents/orka/example-echo-harness:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: ORKA_REMOTE_HTTP_RUNTIME_ADDR

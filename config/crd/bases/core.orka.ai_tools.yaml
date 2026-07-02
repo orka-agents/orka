@@ -50,18 +50,13 @@ spec:
             description: ToolSpec defines the desired state of Tool
             properties:
               brokeredToolClass:
-                allOf:
-                - enum:
-                  - read
-                  - write
-                  - coordination
-                - enum:
-                  - read
-                  - write
-                  - coordination
                 description: |-
                   BrokeredToolClass declares the governed class for remote AgentRuntime brokered calls.
                   Tools without this field are not exposed to remote runtimes through brokered governance.
+                enum:
+                - read
+                - write
+                - coordination
                 type: string
               description:
                 description: Description is the tool description shown to the LLM

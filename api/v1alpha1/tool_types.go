@@ -25,7 +25,6 @@ type ToolSpec struct {
 
 	// BrokeredToolClass declares the governed class for remote AgentRuntime brokered calls.
 	// Tools without this field are not exposed to remote runtimes through brokered governance.
-	// +kubebuilder:validation:Enum=read;write;coordination
 	// +optional
 	BrokeredToolClass AgentRuntimeBrokeredToolClass `json:"brokeredToolClass,omitempty"`
 
