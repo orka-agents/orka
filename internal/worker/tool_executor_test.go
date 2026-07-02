@@ -134,6 +134,67 @@ func TestToolExecutor_Execute_PreservesLargeJSONIntegers(t *testing.T) {
 	}
 }
 
+type zeroLengthRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f zeroLengthRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestToolExecutor_Execute_CustomTransportReadsZeroContentLengthBody(t *testing.T) {
+	executor := &ToolExecutor{
+		client: &http.Client{Transport: zeroLengthRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: "http://tool.test"},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("Execute() = %q, want response body", result)
+	}
+}
+
+func TestToolExecutor_Execute_CustomTransportAllowsEmptyBodyWithContentLength(t *testing.T) {
+	executor := &ToolExecutor{
+		client: &http.Client{Transport: zeroLengthRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader(``)),
+				ContentLength: 42,
+			}, nil
+		})},
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: "http://tool.test"},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "" {
+		t.Fatalf("Execute() = %q, want empty response body", result)
+	}
+}
+
 func TestToolExecutor_Execute_MCPSubstrateActorUsesStatusEndpointAndRouteHost(t *testing.T) {
 	var gotHosts []string
 	var calls int

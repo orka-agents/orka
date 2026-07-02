@@ -271,6 +271,37 @@ func TestExecutionEventFixturesValidate(t *testing.T) {
 	}
 }
 
+func BenchmarkNewListExecutionEventsResponseTaskEvents(b *testing.B) {
+	createdAt := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
+	storeEvents := make([]store.ExecutionEvent, 1024)
+	for i := range storeEvents {
+		storeEvents[i] = store.ExecutionEvent{
+			ID:          "event-1",
+			Namespace:   "default",
+			StreamType:  events.ExecutionEventStreamTypeTask,
+			StreamID:    "task-1",
+			Seq:         int64(i + 1),
+			Type:        events.ExecutionEventTypeTaskPhaseChanged,
+			Severity:    events.ExecutionEventSeverityInfo,
+			TaskName:    "task-1",
+			SessionName: "session-a",
+			AgentName:   "codex",
+			Summary:     "phase changed",
+			ContentText: "Running",
+			CreatedAt:   createdAt,
+		}
+	}
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		response := NewListExecutionEventsResponse("default", events.ExecutionEventStreamTypeTask, "task-1", 0, int64(len(storeEvents)), storeEvents)
+		if len(response.Events) != len(storeEvents) {
+			b.Fatalf("events = %d, want %d", len(response.Events), len(storeEvents))
+		}
+	}
+}
+
 func assertFixtureContainsNoSecrets(t *testing.T, raw string) {
 	t.Helper()
 	for _, marker := range []string{"Authorization:", "Bearer ", "Co" + "okie:", "Txn-Token", "Transaction-Token", "sk-test", "sk-ant", "github" + "_pat_", "gh" + "p_", "xox" + "b-"} {

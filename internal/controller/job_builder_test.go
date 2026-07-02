@@ -927,6 +927,25 @@ func TestJobBuilder_buildResources_Defaults(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildResources_DefaultsAreIndependent(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{}}
+
+	first := builder.buildResources(task, nil)
+	second := builder.buildResources(task, nil)
+
+	first.Requests[corev1.ResourceCPU] = resource.MustParse("900m")
+	delete(first.Limits, corev1.ResourceMemory)
+
+	cpuReq := second.Requests[corev1.ResourceCPU]
+	if got := cpuReq.String(); got != "100m" {
+		t.Fatalf("second default CPU request = %s after mutating first result, want 100m", got)
+	}
+	if _, ok := second.Limits[corev1.ResourceMemory]; !ok {
+		t.Fatal("second default memory limit disappeared after mutating first result")
+	}
+}
+
 func TestJobBuilder_buildEnvVars(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -2919,4 +2938,17 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 		t.Fatal("generic container tasks must not receive telemetry enablement")
 	}
 
+}
+
+var benchmarkResourceRequirementsSink corev1.ResourceRequirements
+
+func BenchmarkJobBuilderBuildResourcesDefaults(b *testing.B) {
+	builder := &JobBuilder{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{}}
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		benchmarkResourceRequirementsSink = builder.buildResources(task, nil)
+	}
 }

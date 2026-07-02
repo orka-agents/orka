@@ -8,6 +8,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/sozercan/orka/internal/store"
@@ -93,13 +95,10 @@ func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask
 		return nil, err
 	}
 
-	// Mark as read within the same transaction
-	if len(ids) > 0 {
-		for _, id := range ids {
-			if _, err := tx.ExecContext(ctx, `UPDATE messages SET read = TRUE WHERE id = ?`, id); err != nil {
-				return nil, err
-			}
-		}
+	// Mark exactly the messages returned by the read query. Batch IDs to avoid
+	// issuing one UPDATE per message while staying below SQLite variable limits.
+	if err := markMessagesReadByID(ctx, tx, ids); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -125,4 +124,32 @@ func (s *Store) DeleteParentMessages(ctx context.Context, namespace, parentTask 
 		namespace, parentTask,
 	)
 	return err
+}
+
+const sqliteMessageReadUpdateBatchSize = 500
+
+func markMessagesReadByID(ctx context.Context, tx *sql.Tx, ids []int64) error {
+	for len(ids) > 0 {
+		batchSize := min(len(ids), sqliteMessageReadUpdateBatchSize)
+		batch := ids[:batchSize]
+
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		query := `UPDATE messages SET read = TRUE WHERE id IN (` + sqlitePlaceholders(len(batch)) + `)`
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+
+		ids = ids[batchSize:]
+	}
+	return nil
+}
+
+func sqlitePlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return "?" + strings.Repeat(",?", n-1)
 }

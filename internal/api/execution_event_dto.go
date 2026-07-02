@@ -137,7 +137,7 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 		StreamID:     event.StreamID,
 		Seq:          event.Seq,
 		Type:         event.Type,
-		Severity:     events.NormalizeExecutionEventSeverity(event.Severity),
+		Severity:     normalizeExecutionEventResponseSeverity(event.Severity),
 		TaskName:     event.TaskName,
 		SessionName:  event.SessionName,
 		AgentName:    event.AgentName,
@@ -158,9 +158,9 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 
 // NewListExecutionEventsResponse builds a list DTO from store events.
 func NewListExecutionEventsResponse(namespace, streamType, streamID string, afterSeq, latestSeq int64, storeEvents []store.ExecutionEvent) ListExecutionEventsResponse {
-	responses := make([]ExecutionEventResponse, 0, len(storeEvents))
-	for _, event := range storeEvents {
-		responses = append(responses, NewExecutionEventResponse(event))
+	responses := make([]ExecutionEventResponse, len(storeEvents))
+	for i := range storeEvents {
+		responses[i] = NewExecutionEventResponse(storeEvents[i])
 	}
 	return ListExecutionEventsResponse{
 		Namespace:  namespace,
@@ -187,9 +187,9 @@ func NewSessionExecutionEventResponse(event store.SessionExecutionEvent) Session
 
 // NewListSessionExecutionEventsResponse builds a session timeline DTO.
 func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterSeq, latestSeq int64, storeEvents []store.SessionExecutionEvent) ListSessionExecutionEventsResponse {
-	responses := make([]SessionExecutionEventResponse, 0, len(storeEvents))
-	for _, event := range storeEvents {
-		responses = append(responses, NewSessionExecutionEventResponse(event))
+	responses := make([]SessionExecutionEventResponse, len(storeEvents))
+	for i := range storeEvents {
+		responses[i] = NewSessionExecutionEventResponse(storeEvents[i])
 	}
 	return ListSessionExecutionEventsResponse{
 		Namespace:  namespace,
@@ -198,6 +198,18 @@ func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterS
 		AfterSeq:   afterSeq,
 		LatestSeq:  latestSeq,
 		Events:     responses,
+	}
+}
+
+func normalizeExecutionEventResponseSeverity(severity string) string {
+	switch severity {
+	case events.ExecutionEventSeverityDebug,
+		events.ExecutionEventSeverityInfo,
+		events.ExecutionEventSeverityWarning,
+		events.ExecutionEventSeverityError:
+		return severity
+	default:
+		return events.NormalizeExecutionEventSeverity(severity)
 	}
 }
 
