@@ -21,7 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/orka/test/utils"
+	"github.com/orka-agents/orka/test/utils"
 )
 
 var _ = Describe("Chat with Tool Execution", Ordered, func() {

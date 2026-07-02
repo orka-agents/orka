@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (

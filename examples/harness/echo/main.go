@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 const (

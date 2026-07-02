@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/harness/harnesstest"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/harnesstest"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestTurnRunnerAppendsMappedEventsForSuccessfulTurn(t *testing.T) {

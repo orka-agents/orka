@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 // UpdatePlanTool allows the LLM to update the autonomous plan state.

@@ -19,15 +19,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/harness/harnesstest"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/workers/common"
-	"github.com/sozercan/orka/workers/harness/cliwrapper"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/harnesstest"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/common"
+	"github.com/orka-agents/orka/workers/harness/cliwrapper"
 )
 
 func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
@@ -2204,7 +2204,7 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
 	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime-secret"}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
-		GitRepo:      "https://github.com/sozercan/orka",
+		GitRepo:      "https://github.com/orka-agents/orka",
 		GitSecretRef: &corev1.LocalObjectReference{Name: "git-credentials"},
 	}}
 	agentSecret := &corev1.Secret{
@@ -2378,7 +2378,7 @@ func TestHarnessWrapperTurnRequestOmitsOptionalMissingValueFromEnv(t *testing.T)
 func TestHarnessWrapperTurnRequestCarriesWorkspaceGitSecretEnv(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
-		GitRepo:      "https://github.com/sozercan/orka",
+		GitRepo:      "https://github.com/orka-agents/orka",
 		GitSecretRef: &corev1.LocalObjectReference{Name: "git-credentials"},
 	}}
 	gitSecret := &corev1.Secret{
@@ -2422,10 +2422,10 @@ func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.Env = []corev1.EnvVar{{Name: workerenv.PRBaseSHA, Value: "base-sha"}, {Name: "ORKA_SECURITY_STAGE", Value: "review"}}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
-		GitRepo:      "https://github.com/sozercan/orka",
+		GitRepo:      "https://github.com/orka-agents/orka",
 		Branch:       "main",
 		SubPath:      "docs",
-		ForkRepo:     "https://github.com/sozercan/orka-fork",
+		ForkRepo:     "https://github.com/orka-agents/orka-fork",
 		PRBaseBranch: "contract",
 		PushBranch:   "agent/test-branch",
 	}}
@@ -2436,10 +2436,10 @@ func TestHarnessWrapperTurnRequestCarriesSafeEnvAndWorkspaceMetadata(t *testing.
 		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
 	}
 	for key, want := range map[string]string{
-		"gitRepo":          "https://github.com/sozercan/orka",
+		"gitRepo":          "https://github.com/orka-agents/orka",
 		"gitBranch":        "main",
 		"workspaceSubPath": "docs",
-		"forkRepo":         "https://github.com/sozercan/orka-fork",
+		"forkRepo":         "https://github.com/orka-agents/orka-fork",
 		"prBaseBranch":     "contract",
 		"pushBranch":       "agent/test-branch",
 		"prBaseSHA":        "base-sha",

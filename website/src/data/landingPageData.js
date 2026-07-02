@@ -69,14 +69,14 @@ export const providers = [
 export const ctaLinks = [
   {
     label: 'GitHub',
-    href: 'https://github.com/sozercan/orka',
+    href: 'https://github.com/orka-agents/orka',
   },
   {
     label: 'Issues',
-    href: 'https://github.com/sozercan/orka/issues',
+    href: 'https://github.com/orka-agents/orka/issues',
   },
   {
     label: 'Releases',
-    href: 'https://github.com/sozercan/orka/releases',
+    href: 'https://github.com/orka-agents/orka/releases',
   },
 ];

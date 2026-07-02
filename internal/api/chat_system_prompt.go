@@ -14,8 +14,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	chattools "github.com/sozercan/orka/internal/tools"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	chattools "github.com/orka-agents/orka/internal/tools"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 

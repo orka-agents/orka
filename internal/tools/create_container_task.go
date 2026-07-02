@@ -19,9 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/tracing"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/tracing"
 )
 
 // CreateContainerTaskTool creates a container-type Task CR.
@@ -275,10 +275,16 @@ func validateContainerTaskWorkspace(task *corev1alpha1.Task) *ChatToolError {
 }
 
 func containerTaskLooksRepoDependent(command, args []string) bool {
-	parts := make([]string, 0, len(command)+len(args))
-	parts = append(parts, command...)
-	parts = append(parts, args...)
-	joined := strings.ToLower(strings.Join(parts, " "))
+	var joinedBuilder strings.Builder
+	for _, part := range command {
+		joinedBuilder.WriteByte(' ')
+		joinedBuilder.WriteString(part)
+	}
+	for _, part := range args {
+		joinedBuilder.WriteByte(' ')
+		joinedBuilder.WriteString(part)
+	}
+	joined := strings.ToLower(joinedBuilder.String())
 	patterns := []string{
 		"go test", "go vet", "go build", "go list", "go mod",
 		"npm test", "npm run", "pnpm ", "yarn ",

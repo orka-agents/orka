@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/metrics"
 )
 
 func TestExecutionEventFilterNormalizationDefaultsLimit(t *testing.T) {

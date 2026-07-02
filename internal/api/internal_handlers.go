@@ -20,9 +20,9 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/workspace/statusrules"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
 const maxResultSize = 10 << 20 // 10MB

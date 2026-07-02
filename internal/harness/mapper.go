@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // EventMapContext supplies Orka stream ownership for harness frames. Harness

@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/sozercan/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const schemaTypeObject = "object"

@@ -26,7 +26,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 // Init initializes OpenTelemetry tracing and metrics. When enabled is false,

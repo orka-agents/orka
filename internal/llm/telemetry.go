@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 // TelemetryIdentity is implemented by providers that can expose their concrete

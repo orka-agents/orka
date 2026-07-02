@@ -59,7 +59,7 @@ var _ = Describe("Orka CLI security and monitor binary workflows", Ordered, func
 		repositoryScanName := "e2e-cli-security-" + suffix
 		monitorName := "e2e-cli-monitor-" + suffix
 		fakeAnthropicKey := "fake-secmon-anthropic-key-" + suffix
-		repoURL := "https://github.com/sozercan/orka"
+		repoURL := "https://github.com/orka-agents/orka"
 
 		DeferCleanup(deleteK8sResource, "repositorymonitor", monitorName)
 		DeferCleanup(deleteK8sResource, "repositoryscan", repositoryScanName)

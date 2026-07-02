@@ -28,11 +28,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/store/sqlite"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -204,13 +204,13 @@ func TestGitHubWebhook_PullRequestImplementUsesForkHeadRepo(t *testing.T) {
 	body := []byte(`{
 		"action":"labeled",
 		"label":{"name":"agent:implement"},
-		"repository":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"},
+		"repository":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"},
 		"pull_request":{
 			"number":35,
 			"title":"Fork change",
 			"body":"Implement on fork",
-			"html_url":"https://github.com/sozercan/orka/pull/35",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"}},
+			"html_url":"https://github.com/orka-agents/orka/pull/35",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"}},
 			"head":{"ref":"feature/fork-change","sha":"fork-head-sha","repo":{"full_name":"contributor/orka","html_url":"https://github.com/contributor/orka","clone_url":"https://github.com/contributor/orka.git","default_branch":"main"}}
 		},
 		"sender":{"login":"octocat"}
@@ -261,13 +261,13 @@ func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *test
 	body := []byte(`{
 		"action":"labeled",
 		"label":{"name":"agent:implement"},
-		"repository":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"},
+		"repository":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"},
 		"pull_request":{
 			"number":36,
 			"title":"Unknown head repo",
 			"body":"Implement with unknown head repo",
-			"html_url":"https://github.com/sozercan/orka/pull/36",
-			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"}},
+			"html_url":"https://github.com/orka-agents/orka/pull/36",
+			"base":{"ref":"main","sha":"base-sha","repo":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"}},
 			"head":{"ref":"feature/unknown-head","sha":"unknown-head-sha","repo":null}
 		},
 		"sender":{"login":"octocat"}
@@ -284,7 +284,7 @@ func TestGitHubWebhook_PullRequestMissingHeadRepoFailsClosedForGitSecret(t *test
 		t.Fatalf("created task not found: %v", err)
 	}
 	ws := task.Spec.AgentRuntime.Workspace
-	if ws.GitRepo != "https://github.com/sozercan/orka.git" {
+	if ws.GitRepo != "https://github.com/orka-agents/orka.git" {
 		t.Errorf("gitRepo = %q, want base repository fallback", ws.GitRepo)
 	}
 	if ws.Branch != "feature/unknown-head" {
@@ -395,8 +395,8 @@ func TestGitHubWebhook_IgnoresIssuePullRequestStub(t *testing.T) {
 	body := []byte(`{
 		"action":"labeled",
 		"label":{"name":"agent:update-branch"},
-		"repository":{"full_name":"sozercan/orka","html_url":"https://github.com/sozercan/orka","clone_url":"https://github.com/sozercan/orka.git","default_branch":"main"},
-		"issue":{"number":35,"title":"Fork change","body":"Implement on fork","html_url":"https://github.com/sozercan/orka/issues/35","pull_request":{"html_url":"https://github.com/sozercan/orka/pull/35"}},
+		"repository":{"full_name":"orka-agents/orka","html_url":"https://github.com/orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git","default_branch":"main"},
+		"issue":{"number":35,"title":"Fork change","body":"Implement on fork","html_url":"https://github.com/orka-agents/orka/issues/35","pull_request":{"html_url":"https://github.com/orka-agents/orka/pull/35"}},
 		"sender":{"login":"octocat"}
 	}`)
 

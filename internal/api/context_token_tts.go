@@ -6,7 +6,7 @@ MIT License - see LICENSE file for details.
 
 package api
 
-import "github.com/sozercan/orka/internal/contexttoken"
+import "github.com/orka-agents/orka/internal/contexttoken"
 
 const (
 	// ContextTokenTTSTokenSourceNone disables Orka-initiated token exchanges.

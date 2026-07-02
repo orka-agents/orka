@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestGetMessagesEmpty(t *testing.T) {
@@ -115,6 +115,46 @@ func TestGetMessagesMultipleMarkRead(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("got %d messages after markRead, want 0", len(msgs))
+	}
+}
+
+func TestGetMessagesMarkReadLargeInbox(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	const (
+		namespace  = "ns-large-mark-read"
+		taskName   = "reader"
+		parentTask = "parent"
+		count      = 503
+	)
+
+	for i := range count {
+		msg := &store.Message{
+			Namespace:  namespace,
+			FromTask:   fmt.Sprintf("sender-%d", i%10),
+			ToTask:     taskName,
+			ParentTask: parentTask,
+			Content:    fmt.Sprintf("msg-%d", i),
+		}
+		if err := s.SendMessage(ctx, msg); err != nil {
+			t.Fatalf("SendMessage %d: %v", i, err)
+		}
+	}
+
+	msgs, err := s.GetMessages(ctx, namespace, taskName, parentTask, true)
+	if err != nil {
+		t.Fatalf("GetMessages markRead: %v", err)
+	}
+	if len(msgs) != count {
+		t.Fatalf("got %d messages, want %d", len(msgs), count)
+	}
+
+	msgs, err = s.GetMessages(ctx, namespace, taskName, parentTask, false)
+	if err != nil {
+		t.Fatalf("GetMessages after markRead: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("got %d messages after markRead, want 0", len(msgs))
 	}
 }
 

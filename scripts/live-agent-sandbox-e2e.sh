@@ -877,7 +877,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	sandbox "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 
-	"github.com/sozercan/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/workspace"
 )
 
 func main() {

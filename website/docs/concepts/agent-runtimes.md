@@ -549,7 +549,7 @@ Research on LLM agent context ([arxiv 2602.11988](https://arxiv.org/abs/2602.119
 
 ## Examples
 
-Complete sample manifests are available in [`config/samples/`](https://github.com/sozercan/orka/tree/main/config/samples):
+Complete sample manifests are available in [`config/samples/`](https://github.com/orka-agents/orka/tree/main/config/samples):
 
 | File | Description |
 |------|-------------|

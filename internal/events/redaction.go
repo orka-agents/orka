@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/sozercan/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/redact"
 )
 
 const (

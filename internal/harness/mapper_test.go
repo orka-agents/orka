@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
+	"github.com/orka-agents/orka/internal/events"
 )
 
 func TestMapFrameToExecutionEventCoversFrozenFrameTypes(t *testing.T) {

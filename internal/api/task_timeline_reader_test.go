@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestTaskTimelineReaderListMatchingReturnsEmptySlice(t *testing.T) {

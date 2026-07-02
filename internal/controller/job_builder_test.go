@@ -22,10 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -927,6 +927,25 @@ func TestJobBuilder_buildResources_Defaults(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_buildResources_DefaultsAreIndependent(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{}}
+
+	first := builder.buildResources(task, nil)
+	second := builder.buildResources(task, nil)
+
+	first.Requests[corev1.ResourceCPU] = resource.MustParse("900m")
+	delete(first.Limits, corev1.ResourceMemory)
+
+	cpuReq := second.Requests[corev1.ResourceCPU]
+	if got := cpuReq.String(); got != "100m" {
+		t.Fatalf("second default CPU request = %s after mutating first result, want 100m", got)
+	}
+	if _, ok := second.Limits[corev1.ResourceMemory]; !ok {
+		t.Fatal("second default memory limit disappeared after mutating first result")
+	}
+}
+
 func TestJobBuilder_buildEnvVars(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -1199,10 +1218,10 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 }
 
 func TestConstants(t *testing.T) {
-	if DefaultAIWorkerImage != "ghcr.io/sozercan/orka/ai-worker:latest" {
+	if DefaultAIWorkerImage != "ghcr.io/orka-agents/orka/ai-worker:latest" {
 		t.Errorf("DefaultAIWorkerImage = %s", DefaultAIWorkerImage)
 	}
-	if DefaultGeneralWorkerImage != "ghcr.io/sozercan/orka/general-worker:latest" {
+	if DefaultGeneralWorkerImage != "ghcr.io/orka-agents/orka/general-worker:latest" {
 		t.Errorf("DefaultGeneralWorkerImage = %s", DefaultGeneralWorkerImage)
 	}
 	if ResultEndpointEnvVar != "ORKA_RESULT_ENDPOINT" {
@@ -2919,4 +2938,17 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 		t.Fatal("generic container tasks must not receive telemetry enablement")
 	}
 
+}
+
+var benchmarkResourceRequirementsSink corev1.ResourceRequirements
+
+func BenchmarkJobBuilderBuildResourcesDefaults(b *testing.B) {
+	builder := &JobBuilder{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{}}
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		benchmarkResourceRequirementsSink = builder.buildResources(task, nil)
+	}
 }

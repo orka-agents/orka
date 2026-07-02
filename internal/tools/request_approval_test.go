@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/approvals"
 )
 
 const requestApprovalDispatchTool = "dispatch_work_order"

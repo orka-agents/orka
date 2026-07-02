@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 type HarnessFactory func(t *testing.T, behavior FakeBehavior) (baseURL string, cleanup func())

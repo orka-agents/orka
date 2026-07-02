@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/workers/harness/cliwrapper"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/harness/cliwrapper"
 )
 
 type repeatedString []string

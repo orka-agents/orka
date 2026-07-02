@@ -17,8 +17,8 @@ All facades are namespace-local `AgentRuntime` objects. Remote execution backend
 ## Build/load the generic HTTP fixture image for kind
 
 ```bash
-docker build -t ghcr.io/sozercan/orka-example-echo-harness:latest -f examples/harness/echo/Dockerfile .
-kind load docker-image ghcr.io/sozercan/orka-example-echo-harness:latest --name <your-kind-cluster>
+docker build -t ghcr.io/orka-agents/orka/example-echo-harness:latest -f examples/harness/echo/Dockerfile .
+kind load docker-image ghcr.io/orka-agents/orka/example-echo-harness:latest --name <your-kind-cluster>
 ```
 
 The fixture can run scripted behaviors through `ORKA_REMOTE_HTTP_RUNTIME_BEHAVIOR`:

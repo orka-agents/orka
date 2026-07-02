@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sozercan/orka/internal/events"
+	"github.com/orka-agents/orka/internal/events"
 )
 
 const (

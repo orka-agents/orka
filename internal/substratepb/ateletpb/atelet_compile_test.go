@@ -3,7 +3,7 @@ package ateletpb_test
 import (
 	"testing"
 
-	ateletpb "github.com/sozercan/orka/internal/substratepb/ateletpb"
+	ateletpb "github.com/orka-agents/orka/internal/substratepb/ateletpb"
 	"google.golang.org/grpc"
 )
 

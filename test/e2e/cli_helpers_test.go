@@ -27,7 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/yaml"
 
-	"github.com/sozercan/orka/test/utils"
+	"github.com/orka-agents/orka/test/utils"
 )
 
 var (

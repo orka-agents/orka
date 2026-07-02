@@ -18,7 +18,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/spf13/cobra"
 
-	"github.com/sozercan/orka/internal/cli/client"
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 func newRunCmd() *cobra.Command {

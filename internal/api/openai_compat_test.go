@@ -26,12 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/llm"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/llm"
 
 	// Register LLM providers for integration tests
-	_ "github.com/sozercan/orka/internal/llm/anthropic"
-	_ "github.com/sozercan/orka/internal/llm/openai"
+	_ "github.com/orka-agents/orka/internal/llm/anthropic"
+	_ "github.com/orka-agents/orka/internal/llm/openai"
 )
 
 func setupTestOpenAIHandler(objs ...runtime.Object) (*OpenAICompatHandler, *fiber.App) {

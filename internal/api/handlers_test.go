@@ -33,10 +33,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/store/sqlite"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 const testWatchNamespace = "prod"
@@ -501,7 +501,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 			"namespace":    "default",
 			"taskType":     "agent",
 			"agent":        "reviewer",
-			"repo":         "https://github.com/sozercan/orka.git",
+			"repo":         "https://github.com/orka-agents/orka.git",
 			"branch":       "kontxt",
 			"allowedTools": []string{"file_read", "code_exec", "Bash"},
 		},
@@ -513,7 +513,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationEnforceAllowsMatchingToken
 		AgentRef:  &corev1alpha1.AgentReference{Name: "reviewer"},
 		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
 			Workspace: &corev1alpha1.WorkspaceConfig{
-				GitRepo: "https://github.com/sozercan/orka.git",
+				GitRepo: "https://github.com/orka-agents/orka.git",
 				Branch:  "kontxt",
 			},
 			AllowedTools: []string{"file_read"},

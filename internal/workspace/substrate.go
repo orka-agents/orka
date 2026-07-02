@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	ateapipb "github.com/sozercan/orka/internal/substratepb"
-	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
+	ateapipb "github.com/orka-agents/orka/internal/substratepb"
+	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

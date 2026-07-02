@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/harness/harnesstest"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/harnesstest"
 )
 
 func TestCheckReadinessPassesForFakeHarness(t *testing.T) {

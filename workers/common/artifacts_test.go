@@ -273,3 +273,21 @@ func TestUploadArtifacts_SkipsOversizedIndividualFiles(t *testing.T) {
 		t.Fatalf("too-large.bin should have been skipped")
 	}
 }
+
+func TestWriteArtifactFileRejectsTraversalFilename(t *testing.T) {
+	prepareArtifactsDir(t)
+	outside := filepath.Join(filepath.Dir(artifactsDir()), "outside.txt")
+	if err := WriteArtifactFile("../outside.txt", []byte("nope")); err == nil {
+		t.Fatal("WriteArtifactFile() error = nil, want invalid filename")
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("outside artifact path exists after rejected write: %v", err)
+	}
+}
+
+func TestMissingArtifactsRejectsTraversalFilename(t *testing.T) {
+	prepareArtifactsDir(t)
+	if _, err := MissingArtifacts([]string{"../outside.txt"}); err == nil {
+		t.Fatal("MissingArtifacts() error = nil, want invalid filename")
+	}
+}
