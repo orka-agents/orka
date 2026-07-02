@@ -13,6 +13,6 @@ keywords:
 maintainers:
   - name: Sertac Ozercan
     url: https://github.com/sozercan
-home: https://github.com/sozercan/orka
+home: https://github.com/orka-agents/orka
 sources:
-  - https://github.com/sozercan/orka
+  - https://github.com/orka-agents/orka

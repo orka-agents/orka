@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 var _ = Describe("Tool Controller", func() {

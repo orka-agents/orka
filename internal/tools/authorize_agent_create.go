@@ -9,7 +9,7 @@ package tools
 import (
 	"context"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 func authorizeAgentCreate(ctx context.Context, tc *ToolContext, agent *corev1alpha1.Agent) (string, bool) {

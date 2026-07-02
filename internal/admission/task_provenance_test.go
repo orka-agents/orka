@@ -19,8 +19,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 const (

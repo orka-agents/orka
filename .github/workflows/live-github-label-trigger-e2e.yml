@@ -7,7 +7,7 @@ on:
         description: GitHub repository URL to place in the synthetic label webhook payload.
         required: true
         type: string
-        default: https://github.com/sozercan/orka
+        default: https://github.com/orka-agents/orka
       target_number:
         description: Synthetic issue number to place in the webhook payload.
         required: true

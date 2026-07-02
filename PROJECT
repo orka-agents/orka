@@ -7,7 +7,7 @@ domain: orka.ai
 layout:
 - go.kubebuilder.io/v4
 projectName: orka
-repo: github.com/sozercan/orka
+repo: github.com/orka-agents/orka
 resources:
 - api:
     crdVersion: v1
@@ -16,7 +16,7 @@ resources:
   domain: orka.ai
   group: core
   kind: Task
-  path: github.com/sozercan/orka/api/v1alpha1
+  path: github.com/orka-agents/orka/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -25,7 +25,7 @@ resources:
   domain: orka.ai
   group: core
   kind: Tool
-  path: github.com/sozercan/orka/api/v1alpha1
+  path: github.com/orka-agents/orka/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -34,7 +34,7 @@ resources:
   domain: orka.ai
   group: core
   kind: Agent
-  path: github.com/sozercan/orka/api/v1alpha1
+  path: github.com/orka-agents/orka/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -43,6 +43,6 @@ resources:
   domain: orka.ai
   group: core
   kind: Skill
-  path: github.com/sozercan/orka/api/v1alpha1
+  path: github.com/orka-agents/orka/api/v1alpha1
   version: v1alpha1
 version: "3"

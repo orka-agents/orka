@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 type FakeBehavior string

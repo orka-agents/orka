@@ -24,10 +24,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/harness/conformance"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/conformance"
 )
 
 const (

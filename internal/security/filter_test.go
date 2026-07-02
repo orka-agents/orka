@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const filterTestAuthzCategory = "authz"

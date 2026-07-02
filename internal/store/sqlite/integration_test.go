@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // setupDiskStore creates a Store backed by a real on-disk SQLite file.

@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const internalMemoryToolBodyLimit = 1 << 20 // 1MB

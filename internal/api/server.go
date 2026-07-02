@@ -21,9 +21,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/sozercan/orka/internal/controller"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/uiembed"
+	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")

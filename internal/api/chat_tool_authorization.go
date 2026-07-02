@@ -9,7 +9,7 @@ package api
 import (
 	"context"
 
-	"github.com/sozercan/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 func chatToolAuthorizationError[T any](authorize func(context.Context, *T) error, ctx context.Context, obj *T, suggestion string) *tools.ChatToolError {

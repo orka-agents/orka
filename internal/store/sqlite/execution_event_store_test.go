@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 //nolint:gocyclo // Keeps append/list/latest/delete coverage together for store lifecycle readability.

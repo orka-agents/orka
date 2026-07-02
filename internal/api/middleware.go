@@ -18,8 +18,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/tracing"
 )
 
 // NewLoggingMiddleware creates a logging middleware

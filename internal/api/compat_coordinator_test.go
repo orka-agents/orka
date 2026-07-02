@@ -16,7 +16,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"github.com/sozercan/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm"
 )
 
 func TestPrepareCompatCoordinatorToolsDisabledPreservesRequest(t *testing.T) {

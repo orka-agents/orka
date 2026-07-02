@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/sozercan/orka/internal/security"
+	"github.com/orka-agents/orka/internal/security"
 )
 
 const (

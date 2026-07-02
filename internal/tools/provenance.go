@@ -7,8 +7,8 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/taskmeta"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
 func inheritTaskProvenance(child, parent *corev1alpha1.Task) {

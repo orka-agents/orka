@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 // DeleteAgentTool implements agent cleanup for dynamically created agents

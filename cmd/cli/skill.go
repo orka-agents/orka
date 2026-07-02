@@ -17,7 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sozercan/orka/internal/cli/client"
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 func newSkillCmd() *cobra.Command {

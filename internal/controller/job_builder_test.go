@@ -22,10 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -1218,10 +1218,10 @@ func TestJobBuilder_buildContainer_ContainerWithoutImage(t *testing.T) {
 }
 
 func TestConstants(t *testing.T) {
-	if DefaultAIWorkerImage != "ghcr.io/sozercan/orka/ai-worker:latest" {
+	if DefaultAIWorkerImage != "ghcr.io/orka-agents/orka/ai-worker:latest" {
 		t.Errorf("DefaultAIWorkerImage = %s", DefaultAIWorkerImage)
 	}
-	if DefaultGeneralWorkerImage != "ghcr.io/sozercan/orka/general-worker:latest" {
+	if DefaultGeneralWorkerImage != "ghcr.io/orka-agents/orka/general-worker:latest" {
 		t.Errorf("DefaultGeneralWorkerImage = %s", DefaultGeneralWorkerImage)
 	}
 	if ResultEndpointEnvVar != "ORKA_RESULT_ENDPOINT" {

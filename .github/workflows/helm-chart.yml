@@ -104,9 +104,9 @@ jobs:
           cp ../.cr-release-packages/*.tgz charts/
 
           if [ -f charts/index.yaml ]; then
-            helm repo index charts --url "https://sozercan.github.io/orka/charts" --merge charts/index.yaml
+            helm repo index charts --url "https://orka-agents.github.io/orka/charts" --merge charts/index.yaml
           else
-            helm repo index charts --url "https://sozercan.github.io/orka/charts"
+            helm repo index charts --url "https://orka-agents.github.io/orka/charts"
           fi
 
           git add -A

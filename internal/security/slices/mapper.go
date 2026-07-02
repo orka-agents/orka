@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 type MapperOptions struct {

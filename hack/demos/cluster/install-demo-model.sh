@@ -198,7 +198,7 @@ fi
 # The manual/chat PR coordinators run as a `type: ai` Task, which uses the AI
 # worker image (workers/ai/Dockerfile), NOT the codex worker. The Substrate e2e
 # never builds or wires this image, so the controller falls back to the code
-# default ghcr.io/sozercan/orka/ai-worker:latest, which the kind cluster cannot
+# default ghcr.io/orka-agents/orka/ai-worker:latest, which the kind cluster cannot
 # pull -> ImagePullBackOff and the coordinator never starts.
 build_and_repoint_worker "ai-worker-image" "workers/ai/Dockerfile" \
   "${ai_image}" "${DEMO_BUILD_AI_IMAGE:-1}" "AI worker"

@@ -11,8 +11,8 @@ import (
 
 	copilot "github.com/github/copilot-sdk/go"
 
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/workers/common"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 const (

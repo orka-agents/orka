@@ -20,8 +20,8 @@ import (
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
 
-	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/redact"
 )
 
 const (
