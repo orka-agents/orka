@@ -1,0 +1,14 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: support-escalation-demo
+spec:
+  type: agent
+  agentRef:
+    name: support-remote-investigator
+  agentRuntime:
+    allowedTools:
+    - support-ticket-lookup
+  prompt: |
+    Customer ACME-42 reports intermittent checkout failures after a payment gateway migration.
+    Gather evidence through brokered support tools and recommend the safest next action.

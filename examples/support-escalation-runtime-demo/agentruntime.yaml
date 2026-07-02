@@ -1,0 +1,22 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: support-http-runtime
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://support-http-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: support-http-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+    - observed
+    - brokered
+    brokeredToolClasses:
+    - read
+    supportsCancel: true
+    supportsRuntimeSessions: true
+    supportsContinuation: true

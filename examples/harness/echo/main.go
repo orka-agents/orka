@@ -15,18 +15,20 @@ import (
 )
 
 const (
-	behaviorSuccess        = "success"
-	behaviorReadTool       = "read-tool"
-	behaviorApprovalTool   = "approval-tool"
-	behaviorFailure        = "failure"
-	behaviorTimeout        = "timeout"
-	behaviorCancellation   = "cancellation"
-	remoteRuntimeNameEnv   = "ORKA_REMOTE_HTTP_RUNTIME_NAME"
-	remoteRuntimeBearerEnv = "ORKA_REMOTE_HTTP_RUNTIME_BEARER_TOKEN"
-	remoteRuntimeAddrEnv   = "ORKA_REMOTE_HTTP_RUNTIME_ADDR"
-	remoteRuntimeScriptEnv = "ORKA_REMOTE_HTTP_RUNTIME_BEHAVIOR"
-	brokeredReadCallID     = "tool-read-1"
-	brokeredWriteCallID    = "tool-write-1"
+	behaviorSuccess           = "success"
+	behaviorReadTool          = "read-tool"
+	behaviorApprovalTool      = "approval-tool"
+	behaviorFailure           = "failure"
+	behaviorTimeout           = "timeout"
+	behaviorCancellation      = "cancellation"
+	remoteRuntimeNameEnv      = "ORKA_REMOTE_HTTP_RUNTIME_NAME"
+	remoteRuntimeBearerEnv    = "ORKA_REMOTE_HTTP_RUNTIME_BEARER_TOKEN"
+	remoteRuntimeAddrEnv      = "ORKA_REMOTE_HTTP_RUNTIME_ADDR"
+	remoteRuntimeScriptEnv    = "ORKA_REMOTE_HTTP_RUNTIME_BEHAVIOR"
+	remoteRuntimeReadToolEnv  = "ORKA_REMOTE_HTTP_RUNTIME_READ_TOOL_NAME"
+	remoteRuntimeWriteToolEnv = "ORKA_REMOTE_HTTP_RUNTIME_WRITE_TOOL_NAME"
+	brokeredReadCallID        = "tool-read-1"
+	brokeredWriteCallID       = "tool-write-1"
 )
 
 type server struct {
@@ -72,8 +74,30 @@ func main() {
 	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)
 	mux.HandleFunc(harness.TurnsPath, s.startTurn)
 	mux.HandleFunc(harness.TurnsPath+"/", s.turn)
+	mux.HandleFunc("/lookup", s.supportLookup)
 	log.Printf("generic HTTP AgentRuntime fixture listening on %s (runtime=%s behavior=%s)", addr, runtimeName, behavior)
 	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+func (s *server) supportLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	incident, _ := body["incident"].(string)
+	if strings.TrimSpace(incident) == "" {
+		incident = "unknown"
+	}
+	harness.WriteJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"data": map[string]any{
+			"incident": incident,
+			"status":   "investigating",
+			"source":   "mock-support-tool",
+		},
+	})
 }
 
 func firstNonBlank(values ...string) string {
@@ -339,15 +363,22 @@ func (s *server) initialFrames(turn *turnState) []harness.HarnessEventFrame {
 			return observedSuccessFrames(request, start)
 		}
 		output := runtimeOutput(request, 2, "generic HTTP runtime requesting read-only tool")
-		tool := toolRequested(request, 3, brokeredToolNameForRequest(request, "read_incident"), `{"incident":"quincy-north"}`)
+		toolName := brokeredToolNameForRequest(request, defaultReadToolName())
+		tool := toolRequested(request, 3, toolName, brokeredReadCallID, `{"incident":"quincy-north"}`)
 		return []harness.HarnessEventFrame{start, output, tool}
 	case behaviorApprovalTool:
 		if request.ToolExecutionMode != harness.ToolExecutionModeBrokered {
 			return observedSuccessFrames(request, start)
 		}
 		output := runtimeOutput(request, 2, "generic HTTP runtime requesting approval-gated tool")
-		toolName := brokeredToolNameForRequest(request, "dispatch_work_order")
-		tool := toolRequested(request, 3, toolName, `{"incident":"quincy-north","action":"dispatch technician"}`)
+		toolName := brokeredToolNameForRequest(request, defaultWriteToolName())
+		tool := toolRequested(
+			request,
+			3,
+			toolName,
+			brokeredWriteCallID,
+			`{"incident":"quincy-north","action":"dispatch technician"}`,
+		)
 		approval := frame(request, 4, harness.FrameApprovalRequested, "approval required for brokered tool", nil)
 		approval.ToolName = toolName
 		approval.ToolCallID = brokeredWriteCallID
@@ -370,6 +401,14 @@ func brokeredToolNameForRequest(request harness.StartTurnRequest, fallback strin
 	return fallback
 }
 
+func defaultReadToolName() string {
+	return firstNonBlank(os.Getenv(remoteRuntimeReadToolEnv), "read_incident")
+}
+
+func defaultWriteToolName() string {
+	return firstNonBlank(os.Getenv(remoteRuntimeWriteToolEnv), "dispatch_work_order")
+}
+
 func observedSuccessFrames(
 	request harness.StartTurnRequest,
 	start harness.HarnessEventFrame,
@@ -385,7 +424,7 @@ func observedSuccessFrames(
 func (s *server) continuedReadFrames(turn *turnState) []harness.HarnessEventFrame {
 	request := turn.request
 	result := frame(request, 4, harness.FrameToolResultReceived, "brokered read-only tool result received", nil)
-	result.ToolName = brokeredToolNameForRequest(request, "read_incident")
+	result.ToolName = brokeredToolNameForRequest(request, defaultReadToolName())
 	result.ToolCallID = brokeredReadCallID
 	if len(turn.results) > 0 {
 		if turn.results[0].Error != nil {
@@ -406,7 +445,7 @@ func (s *server) continuedReadFrames(turn *turnState) []harness.HarnessEventFram
 func (s *server) continuedFrames(turn *turnState) []harness.HarnessEventFrame {
 	request := turn.request
 	result := frame(request, 5, harness.FrameToolResultReceived, "brokered approval-gated tool result received", nil)
-	result.ToolName = brokeredToolNameForRequest(request, "dispatch_work_order")
+	result.ToolName = brokeredToolNameForRequest(request, defaultWriteToolName())
 	result.ToolCallID = brokeredWriteCallID
 	if len(turn.results) > 0 {
 		if turn.results[0].Error != nil {
@@ -434,14 +473,16 @@ func runtimeOutput(request harness.StartTurnRequest, seq int64, text string) har
 	return output
 }
 
-func toolRequested(request harness.StartTurnRequest, seq int64, name string, args string) harness.HarnessEventFrame {
+func toolRequested(
+	request harness.StartTurnRequest,
+	seq int64,
+	name string,
+	toolCallID string,
+	args string,
+) harness.HarnessEventFrame {
 	tool := frame(request, seq, harness.FrameToolCallRequested, "brokered tool requested", nil)
 	tool.ToolName = name
-	if strings.Contains(name, "write") || name == "dispatch_work_order" {
-		tool.ToolCallID = brokeredWriteCallID
-	} else {
-		tool.ToolCallID = brokeredReadCallID
-	}
+	tool.ToolCallID = toolCallID
 	tool.Content = json.RawMessage(args)
 	return tool
 }

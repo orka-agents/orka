@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -68,6 +69,27 @@ func TestEchoHarnessRejectsDuplicateStartTurn(t *testing.T) {
 	_, err = client.StartTurn(context.Background(), request)
 	if err == nil || !strings.Contains(err.Error(), "turn already exists") {
 		t.Fatalf("second StartTurn() error = %v, want duplicate rejection", err)
+	}
+}
+
+func TestSupportLookupEndpoint(t *testing.T) {
+	s := newTestServer(behaviorSuccess)
+	srv := httptest.NewServer(s.handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/lookup", "application/json", bytes.NewBufferString(`{"incident":"case-1"}`))
+	if err != nil {
+		t.Fatalf("POST /lookup: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["success"] != true {
+		t.Fatalf("body = %#v", body)
 	}
 }
 
@@ -174,6 +196,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)
 	mux.HandleFunc(harness.TurnsPath, s.startTurn)
 	mux.HandleFunc(harness.TurnsPath+"/", s.turn)
+	mux.HandleFunc("/lookup", s.supportLookup)
 	return mux
 }
 
