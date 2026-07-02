@@ -345,8 +345,8 @@ func TestRuntimeSessionStoreDeleteRequiresDeletedState(t *testing.T) {
 	if err := s.CreateRuntimeSession(ctx, &session); err != nil {
 		t.Fatalf("CreateRuntimeSession: %v", err)
 	}
-	if err := s.DeleteRuntimeSession(ctx, runtimeSessionTestNamespace, session.ID); !errors.Is(err, store.ErrValidation) {
-		t.Fatalf("DeleteRuntimeSession active error = %v, want ErrValidation", err)
+	if err := s.PruneDeletedRuntimeSession(ctx, runtimeSessionTestNamespace, session.ID); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("PruneDeletedRuntimeSession active error = %v, want ErrValidation", err)
 	}
 	if _, err := s.TransitionRuntimeSession(ctx, harness.RuntimeSessionTransition{Namespace: runtimeSessionTestNamespace, ID: session.ID, From: harness.RuntimeSessionStatePending, To: harness.RuntimeSessionStateDeleting}); err != nil {
 		t.Fatalf("transition to deleting: %v", err)
@@ -354,8 +354,8 @@ func TestRuntimeSessionStoreDeleteRequiresDeletedState(t *testing.T) {
 	if _, err := s.TransitionRuntimeSession(ctx, harness.RuntimeSessionTransition{Namespace: runtimeSessionTestNamespace, ID: session.ID, From: harness.RuntimeSessionStateDeleting, To: harness.RuntimeSessionStateDeleted}); err != nil {
 		t.Fatalf("transition to deleted: %v", err)
 	}
-	if err := s.DeleteRuntimeSession(ctx, runtimeSessionTestNamespace, session.ID); err != nil {
-		t.Fatalf("DeleteRuntimeSession deleted: %v", err)
+	if err := s.PruneDeletedRuntimeSession(ctx, runtimeSessionTestNamespace, session.ID); err != nil {
+		t.Fatalf("PruneDeletedRuntimeSession deleted: %v", err)
 	}
 	if _, err := s.GetRuntimeSession(ctx, runtimeSessionTestNamespace, session.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetRuntimeSession after delete error = %v, want ErrNotFound", err)
@@ -447,7 +447,7 @@ func TestRuntimeSessionStoreValidationErrors(t *testing.T) {
 		_, err := s.TransitionRuntimeSession(ctx, harness.RuntimeSessionTransition{Namespace: runtimeSessionTestNamespace, ID: "runtime", From: "Mystery", To: harness.RuntimeSessionStateBooting})
 		return err
 	})
-	assertValidationError("delete empty namespace", func() error { return s.DeleteRuntimeSession(ctx, "", "runtime") })
+	assertValidationError("delete empty namespace", func() error { return s.PruneDeletedRuntimeSession(ctx, "", "runtime") })
 
 	if _, err := s.GetRuntimeSession(ctx, runtimeSessionTestNamespace, "missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetRuntimeSession missing error = %v, want ErrNotFound", err)
@@ -455,8 +455,8 @@ func TestRuntimeSessionStoreValidationErrors(t *testing.T) {
 	if _, err := s.TransitionRuntimeSession(ctx, harness.RuntimeSessionTransition{Namespace: runtimeSessionTestNamespace, ID: "missing", From: harness.RuntimeSessionStatePending, To: harness.RuntimeSessionStateBooting}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("TransitionRuntimeSession missing error = %v, want ErrNotFound", err)
 	}
-	if err := s.DeleteRuntimeSession(ctx, runtimeSessionTestNamespace, "missing"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("DeleteRuntimeSession missing error = %v, want ErrNotFound", err)
+	if err := s.PruneDeletedRuntimeSession(ctx, runtimeSessionTestNamespace, "missing"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("PruneDeletedRuntimeSession missing error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -530,4 +530,290 @@ func runtimeSessionIDs(sessions []harness.RuntimeSession) []harness.RuntimeSessi
 		ids = append(ids, session.ID)
 	}
 	return ids
+}
+
+func TestRuntimeSessionStoreCreateClaimReuseReleaseAndDelete(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	created := &harness.RuntimeSession{
+		ID: "runtime-a",
+		Owner: harness.RuntimeSessionOwner{
+			Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService,
+		},
+		State:         harness.RuntimeSessionStateReady,
+		CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+		IdleTimeout:   time.Minute,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := s.CreateRuntimeSession(ctx, created); err != nil {
+		t.Fatalf("CreateRuntimeSession: %v", err)
+	}
+	claimed, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "runtime-task-a", true, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession: %v", err)
+	}
+	if claimed.ID != "runtime-a" || claimed.State != harness.RuntimeSessionStateTurnRunning || claimed.Owner.ActiveTask != "runtime-task-a" {
+		t.Fatalf("claimed = %#v, want reused active runtime-a", claimed)
+	}
+	idle, err := s.MarkRuntimeSessionIdle(ctx, "default", "runtime-a", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("MarkRuntimeSessionIdle: %v", err)
+	}
+	if idle.State != harness.RuntimeSessionStateIdle || idle.Owner.ActiveTask != "" {
+		t.Fatalf("idle = %#v", idle)
+	}
+	retained, err := s.ReleaseRuntimeSession(ctx, "default", "runtime-a", harness.RuntimeCleanupPolicyRetain, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("ReleaseRuntimeSession(retain): %v", err)
+	}
+	if retained.State != harness.RuntimeSessionStateRetained || retained.CleanupPolicy != harness.RuntimeCleanupPolicyRetain {
+		t.Fatalf("retained = %#v", retained)
+	}
+	deleted, err := s.DeleteRuntimeSession(ctx, "default", "runtime-a", now.Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("DeleteRuntimeSession: %v", err)
+	}
+	if deleted.State != harness.RuntimeSessionStateDeleted {
+		t.Fatalf("deleted = %#v", deleted)
+	}
+}
+
+func TestRuntimeSessionStoreClaimCreatesAndDeniesCrossNamespaceReuse(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	claimed, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "runtime-task-a", true, now)
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(create): %v", err)
+	}
+	if claimed.Owner.Namespace != "default" || claimed.Owner.SessionName != "session-a" || claimed.State != harness.RuntimeSessionStateTurnRunning {
+		t.Fatalf("claimed = %#v", claimed)
+	}
+	if _, err := s.GetRuntimeSession(ctx, "other", claimed.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cross-namespace GetRuntimeSession error = %v, want ErrNotFound", err)
+	}
+	other, err := s.ClaimRuntimeSession(ctx, "other", "session-a", harness.ProviderKindKubernetesService, "", "task-b", true, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(other namespace): %v", err)
+	}
+	if other.ID == claimed.ID || other.Owner.Namespace != "other" {
+		t.Fatalf("other = %#v claimed=%#v, want distinct namespace runtime", other, claimed)
+	}
+}
+
+func TestRuntimeSessionStoreClaimWithoutReuseDoesNotClaimRetainedRuntime(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	first, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "task-a", true, now)
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(first): %v", err)
+	}
+	if _, err := s.ReleaseRuntimeSession(ctx, "default", first.ID, harness.RuntimeCleanupPolicyRetain, now.Add(time.Second)); err != nil {
+		t.Fatalf("ReleaseRuntimeSession(retain): %v", err)
+	}
+	second, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "task-b", false, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(no reuse): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("second ID = %s, want fresh runtime when reuse not allowed", second.ID)
+	}
+}
+
+func TestRuntimeSessionStoreClaimSeparatesAgentOwners(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	first, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "agent-a", "task-a", true, now)
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(agent-a): %v", err)
+	}
+	if _, err := s.ReleaseRuntimeSession(ctx, "default", first.ID, harness.RuntimeCleanupPolicyRetain, now.Add(time.Second)); err != nil {
+		t.Fatalf("ReleaseRuntimeSession(agent-a): %v", err)
+	}
+	second, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "agent-b", "task-b", true, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(agent-b): %v", err)
+	}
+	if second.ID == first.ID || second.Owner.AgentName != "agent-b" {
+		t.Fatalf("second = %#v first=%#v, want distinct runtime for different agent", second, first)
+	}
+	reused, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "agent-a", "task-c", true, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession(agent-a reuse): %v", err)
+	}
+	if reused.ID != first.ID || reused.Owner.AgentName != "agent-a" {
+		t.Fatalf("reused = %#v first=%#v, want agent-a runtime reused only by agent-a", reused, first)
+	}
+}
+
+func TestRuntimeSessionStoreIdleCleanupDeletesExpiredIdleSessions(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	for _, session := range []harness.RuntimeSession{
+		{
+			ID:    "runtime-expired",
+			Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService},
+			State: harness.RuntimeSessionStateIdle, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+			IdleTimeout: time.Minute, CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute),
+		},
+		{
+			ID:    "runtime-fresh",
+			Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-b", Provider: harness.ProviderKindKubernetesService},
+			State: harness.RuntimeSessionStateIdle, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+			IdleTimeout: time.Hour, CreatedAt: now, UpdatedAt: now,
+		},
+	} {
+		if err := s.CreateRuntimeSession(ctx, &session); err != nil {
+			t.Fatalf("CreateRuntimeSession(%s): %v", session.ID, err)
+		}
+	}
+	deleted, err := s.CleanupIdleRuntimeSessions(ctx, now)
+	if err != nil {
+		t.Fatalf("CleanupIdleRuntimeSessions: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0].ID != "runtime-expired" || deleted[0].State != harness.RuntimeSessionStateDeleted {
+		t.Fatalf("deleted = %#v, want expired deleted", deleted)
+	}
+	fresh, err := s.GetRuntimeSession(ctx, "default", "runtime-fresh")
+	if err != nil {
+		t.Fatalf("GetRuntimeSession(fresh): %v", err)
+	}
+	if fresh.State != harness.RuntimeSessionStateIdle {
+		t.Fatalf("fresh = %#v, want idle", fresh)
+	}
+}
+
+func TestRuntimeSessionStoreIdleCleanupDeletesExpiredRetainedSessions(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	session := &harness.RuntimeSession{
+		ID:    "runtime-retained-expired",
+		Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService},
+		State: harness.RuntimeSessionStateRetained, CleanupPolicy: harness.RuntimeCleanupPolicyRetain,
+		IdleTimeout: time.Minute, CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute),
+	}
+	if err := s.CreateRuntimeSession(ctx, session); err != nil {
+		t.Fatalf("CreateRuntimeSession: %v", err)
+	}
+	deleted, err := s.CleanupIdleRuntimeSessions(ctx, now)
+	if err != nil {
+		t.Fatalf("CleanupIdleRuntimeSessions: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0].ID != session.ID || deleted[0].State != harness.RuntimeSessionStateDeleted {
+		t.Fatalf("deleted = %#v, want retained runtime deleted after idle timeout", deleted)
+	}
+}
+
+func TestRuntimeSessionStoreClaimSetsDefaultIdleTimeout(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	claimed, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "task-a", true, now)
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession: %v", err)
+	}
+	if claimed.IdleTimeout != harness.DefaultRuntimeSessionIdleTimeout {
+		t.Fatalf("IdleTimeout = %s, want %s", claimed.IdleTimeout, harness.DefaultRuntimeSessionIdleTimeout)
+	}
+}
+
+func TestRuntimeSessionStoreIdleCleanupSkipsRuntimeClaimedAfterSelection(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	candidate := &harness.RuntimeSession{
+		ID:    "runtime-race",
+		Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService},
+		State: harness.RuntimeSessionStateRetained, CleanupPolicy: harness.RuntimeCleanupPolicyRetain,
+		IdleTimeout: time.Minute, CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute),
+	}
+	if err := s.CreateRuntimeSession(ctx, candidate); err != nil {
+		t.Fatalf("CreateRuntimeSession: %v", err)
+	}
+	claimed, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "task-active", true, now)
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession: %v", err)
+	}
+	deleted, ok, err := s.deleteExpiredInactiveRuntimeSession(ctx, *candidate, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("deleteExpiredInactiveRuntimeSession: %v", err)
+	}
+	if ok || deleted != nil {
+		t.Fatalf("deleted=%#v ok=%v, want cleanup skip after claim", deleted, ok)
+	}
+	current, err := s.GetRuntimeSession(ctx, "default", claimed.ID)
+	if err != nil {
+		t.Fatalf("GetRuntimeSession: %v", err)
+	}
+	if current.State != harness.RuntimeSessionStateTurnRunning || current.Owner.ActiveTask != "task-active" {
+		t.Fatalf("current=%#v, want active runtime preserved", current)
+	}
+}
+
+func TestRuntimeSessionStoreInvalidTransitionRejected(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	session := &harness.RuntimeSession{
+		ID:    "runtime-pending",
+		Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService},
+		State: harness.RuntimeSessionStatePending, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateRuntimeSession(ctx, session); err != nil {
+		t.Fatalf("CreateRuntimeSession: %v", err)
+	}
+	if _, err := s.MarkRuntimeSessionIdle(ctx, "default", "runtime-pending", now.Add(time.Second)); err == nil {
+		t.Fatal("MarkRuntimeSessionIdle() error = nil, want invalid transition")
+	}
+}
+
+func TestRuntimeSessionStoreClaimReplacesFailedRuntime(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	failed := &harness.RuntimeSession{
+		ID:    "runtime-failed",
+		Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService},
+		State: harness.RuntimeSessionStateFailed, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateRuntimeSession(ctx, failed); err != nil {
+		t.Fatalf("CreateRuntimeSession: %v", err)
+	}
+	claimed, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "runtime-task-new", true, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession: %v", err)
+	}
+	if claimed.ID == failed.ID || claimed.State != harness.RuntimeSessionStateTurnRunning {
+		t.Fatalf("claimed = %#v, want replacement TurnRunning runtime", claimed)
+	}
+}
+
+func TestRuntimeSessionStoreClaimReplacesUnhealthyRuntime(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	unhealthy := &harness.RuntimeSession{
+		ID:    "runtime-unhealthy",
+		Owner: harness.RuntimeSessionOwner{Namespace: "default", SessionName: "session-a", Provider: harness.ProviderKindKubernetesService},
+		State: harness.RuntimeSessionStateUnhealthy, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.CreateRuntimeSession(ctx, unhealthy); err != nil {
+		t.Fatalf("CreateRuntimeSession: %v", err)
+	}
+	claimed, err := s.ClaimRuntimeSession(ctx, "default", "session-a", harness.ProviderKindKubernetesService, "", "runtime-task-new", true, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ClaimRuntimeSession: %v", err)
+	}
+	if claimed.ID == unhealthy.ID || claimed.State != harness.RuntimeSessionStateTurnRunning {
+		t.Fatalf("claimed = %#v, want replacement TurnRunning runtime", claimed)
+	}
 }

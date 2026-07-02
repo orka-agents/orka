@@ -120,10 +120,13 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
+	server.chatHandler.executionEventStore = config.ExecutionEventStore
 	server.openaiHandler = NewOpenAICompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
+	server.openaiHandler.executionEventStore = config.ExecutionEventStore
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
+	server.anthropicHandler.executionEventStore = config.ExecutionEventStore
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupStaticFiles()
@@ -226,6 +229,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id", s.handlers.GetSession)
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
+	api.Post("/sessions/:id/fork", s.handlers.ForkSession)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
 
 	// Memory endpoints
@@ -365,6 +369,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
 		internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
 		internal.Post("/events/:namespace/:streamType/:streamID", s.internalHandlers.SubmitExecutionEvent)
+		internal.Post("/harness/tools/:namespace/:taskName", s.internalHandlers.BrokerHarnessTool)
 		internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
 		internal.Get("/memories/:namespace", s.internalHandlers.ListMemories)
 		internal.Post("/memories/:namespace", s.internalHandlers.CreateMemory)

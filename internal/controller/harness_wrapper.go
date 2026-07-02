@@ -1183,6 +1183,9 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
 	}
+	if task != nil && task.Annotations != nil && strings.TrimSpace(task.Annotations[labels.AnnotationHarnessBrokeredTools]) != "" {
+		return harness.StartTurnRequest{}, fmt.Errorf("harness wrapper does not support brokered tool execution yet")
+	}
 	metadata, err := r.harnessWrapperTurnMetadata(ctx, task, agent, runtimeName)
 	if err != nil {
 		return harness.StartTurnRequest{}, err

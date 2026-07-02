@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const DefaultRuntimeSessionIdleTimeout = 30 * time.Minute
+
 type RuntimeSessionState string
 
 const (

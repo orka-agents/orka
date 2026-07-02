@@ -74,6 +74,7 @@ printf 'copilot:%s' "$prompt"
 	}
 	request.Metadata["runtime"] = RuntimeCopilot
 	request.Input.Prompt = "hello copilot"
+	request.Input.Env = []harness.TurnEnvVar{{Name: workerenv.ResultStdout, Value: "true"}}
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}

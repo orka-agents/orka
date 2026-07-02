@@ -104,6 +104,7 @@ func main() {
 	var chatMaxTasksPerTurn int
 	var chatMaxSessionSize int
 	var chatMaxPrematureEndRetries int
+	var runtimeSessionCleanupInterval time.Duration
 	var aiWorkerImage string
 	var storeBackend string
 	var storePath string
@@ -227,6 +228,12 @@ func main() {
 		"How many times to re-prompt the coordinator with 'continue with tool_use' before accepting a "+
 			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
 			"final turn — see coordinatorSystemPrompt.")
+	flag.DurationVar(
+		&runtimeSessionCleanupInterval,
+		"runtime-session-cleanup-interval",
+		controller.DefaultRuntimeSessionCleanupInterval,
+		"Interval for cleaning expired inactive runtime sessions. Set to 0 to disable.",
+	)
 	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
 	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
 	flag.StringVar(&controllerURL, "controller-url", "",
@@ -720,6 +727,7 @@ func main() {
 		MessageStore:                       sqliteStore,
 		ArtifactStore:                      sqliteStore,
 		ExecutionEventStore:                sqliteStore,
+		RuntimeSessionStore:                sqliteStore,
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
@@ -810,6 +818,18 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
 	}
+	if runtimeSessionCleanupInterval > 0 {
+		if err := mgr.Add(&controller.RuntimeSessionCleanupLoop{
+			Store:    sqliteStore,
+			Interval: runtimeSessionCleanupInterval,
+		}); err != nil {
+			setupLog.Error(err, "unable to add runtime session cleanup loop")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("runtime session cleanup loop disabled")
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

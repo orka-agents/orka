@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -33,6 +34,8 @@ import (
 )
 
 const queryTrue = "true"
+
+const healthCheckUnhealthy = "unhealthy"
 
 // Handlers contains all API handlers
 //
@@ -345,7 +348,7 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	// Verify database connectivity
 	if h.healthChecker != nil {
 		if err := h.healthChecker.HealthCheck(ctx); err != nil {
-			checks["store"] = "unhealthy"
+			checks["store"] = healthCheckUnhealthy
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"status": "not ready",
 				"checks": checks,
@@ -353,12 +356,26 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 		}
 		checks["store"] = "ok"
 	}
+	if h.executionEventStore == nil {
+		checks["executionEvents"] = "not_configured"
+	} else if checker, ok := h.executionEventStore.(store.HealthChecker); ok {
+		if err := checker.HealthCheck(ctx); err != nil {
+			checks["executionEvents"] = healthCheckUnhealthy
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"status": "not ready",
+				"checks": checks,
+			})
+		}
+		checks["executionEvents"] = "ok"
+	} else {
+		checks["executionEvents"] = "configured"
+	}
 
 	// Verify Kubernetes API connectivity
 	if h.client != nil {
 		var ns corev1.NamespaceList
 		if err := h.client.List(ctx, &ns, client.Limit(1)); err != nil {
-			checks["kubernetes"] = "unhealthy"
+			checks["kubernetes"] = healthCheckUnhealthy
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"status": "not ready",
 				"checks": checks,
@@ -413,12 +430,44 @@ func rejectRequestedByTampering(body []byte) error {
 }
 
 func rejectReservedTaskAnnotations(annotations map[string]string) error {
-	for key := range annotations {
-		if strings.HasPrefix(key, "orka.ai/") {
+	for key, value := range annotations {
+		if strings.HasPrefix(key, "orka.ai/") && !clientWritableTaskAnnotation(key) {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("annotation %q is reserved", key))
+		}
+		if err := validateClientWritableTaskAnnotation(key, value); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func validateClientWritableTaskAnnotation(key, value string) error {
+	switch key {
+	case labels.AnnotationHarnessEndpoint:
+		parsed, err := url.Parse(strings.TrimSpace(value))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "harness endpoint annotation must be an absolute http(s) URL")
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fiber.NewError(fiber.StatusBadRequest, "harness endpoint annotation scheme must be http or https")
+		}
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fiber.NewError(fiber.StatusBadRequest, "harness endpoint annotation must not include user info, query, or fragment")
+		}
+	}
+	return nil
+}
+
+func clientWritableTaskAnnotation(key string) bool {
+	switch key {
+	case labels.AnnotationHarnessEndpoint,
+		labels.AnnotationHarnessProvider,
+		labels.AnnotationHarnessBrokeredTools,
+		labels.AnnotationHarnessReusePolicy:
+		return true
+	default:
+		return false
+	}
 }
 
 // CreateTask creates a new task

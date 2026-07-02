@@ -65,6 +65,7 @@ func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.Execution
 			redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
 			metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
 			success = true
+			store.DeriveExecutionEventSLOFromAppend(ctx, s.executionSLOs, s, *appended)
 			return appended, nil
 		}
 		if ctx.Err() != nil {
@@ -122,6 +123,11 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 	} else if conflict {
 		return nil, store.TerminalApprovalConflict(existingType, approvalID)
 	}
+	if deleted, err := isSQLiteDeletedSessionTaskEvent(ctx, conn, event); err != nil {
+		return nil, err
+	} else if deleted {
+		event.SessionName = ""
+	}
 
 	sessionSeq, err := nextSQLiteSessionExecutionEventSeq(ctx, conn, event.Namespace, event.SessionName)
 	if err != nil {
@@ -144,6 +150,24 @@ func (s *Store) appendExecutionEventOnce(ctx context.Context, event store.Execut
 	}
 	committed = true
 	return &event, nil
+}
+
+func isSQLiteDeletedSessionTaskEvent(ctx context.Context, conn *sql.Conn, event store.ExecutionEvent) (bool, error) {
+	if strings.TrimSpace(event.SessionName) == "" || strings.TrimSpace(event.TaskName) == "" {
+		return false, nil
+	}
+	var count int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*)
+		 FROM execution_event_deleted_session_tasks
+		 WHERE namespace = ? AND session_name = ? AND task_name = ?`,
+		event.Namespace,
+		event.SessionName,
+		event.TaskName,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func existingSQLiteTerminalApprovalEvent(
@@ -297,6 +321,10 @@ func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionE
 		where = append(where, "session_name = ?")
 		args = append(args, filter.SessionName)
 	}
+	if filter.ToolCallID != "" {
+		where = append(where, "tool_call_id = ?")
+		args = append(args, filter.ToolCallID)
+	}
 	if len(filter.EventTypes) > 0 {
 		placeholders := make([]string, len(filter.EventTypes))
 		for i, typ := range filter.EventTypes {
@@ -355,6 +383,10 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	outerWhere := []string{"effective_session_seq > ?"}
 	queryArgs := append([]any{}, baseArgs...)
 	queryArgs = append(queryArgs, filter.AfterSeq)
+	if filter.ToolCallID != "" {
+		outerWhere = append(outerWhere, "tool_call_id = ?")
+		queryArgs = append(queryArgs, filter.ToolCallID)
+	}
 	if len(filter.EventTypes) > 0 {
 		placeholders := make([]string, len(filter.EventTypes))
 		for i, typ := range filter.EventTypes {
@@ -422,11 +454,18 @@ func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType
 	if err := filter.Validate(); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM execution_events WHERE namespace = ? AND stream_type = ? AND stream_id = ?`,
 		filter.Namespace, filter.StreamType, filter.StreamID,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type executionEventScanner interface {

@@ -27,6 +27,9 @@ const (
 	BehaviorInvalidFrame    FakeBehavior = "invalid-frame"
 	BehaviorRedactionOutput FakeBehavior = "secret-output"
 	BehaviorMissingTerminal FakeBehavior = "missing-terminal"
+	BehaviorResidentState   FakeBehavior = "resident-state"
+	BehaviorStartTurnError  FakeBehavior = "start-turn-error"
+	BehaviorUnhealthy       FakeBehavior = "unhealthy"
 )
 
 type FakeHarnessConfig struct {
@@ -46,8 +49,9 @@ type FakeHarnessServer struct {
 	config FakeHarnessConfig
 	now    func() time.Time
 
-	mu    sync.Mutex
-	turns map[harness.HarnessTurnID]*fakeTurn
+	mu           sync.Mutex
+	turns        map[harness.HarnessTurnID]*fakeTurn
+	runtimeFiles map[harness.RuntimeSessionID]map[string]string
 }
 
 type fakeTurn struct {
@@ -85,7 +89,7 @@ func NewFakeHarnessServer(config FakeHarnessConfig) *FakeHarnessServer {
 	if now == nil {
 		now = time.Now
 	}
-	s := &FakeHarnessServer{config: config, now: now, turns: map[harness.HarnessTurnID]*fakeTurn{}}
+	s := &FakeHarnessServer{config: config, now: now, turns: map[harness.HarnessTurnID]*fakeTurn{}, runtimeFiles: map[harness.RuntimeSessionID]map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.handleHealth)
 	mux.HandleFunc(harness.CapabilitiesPath, s.handleCapabilities)
@@ -103,15 +107,35 @@ func (s *FakeHarnessServer) Close() {
 	}
 }
 
+// StartTurnRequests returns a snapshot of accepted turn requests in insertion-agnostic order.
+func (s *FakeHarnessServer) StartTurnRequests() []harness.StartTurnRequest {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]harness.StartTurnRequest, 0, len(s.turns))
+	for _, turn := range s.turns {
+		out = append(out, turn.request)
+	}
+	return out
+}
+
 func (s *FakeHarnessServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	status := harness.HealthStatusOK
+	ready := true
+	if s.config.Behavior == BehaviorUnhealthy {
+		status = harness.HealthStatusUnhealthy
+		ready = false
+	}
 	harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
 		Version:   harness.ProtocolVersion,
-		Status:    harness.HealthStatusOK,
-		Ready:     true,
+		Status:    status,
+		Ready:     ready,
 		CheckedAt: s.now().UTC(),
 	})
 }
@@ -168,6 +192,10 @@ func (s *FakeHarnessServer) handleStartTurn(w http.ResponseWriter, r *http.Reque
 	eventStreamPath, err := harness.EventStreamPath(request.TurnID)
 	if err != nil {
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.config.Behavior == BehaviorStartTurnError {
+		harness.WriteError(w, http.StatusServiceUnavailable, "start turn unavailable")
 		return
 	}
 	turn := &fakeTurn{request: request, cancelled: make(chan struct{})}
@@ -310,6 +338,13 @@ func (s *FakeHarnessServer) framesFor(turn *fakeTurn) []harness.HarnessEventFram
 		return []harness.HarnessEventFrame{start, output}
 	case BehaviorLongRunning, BehaviorCancellation:
 		return []harness.HarnessEventFrame{start}
+	case BehaviorResidentState:
+		message := s.applyResidentStatePrompt(turn.request.RuntimeSessionID, turn.request.Input.Prompt)
+		output := s.frame(turn, 2, harness.FrameRuntimeOutput, "resident state", nil)
+		output.Content = json.RawMessage(fmt.Sprintf(`{"message":%q}`, message))
+		output.ContentText = message
+		completed := s.frame(turn, 3, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{Result: message, FinalEventSeq: 3, RetainSession: true})
+		return []harness.HarnessEventFrame{start, output, completed}
 	default:
 		output := s.frame(turn, 2, harness.FrameRuntimeOutput, "echo", nil)
 		output.Content = json.RawMessage(fmt.Sprintf(`{"message":%q}`, "echo: "+turn.request.Input.Prompt))
@@ -324,6 +359,38 @@ func (s *FakeHarnessServer) framesFor(turn *fakeTurn) []harness.HarnessEventFram
 		result.Content = json.RawMessage(`{"output":"hello"}`)
 		completed := s.frame(turn, 5, harness.FrameTurnCompleted, "turn completed", &harness.TurnCompleted{Result: "ok", FinalEventSeq: 5})
 		return []harness.HarnessEventFrame{start, output, tool, result, completed}
+	}
+}
+
+func (s *FakeHarnessServer) applyResidentStatePrompt(runtimeID harness.RuntimeSessionID, prompt string) string {
+	fields := strings.Fields(prompt)
+	if len(fields) < 2 {
+		return "resident noop"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	files := s.runtimeFiles[runtimeID]
+	if files == nil {
+		files = map[string]string{}
+		s.runtimeFiles[runtimeID] = files
+	}
+	switch fields[0] {
+	case "write":
+		if len(fields) < 3 {
+			return "resident write requires path and content"
+		}
+		path := fields[1]
+		value := strings.Join(fields[2:], " ")
+		files[path] = value
+		return fmt.Sprintf("wrote %s", path)
+	case "read":
+		value, ok := files[fields[1]]
+		if !ok {
+			return fmt.Sprintf("missing %s", fields[1])
+		}
+		return fmt.Sprintf("read %s: %s", fields[1], value)
+	default:
+		return "resident noop"
 	}
 }
 

@@ -1776,6 +1776,43 @@ func TestHandlers_CreateTask_RejectsReservedAnnotations(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTask_RejectsCredentialedHarnessEndpointAnnotation(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+	}{
+		{name: "userinfo", endpoint: "http://user:pass@harness.default.svc:8080"},
+		{name: "query", endpoint: "http://harness.default.svc:8080?token=secret"},
+		{name: "fragment", endpoint: "http://harness.default.svc:8080#secret"},
+		{name: "unsupported scheme", endpoint: "ftp://harness.default.svc:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, app := setupTestHandlers()
+			app.Post("/tasks", handlers.CreateTask)
+			body := CreateTaskRequest{
+				Name:      "bad-harness-endpoint",
+				Namespace: "default",
+				Annotations: map[string]string{
+					labels.AnnotationHarnessEndpoint: tt.endpoint,
+				},
+				Type:  corev1alpha1.TaskTypeContainer,
+				Image: "busybox",
+			}
+			bodyBytes, _ := json.Marshal(body)
+			req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 func TestHandlers_CreateTask_NamespaceScoped(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -4205,6 +4242,15 @@ func (f *fakeHealthChecker) HealthCheck(_ context.Context) error {
 	return f.err
 }
 
+type fakeHealthyExecutionEventStore struct {
+	store.ExecutionEventStore
+	err error
+}
+
+func (f fakeHealthyExecutionEventStore) HealthCheck(context.Context) error {
+	return f.err
+}
+
 func TestHandlers_Readyz_HealthCheckFailure(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -4239,6 +4285,60 @@ func TestHandlers_Readyz_HealthCheckSuccess(t *testing.T) {
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestHandlers_Readyz_ExecutionEventStoreHealthFailure(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	handlers := NewHandlers(HandlersConfig{
+		Client: fakeClient,
+		ExecutionEventStore: fakeHealthyExecutionEventStore{
+			ExecutionEventStore: store.NewFakeExecutionEventStore(),
+			err:                 fmt.Errorf("events down"),
+		},
+	})
+	app := fiber.New()
+	app.Get("/readyz", handlers.Readyz)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var body map[string]any
+	json.NewDecoder(resp.Body).Decode(&body) //nolint:errcheck
+	require.Equal(t, "not ready", body["status"])
+	checks := body["checks"].(map[string]any)
+	require.Equal(t, "unhealthy", checks["executionEvents"])
+}
+
+func TestHandlers_Readyz_ExecutionEventStoreHealthSuccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	handlers := NewHandlers(HandlersConfig{
+		Client: fakeClient,
+		ExecutionEventStore: fakeHealthyExecutionEventStore{
+			ExecutionEventStore: store.NewFakeExecutionEventStore(),
+		},
+	})
+	app := fiber.New()
+	app.Get("/readyz", handlers.Readyz)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body map[string]any
+	json.NewDecoder(resp.Body).Decode(&body) //nolint:errcheck
+	checks := body["checks"].(map[string]any)
+	require.Equal(t, "ok", checks["executionEvents"])
 }
 
 // --- Tests: GetTaskLogs with clientset ---

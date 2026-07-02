@@ -233,6 +233,31 @@ func TestExecutionEventStoreFakeSessionCursorSurvivesTaskDeletion(t *testing.T) 
 	}
 }
 
+func TestFakeExecutionEventStoreListSessionExecutionEventsFiltersToolCallID(t *testing.T) {
+	ctx := context.Background()
+	store := NewFakeExecutionEventStore()
+	for _, callID := range []string{"call-a", "call-b"} {
+		if _, err := store.AppendExecutionEvent(ctx, &ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  ExecutionEventStreamTypeTask,
+			StreamID:    "task-" + callID,
+			TaskName:    "task-" + callID,
+			SessionName: "session-tools",
+			ToolCallID:  callID,
+			Type:        events.ExecutionEventTypeToolCallCompleted,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(%s): %v", callID, err)
+		}
+	}
+	listed, latest, err := store.ListSessionExecutionEvents(ctx, SessionExecutionEventFilter{Namespace: "default", SessionName: "session-tools", ToolCallID: "call-a"})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 2 || len(listed) != 1 || listed[0].ToolCallID != "call-a" {
+		t.Fatalf("latest=%d listed=%#v, want only call-a with overall latest cursor 2", latest, listed)
+	}
+}
+
 func TestExecutionEventStoreFakeRejectsDuplicateTerminalApproval(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

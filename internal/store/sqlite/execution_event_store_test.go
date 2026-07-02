@@ -220,6 +220,31 @@ func TestEventSecretRedactionPersistedRows(t *testing.T) {
 	}
 }
 
+func TestExecutionEventStoreListSessionExecutionEventsFiltersToolCallID(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	for _, callID := range []string{"call-a", "call-b"} {
+		if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+			Namespace:   "default",
+			StreamType:  store.ExecutionEventStreamTypeTask,
+			StreamID:    "task-" + callID,
+			TaskName:    "task-" + callID,
+			SessionName: "session-tools",
+			ToolCallID:  callID,
+			Type:        events.ExecutionEventTypeToolCallCompleted,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(%s): %v", callID, err)
+		}
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{Namespace: "default", SessionName: "session-tools", ToolCallID: "call-a"})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 2 || len(listed) != 1 || listed[0].ToolCallID != "call-a" {
+		t.Fatalf("latest=%d listed=%#v, want only call-a with overall latest cursor 2", latest, listed)
+	}
+}
+
 func TestExecutionEventStoreConcurrentSameStreamAppends(t *testing.T) {
 	s := setupDiskStore(t)
 	assertConcurrentExecutionEventAppends(t, s)
@@ -507,6 +532,143 @@ func TestExecutionEventStoreListSessionCursorSurvivesTaskDeletion(t *testing.T) 
 	}
 	if latest != 3 || len(listed) != 1 || listed[0].SessionSeq != 3 || listed[0].TaskName != taskC {
 		t.Fatalf("latest=%d listed=%#v, want stable cursor 3 for task-c", latest, listed)
+	}
+}
+
+func TestExecutionEventStoreSessionDeleteTombstonesOldTaskEvents(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		ActiveTask:  "old-task",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateSession(old): %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "old-task",
+		TaskName:    "old-task",
+		SessionName: "session-1",
+		Type:        events.ExecutionEventTypeTaskStarted,
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(old start): %v", err)
+	}
+	if err := s.DeleteSession(ctx, "default", "session-1"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "old-task",
+		TaskName:    "old-task",
+		SessionName: "session-1",
+		Type:        events.ExecutionEventTypeTaskFailed,
+		CreatedAt:   now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(late old before recreate): %v", err)
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents(deleted): %v", err)
+	}
+	if latest != 0 || len(listed) != 0 {
+		t.Fatalf("deleted session events latest=%d listed=%#v, want none", latest, listed)
+	}
+
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace:   "default",
+		Name:        "session-1",
+		SessionType: "task",
+		ActiveTask:  "new-task",
+		CreatedAt:   now.Add(2 * time.Second),
+		UpdatedAt:   now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("CreateSession(new): %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "new-task",
+		TaskName:    "new-task",
+		SessionName: "session-1",
+		Type:        events.ExecutionEventTypeTaskStarted,
+		CreatedAt:   now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(new): %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace:   "default",
+		StreamType:  store.ExecutionEventStreamTypeTask,
+		StreamID:    "old-task",
+		TaskName:    "old-task",
+		SessionName: "session-1",
+		Type:        events.ExecutionEventTypeWorkerStarted,
+		CreatedAt:   now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(late old after recreate): %v", err)
+	}
+	listed, latest, err = s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents(recreated): %v", err)
+	}
+	if latest != 1 || len(listed) != 1 || listed[0].TaskName != "new-task" {
+		t.Fatalf("recreated session latest=%d listed=%#v, want only new-task", latest, listed)
+	}
+}
+
+func TestExecutionEventStoreTaskDeletionPreservesDeletedSessionTombstoneForLateEvents(t *testing.T) {
+	s := setupDiskStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "session-1", SessionType: "task", ActiveTask: "reused-task",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession(old): %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "reused-task",
+		TaskName: "reused-task", SessionName: "session-1", Type: events.ExecutionEventTypeTaskStarted,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(old): %v", err)
+	}
+	if err := s.DeleteSession(ctx, "default", "session-1"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if err := s.DeleteExecutionEvents(ctx, "default", store.ExecutionEventStreamTypeTask, "reused-task"); err != nil {
+		t.Fatalf("DeleteExecutionEvents: %v", err)
+	}
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "session-1", SessionType: "task", ActiveTask: "reused-task",
+		CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("CreateSession(new): %v", err)
+	}
+	if _, err := s.AppendExecutionEvent(ctx, &store.ExecutionEvent{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "reused-task",
+		TaskName: "reused-task", SessionName: "session-1", Type: events.ExecutionEventTypeWorkerStarted,
+	}); err != nil {
+		t.Fatalf("AppendExecutionEvent(reused late): %v", err)
+	}
+	listed, latest, err := s.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace: "default", SessionName: "session-1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessionExecutionEvents: %v", err)
+	}
+	if latest != 0 || len(listed) != 0 {
+		t.Fatalf("latest=%d listed=%#v, want tombstone to keep reused task name excluded without generation", latest, listed)
 	}
 }
 

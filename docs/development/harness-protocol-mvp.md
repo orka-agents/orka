@@ -53,6 +53,31 @@ Deferred:
 - remote harness-backed Agent CRDs;
 - full graph layout UI.
 
+## Non-Substrate provider MVP
+
+The first provider implementation is the boring Kubernetes Service HTTP provider. A Task can opt into a harness-backed
+turn with the annotation:
+
+```yaml
+metadata:
+  annotations:
+    orka.ai/harness-endpoint: "http://harness.default.svc.cluster.local:8080"
+```
+
+The controller accepts only `http`/`https` Kubernetes Service DNS names in the Task namespace (for example,
+`service.<namespace>.svc` or `service.<namespace>.svc.cluster.local`). It rejects raw IPs, user-info URLs, loopback,
+link-local, and external hostnames so task authors cannot turn the controller into an arbitrary network client.
+
+When this annotation is present, the Task controller skips Job creation and starts one `orka.harness.v1` turn through the
+provider-neutral `TurnRunner`. The controller still owns Task phase transitions and terminal Task events; the harness
+frames are mapped into the existing execution event stream, so task event list/stream/trace readers see
+`AgentRuntimeStarted`, `ModelMessage`, tool/approval events, and `AgentRuntimeCompleted`/`AgentRuntimeFailed` from the
+harness. This MVP is non-resident: each annotated Task runs one turn against the supplied service endpoint. RuntimeSession
+reuse and resident daemon/workspace behavior are separate follow-up work.
+
+This path does not require Agent Substrate. It deliberately uses an explicit endpoint annotation as the minimal feature
+gate/configuration surface until provider CRD status and RuntimeSession cleanup semantics are stable.
+
 ---
 
 ## Frozen MVP contract (`orka.harness.v1`)
@@ -116,6 +141,27 @@ Redaction/truncation runs in the harness mapper and again at the event store bou
 - `observed`: the harness executes tools itself and emits tool lifecycle frames. This is compatible with opaque runtimes but Orka cannot prevent side effects before observation.
 - `brokered`: the harness requests tool execution through Orka. The idempotency key is `runtimeSessionID:turnID:toolCallID`; duplicate requests must return the same result or a deterministic conflict. Approval-required brokered calls emit the existing approval events and do not execute until approved.
 
+Brokered tool calls are accepted at Orka's internal worker API:
+
+```http
+POST /internal/v1/harness/tools/{namespace}/{taskName}
+```
+
+The request body is `ToolCallRequest`. Orka validates the idempotency key, injects namespace/task context, routes the call
+through the central tool registry, and appends `ToolCallStarted` plus terminal `ToolCallCompleted`/`ToolCallFailed` events
+with low-cardinality safe metadata. Duplicate requests with the same idempotency key and body return the cached result while the broker cache is live. After controller/API restart, Orka derives the prior terminal tool event from the durable event stream and returns a deterministic `idempotency_already_processed` conflict instead of re-executing side effects or persisting raw tool output as a replay cache. The same key with different input returns an idempotency conflict. Approval-required requests append `ApprovalRequested`
+and return `approval_required` without executing the tool.
+
+Brokered tools are disabled by default. A harness-backed Task must explicitly list tools that may be brokered. The first controller-safe built-in brokered tool is `list_tools`:
+
+```yaml
+metadata:
+  annotations:
+    orka.ai/harness-brokered-tools: "list_tools"
+```
+
+The internal broker never treats the tool name in the request as authorization; it must match the Task allow-list. `list_tools` runs with the task namespace injected as both the watch namespace and namespace-isolation boundary, so cross-namespace input is denied at the tool layer. Filesystem, code-execution, and network-fetch tools are not brokerable from the controller/API process until a task-scoped workspace or egress proxy exists. The broker rejects `file_read`, `file_write`, `code_exec`, `web_fetch`, and `web_search` even if a Task allow-lists them; safe provider-specific tools can be enabled once they execute outside the controller trust boundary.
+
 ### RuntimeSession lifecycle
 
 `internal/harness` defines the backend-neutral state machine:
@@ -129,6 +175,26 @@ Pending -> Booting -> Ready -> TurnRunning -> Idle -> Releasing -> Deleted
 ```
 
 Supported states are `Pending`, `Booting`, `Ready`, `TurnRunning`, `Idle`, `Releasing`, `Retained`, `Suspended`, `Deleting`, `Deleted`, `Failed`, and `Unhealthy`. Runtime sessions require namespace, session name, provider, cleanup policy, and owner metadata. Cleanup policies are `delete`, `retain`, and provider-capability-gated `suspend`.
+
+ADR 0008 is implemented as an internal SQLite-backed `RuntimeSessionStore` before exposing a CRD. The store persists
+runtime session owner metadata, provider kind, state, cleanup policy, active task, idle timeout, max lifetime, and update
+timestamps. It validates state transitions, reuses an existing runtime only within the same namespace/session/provider
+owner tuple, denies cross-namespace lookups by key, and provides idle-timeout cleanup for inactive `Idle`, `Retained`, and `Suspended` sessions. Claimed runtime sessions default to a 30-minute idle timeout. The controller manager runs a runtime-session cleanup loop every five minutes by default (`--runtime-session-cleanup-interval`; set to `0` to disable) and logs cleanup failures without blocking task reconciliation. Public Kubernetes API surface for RuntimeSessions remains deferred until provider semantics and cleanup observability stabilize.
+
+Harness-backed Tasks can opt into resident runtime reuse with:
+
+```yaml
+metadata:
+  annotations:
+    orka.ai/harness-reuse-policy: "retain"
+```
+
+When set, successful harness turns release the runtime session to `Retained` instead of deleting it. A later Task in the
+same namespace/session/provider claims that retained runtime session and sends the same `runtimeSessionID` to the harness,
+allowing a healthy non-Substrate harness daemon to keep session-local state/workspace warm. The fake provider test suite
+proves this by writing state in turn 1 and reading it back in turn 2 through the same retained runtime session. Failed or
+unhealthy runtime sessions are not selected for reuse; the next claim creates a replacement. This is still logical runtime
+reuse for the Kubernetes Service provider. Physical workspace snapshot/clone semantics remain deferred.
 
 ### Security requirements
 

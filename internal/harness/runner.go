@@ -52,14 +52,38 @@ func (r TurnRunner) Run(ctx context.Context, request StartTurnRequest) (TurnRunR
 	if err != nil {
 		return TurnRunResult{}, err
 	}
-	if err := validateAcceptedTurn(request, *accepted); err != nil {
+	return r.RunAccepted(ctx, request, *accepted)
+}
+
+// RunAccepted streams and maps frames for a turn that has already been accepted
+// by the harness. Controllers can call StartTurn, persist accepted turn identity,
+// and then resume through this method without issuing duplicate StartTurn calls.
+func (r TurnRunner) RunAccepted(ctx context.Context, request StartTurnRequest, accepted StartTurnResponse) (TurnRunResult, error) {
+	if r.Client == nil {
+		return TurnRunResult{}, fmt.Errorf("harness client is required")
+	}
+	if r.EventStore == nil {
+		return TurnRunResult{}, fmt.Errorf("execution event store is required")
+	}
+	if err := request.Validate(); err != nil {
 		return TurnRunResult{}, err
 	}
-	result := TurnRunResult{Accepted: accepted}
+	if err := r.MapContext.validate(); err != nil {
+		return TurnRunResult{}, err
+	}
+	if r.TurnTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.TurnTimeout)
+		defer cancel()
+	}
+	if err := validateAcceptedTurn(request, accepted); err != nil {
+		return TurnRunResult{}, err
+	}
+	result := TurnRunResult{Accepted: &accepted}
 	// EventCursor is Orka's persisted task-event cursor. Harness frame cursors
 	// are turn-local, so a newly started turn must stream from frame 0.
 	var lastFrameSeq int64
-	err = r.Client.StreamFrames(ctx, request.TurnID, 0, func(frame HarnessEventFrame) error {
+	err := r.Client.StreamFrames(ctx, request.TurnID, 0, func(frame HarnessEventFrame) error {
 		if err := validateFrameForTurn(request, frame); err != nil {
 			return err
 		}

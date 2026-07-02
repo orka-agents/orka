@@ -72,8 +72,11 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	if events.IsTerminalTaskEventType(event.Type) || events.IsTerminalApprovalEventType(event.Type) {
-		return fiber.NewError(fiber.StatusForbidden, "terminal task and approval events must use controller-owned paths")
+	if events.IsTerminalApprovalEventType(event.Type) {
+		return fiber.NewError(fiber.StatusForbidden, "approval decision events must use the approval decision API")
+	}
+	if events.IsTerminalTaskEventType(event.Type) {
+		return fiber.NewError(fiber.StatusForbidden, "terminal task events must use controller-owned paths")
 	}
 	if event.StreamType == events.ExecutionEventStreamTypeTask {
 		event.TaskName = streamID
@@ -88,7 +91,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 					}
 				}
 			}
-			if event.SessionName != "" && event.SessionName != expectedSessionName {
+			if expectedSessionName != "" && event.SessionName != "" && event.SessionName != expectedSessionName {
 				return fiber.NewError(fiber.StatusBadRequest, "sessionName does not match task session")
 			}
 			event.SessionName = expectedSessionName
@@ -96,6 +99,12 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	}
 	appended, err := h.executionEventStore.AppendExecutionEvent(c.Context(), event)
 	if err != nil {
+		log.Error(err, "failed to append worker execution event",
+			"namespace", namespace,
+			"streamType", streamType,
+			"streamID", streamID,
+			"eventType", event.Type,
+		)
 		if errors.Is(err, store.ErrValidation) {
 			return fiber.NewError(fiber.StatusBadRequest, err.Error())
 		}

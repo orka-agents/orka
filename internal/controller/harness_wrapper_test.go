@@ -575,6 +575,20 @@ func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperStartTurnRejectsBrokeredToolsUntilSupported(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationHarnessBrokeredTools] = "list_tools"
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "does not support brokered tool execution") {
+		t.Fatalf("harnessWrapperStartTurnRequest error = %v, want brokered tool rejection", err)
+
+	}
+}
+
 func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true

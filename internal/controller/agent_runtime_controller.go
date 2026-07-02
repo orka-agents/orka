@@ -136,7 +136,7 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return fmt.Errorf("deployment.endpoint must be an absolute http(s) URL")
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+	if parsed.Scheme != controllerURLSchemeHTTP && parsed.Scheme != controllerURLSchemeHTTPS {
 		return fmt.Errorf("deployment.endpoint scheme %q is not supported", parsed.Scheme)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {

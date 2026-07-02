@@ -8,6 +8,8 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -81,6 +83,43 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	if args.TaskName == "" || args.HeadBranch == "" || args.BaseBranch == "" || args.Title == "" {
 		return "", fmt.Errorf("task_name, head_branch, base_branch, and title are required")
 	}
+	target, err := resolveCreatePullRequestApprovalTarget(ctx, t.k8sClient, args, t.apiBaseURL)
+	if err != nil {
+		return "", err
+	}
+	approvalTaskName := strings.TrimSpace(args.TaskName)
+	if tc := GetToolContext(ctx); tc != nil && strings.TrimSpace(tc.TaskID) != "" {
+		approvalTaskName = strings.TrimSpace(tc.TaskID)
+	}
+	approval, err := requireToolApproval(ctx, toolApprovalRequest{
+		Action:           createPullRequestApprovalAction,
+		ToolName:         createPullRequestToolName,
+		RiskSummary:      createPullRequestRiskSummary(args, target),
+		SafeSummary:      "approval required to create pull request",
+		Seed:             createPullRequestApprovalSeed(args, target),
+		ApprovalTaskName: approvalTaskName,
+		SafeContent: map[string]any{
+			"targetTaskName": args.TaskName,
+			"headBranch":     args.HeadBranch,
+			"baseBranch":     args.BaseBranch,
+			"title":          args.Title,
+			"repository":     target.Repository(),
+			"apiBaseURL":     target.BaseURL,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if !approval.Approved {
+		return approval.Result, nil
+	}
+	latestTarget, err := resolveCreatePullRequestApprovalTarget(ctx, t.k8sClient, args, t.apiBaseURL)
+	if err != nil {
+		return "", err
+	}
+	if latestTarget != target {
+		return "", fmt.Errorf("approved pull request target changed from %s to %s", target.Repository(), latestTarget.Repository())
+	}
 
 	owner, repo, token, baseURL, err := resolveRepoAndToken(ctx, t.k8sClient, args.TaskName, "", t.apiBaseURL)
 	if err != nil {
@@ -100,6 +139,68 @@ func (t *CreatePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMe
 	}
 	resultJSON, _ := json.Marshal(result)
 	return string(resultJSON), nil
+}
+
+func createPullRequestApprovalSeed(args CreatePullRequestArgs, target createPullRequestApprovalTarget) string {
+	bodyDigest := sha256.Sum256([]byte(args.Body))
+	seed := map[string]string{
+		"taskName":   strings.TrimSpace(args.TaskName),
+		"headBranch": strings.TrimSpace(args.HeadBranch),
+		"baseBranch": strings.TrimSpace(args.BaseBranch),
+		"title":      strings.TrimSpace(args.Title),
+		"bodySHA256": hex.EncodeToString(bodyDigest[:]),
+		"repository": target.Repository(),
+		"apiBaseURL": target.BaseURL,
+	}
+	data, err := json.Marshal(seed)
+	if err != nil {
+		return strings.Join([]string{seed["taskName"], seed["headBranch"], seed["baseBranch"], seed["title"], seed["bodySHA256"], seed["repository"], seed["apiBaseURL"]}, "|")
+	}
+	return string(data)
+}
+
+func createPullRequestRiskSummary(args CreatePullRequestArgs, target createPullRequestApprovalTarget) string {
+	return fmt.Sprintf(
+		"Create a GitHub pull request in %s from branch %q into %q using completed task %q.",
+		target.Repository(),
+		strings.TrimSpace(args.HeadBranch),
+		strings.TrimSpace(args.BaseBranch),
+		strings.TrimSpace(args.TaskName),
+	)
+}
+
+type createPullRequestApprovalTarget struct {
+	Owner   string
+	Repo    string
+	BaseURL string
+}
+
+func (t createPullRequestApprovalTarget) Repository() string {
+	return strings.TrimSpace(t.Owner) + "/" + strings.TrimSpace(t.Repo)
+}
+
+func resolveCreatePullRequestApprovalTarget(
+	ctx context.Context,
+	k8sClient client.Client,
+	args CreatePullRequestArgs,
+	overrideBaseURL string,
+) (createPullRequestApprovalTarget, error) {
+	baseURL := githubAPIBaseURL
+	if strings.TrimSpace(overrideBaseURL) != "" {
+		baseURL = strings.TrimSpace(overrideBaseURL)
+	}
+	taskContext, err := loadGitHubTaskContext(ctx, k8sClient, args.TaskName)
+	if err != nil {
+		return createPullRequestApprovalTarget{}, err
+	}
+	if len(taskContext.scopes) == 0 {
+		return createPullRequestApprovalTarget{}, fmt.Errorf("task %s workspace has no GitHub repository scope", strings.TrimSpace(args.TaskName))
+	}
+	return createPullRequestApprovalTarget{
+		Owner:   taskContext.scopes[0].owner,
+		Repo:    taskContext.scopes[0].repo,
+		BaseURL: baseURL,
+	}, nil
 }
 
 // parseGitHubRepo extracts owner and repo name from a GitHub URL.

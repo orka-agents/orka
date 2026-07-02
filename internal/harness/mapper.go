@@ -146,9 +146,138 @@ func buildMappedContent(frame HarnessEventFrame) (json.RawMessage, error) {
 		}
 		content["frameContent"] = decoded
 	}
+	return marshalMappedContent(content, frame)
+}
+
+func marshalMappedContent(content map[string]any, frame HarnessEventFrame) (json.RawMessage, error) {
 	encoded, err := json.Marshal(content)
 	if err != nil {
 		return nil, fmt.Errorf("marshal mapped harness content: %w", err)
 	}
+	if len(encoded) <= events.MaxExecutionEventContentJSONBytes {
+		return encoded, nil
+	}
+	bounded := map[string]any{}
+	if harnessEnvelope, ok := content["harness"]; ok {
+		bounded["harness"] = harnessEnvelope
+	}
+	if approvalID, truncated := boundedHarnessIdentifier(frame.ApprovalID); truncated {
+		bounded["approvalIDTruncated"] = true
+	} else if approvalID != "" {
+		bounded["approvalID"] = approvalID
+	}
+	if frame.Completed != nil {
+		bounded["completed"] = boundedTurnCompleted(frame.Completed)
+	}
+	if frame.Failed != nil {
+		bounded["failed"] = boundedTurnFailed(frame.Failed)
+	}
+	if frame.Error != nil {
+		bounded["error"] = boundedErrorInfo(frame.Error)
+	}
+	if _, ok := content["metadata"]; ok {
+		bounded["metadataTruncated"] = true
+	}
+	if _, ok := content["frameContent"]; ok {
+		bounded["frameContent"] = map[string]any{
+			"truncated": true,
+			"preview":   "[truncated oversized harness frame content]",
+		}
+	}
+	bounded["contentTruncated"] = true
+	encoded, err = json.Marshal(bounded)
+	if err != nil {
+		return nil, fmt.Errorf("marshal bounded mapped harness content: %w", err)
+	}
 	return encoded, nil
+}
+
+func boundedHarnessIdentifier(value string) (string, bool) {
+	const maxChars = 1024
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", false
+	}
+	if len([]rune(trimmed)) > maxChars {
+		return "", true
+	}
+	return trimmed, false
+}
+
+func boundedErrorInfo(info *ErrorInfo) *ErrorInfo {
+	if info == nil {
+		return nil
+	}
+	copy := *info
+	copy.Code = truncateForkContextTextForHarness(copy.Code)
+	copy.Message = truncateForkContextTextForHarness(copy.Message)
+	return &copy
+}
+
+func boundedTurnFailed(failed *TurnFailed) map[string]any {
+	if failed == nil {
+		return nil
+	}
+	body := map[string]any{
+		"reason":    truncateForkContextTextForHarness(failed.Reason),
+		"message":   truncateForkContextTextForHarness(failed.Message),
+		"retryable": failed.Retryable,
+	}
+	if outputRef, truncated := boundedHarnessOutputRef(failed.OutputRef); truncated {
+		body["outputRefTruncated"] = true
+	} else if outputRef != "" {
+		body["outputRef"] = outputRef
+	}
+	if originalResult := strings.TrimSpace(failed.Result); originalResult != "" {
+		preview := truncateForkContextTextForHarness(originalResult)
+		body["result"] = preview
+		if failed.ResultTruncated || preview != originalResult {
+			body["resultTruncated"] = true
+		}
+	}
+	return body
+}
+
+func truncateForkContextTextForHarness(value string) string {
+	const maxChars = 1024
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= maxChars {
+		return string(runes)
+	}
+	return string(runes[:maxChars]) + "...[truncated]"
+}
+
+func boundedHarnessOutputRef(value string) (string, bool) {
+	const maxChars = 1024
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", false
+	}
+	if len([]rune(trimmed)) > maxChars {
+		return "", true
+	}
+	return trimmed, false
+}
+
+func boundedTurnCompleted(completed *TurnCompleted) map[string]any {
+	if completed == nil {
+		return nil
+	}
+	body := map[string]any{
+		"finalEventSeq": completed.FinalEventSeq,
+		"retainSession": completed.RetainSession,
+	}
+	if outputRef, truncated := boundedHarnessOutputRef(completed.OutputRef); truncated {
+		body["outputRefTruncated"] = true
+	} else if outputRef != "" {
+		body["outputRef"] = outputRef
+	}
+	if originalResult := strings.TrimSpace(completed.Result); originalResult != "" {
+		preview := truncateForkContextTextForHarness(originalResult)
+		body["result"] = preview
+		if completed.ResultTruncated || preview != originalResult {
+			body["resultTruncated"] = true
+		}
+	}
+	return body
 }

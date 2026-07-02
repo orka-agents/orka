@@ -12,7 +12,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +46,23 @@ type ForkTaskResponse struct {
 	NewTaskName    string              `json:"newTaskName"`
 	AfterSeq       int64               `json:"afterSeq"`
 	ForkContext    forkcontext.Context `json:"forkContext"`
+}
+
+type ForkSessionRequest struct {
+	AfterSeq       *int64                       `json:"afterSeq,omitempty"`
+	NewSessionName string                       `json:"newSessionName,omitempty"`
+	SeedTaskName   string                       `json:"seedTaskName,omitempty"`
+	AgentRef       *corev1alpha1.AgentReference `json:"agentRef,omitempty"`
+	Prompt         string                       `json:"prompt,omitempty"`
+}
+
+type ForkSessionResponse struct {
+	Namespace         string              `json:"namespace"`
+	SourceSessionName string              `json:"sourceSessionName"`
+	NewSessionName    string              `json:"newSessionName"`
+	SeedTaskName      string              `json:"seedTaskName,omitempty"`
+	AfterSeq          int64               `json:"afterSeq"`
+	ForkContext       forkcontext.Context `json:"forkContext"`
 }
 
 // ForkTask handles POST /api/v1/tasks/{id}/fork.
@@ -230,9 +249,162 @@ func forkRequesterIdentity(c fiber.Ctx) string {
 	return ""
 }
 
+const (
+	sessionForkProvenanceRole   = "system"
+	sessionForkProvenanceName   = "orka.sessionForkProvenance"
+	sessionForkProvenancePrefix = "Fork context through session execution event checkpoint:"
+)
+
 // deterministicForkTaskName derives a stable fork name so retries of the same
 // logical fork (identified by an explicit Idempotency-Key) resolve to the same
 // object. Used only on the opt-in idempotent path.
+func (h *Handlers) recoverSessionForkResponse(c fiber.Ctx, namespace, sourceName, newSessionName, idempotencyKey, expectedRequestDigest string, req ForkSessionRequest) (*ForkSessionResponse, error) {
+	ctx := c.Context()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for {
+		existing, err := h.sessionStore.GetSession(ctx, namespace, newSessionName)
+		if err != nil {
+			lastErr = err
+		} else if recoveredAfterSeq, recoveredSeedTaskName, recoveredRequestDigest, _, recoveredCtx, ok := sessionForkProvenance(existing, namespace, sourceName); ok {
+			if expectedRequestDigest != "" && recoveredRequestDigest != expectedRequestDigest {
+				return nil, fiber.NewError(fiber.StatusConflict, "idempotency key was already used for a different session fork request")
+			}
+			trustedSeedTaskName := expectedSessionForkSeedTaskName(sourceName, recoveredAfterSeq, idempotencyKey, req)
+			if trustedSeedTaskName == "" {
+				if recoveredSeedTaskName != "" {
+					return nil, fiber.NewError(fiber.StatusConflict, "idempotent fork seed task provenance does not match request")
+				}
+				return &ForkSessionResponse{Namespace: namespace, SourceSessionName: sourceName, NewSessionName: newSessionName, AfterSeq: recoveredAfterSeq, ForkContext: recoveredCtx}, nil
+			}
+			if recoveredSeedTaskName != "" && recoveredSeedTaskName != trustedSeedTaskName {
+				return nil, fiber.NewError(fiber.StatusConflict, "idempotent fork seed task provenance does not match request")
+			}
+			recoveredSeedTaskName = trustedSeedTaskName
+			if !h.existingSessionForkSeedTaskMatches(ctx, namespace, sourceName, newSessionName, recoveredAfterSeq, recoveredRequestDigest, recoveredSeedTaskName, nil) {
+				probe := &corev1alpha1.Task{}
+				probeErr := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: recoveredSeedTaskName}, probe)
+				if probeErr == nil {
+					return nil, fiber.NewError(fiber.StatusConflict, "idempotent fork seed task already exists with different provenance")
+				}
+				lastErr = probeErr
+			} else {
+				return &ForkSessionResponse{Namespace: namespace, SourceSessionName: sourceName, NewSessionName: newSessionName, AfterSeq: recoveredAfterSeq, SeedTaskName: recoveredSeedTaskName, ForkContext: recoveredCtx}, nil
+			}
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			if lastErr != nil && !errors.Is(lastErr, store.ErrNotFound) && !apierrors.IsNotFound(lastErr) {
+				return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to recover idempotent fork session: %v", lastErr))
+			}
+			return nil, fiber.NewError(fiber.StatusConflict, "idempotent fork session already exists without matching provenance")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (h *Handlers) findSessionForkNameByIdempotencyKey(ctx context.Context, namespace, sourceName, idempotencyKey string) (string, error) {
+	expectedDigest := sessionForkIdempotencyKeyDigest(idempotencyKey)
+	if h == nil || h.sessionStore == nil || expectedDigest == "" {
+		return "", nil
+	}
+	sessions, err := h.sessionStore.ListSessions(ctx, namespace)
+	if err != nil {
+		return "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list fork sessions: %v", err))
+	}
+	for _, session := range sessions {
+		record, err := h.sessionStore.GetSession(ctx, namespace, session.Name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect fork session: %v", err))
+		}
+		_, _, _, keyDigest, _, ok := sessionForkProvenance(record, namespace, sourceName)
+		if ok && keyDigest == expectedDigest {
+			return session.Name, nil
+		}
+	}
+	return "", nil
+}
+
+func expectedSessionForkSeedTaskName(sourceName string, afterSeq int64, idempotencyKey string, req ForkSessionRequest) string {
+	if seedTaskName := strings.TrimSpace(req.SeedTaskName); seedTaskName != "" {
+		return seedTaskName
+	}
+	if !shouldCreateSessionForkSeedTask(req) {
+		return ""
+	}
+	return deterministicSessionForkSeedTaskName(sourceName, afterSeq, "", strings.TrimSpace(idempotencyKey)+":seed")
+}
+
+func sessionForkProvenance(session *store.SessionRecord, namespace, sourceName string) (int64, string, string, string, forkcontext.Context, bool) {
+	if session == nil {
+		return 0, "", "", "", forkcontext.Context{}, false
+	}
+	for _, message := range session.Messages {
+		if message.Role != sessionForkProvenanceRole || message.Name != sessionForkProvenanceName {
+			continue
+		}
+		_, raw, ok := strings.Cut(message.Content, sessionForkProvenancePrefix+"\n")
+		if !ok {
+			continue
+		}
+		var payload struct {
+			SourceSessionName    string                     `json:"sourceSessionName"`
+			AfterSeq             int64                      `json:"afterSeq"`
+			SeedTaskName         string                     `json:"seedTaskName"`
+			RequestDigest        string                     `json:"requestDigest"`
+			IdempotencyKeyDigest string                     `json:"idempotencyKeyDigest"`
+			Truncated            bool                       `json:"truncated"`
+			Events               []forkcontext.EventSummary `json:"events"`
+		}
+		if json.Unmarshal([]byte(raw), &payload) != nil || payload.SourceSessionName != sourceName {
+			continue
+		}
+		return payload.AfterSeq, strings.TrimSpace(payload.SeedTaskName), strings.TrimSpace(payload.RequestDigest), strings.TrimSpace(payload.IdempotencyKeyDigest), forkcontext.Context{
+			SourceNamespace: namespace,
+			SourceSession:   sourceName,
+			AfterSeq:        payload.AfterSeq,
+			Events:          payload.Events,
+			Truncated:       payload.Truncated,
+		}, true
+	}
+	return 0, "", "", "", forkcontext.Context{}, false
+}
+
+func sessionForkIdempotencyKeyDigest(idempotencyKey string) string {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(idempotencyKey))
+	return hex.EncodeToString(sum[:])
+}
+
+func sessionForkRequestDigest(req ForkSessionRequest, afterSeq int64) string {
+	body := map[string]any{
+		"prompt":         req.Prompt,
+		"seedTaskName":   strings.TrimSpace(req.SeedTaskName),
+		"newSessionName": strings.TrimSpace(req.NewSessionName),
+		"agentRef":       req.AgentRef,
+	}
+	if req.AfterSeq != nil {
+		body["afterSeq"] = afterSeq
+	}
+	data, _ := json.Marshal(body)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func deterministicForkSessionName(sourceName string, afterSeq int64, requester, idempotencyKey string) string {
+	seed := idempotencyKey
+	if seed == "" {
+		seed = fmt.Sprintf("%s\x00%d\x00%s", sourceName, afterSeq, requester)
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(sum[:8]))
+}
+
 func deterministicForkTaskName(sourceName string, afterSeq int64, requester, idempotencyKey string) string {
 	seed := idempotencyKey
 	if seed == "" {
@@ -240,6 +412,15 @@ func deterministicForkTaskName(sourceName string, afterSeq int64, requester, ide
 	}
 	sum := sha256.Sum256([]byte(seed))
 	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(sum[:4]))
+}
+
+func deterministicSessionForkSeedTaskName(newSessionName string, afterSeq int64, requester, idempotencyKey string) string {
+	seed := idempotencyKey
+	if seed == "" {
+		seed = fmt.Sprintf("%s\x00%d\x00%s", newSessionName, afterSeq, requester)
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(newSessionName), hex.EncodeToString(sum[:8]))
 }
 
 // generatedForkTaskName mints a unique fork name (random suffix). This is the
@@ -415,6 +596,251 @@ func marshalForkEventContent(sourceName, newName string, afterSeq int64, eventKi
 	return content, nil
 }
 
+// ForkSession handles POST /api/v1/sessions/{id}/fork.
+func (h *Handlers) ForkSession(c fiber.Ctx) error {
+	sourceName := c.Params("id")
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "forkSession", h.contextTokenAuthorization.SessionReadScopes); err != nil {
+		return err
+	}
+	if err := h.ensureSessionReadable(c, namespace, sourceName); err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "forkSessionWrite", h.contextTokenAuthorization.SessionWriteScopes); err != nil {
+		return err
+	}
+	if h.executionEventStore == nil || h.sessionStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "session fork storage not enabled")
+	}
+
+	sourceSessionType, err := h.getSourceSessionType(c.Context(), namespace, sourceName)
+	if err != nil {
+		return err
+	}
+
+	var req ForkSessionRequest
+	if len(c.Body()) > 0 {
+		if err := c.Bind().JSON(&req); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		}
+	}
+
+	_, latestSeq, err := h.executionEventStore.ListSessionExecutionEvents(c.Context(), store.SessionExecutionEventFilter{
+		Namespace:   namespace,
+		SessionName: sourceName,
+		Limit:       1,
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get latest session event sequence: %v", err))
+	}
+	afterSeq := latestSeq
+	if req.AfterSeq != nil {
+		afterSeq = *req.AfterSeq
+	}
+	if afterSeq < 0 || afterSeq > latestSeq {
+		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing session event sequence")
+	}
+	validAfterSeq, err := sessionEventSeqExists(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq, latestSeq)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to validate session event sequence: %v", err))
+	}
+	if !validAfterSeq {
+		return fiber.NewError(fiber.StatusBadRequest, "afterSeq must be 0, latest, or an existing session event sequence")
+	}
+	sessionEvents, err := listSessionEventsThrough(c.Context(), h.executionEventStore, namespace, sourceName, afterSeq)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list session execution events: %v", err))
+	}
+	forkCtx := forkcontext.BuildSessionContext(namespace, sourceName, afterSeq, sessionEvents, forkcontext.DefaultMaxEvents)
+
+	newSessionName, seedTaskName, recovered, err := h.prepareSessionForkNames(c, namespace, sourceName, afterSeq, req)
+	if err != nil {
+		return err
+	}
+	if recovered != nil {
+		return c.Status(fiber.StatusOK).JSON(recovered)
+	}
+	seedTask, err := h.prepareSessionForkSeedTask(c, namespace, sourceName, newSessionName, seedTaskName, afterSeq, req, forkCtx)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	if err := h.sessionStore.CreateSession(c.Context(), &store.SessionRecord{
+		Namespace:   namespace,
+		Name:        newSessionName,
+		SessionType: sourceSessionType,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		if isIdempotentSessionFork(c, req) {
+			if recovered, recoverErr := h.recoverSessionForkResponse(c, namespace, sourceName, newSessionName, strings.TrimSpace(c.Get("Idempotency-Key")), sessionForkRequestDigest(req, afterSeq), req); recoverErr == nil {
+				return c.Status(fiber.StatusOK).JSON(recovered)
+			} else {
+				return recoverErr
+			}
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create forked session: %v", err))
+	}
+	if err := h.appendSessionForkProvenanceOrCleanup(c.Context(), namespace, newSessionName, sourceName, seedTaskName, sessionForkRequestDigest(req, afterSeq), strings.TrimSpace(c.Get("Idempotency-Key")), afterSeq, forkCtx); err != nil {
+		return err
+	}
+	if recovered, err := h.createSessionForkSeedTask(c, namespace, sourceName, newSessionName, afterSeq, req, seedTask); recovered != nil || err != nil {
+		if recovered != nil {
+			return c.Status(fiber.StatusOK).JSON(recovered)
+		}
+		return err
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(ForkSessionResponse{
+		Namespace:         namespace,
+		SourceSessionName: sourceName,
+		NewSessionName:    newSessionName,
+		SeedTaskName:      seedTaskName,
+		AfterSeq:          afterSeq,
+		ForkContext:       forkCtx,
+	})
+}
+
+func (h *Handlers) prepareSessionForkSeedTask(
+	c fiber.Ctx,
+	namespace string,
+	sourceName string,
+	newSessionName string,
+	seedTaskName string,
+	afterSeq int64,
+	req ForkSessionRequest,
+	forkCtx forkcontext.Context,
+) (*corev1alpha1.Task, error) {
+	if !shouldCreateSessionForkSeedTask(req) {
+		return nil, nil
+	}
+	seedTaskType, err := h.sessionForkSeedTaskType(c.Context(), namespace, req.AgentRef)
+	if err != nil {
+		return nil, err
+	}
+	seedTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      seedTaskName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				labels.AnnotationForkSourceSession:        sourceName,
+				labels.AnnotationForkSourceSessionSeq:     strconv.FormatInt(afterSeq, 10),
+				labels.AnnotationForkContextTruncated:     strconv.FormatBool(forkCtx.Truncated),
+				labels.AnnotationSessionForkRequestDigest: sessionForkRequestDigest(req, afterSeq),
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:       seedTaskType,
+			Prompt:     sessionForkPrompt(forkCtx, req.Prompt),
+			AgentRef:   req.AgentRef,
+			SessionRef: &corev1alpha1.SessionReference{Name: newSessionName, Append: true},
+		},
+	}
+	stampTaskRequesterFromUserInfo(seedTask, GetUserInfo(c))
+	if err := h.authorizeContextTokenTaskCreate(c, createTaskRequestFromTask(seedTask), namespace); err != nil {
+		return nil, err
+	}
+	if err := h.authorizeTaskCreate(c.Context(), c, seedTask); err != nil {
+		return nil, err
+	}
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: seedTaskName, Namespace: namespace}, &corev1alpha1.Task{}); err == nil {
+		if isIdempotentSessionFork(c, req) && h.existingSessionForkSeedTaskMatches(c.Context(), namespace, sourceName, newSessionName, afterSeq, sessionForkRequestDigest(req, afterSeq), seedTaskName, seedTask) {
+			return nil, nil
+		}
+		return nil, fiber.NewError(fiber.StatusConflict, "seed task already exists")
+	} else if !apierrors.IsNotFound(err) {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to check seed task: %v", err))
+	}
+	return seedTask, nil
+}
+
+func (h *Handlers) appendSessionForkProvenanceOrCleanup(
+	ctx context.Context,
+	namespace string,
+	newSessionName string,
+	sourceName string,
+	seedTaskName string,
+	requestDigest string,
+	idempotencyKey string,
+	afterSeq int64,
+	forkCtx forkcontext.Context,
+) error {
+	if err := appendSessionForkProvenance(ctx, h.sessionStore, namespace, newSessionName, sourceName, seedTaskName, requestDigest, idempotencyKey, afterSeq, forkCtx); err != nil {
+		_ = h.sessionStore.DeleteSession(context.Background(), namespace, newSessionName)
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to write fork provenance: %v", err))
+	}
+	return nil
+}
+
+func (h *Handlers) createSessionForkSeedTask(
+	c fiber.Ctx,
+	namespace string,
+	sourceName string,
+	newSessionName string,
+	afterSeq int64,
+	req ForkSessionRequest,
+	seedTask *corev1alpha1.Task,
+) (*ForkSessionResponse, error) {
+	if seedTask == nil {
+		return nil, nil
+	}
+	if err := h.client.Create(c.Context(), seedTask); err == nil {
+		return nil, nil
+	} else {
+		if isIdempotentSessionFork(c, req) && apierrors.IsAlreadyExists(err) && h.existingSessionForkSeedTaskMatches(c.Context(), namespace, sourceName, newSessionName, afterSeq, sessionForkRequestDigest(req, afterSeq), seedTask.Name, seedTask) {
+			if recovered, recoverErr := h.recoverSessionForkResponse(c, namespace, sourceName, newSessionName, strings.TrimSpace(c.Get("Idempotency-Key")), sessionForkRequestDigest(req, afterSeq), req); recoverErr == nil {
+				return recovered, nil
+			}
+		}
+		_ = h.sessionStore.DeleteSession(context.Background(), namespace, newSessionName)
+		if apierrors.IsAlreadyExists(err) {
+			return nil, fiber.NewError(fiber.StatusConflict, "seed task already exists")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create seed task: %v", err))
+	}
+}
+
+func (h *Handlers) existingSessionForkSeedTaskMatches(ctx context.Context, namespace, sourceName, newSessionName string, afterSeq int64, requestDigest, seedTaskName string, expected *corev1alpha1.Task) bool {
+	if h == nil || h.client == nil || strings.TrimSpace(seedTaskName) == "" {
+		return false
+	}
+	existing := &corev1alpha1.Task{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: seedTaskName}, existing); err != nil {
+		return false
+	}
+	matches := existing.Spec.SessionRef != nil &&
+		existing.Spec.SessionRef.Name == newSessionName &&
+		existing.Annotations[labels.AnnotationForkSourceSession] == sourceName &&
+		existing.Annotations[labels.AnnotationForkSourceSessionSeq] == strconv.FormatInt(afterSeq, 10) &&
+		existing.Annotations[labels.AnnotationSessionForkRequestDigest] == requestDigest
+	if !matches || expected == nil {
+		return matches
+	}
+	return existing.Spec.Type == expected.Spec.Type &&
+		existing.Spec.Prompt == expected.Spec.Prompt &&
+		reflect.DeepEqual(existing.Spec.AgentRef, expected.Spec.AgentRef) &&
+		reflect.DeepEqual(existing.Spec.SessionRef, expected.Spec.SessionRef)
+}
+
+func (h *Handlers) getSourceSessionType(ctx context.Context, namespace, sourceName string) (string, error) {
+	sourceSession, err := h.sessionStore.GetSession(ctx, namespace, sourceName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", fiber.NewError(fiber.StatusNotFound, "source session not found")
+		}
+		return "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get source session: %v", err))
+	}
+	sessionType := strings.TrimSpace(sourceSession.SessionType)
+	if sessionType == "" {
+		sessionType = "task"
+	}
+	return sessionType, nil
+}
+
 func taskEventSeqExists(
 	ctx context.Context,
 	eventStore store.ExecutionEventStore,
@@ -434,4 +860,217 @@ func listTaskEventsThrough(
 	throughSeq int64,
 ) ([]store.ExecutionEvent, error) {
 	return newTaskTimelineReader(eventStore, namespace, taskName).listRecentThrough(ctx, throughSeq, forkcontext.DefaultMaxEvents+1)
+}
+func sessionEventSeqExists(
+	ctx context.Context,
+	eventStore store.ExecutionEventStore,
+	namespace,
+	sessionName string,
+	seq,
+	latestSeq int64,
+) (bool, error) {
+	if seq == 0 || seq == latestSeq {
+		return true, nil
+	}
+	if seq < 0 || seq > latestSeq {
+		return false, nil
+	}
+	listed, _, err := eventStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+		Namespace:   namespace,
+		SessionName: sessionName,
+		AfterSeq:    seq - 1,
+		Limit:       1,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(listed) == 1 && listed[0].SessionSeq == seq, nil
+}
+
+func listSessionEventsThrough(
+	ctx context.Context,
+	eventStore store.ExecutionEventStore,
+	namespace,
+	sessionName string,
+	throughSeq int64,
+) ([]store.SessionExecutionEvent, error) {
+	if throughSeq == 0 {
+		return nil, nil
+	}
+	readLimit := forkcontext.DefaultMaxEvents + 1
+	windowEnd := throughSeq
+	out := make([]store.SessionExecutionEvent, 0, readLimit)
+	for windowEnd > 0 && len(out) < readLimit {
+		after := max(windowEnd-int64(store.MaxExecutionEventLimit), 0)
+		batch, _, err := eventStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
+			Namespace:   namespace,
+			SessionName: sessionName,
+			AfterSeq:    after,
+			Limit:       store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		windowEvents := make([]store.SessionExecutionEvent, 0, len(batch))
+		for _, event := range batch {
+			if event.SessionSeq > windowEnd || event.SessionSeq > throughSeq {
+				break
+			}
+			windowEvents = append(windowEvents, event)
+		}
+		if len(windowEvents) > 0 {
+			combined := make([]store.SessionExecutionEvent, 0, len(windowEvents)+len(out))
+			combined = append(combined, windowEvents...)
+			combined = append(combined, out...)
+			if len(combined) > readLimit {
+				combined = combined[len(combined)-readLimit:]
+			}
+			out = combined
+		}
+		if after == 0 {
+			break
+		}
+		windowEnd = after
+	}
+	return out, nil
+}
+
+func appendSessionForkProvenance(
+	ctx context.Context,
+	sessionStore store.SessionStore,
+	namespace,
+	newSessionName,
+	sourceSessionName string,
+	seedTaskName string,
+	requestDigest string,
+	idempotencyKey string,
+	afterSeq int64,
+	forkCtx forkcontext.Context,
+) error {
+	content, err := json.Marshal(map[string]any{
+		"sourceSessionName":    sourceSessionName,
+		"afterSeq":             afterSeq,
+		"seedTaskName":         seedTaskName,
+		"requestDigest":        requestDigest,
+		"idempotencyKeyDigest": sessionForkIdempotencyKeyDigest(idempotencyKey),
+		"truncated":            forkCtx.Truncated,
+		"events":               forkCtx.Events,
+		"note":                 "logical session fork only; workspace snapshot fork is not included",
+	})
+	if err != nil {
+		return err
+	}
+	return sessionStore.AppendMessages(ctx, namespace, newSessionName, []store.SessionMessage{{
+		Role:      sessionForkProvenanceRole,
+		Name:      sessionForkProvenanceName,
+		Content:   sessionForkProvenancePrefix + "\n" + string(content),
+		Timestamp: time.Now().UTC(),
+	}})
+}
+
+func sessionForkPrompt(forkCtx forkcontext.Context, prompt string) string {
+	encoded, err := json.Marshal(forkCtx)
+	contextBlock := "Fork context through session execution event checkpoint:"
+	if err == nil {
+		contextBlock += "\n" + string(encoded)
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return contextBlock
+	}
+	return contextBlock + "\n\nUser continuation prompt:\n" + prompt
+}
+
+func shouldCreateSessionForkSeedTask(req ForkSessionRequest) bool {
+	return strings.TrimSpace(req.SeedTaskName) != "" || strings.TrimSpace(req.Prompt) != "" || req.AgentRef != nil
+}
+
+func isIdempotentSessionFork(c fiber.Ctx, _ ForkSessionRequest) bool {
+	return strings.TrimSpace(c.Get("Idempotency-Key")) != ""
+}
+
+func (h *Handlers) prepareSessionForkNames(
+	c fiber.Ctx,
+	namespace string,
+	sourceName string,
+	afterSeq int64,
+	req ForkSessionRequest,
+) (newSessionName string, seedTaskName string, recovered *ForkSessionResponse, err error) {
+	idempotencyKey := strings.TrimSpace(c.Get("Idempotency-Key"))
+	expectedDigest := sessionForkRequestDigest(req, afterSeq)
+	newSessionName = strings.TrimSpace(req.NewSessionName)
+	idempotent := idempotencyKey != ""
+	if newSessionName == "" {
+		if idempotent {
+			newSessionName = deterministicForkSessionName(sourceName, afterSeq, forkRequesterIdentity(c), idempotencyKey)
+		} else {
+			newSessionName = generatedForkSessionName(sourceName)
+		}
+	}
+	seedTaskName = strings.TrimSpace(req.SeedTaskName)
+	if shouldCreateSessionForkSeedTask(req) && seedTaskName == "" {
+		if idempotent {
+			seedTaskName = deterministicSessionForkSeedTaskName(sourceName, afterSeq, forkRequesterIdentity(c), idempotencyKey+":seed")
+		} else {
+			seedTaskName = generatedForkTaskName(newSessionName)
+		}
+	}
+	if idempotent {
+		matchedName, matchErr := h.findSessionForkNameByIdempotencyKey(c.Context(), namespace, sourceName, idempotencyKey)
+		if matchErr != nil {
+			return "", "", nil, matchErr
+		}
+		if matchedName != "" && matchedName != newSessionName {
+			recovered, recoverErr := h.recoverSessionForkResponse(c, namespace, sourceName, matchedName, idempotencyKey, expectedDigest, req)
+			if recoverErr != nil {
+				return "", "", nil, recoverErr
+			}
+			return matchedName, recovered.SeedTaskName, recovered, nil
+		}
+	}
+	if _, err := h.sessionStore.GetSession(c.Context(), namespace, newSessionName); err == nil {
+		if idempotent {
+			recovered, recoverErr := h.recoverSessionForkResponse(c, namespace, sourceName, newSessionName, idempotencyKey, expectedDigest, req)
+			if recoverErr != nil {
+				return "", "", nil, recoverErr
+			}
+			return newSessionName, recovered.SeedTaskName, recovered, nil
+		}
+		return "", "", nil, fiber.NewError(fiber.StatusConflict, "forked session already exists")
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return "", "", nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to check forked session: %v", err))
+	}
+	return newSessionName, seedTaskName, nil, nil
+}
+
+func (h *Handlers) sessionForkSeedTaskType(ctx context.Context, namespace string, agentRef *corev1alpha1.AgentReference) (corev1alpha1.TaskType, error) {
+	if h == nil || h.client == nil || agentRef == nil || strings.TrimSpace(agentRef.Name) == "" {
+		return corev1alpha1.TaskTypeAI, nil
+	}
+	agentNamespace := strings.TrimSpace(agentRef.Namespace)
+	if agentNamespace != "" && agentNamespace != namespace {
+		return "", fiber.NewError(fiber.StatusForbidden, "agentRef namespace must match fork namespace")
+	}
+	if agentNamespace == "" {
+		agentNamespace = namespace
+	}
+	agent := &corev1alpha1.Agent{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: agentNamespace, Name: strings.TrimSpace(agentRef.Name)}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return corev1alpha1.TaskTypeAI, nil
+		}
+		return "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent for session fork seed task: %v", err))
+	}
+	if agent.Spec.Runtime != nil {
+		return corev1alpha1.TaskTypeAgent, nil
+	}
+	return corev1alpha1.TaskTypeAI, nil
+}
+
+func generatedForkSessionName(sourceName string) string {
+	var suffix [3]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Sprintf("%s-fork-%d", forkcontext.SanitizeTaskNamePrefix(sourceName), time.Now().Unix())
+	}
+	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(suffix[:]))
 }

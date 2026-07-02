@@ -74,11 +74,25 @@ func TestBuildContextWithLimitsCompactionMarksTruncated(t *testing.T) {
 }
 
 func TestTruncateForkContextTextPreservesUTF8(t *testing.T) {
-	got := truncateForkContextText(strings.Repeat("🙂", 8), 5)
+	got := truncateForkContextText(strings.Repeat("🙂", 32), 20)
 	if !utf8.ValidString(got) {
 		t.Fatalf("truncated string is not valid UTF-8: %q", got)
 	}
 	if !strings.HasSuffix(got, "...[truncated]") {
 		t.Fatalf("truncated string = %q, want marker", got)
+	}
+}
+
+func TestSessionForkBuildContextBoundsBySessionSeq(t *testing.T) {
+	ctx := BuildSessionContext("default", "session-a", 2, []store.SessionExecutionEvent{
+		{SessionSeq: 1, TaskSeq: 1, ExecutionEvent: store.ExecutionEvent{TaskName: "task-a", Type: events.ExecutionEventTypeTaskStarted}},
+		{SessionSeq: 2, TaskSeq: 1, ExecutionEvent: store.ExecutionEvent{TaskName: "task-b", Type: events.ExecutionEventTypeWorkerStarted}},
+		{SessionSeq: 3, TaskSeq: 2, ExecutionEvent: store.ExecutionEvent{TaskName: "task-a", Type: events.ExecutionEventTypeTaskSucceeded}},
+	}, 1)
+	if ctx.SourceSession != "session-a" || ctx.SourceTask != "" || ctx.AfterSeq != 2 || !ctx.Truncated {
+		t.Fatalf("context metadata = %#v", ctx)
+	}
+	if len(ctx.Events) != 1 || ctx.Events[0].Seq != 2 || ctx.Events[0].TaskName != "task-b" || ctx.Events[0].TaskSeq != 1 {
+		t.Fatalf("events = %#v, want only session seq 2", ctx.Events)
 	}
 }

@@ -11,18 +11,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 
+	"github.com/sozercan/orka/internal/events"
 	"github.com/sozercan/orka/internal/security"
 	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/sozercan/orka/workers/common"
 )
 
 func TestRun_Success(t *testing.T) {
@@ -59,83 +58,142 @@ func TestRun_CommandFromEnv(t *testing.T) {
 	}
 }
 
-func TestRun_EmitsWorkerEventsOnSuccess(t *testing.T) {
-	eventTypes := captureGeneralWorkerHTTPEvents(t, "general-success-task", func() {
-		origArgs := os.Args
-		t.Cleanup(func() { os.Args = origArgs })
-		os.Args = []string{"worker", "printf", "hello"}
+func TestRunEventEmissionSuccess(t *testing.T) {
+	origArgs := os.Args
+	origRecorderFactory := newGeneralEventRecorder
+	defer func() {
+		os.Args = origArgs
+		newGeneralEventRecorder = origRecorderFactory
+	}()
 
-		if err := run(); err != nil {
-			t.Fatalf("run() error = %v", err)
-		}
-	})
-
-	want := []string{"WorkerStarted", "ResultSubmitted", "WorkerCompleted"}
-	if !reflect.DeepEqual(eventTypes, want) {
-		t.Fatalf("event types = %#v, want %#v", eventTypes, want)
-	}
-}
-
-func TestRun_EmitsWorkerFailedEventOnError(t *testing.T) {
-	eventTypes := captureGeneralWorkerHTTPEvents(t, "general-failure-task", func() {
-		origArgs := os.Args
-		t.Cleanup(func() { os.Args = origArgs })
-		os.Args = []string{"worker", "nonexistent_command_12345"}
-
-		if err := run(); err == nil {
-			t.Fatal("run() error = nil, want command error")
-		}
-	})
-
-	want := []string{"WorkerStarted", "WorkerFailed"}
-	if !reflect.DeepEqual(eventTypes, want) {
-		t.Fatalf("event types = %#v, want %#v", eventTypes, want)
-	}
-}
-
-func captureGeneralWorkerHTTPEvents(t *testing.T, taskName string, runWorker func()) []string {
-	t.Helper()
-
-	var mu sync.Mutex
-	var eventTypes []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/internal/v1/events/default/task/"+taskName):
-			defer r.Body.Close() //nolint:errcheck
-			var body struct {
-				Type     string `json:"type"`
-				TaskName string `json:"taskName"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Errorf("decode event body: %v", err)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			if body.TaskName != taskName {
-				t.Errorf("event taskName = %q, want %q", body.TaskName, taskName)
-			}
-			mu.Lock()
-			eventTypes = append(eventTypes, body.Type)
-			mu.Unlock()
-			w.WriteHeader(http.StatusCreated)
-		case strings.HasPrefix(r.URL.Path, "/internal/v1/results/default/"+taskName):
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Errorf("unexpected request path: %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	t.Setenv(workerenv.ControllerURL, server.URL)
-	t.Setenv(workerenv.TaskName, taskName)
+	recorder := common.NewFakeEventRecorder()
+	newGeneralEventRecorder = func() common.EventRecorder { return recorder }
+	t.Setenv(workerenv.TaskName, "task-success")
 	t.Setenv(workerenv.TaskNamespace, "default")
 	t.Setenv("ORKA_ARTIFACTS_DIR", filepath.Join(t.TempDir(), "artifacts"))
-	runWorker()
+	t.Setenv(workerenv.SessionName, "session-a")
+	os.Args = []string{"worker", "sh", "-c", "printf hello; printf warn >&2"}
 
-	mu.Lock()
-	defer mu.Unlock()
-	return append([]string(nil), eventTypes...)
+	if err := run(); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+
+	wantTypes := []string{
+		events.ExecutionEventTypeWorkerStarted,
+		events.ExecutionEventTypeContainerCommandStarted,
+		events.ExecutionEventTypeContainerCommandCompleted,
+		events.ExecutionEventTypeResultSubmitted,
+		events.ExecutionEventTypeWorkerCompleted,
+	}
+	if got := recorder.EventTypes(); !reflect.DeepEqual(got, wantTypes) {
+		t.Fatalf("event types = %#v, want %#v", got, wantTypes)
+	}
+
+	completed := findRecordedEvent(t, recorder.Events(), events.ExecutionEventTypeContainerCommandCompleted)
+	if completed.TaskName != "task-success" || completed.SessionName != "session-a" {
+		t.Fatalf(
+			"completed event task/session = %q/%q, want task-success/session-a",
+			completed.TaskName,
+			completed.SessionName,
+		)
+	}
+	content := recordedEventContent(t, completed)
+	if content["executable"] != "sh" || content["argsCount"] != float64(2) || content["exitCode"] != float64(0) {
+		t.Fatalf("completed content = %#v, want executable sh argsCount 2 exitCode 0", content)
+	}
+	if content["stdoutBytes"] != float64(len("hello")) || content["stderrBytes"] != float64(len("warn")) {
+		t.Fatalf("completed byte counts = %#v, want stdout/stderr byte counts", content)
+	}
+	if strings.Contains(string(completed.Content), "hello") || strings.Contains(string(completed.Content), "warn") {
+		t.Fatalf("completed content leaked raw stdout/stderr: %s", completed.Content)
+	}
+}
+
+func TestRunEventEmissionFailure(t *testing.T) {
+	origArgs := os.Args
+	origRecorderFactory := newGeneralEventRecorder
+	origExitProcess := exitProcess
+	defer func() {
+		os.Args = origArgs
+		newGeneralEventRecorder = origRecorderFactory
+		exitProcess = origExitProcess
+	}()
+
+	recorder := common.NewFakeEventRecorder()
+	newGeneralEventRecorder = func() common.EventRecorder { return recorder }
+	exitProcess = func(code int) { panic(exitPanic{code: code}) }
+	t.Setenv(workerenv.TaskName, "task-fail")
+	t.Setenv(workerenv.TaskNamespace, "default")
+	os.Args = []string{"worker", "sh", "-c", "printf fail; exit 7"}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("run() did not exit for command failure")
+		}
+		exit, ok := r.(exitPanic)
+		if !ok {
+			panic(r)
+		}
+		if exit.code != 7 {
+			t.Fatalf("exit code = %d, want 7", exit.code)
+		}
+		wantTypes := []string{
+			events.ExecutionEventTypeWorkerStarted,
+			events.ExecutionEventTypeContainerCommandStarted,
+			events.ExecutionEventTypeContainerCommandFailed,
+			events.ExecutionEventTypeResultSubmitted,
+			events.ExecutionEventTypeWorkerFailed,
+		}
+		if got := recorder.EventTypes(); !reflect.DeepEqual(got, wantTypes) {
+			t.Fatalf("event types = %#v, want %#v", got, wantTypes)
+		}
+		failed := findRecordedEvent(t, recorder.Events(), events.ExecutionEventTypeContainerCommandFailed)
+		content := recordedEventContent(t, failed)
+		if content["exitCode"] != float64(7) || content["stdoutBytes"] != float64(len("fail")) {
+			t.Fatalf("failed content = %#v, want exit code and stdout byte count", content)
+		}
+	}()
+
+	if err := run(); err != nil {
+		t.Fatalf("run() returned error before exit: %v", err)
+	}
+}
+
+func TestRunEventRecorderFailureDoesNotChangeResult(t *testing.T) {
+	origArgs := os.Args
+	origRecorderFactory := newGeneralEventRecorder
+	defer func() {
+		os.Args = origArgs
+		newGeneralEventRecorder = origRecorderFactory
+	}()
+
+	newGeneralEventRecorder = func() common.EventRecorder { return panicEventRecorder{} }
+	t.Setenv(workerenv.TaskName, "task-recorder-panic")
+	t.Setenv(workerenv.TaskNamespace, "default")
+	os.Args = []string{"worker", "echo", "ok"}
+
+	if err := run(); err != nil {
+		t.Fatalf("run() error = %v, want recorder panic ignored", err)
+	}
+}
+
+func TestRecordGeneralEventUsesDetachedContextWhenWorkerContextCancelled(t *testing.T) {
+	recorder := common.NewFakeEventRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recordGeneralEvent(
+		ctx,
+		recorder,
+		workerenv.BaseEnv{TaskName: "task-cancelled", TaskNamespace: "default"},
+		events.ExecutionEventTypeWorkerFailed,
+		events.ExecutionEventSeverityError,
+		"failed",
+		map[string]any{"worker": "general"},
+	)
+	if got := recorder.EventTypes(); !reflect.DeepEqual(got, []string{events.ExecutionEventTypeWorkerFailed}) {
+		t.Fatalf("event types = %#v, want WorkerFailed despite cancelled context", got)
+	}
 }
 
 func TestWorkspaceRootUsesSubPath(t *testing.T) {
@@ -513,4 +571,32 @@ func runGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s failed: %s: %v", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+type exitPanic struct{ code int }
+
+type panicEventRecorder struct{}
+
+func (panicEventRecorder) Record(context.Context, string, ...common.EventOption) {
+	panic("record event")
+}
+
+func findRecordedEvent(t *testing.T, recorded []common.RecordedEvent, typ string) common.RecordedEvent {
+	t.Helper()
+	for _, event := range recorded {
+		if event.Type == typ {
+			return event
+		}
+	}
+	t.Fatalf("event %s not recorded; got %#v", typ, recorded)
+	return common.RecordedEvent{}
+}
+
+func recordedEventContent(t *testing.T, event common.RecordedEvent) map[string]any {
+	t.Helper()
+	var content map[string]any
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		t.Fatalf("unmarshal event content %s: %v", event.Content, err)
+	}
+	return content
 }

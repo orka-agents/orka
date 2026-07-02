@@ -221,6 +221,7 @@ func newSessionCmd() *cobra.Command {
 	})
 	cmd.AddCommand(newSessionEventsCmd())
 	cmd.AddCommand(newSessionFollowCmd())
+	cmd.AddCommand(newSessionForkCmd())
 	return cmd
 }
 

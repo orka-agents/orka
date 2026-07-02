@@ -119,6 +119,41 @@ func TestListTaskEventsUsesStreamIDWhenTaskNameMetadataDiffers(t *testing.T) {
 	}
 }
 
+func TestListTaskEventsFiltersByToolCallID(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	for _, callID := range []string{"call-a", "call-b"} {
+		if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace:  "default",
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   "task-tools",
+			TaskName:   "task-tools",
+			Type:       events.ExecutionEventTypeToolCallCompleted,
+			Severity:   events.ExecutionEventSeverityInfo,
+			ToolCallID: callID,
+		}); err != nil {
+			t.Fatalf("AppendExecutionEvent(%s): %v", callID, err)
+		}
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-tools"))
+	app.Get("/api/v1/tasks/:id/events", h.ListTaskEvents)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/task-tools/events?namespace=default&toolCallID=call-a", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var listed ListExecutionEventsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(listed.Events) != 1 || listed.Events[0].ToolCallID != "call-a" {
+		t.Fatalf("events = %#v, want only call-a", listed.Events)
+	}
+}
+
 func TestStreamTaskEventsSSEReplayHeartbeatAndPolling(t *testing.T) {
 	eventStore := store.NewFakeExecutionEventStoreWithClock(func() time.Time {
 		return time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)

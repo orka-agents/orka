@@ -53,16 +53,19 @@ func (h *Handlers) ListTaskEvents(c fiber.Ctx) error {
 		Namespace:  namespace,
 		StreamType: events.ExecutionEventStreamTypeTask,
 		StreamID:   taskName,
+		ToolCallID: query.toolCallID,
 		EventTypes: query.eventTypes,
 		AfterSeq:   query.afterSeq,
 		Limit:      query.limit,
 	}
 	listed, err := h.executionEventStore.ListExecutionEvents(c.Context(), filter)
 	if err != nil {
+		log.Error(err, "failed to list task execution events", "namespace", namespace, "task", taskName)
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
 	latestSeq, err := h.executionEventStore.GetLatestExecutionEventSeq(c.Context(), namespace, events.ExecutionEventStreamTypeTask, taskName)
 	if err != nil {
+		log.Error(err, "failed to get latest task execution event sequence", "namespace", namespace, "task", taskName)
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get latest execution event sequence: %v", err))
 	}
 
@@ -137,6 +140,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 				Namespace:  namespace,
 				StreamType: events.ExecutionEventStreamTypeTask,
 				StreamID:   taskName,
+				ToolCallID: query.toolCallID,
 				EventTypes: query.eventTypes,
 				AfterSeq:   lastSeq,
 				Limit:      store.MaxExecutionEventLimit,
@@ -170,7 +174,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 				}
 				terminalScanSeq = max(terminalScanSeq, scannedThrough)
 				if found {
-					shouldWriteDiscoveredTerminal := len(query.eventTypes) == 0 && terminalEvent.Seq > lastSeq
+					shouldWriteDiscoveredTerminal := len(query.eventTypes) == 0 && query.toolCallID == "" && terminalEvent.Seq > lastSeq
 					pendingTerminal = &terminalEvent
 					if shouldWriteDiscoveredTerminal {
 						if !writeExecutionEventSSEFrame(w, terminalEvent) {
@@ -276,11 +280,13 @@ func (h *Handlers) ListSessionEvents(c fiber.Ctx) error {
 	listed, latestSeq, err := h.executionEventStore.ListSessionExecutionEvents(c.Context(), store.SessionExecutionEventFilter{
 		Namespace:   namespace,
 		SessionName: sessionName,
+		ToolCallID:  query.toolCallID,
 		EventTypes:  query.eventTypes,
 		AfterSeq:    query.afterSeq,
 		Limit:       query.limit,
 	})
 	if err != nil {
+		log.Error(err, "failed to list session execution events", "namespace", namespace, "session", sessionName)
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list session execution events: %v", err))
 	}
 
@@ -341,6 +347,7 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 			listed, _, err := streamStore.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{
 				Namespace:   namespace,
 				SessionName: sessionName,
+				ToolCallID:  query.toolCallID,
 				EventTypes:  query.eventTypes,
 				AfterSeq:    lastSeq,
 				Limit:       store.MaxExecutionEventLimit,
@@ -403,6 +410,7 @@ func (h *Handlers) StreamSessionEvents(c fiber.Ctx) error {
 type executionEventListQuery struct {
 	afterSeq   int64
 	limit      int
+	toolCallID string
 	eventTypes []string
 }
 
@@ -422,6 +430,7 @@ func parseExecutionEventListQuery(c fiber.Ctx) (executionEventListQuery, error) 
 		}
 		query.limit = limit
 	}
+	query.toolCallID = strings.TrimSpace(c.Query("toolCallID", ""))
 
 	values, err := url.ParseQuery(string(c.Request().URI().QueryString()))
 	if err != nil {

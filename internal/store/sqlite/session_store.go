@@ -81,7 +81,34 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE namespace = ? AND name = ?`, namespace, name); err != nil {
+	var activeTask string
+	err = tx.QueryRowContext(ctx,
+		`SELECT active_task FROM sessions WHERE namespace = ? AND name = ?`,
+		namespace,
+		name,
+	).Scan(&activeTask)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if activeTask != "" {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO execution_event_deleted_session_tasks(namespace, session_name, task_name)
+			 VALUES (?, ?, ?)`,
+			namespace,
+			name,
+			activeTask,
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO execution_event_deleted_session_tasks(namespace, session_name, task_name)
+		 SELECT DISTINCT namespace, session_name, task_name
+		 FROM execution_events
+		 WHERE namespace = ? AND session_name = ? AND task_name <> ''`,
+		namespace,
+		name,
+	); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -92,6 +119,9 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM execution_event_session_sequences WHERE namespace = ? AND session_name = ?`, namespace, name); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE namespace = ? AND name = ?`, namespace, name); err != nil {
 		return err
 	}
 	return tx.Commit()

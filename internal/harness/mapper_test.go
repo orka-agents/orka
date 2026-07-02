@@ -80,6 +80,78 @@ func TestMapFrameToExecutionEventRedactsBeforeStoreAppend(t *testing.T) {
 	}
 }
 
+func TestMapFrameToExecutionEventPreservesHarnessEnvelopeWhenContentIsOversized(t *testing.T) {
+	frame := validFrame(FrameTurnCompleted)
+	frame.Seq = 42
+	frame.Completed = &TurnCompleted{Result: strings.Repeat("r", events.MaxExecutionEventContentJSONBytes), FinalEventSeq: 42, RetainSession: true}
+	frame.Content = json.RawMessage(`{"blob":"` + strings.Repeat("x", events.MaxExecutionEventContentJSONBytes) + `"}`)
+	event, err := MapFrameToExecutionEvent(frame, EventMapContext{Namespace: "default", TaskName: "task-a"})
+	if err != nil {
+		t.Fatalf("MapFrameToExecutionEvent() error = %v", err)
+	}
+	var content struct {
+		Harness struct {
+			RuntimeSessionID string `json:"runtimeSessionID"`
+			TurnID           string `json:"turnID"`
+			Seq              int64  `json:"seq"`
+		} `json:"harness"`
+		Completed *TurnCompleted `json:"completed"`
+	}
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if content.Harness.RuntimeSessionID != string(frame.RuntimeSessionID) || content.Harness.TurnID != string(frame.TurnID) || content.Harness.Seq != 42 {
+		t.Fatalf("harness envelope = %#v, want preserved runtime/turn/seq", content.Harness)
+	}
+	if content.Completed == nil || content.Completed.FinalEventSeq != 42 || !content.Completed.RetainSession {
+		t.Fatalf("completed = %#v, want terminal metadata preserved", content.Completed)
+	}
+	if content.Completed.Result == "" || !strings.Contains(content.Completed.Result, "...[truncated]") || !content.Completed.ResultTruncated {
+		t.Fatalf("completed result=%q resultTruncated=%v, want bounded result preview with truncation marker", content.Completed.Result, content.Completed.ResultTruncated)
+	}
+}
+
+func TestMapFrameToExecutionEventPreservesSmallCompletedResultWhenContentIsOversized(t *testing.T) {
+	frame := validFrame(FrameTurnCompleted)
+	frame.Seq = 7
+	frame.Completed = &TurnCompleted{Result: "ok", FinalEventSeq: 7}
+	frame.Content = json.RawMessage(`{"blob":"` + strings.Repeat("x", events.MaxExecutionEventContentJSONBytes) + `"}`)
+	event, err := MapFrameToExecutionEvent(frame, EventMapContext{Namespace: "default", TaskName: "task-a"})
+	if err != nil {
+		t.Fatalf("MapFrameToExecutionEvent() error = %v", err)
+	}
+	var content struct {
+		Completed *TurnCompleted `json:"completed"`
+	}
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if content.Completed == nil || content.Completed.Result != "ok" || content.Completed.ResultTruncated {
+		t.Fatalf("completed = %#v, want small inline result preserved without truncation", content.Completed)
+	}
+}
+
+func TestMapFrameToExecutionEventOmitsOversizedFailedResultPlaceholder(t *testing.T) {
+	frame := validFrame(FrameTurnFailed)
+	frame.Failed = &TurnFailed{Reason: "failed", Message: "failed", Result: strings.Repeat("r", events.MaxExecutionEventContentJSONBytes), OutputRef: "orka://result/task-a"}
+	event, err := MapFrameToExecutionEvent(frame, EventMapContext{Namespace: "default", TaskName: "task-a"})
+	if err != nil {
+		t.Fatalf("MapFrameToExecutionEvent() error = %v", err)
+	}
+	var content struct {
+		Failed *TurnFailed `json:"failed"`
+	}
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if content.Failed == nil || content.Failed.OutputRef == "" {
+		t.Fatalf("failed = %#v, want outputRef preserved", content.Failed)
+	}
+	if content.Failed.Result == "" || !strings.Contains(content.Failed.Result, "...[truncated]") || !content.Failed.ResultTruncated {
+		t.Fatalf("failed result=%q resultTruncated=%v, want bounded diagnostic preview", content.Failed.Result, content.Failed.ResultTruncated)
+	}
+}
+
 func validFrame(typ FrameType) HarnessEventFrame {
 	frame := HarnessEventFrame{
 		Version:          ProtocolVersion,

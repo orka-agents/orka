@@ -47,6 +47,7 @@ type ToolExecutor struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	resultStore               store.ResultStore
+	executionEventStore       store.ExecutionEventStore
 	registry                  *tools.Registry
 	allowedToolNames          map[string]struct{}
 	authorizeTaskCreate       func(context.Context, *corev1alpha1.Task) error
@@ -169,6 +170,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		WatchNamespace:            e.watchNamespace,
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
+		ExecutionEventStore:       e.executionEventStore,
 		SessionDeleter:            e.sessionManager,
 		GenerateTaskName:          e.generateTaskName,
 		TaskLabels:                e.taskLabels,
