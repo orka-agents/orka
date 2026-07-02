@@ -15,15 +15,15 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/approvals"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	toolspkg "github.com/sozercan/orka/internal/tools"
-	worker "github.com/sozercan/orka/internal/worker"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
+	worker "github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
