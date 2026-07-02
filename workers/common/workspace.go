@@ -621,9 +621,31 @@ func resetReservedWorkspacePaths(workDir string) {
 func execGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
+	cmd.Env = gitIsolatedConfigEnv(os.Environ())
 	cmd.SysProcAttr = gitCommandSysProcAttr()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// gitIsolatedConfigEnv prevents untrusted inherited git config from
+// affecting worker-managed git commands. Attackers can steer reads and writes
+// with GIT_CONFIG/GIT_CONFIG_* or HOME/global/system config, so strip those
+// overrides and force git to ignore global and system config files.
+func gitIsolatedConfigEnv(env []string) []string {
+	isolated := make([]string, 0, len(env)+2)
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upperKey := strings.ToUpper(key)
+		if upperKey == "GIT_CONFIG" || strings.HasPrefix(upperKey, "GIT_CONFIG_") {
+			continue
+		}
+		isolated = append(isolated, entry)
+	}
+	isolated = append(isolated, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	return isolated
 }
 
 func execGitLimited(dir string, limit int64, args ...string) (string, bool, error) {
@@ -633,6 +655,7 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	stderr.limit = 64 * 1024
 	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
+	cmd.Env = gitIsolatedConfigEnv(os.Environ())
 	cmd.SysProcAttr = gitCommandSysProcAttr()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
