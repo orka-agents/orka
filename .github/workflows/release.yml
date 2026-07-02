@@ -12,7 +12,8 @@ env:
 permissions:
   contents: read
   packages: write
-  id-token: write # for provenance attestations
+  id-token: write # for provenance attestations and keyless signing
+  security-events: write
 
 jobs:
   build-and-push:
@@ -57,34 +58,130 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
+      - name: Define staging image
+        id: staging
+        run: echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Save release tags
+        run: |
+          cat > tags-${{ matrix.image }}.txt <<'TAGS'
+          ${{ steps.meta.outputs.tags }}
+          TAGS
+
       - name: Build and push
+        id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.staging.outputs.ref }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
-      - name: Generate SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
-          format: spdx-json
-          output-file: sbom-${{ matrix.image }}.spdx.json
+      - name: Save image digest
+        run: printf '%s' '${{ steps.build.outputs.digest }}' > digest-${{ matrix.image }}.txt
 
-      - name: Upload SBOM
+      - name: Upload image digest
+        uses: actions/upload-artifact@ea165f8d65b6db9a8b9c84b9ecb0b81bc0de3c06 # v4
+        with:
+          name: digest-${{ matrix.image }}
+          path: digest-${{ matrix.image }}.txt
+
+      - name: Upload release tags
+        uses: actions/upload-artifact@ea165f8d65b6db9a8b9c84b9ecb0b81bc0de3c06 # v4
+        with:
+          name: tags-${{ matrix.image }}
+          path: tags-${{ matrix.image }}.txt
+
+      - name: Set up Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+      - name: Generate platform SBOMs
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
+        run: |
+          set -euo pipefail
+          "${SYFT_CMD}" scan --platform linux/amd64 "${IMAGE_REF}@${IMAGE_DIGEST}" -o spdx-json="sbom-${{ matrix.image }}-linux-amd64.spdx.json"
+          "${SYFT_CMD}" scan --platform linux/arm64 "${IMAGE_REF}@${IMAGE_DIGEST}" -o spdx-json="sbom-${{ matrix.image }}-linux-arm64.spdx.json"
+
+      - name: Upload SBOMs
         uses: actions/upload-artifact@ea165f8d65b6db9a8b9c84b9ecb0b81bc0de3c06 # v4
         with:
           name: sbom-${{ matrix.image }}
-          path: sbom-${{ matrix.image }}.spdx.json
+          path: sbom-${{ matrix.image }}-*.spdx.json
 
   scan:
     name: Security Scan
     needs: build-and-push
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: controller
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: controller
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: ai-worker
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: ai-worker
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: general-worker
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: general-worker
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: agent-harness-wrapper
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: agent-harness-wrapper
+            platform: linux/arm64
+            platform_slug: linux-arm64
+    steps:
+      - name: Download image digest
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests
+
+      - name: Read image digest
+        id: digest
+        run: echo "value=$(cat digests/digest-${{ matrix.image }}.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e0f18c8ea69db56b # v0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.digest.outputs.value }}
+          format: sarif
+          output: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@ff82a3f0d98ec3cdc78ee8e96ffa7b68c8f68367 # v3
+        with:
+          sarif_file: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}.sarif
+          category: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}
+        if: always()
+
+  sign-and-attest:
+    name: Sign Images and Attest SBOMs
+    needs:
+      - build-and-push
+      - scan
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -94,17 +191,115 @@ jobs:
           - image: general-worker
           - image: agent-harness-wrapper
     steps:
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e0f18c8ea69db56b # v0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ github.ref_name }}
-          format: sarif
-          output: trivy-${{ matrix.image }}.sarif
-          severity: CRITICAL,HIGH
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@ff82a3f0d98ec3cdc78ee8e96ffa7b68c8f68367 # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
         with:
-          sarif_file: trivy-${{ matrix.image }}.sarif
-          category: trivy-${{ matrix.image }}
-        if: always()
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+
+      - name: Download image digest
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: sbom-${{ matrix.image }}
+          path: sboms
+
+      - name: Read image digest
+        id: digest
+        run: echo "value=$(cat digests/digest-${{ matrix.image }}.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve platform digests
+        id: platform-digests
+        env:
+          IMAGE_DIGEST: ${{ steps.digest.outputs.value }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          manifest_json=$(docker buildx imagetools inspect --raw "${IMAGE_REF}@${IMAGE_DIGEST}")
+          amd64_digest=$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' <<<"${manifest_json}")
+          arm64_digest=$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' <<<"${manifest_json}")
+          test -n "${amd64_digest}" && test "${amd64_digest}" != "null"
+          test -n "${arm64_digest}" && test "${arm64_digest}" != "null"
+          echo "linux_amd64=${amd64_digest}" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=${arm64_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign image index
+        env:
+          IMAGE_DIGEST: ${{ steps.digest.outputs.value }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+        run: cosign sign --yes "${IMAGE_REF}@${IMAGE_DIGEST}"
+
+      - name: Attest platform SBOMs
+        env:
+          AMD64_DIGEST: ${{ steps.platform-digests.outputs.linux_amd64 }}
+          ARM64_DIGEST: ${{ steps.platform-digests.outputs.linux_arm64 }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          cosign attest --yes --type spdxjson --predicate "sboms/sbom-${{ matrix.image }}-linux-amd64.spdx.json" "${IMAGE_REF}@${AMD64_DIGEST}"
+          cosign attest --yes --type spdxjson --predicate "sboms/sbom-${{ matrix.image }}-linux-arm64.spdx.json" "${IMAGE_REF}@${ARM64_DIGEST}"
+
+  promote-release-tags:
+    name: Promote Release Tags
+    needs: sign-and-attest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download image digests
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Download release tags
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: tags-*
+          path: tags
+          merge-multiple: true
+
+      - name: Promote release tags
+        env:
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+          REGISTRY: ${{ env.REGISTRY }}
+        run: |
+          set -euo pipefail
+
+          promote_image() {
+            local image="$1"
+            local digest
+            digest=$(cat "digests/digest-${image}.txt")
+            local image_ref="${REGISTRY}/${IMAGE_PREFIX}/${image}"
+
+            while IFS= read -r tag; do
+              test -n "${tag}" || continue
+              docker buildx imagetools create -t "${tag}" "${image_ref}@${digest}"
+            done < "tags/tags-${image}.txt"
+          }
+
+          promote_image controller
+          promote_image ai-worker
+          promote_image general-worker
+          promote_image agent-harness-wrapper
