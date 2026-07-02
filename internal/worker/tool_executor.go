@@ -117,7 +117,7 @@ func NewToolExecutor() *ToolExecutor {
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
 	start := time.Now()
 	toolName := toolTelemetryName(tool)
-	attrs := make([]attribute.KeyValue, 0, 8)
+	attrs := make([]attribute.KeyValue, 0, 9)
 	attrs = append(attrs,
 		executeToolOperationAttr,
 		attribute.String(genai.AttrToolName, toolName),
