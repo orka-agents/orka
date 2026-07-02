@@ -68,7 +68,7 @@ var _ = Describe("AgentRuntime external endpoint", Ordered, func() {
 	})
 
 	It("runs an agent task through a conformance-gated external AgentRuntime", func() {
-		By("deploying the mock AgentKit-compatible harness endpoint")
+		By("deploying the generic HTTP remote runtime harness endpoint")
 		endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", serviceName, namespace, harnessServicePort)
 		Expect(applyManifestJSON(agentRuntimeExternalGoodSecret(goodSecretName, runtimeName, endpoint, harnessToken))).To(Succeed())
 		Expect(applyManifestJSON(agentRuntimeExternalHarnessDeployment(deploymentName, serviceName, harnessToken))).To(Succeed())

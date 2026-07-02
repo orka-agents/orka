@@ -127,6 +127,85 @@ func TestClientCancelTurnRejectedResponseIsError(t *testing.T) {
 	}
 }
 
+func TestClientContinueTurnPostsToContinuePath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		WriteJSON(w, http.StatusAccepted, ContinueTurnResponse{
+			Version:          ProtocolVersion,
+			Accepted:         true,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.ContinueTurn(context.Background(), ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		ToolResults: []ToolCallResult{{
+			Version:          ProtocolVersion,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			ToolCallID:       "tool-1",
+			IdempotencyKey:   "runtime-a:turn-a:tool-1",
+			Output:           []byte(`{"success":true}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ContinueTurn() error = %v", err)
+	}
+	if gotPath != "/v1/turns/turn-a/continue" {
+		t.Fatalf("ContinueTurn path = %q", gotPath)
+	}
+}
+
+func TestClientContinueTurnMismatchedResponseIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		WriteJSON(w, http.StatusAccepted, ContinueTurnResponse{
+			Version:          ProtocolVersion,
+			Accepted:         true,
+			RuntimeSessionID: "other-runtime",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.ContinueTurn(context.Background(), ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		ToolResults: []ToolCallResult{{
+			Version:          ProtocolVersion,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			ToolCallID:       "tool-1",
+			IdempotencyKey:   "runtime-a:turn-a:tool-1",
+			Output:           []byte(`{"success":true}`),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime session") {
+		t.Fatalf("ContinueTurn() error = %v, want identity mismatch", err)
+	}
+}
+
 func TestNewClientDefaultDoesNotSetTotalHTTPTimeout(t *testing.T) {
 	client, err := NewClient("http://127.0.0.1:8080")
 	if err != nil {

@@ -152,6 +152,24 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*Ca
 	return &response, nil
 }
 
+func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) (*ContinueTurnResponse, error) {
+	if err := request.Validate(); err != nil {
+		return nil, safeClientError("continue_turn", 0, err.Error())
+	}
+	rel, err := ContinueTurnPath(request.TurnID)
+	if err != nil {
+		return nil, safeClientError("continue_turn", 0, err.Error())
+	}
+	var response ContinueTurnResponse
+	if err := c.postJSON(ctx, rel, request, &response); err != nil {
+		return nil, err
+	}
+	if err := response.ValidateFor(request); err != nil {
+		return nil, safeClientError("continue_turn", 0, err.Error())
+	}
+	return &response, nil
+}
+
 func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outputRef string) ([]byte, error) {
 	ctx, cancel := c.controlContext(ctx)
 	defer cancel()

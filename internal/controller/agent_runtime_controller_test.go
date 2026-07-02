@@ -49,6 +49,183 @@ func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {
 	}
 }
 
+func TestValidateAgentRuntimeRequiredCapabilitiesChecksBrokeredProfiles(t *testing.T) {
+	supportsContinuation := true
+	runtime := &corev1alpha1.AgentRuntime{Spec: corev1alpha1.AgentRuntimeRegistrySpec{
+		Capabilities: &corev1alpha1.AgentRuntimeCapabilitiesSpec{
+			ToolExecutionModes:   []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionModeBrokered},
+			BrokeredToolClasses:  []corev1alpha1.AgentRuntimeBrokeredToolClass{corev1alpha1.AgentRuntimeBrokeredToolClassRead},
+			SupportsContinuation: &supportsContinuation,
+		},
+	}}
+	caps := &harness.CapabilitiesResponse{
+		Version:                 harness.ProtocolVersion,
+		ProtocolVersion:         harness.ProtocolVersion,
+		Transport:               harness.HTTPTransport,
+		RuntimeName:             "fibey-http-runtime",
+		ProviderKind:            harness.ProviderKindRemote,
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
+		BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+		SupportsCancel:          true,
+		SupportsRuntimeSessions: true,
+		SupportsContinuation:    true,
+	}
+	if err := validateAgentRuntimeRequiredCapabilities(runtime, caps); err != nil {
+		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v", err)
+	}
+	caps.BrokeredToolClasses = nil
+	if err := validateAgentRuntimeRequiredCapabilities(runtime, caps); err == nil || !strings.Contains(err.Error(), "brokeredToolClass") {
+		t.Fatalf("validateAgentRuntimeRequiredCapabilities() = %v, want missing brokered class", err)
+	}
+}
+
+func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeNotReadyUntilConformanceExists(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
+		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{
+			Version:   harness.ProtocolVersion,
+			Status:    harness.HealthStatusOK,
+			Ready:     true,
+			CheckedAt: time.Now().UTC(),
+		})
+	})
+	mux.HandleFunc(harness.CapabilitiesPath, func(w http.ResponseWriter, r *http.Request) {
+		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+			Version:                 harness.ProtocolVersion,
+			ProtocolVersion:         harness.ProtocolVersion,
+			Transport:               harness.HTTPTransport,
+			RuntimeName:             "fibey-brokered-runtime",
+			ProviderKind:            harness.ProviderKindRemote,
+			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
+			BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+			SupportsCancel:          true,
+			SupportsRuntimeSessions: true,
+			SupportsContinuation:    true,
+		})
+	})
+	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		harness.WriteError(w, http.StatusNotImplemented, "brokered conformance not implemented")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL)
+	runtime.Spec.Capabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{
+		corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
+	}
+	runtime.Spec.Capabilities.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{
+		corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+	}
+	supportsContinuation := true
+	runtime.Spec.Capabilities.SupportsContinuation = &supportsContinuation
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false until brokered turn conformance exists")
+	}
+	if !strings.Contains(updated.Status.Message, "brokered-only turn conformance is not implemented") {
+		t.Fatalf("Message = %q, want brokered-only conformance message", updated.Status.Message)
+	}
+}
+
+func TestAgentRuntimeReconcilerRequiresBrokeredReadConformanceWhenCapabilityRequested(t *testing.T) {
+	turns := map[harness.HarnessTurnID]harness.StartTurnRequest{}
+	mux := http.NewServeMux()
+	mux.HandleFunc(harness.HealthPath, func(w http.ResponseWriter, r *http.Request) {
+		harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{Version: harness.ProtocolVersion, Status: harness.HealthStatusOK, Ready: true, CheckedAt: time.Now().UTC()})
+	})
+	mux.HandleFunc(harness.CapabilitiesPath, func(w http.ResponseWriter, r *http.Request) {
+		harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+			Version:                 harness.ProtocolVersion,
+			ProtocolVersion:         harness.ProtocolVersion,
+			Transport:               harness.HTTPTransport,
+			RuntimeName:             "fibey-runtime",
+			ProviderKind:            harness.ProviderKindRemote,
+			ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved, harness.ToolExecutionModeBrokered},
+			BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+			SupportsCancel:          true,
+			SupportsRuntimeSessions: true,
+			SupportsContinuation:    true,
+		})
+	})
+	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var request harness.StartTurnRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			harness.WriteError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		if _, exists := turns[request.TurnID]; exists {
+			harness.WriteError(w, http.StatusConflict, "turn already exists")
+			return
+		}
+		turns[request.TurnID] = request
+		eventsPath, _ := harness.EventStreamPath(request.TurnID)
+		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, EventStreamPath: eventsPath})
+	})
+	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		turnID, resource, err := harness.ParseTurnResourcePath(r.URL.EscapedPath())
+		if err != nil {
+			harness.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		request := turns[turnID]
+		switch resource {
+		case harness.TurnResourceEvents:
+			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnStarted, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, Seq: 1})
+			if request.ToolExecutionMode == harness.ToolExecutionModeBrokered {
+				_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, Seq: 2, ToolName: "read_incident", ToolCallID: "call-1", Content: json.RawMessage(`{"probe":true}`)})
+				return
+			}
+			_ = harness.WriteSSEFrame(w, harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameTurnCompleted, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, Seq: 2, Completed: &harness.TurnCompleted{Result: "ok", FinalEventSeq: 2}})
+			_ = harness.WriteSSEDone(w)
+		case harness.TurnResourceCancel:
+			harness.WriteJSON(w, http.StatusAccepted, harness.CancelTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID})
+		default:
+			harness.WriteError(w, http.StatusNotFound, "not found")
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(server.URL)
+	runtime.Spec.Capabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{corev1alpha1.AgentRuntimeToolExecutionModeObserved, corev1alpha1.AgentRuntimeToolExecutionModeBrokered}
+	runtime.Spec.Capabilities.BrokeredToolClasses = []corev1alpha1.AgentRuntimeBrokeredToolClass{corev1alpha1.AgentRuntimeBrokeredToolClassRead}
+	supportsContinuation := true
+	runtime.Spec.Capabilities.SupportsContinuation = &supportsContinuation
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false when brokered read continue path is broken")
+	}
+	if !strings.Contains(updated.Status.Message, "brokered") {
+		t.Fatalf("Message = %q, want brokered conformance failure", updated.Status.Message)
+	}
+}
+
 func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
 	defer server.Close()
@@ -391,21 +568,22 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 	return runtime, secret
 }
 
-func TestValidateAgentRuntimeRequiredCapabilitiesRequiresCancelAndSessions(t *testing.T) {
-	runtime := &corev1alpha1.AgentRuntime{}
-	err := validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{
+func TestValidateObservedHarnessCapabilitiesRequiresCancelAndSessions(t *testing.T) {
+	err := validateObservedHarnessCapabilities(&harness.CapabilitiesResponse{
+		RuntimeName:             "runtime-a",
 		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
 		SupportsRuntimeSessions: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "supportsCancel") {
-		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v, want supportsCancel requirement", err)
+		t.Fatalf("validateObservedHarnessCapabilities() error = %v, want supportsCancel requirement", err)
 	}
-	err = validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{
+	err = validateObservedHarnessCapabilities(&harness.CapabilitiesResponse{
+		RuntimeName:        "runtime-a",
 		ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
 		SupportsCancel:     true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "supportsRuntimeSessions") {
-		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v, want supportsRuntimeSessions requirement", err)
+		t.Fatalf("validateObservedHarnessCapabilities() error = %v, want supportsRuntimeSessions requirement", err)
 	}
 }
 
@@ -429,13 +607,13 @@ func TestObservedCapabilitiesFromConformanceRedactsStrings(t *testing.T) {
 	}
 }
 
-func TestValidateAgentRuntimeRequiredCapabilitiesRequiresObservedMode(t *testing.T) {
-	runtime := &corev1alpha1.AgentRuntime{}
-	err := validateAgentRuntimeRequiredCapabilities(runtime, &harness.CapabilitiesResponse{
+func TestValidateObservedHarnessCapabilitiesRequiresObservedMode(t *testing.T) {
+	err := validateObservedHarnessCapabilities(&harness.CapabilitiesResponse{
+		RuntimeName:        "runtime-a",
 		ToolExecutionModes: []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
 	})
 	if err == nil || !strings.Contains(err.Error(), "observed") {
-		t.Fatalf("validateAgentRuntimeRequiredCapabilities() error = %v, want observed mode requirement", err)
+		t.Fatalf("validateObservedHarnessCapabilities() error = %v, want observed mode requirement", err)
 	}
 }
 

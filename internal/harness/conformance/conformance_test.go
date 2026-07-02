@@ -178,18 +178,99 @@ func TestCheckFailsWhenFrameTypeUnknown(t *testing.T) {
 	}
 }
 
+func TestCheckPassesBrokeredReadProfile(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+}
+
+func TestCheckPassesBrokeredWriteProfile(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassWrite
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredWrite: true})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+}
+
+func TestCheckPassesBrokeredCoordinationProfile(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassCoordination
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredCoordination: true})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+}
+
+func TestCheckBrokeredReadFailsWhenClassNotAdvertised(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "toolExecutionMode") {
+		t.Fatalf("Message = %q, want brokered toolExecutionMode failure", result.Message)
+	}
+}
+
+func TestCheckBrokeredReadFailsWhenRuntimeDoesNotWaitForContinue(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.brokeredEagerResult = true
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "before continue") {
+		t.Fatalf("Message = %q, want before continue failure", result.Message)
+	}
+}
+
+func TestCheckBrokeredReadFailsWhenRuntimeRequestsWrongToolClass(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.brokeredToolNameOverride = "conformance_write"
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	if result.Passed {
+		t.Fatal("Passed = true, want false")
+	}
+	if !strings.Contains(result.Message, "want \"conformance_read\"") {
+		t.Fatalf("Message = %q, want expected tool failure", result.Message)
+	}
+}
+
 type agentKitOrkaFixture struct {
 	*httptest.Server
-	runtimeName         string
-	authValue           string
-	omitEventStreamPath bool
-	frameType           harness.FrameType
-	allowDuplicateStart bool
-	outputFrames        int
-	outputText          string
-	cancelCount         int
-	mu                  sync.Mutex
-	turns               map[harness.HarnessTurnID]harness.StartTurnRequest
+	runtimeName              string
+	authValue                string
+	omitEventStreamPath      bool
+	frameType                harness.FrameType
+	allowDuplicateStart      bool
+	outputFrames             int
+	outputText               string
+	cancelCount              int
+	brokeredClass            harness.BrokeredToolClass
+	brokeredEagerResult      bool
+	brokeredToolNameOverride string
+	mu                       sync.Mutex
+	turns                    map[harness.HarnessTurnID]harness.StartTurnRequest
+	continued                map[harness.HarnessTurnID]harness.ToolCallResult
+	continueCh               map[harness.HarnessTurnID]chan struct{}
 }
 
 func newAgentKitOrkaFixture(t *testing.T) *agentKitOrkaFixture {
@@ -200,6 +281,8 @@ func newAgentKitOrkaFixture(t *testing.T) *agentKitOrkaFixture {
 		frameType:    harness.FrameRuntimeOutput,
 		outputFrames: 1,
 		turns:        map[harness.HarnessTurnID]harness.StartTurnRequest{},
+		continued:    map[harness.HarnessTurnID]harness.ToolCallResult{},
+		continueCh:   map[harness.HarnessTurnID]chan struct{}{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, fixture.health)
@@ -228,6 +311,12 @@ func (f *agentKitOrkaFixture) capabilities(w http.ResponseWriter, r *http.Reques
 		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	modes := []harness.ToolExecutionMode{harness.ToolExecutionModeObserved}
+	classes := []harness.BrokeredToolClass(nil)
+	if f.brokeredClass != "" {
+		modes = append(modes, harness.ToolExecutionModeBrokered)
+		classes = append(classes, f.brokeredClass)
+	}
 	harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
 		Version:                 harness.ProtocolVersion,
 		ProtocolVersion:         harness.ProtocolVersion,
@@ -235,9 +324,11 @@ func (f *agentKitOrkaFixture) capabilities(w http.ResponseWriter, r *http.Reques
 		RuntimeName:             f.runtimeName,
 		RuntimeVersion:          "agentkit-fixture",
 		ProviderKind:            harness.ProviderKindKubernetesService,
-		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+		ToolExecutionModes:      modes,
+		BrokeredToolClasses:     classes,
 		SupportsCancel:          true,
 		SupportsRuntimeSessions: true,
+		SupportsContinuation:    f.brokeredClass != "",
 		MaxConcurrentTurns:      1,
 	})
 }
@@ -275,6 +366,7 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	f.turns[request.TurnID] = request
+	f.continueCh[request.TurnID] = make(chan struct{})
 	f.mu.Unlock()
 	response := harness.StartTurnResponse{
 		Version:          harness.ProtocolVersion,
@@ -309,6 +401,8 @@ func (f *agentKitOrkaFixture) turnResource(w http.ResponseWriter, r *http.Reques
 	switch resource {
 	case "events":
 		f.events(w, request)
+	case "continue":
+		f.continueTurn(w, r, request)
 	case "cancel":
 		f.mu.Lock()
 		f.cancelCount++
@@ -325,9 +419,43 @@ func (f *agentKitOrkaFixture) turnResource(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func (f *agentKitOrkaFixture) continueTurn(w http.ResponseWriter, r *http.Request, request harness.StartTurnRequest) {
+	var body harness.ContinueTurnRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		harness.WriteError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := body.Validate(); err != nil {
+		harness.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.RuntimeSessionID != request.RuntimeSessionID || body.TurnID != request.TurnID || body.CorrelationID != request.CorrelationID {
+		harness.WriteError(w, http.StatusBadRequest, "continue request does not match turn")
+		return
+	}
+	f.mu.Lock()
+	f.continued[request.TurnID] = body.ToolResults[0]
+	ch := f.continueCh[request.TurnID]
+	f.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+	harness.WriteJSON(w, http.StatusAccepted, harness.ContinueTurnResponse{
+		Version:          harness.ProtocolVersion,
+		Accepted:         true,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+	})
+}
+
 func (f *agentKitOrkaFixture) events(w http.ResponseWriter, request harness.StartTurnRequest) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	_ = harness.WriteSSEFrame(w, agentKitFrame(request, 1, harness.FrameTurnStarted, "turn started", nil))
+	if f.brokeredClass != "" && request.ToolExecutionMode == harness.ToolExecutionModeBrokered {
+		f.brokeredEvents(w, request)
+		return
+	}
 	outputFrames := f.outputFrames
 	if outputFrames <= 0 {
 		outputFrames = 1
@@ -346,6 +474,52 @@ func (f *agentKitOrkaFixture) events(w http.ResponseWriter, request harness.Star
 	completedSeq := int64(outputFrames + 2)
 	completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: completedSeq}
 	_ = harness.WriteSSEFrame(w, agentKitFrame(request, completedSeq, harness.FrameTurnCompleted, "turn completed", completed))
+	_ = harness.WriteSSEDone(w)
+}
+
+func (f *agentKitOrkaFixture) brokeredEvents(w http.ResponseWriter, request harness.StartTurnRequest) {
+	tool := agentKitFrame(request, 2, harness.FrameToolCallRequested, "brokered tool requested", nil)
+	tool.ToolName = "conformance_" + string(f.brokeredClass)
+	if f.brokeredToolNameOverride != "" {
+		tool.ToolName = f.brokeredToolNameOverride
+	}
+	tool.ToolCallID = "tool-call-1"
+	tool.Content = json.RawMessage(`{"probe":true}`)
+	_ = harness.WriteSSEFrame(w, tool)
+	if f.brokeredEagerResult {
+		result := agentKitFrame(request, 3, harness.FrameToolResultReceived, "tool result received", nil)
+		result.ToolName = tool.ToolName
+		result.ToolCallID = tool.ToolCallID
+		result.Content = json.RawMessage(`{"success":true}`)
+		_ = harness.WriteSSEFrame(w, result)
+		completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}
+		_ = harness.WriteSSEFrame(w, agentKitFrame(request, 4, harness.FrameTurnCompleted, "turn completed", completed))
+		_ = harness.WriteSSEDone(w)
+		return
+	}
+	f.mu.Lock()
+	ch := f.continueCh[request.TurnID]
+	f.mu.Unlock()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		failed := agentKitFrame(request, 3, harness.FrameTurnFailed, "continue timeout", nil)
+		failed.Failed = &harness.TurnFailed{Reason: "continue_timeout", Message: "continue not received"}
+		_ = harness.WriteSSEFrame(w, failed)
+		_ = harness.WriteSSEDone(w)
+		return
+	}
+	f.mu.Lock()
+	continued := f.continued[request.TurnID]
+	f.mu.Unlock()
+	result := agentKitFrame(request, 3, harness.FrameToolResultReceived, "tool result received", nil)
+	result.ToolName = tool.ToolName
+	result.ToolCallID = tool.ToolCallID
+	result.Content = continued.Output
+	result.Error = continued.Error
+	_ = harness.WriteSSEFrame(w, result)
+	completed := &harness.TurnCompleted{Result: "ok", FinalEventSeq: 4}
+	_ = harness.WriteSSEFrame(w, agentKitFrame(request, 4, harness.FrameTurnCompleted, "turn completed", completed))
 	_ = harness.WriteSSEDone(w)
 }
 

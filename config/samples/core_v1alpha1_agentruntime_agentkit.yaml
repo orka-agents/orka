@@ -1,0 +1,30 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: sample-agentkit-runtime
+spec:
+  # Namespace-local facade for an operator-deployed AgentKit Serve adapter.
+  # Adapter/runtime credentials live in the adapter deployment, not in Orka Tool
+  # credentials or the remote workload.
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://sample-agentkit-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: sample-agentkit-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+    - observed
+    - brokered
+    brokeredToolClasses:
+    - read
+    - write
+    - coordination
+    supportsCancel: true
+    supportsRuntimeSessions: true
+    supportsContinuation: true

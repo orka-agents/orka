@@ -5,7 +5,7 @@ metadata:
 spec:
   type: agent
   agentRef:
-    name: fibey-custom
+    name: fibey-remote-http
   prompt: |
     Quincy North alert: pump telemetry is anomalous after overnight maintenance.
     Investigate likely cause, summarize evidence, and propose the safest next action.

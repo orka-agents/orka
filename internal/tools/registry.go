@@ -18,6 +18,7 @@ import (
 	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
 	"github.com/sozercan/orka/internal/approvals"
 	"github.com/sozercan/orka/internal/llm"
+	"github.com/sozercan/orka/internal/store"
 	"github.com/sozercan/orka/internal/tracing"
 	"github.com/sozercan/orka/internal/tracing/genai"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,6 +37,7 @@ type ToolContext struct {
 	SessionID                 string
 	TaskID                    string
 	TaskUID                   string
+	ParentTaskID              string
 	ToolCallID                string
 	Tenant                    string
 	Provider                  string
@@ -46,6 +48,8 @@ type ToolContext struct {
 	ResultStore interface {
 		GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
 	}
+	// MessageStore for inter-agent messaging when tools execute in-process from the controller broker.
+	MessageStore store.MessageStore
 	// SessionDeleter for deleting sessions (controller.SessionManager)
 	SessionDeleter interface {
 		DeleteSession(ctx context.Context, namespace, sessionID string) error

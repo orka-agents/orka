@@ -616,6 +616,10 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	if r.ExecutionEventStore == nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "execution event store is required for harness wrapper mode")
 	}
+	agent, agentErr := r.resolveAgent(ctx, task)
+	if agentErr != nil && harnessWrapperPlannedToolExecutionMode(task) == harness.ToolExecutionModeBrokered {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(agentErr.Error()))
+	}
 	turnID := harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
 	runtimeSessionID := harness.RuntimeSessionID(strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]))
 	correlationID := strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno])
@@ -651,6 +655,11 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		if appendedNew {
 			result.Events = append(result.Events, *appended)
 		}
+		if frame.Type == harness.FrameToolCallRequested && harnessWrapperPlannedToolExecutionMode(task) == harness.ToolExecutionModeBrokered {
+			if err := r.continueHarnessBrokeredToolCall(ctx, client, task, agent, frame); err != nil {
+				return err
+			}
+		}
 		if frame.Seq > lastFrameSeq {
 			lastFrameSeq = frame.Seq
 		}
@@ -665,7 +674,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		return nil
 	})
 	terminalFrameSeen := result.Completed != nil || result.Failed != nil || result.Cancelled
-	if lastFrameSeq > afterSeq && !terminalFrameSeen {
+	if lastFrameSeq > afterSeq && !terminalFrameSeen && !harnessWrapperStreamErrorIsBrokeredPause(err) {
 		if patchErr := r.patchHarnessWrapperLastFrameSeq(ctx, task, lastFrameSeq); patchErr != nil {
 			return ctrl.Result{}, patchErr
 		}
@@ -934,6 +943,11 @@ func harnessWrapperPlannedMetadata(task *corev1alpha1.Task, runtimeName string) 
 	return metadata
 }
 
+func harnessWrapperPlannedToolExecutionMode(task *corev1alpha1.Task) harness.ToolExecutionMode {
+	metadata := harnessWrapperPlannedMetadata(task, "")
+	return harness.ToolExecutionMode(strings.TrimSpace(metadata["toolExecutionMode"]))
+}
+
 func harnessWrapperCurrentAttempt(task *corev1alpha1.Task) int32 {
 	if task == nil || task.Status.Attempts <= 0 {
 		return 1
@@ -1004,7 +1018,104 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 			return err
 		}
 	}
+	if request.ToolExecutionMode == harness.ToolExecutionModeBrokered {
+		if !capabilityHasToolMode(capabilities, corev1alpha1.AgentRuntimeToolExecutionModeBrokered) {
+			return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", corev1alpha1.AgentRuntimeToolExecutionModeBrokered)
+		}
+		for _, requiredClass := range harnessWrapperRequiredBrokeredClassesFromMetadata(request.Metadata) {
+			if !capabilityHasBrokeredToolClass(capabilities, requiredClass) {
+				return fmt.Errorf("runtime does not advertise required brokeredToolClass %q", requiredClass)
+			}
+		}
+		if !capabilities.SupportsContinuation {
+			return fmt.Errorf("runtime does not advertise required supportsContinuation capability")
+		}
+	}
 	return nil
+}
+
+func harnessWrapperRequiredBrokeredClassesFromMetadata(metadata map[string]string) []corev1alpha1.AgentRuntimeBrokeredToolClass {
+	if len(metadata) == 0 {
+		return nil
+	}
+	return parseBrokeredToolClasses(metadata["brokeredToolClasses"])
+}
+
+func parseBrokeredToolClasses(value string) []corev1alpha1.AgentRuntimeBrokeredToolClass {
+	seen := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
+	out := []corev1alpha1.AgentRuntimeBrokeredToolClass{}
+	for raw := range strings.SplitSeq(value, ",") {
+		class := corev1alpha1.AgentRuntimeBrokeredToolClass(strings.TrimSpace(raw))
+		if class == "" {
+			continue
+		}
+		if _, ok := seen[class]; ok {
+			continue
+		}
+		seen[class] = struct{}{}
+		out = append(out, class)
+	}
+	return out
+}
+
+func harnessWrapperPlannedBrokeredToolClassMap(task *corev1alpha1.Task) (map[string]corev1alpha1.AgentRuntimeBrokeredToolClass, error) {
+	metadata := harnessWrapperPlannedMetadata(task, "")
+	raw := strings.TrimSpace(metadata["brokeredToolClassMap"])
+	if raw == "" {
+		return nil, nil
+	}
+	decoded := map[string]corev1alpha1.AgentRuntimeBrokeredToolClass{}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil, fmt.Errorf("parse planned brokered tool class map: %w", err)
+	}
+	return decoded, nil
+}
+
+func (r *TaskReconciler) harnessWrapperBrokeredToolClassMap(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (map[string]corev1alpha1.AgentRuntimeBrokeredToolClass, error) {
+	out := map[string]corev1alpha1.AgentRuntimeBrokeredToolClass{}
+	for _, toolName := range harnessWrapperBrokeredToolNames(task) {
+		if isHarnessBrokeredCoordinationToolName(toolName) {
+			out[toolName] = corev1alpha1.AgentRuntimeBrokeredToolClassCoordination
+			continue
+		}
+		tool := &corev1alpha1.Tool{}
+		if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: toolName}, tool); err != nil {
+			return nil, fmt.Errorf("read brokered tool %q: %w", toolName, err)
+		}
+		if tool.Spec.BrokeredToolClass == "" {
+			return nil, fmt.Errorf("brokered tool %q must set spec.brokeredToolClass", toolName)
+		}
+		out[toolName] = tool.Spec.BrokeredToolClass
+	}
+	return out, nil
+}
+
+func (r *TaskReconciler) harnessWrapperRequiredBrokeredToolClasses(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) ([]string, error) {
+	if harnessWrapperToolExecutionMode(task, agent) != harness.ToolExecutionModeBrokered {
+		return nil, nil
+	}
+	classMap, err := r.harnessWrapperBrokeredToolClassMap(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
+	classes := []string{}
+	for _, class := range classMap {
+		if _, ok := seen[class]; ok {
+			continue
+		}
+		seen[class] = struct{}{}
+		classes = append(classes, string(class))
+	}
+	sort.Strings(classes)
+	return classes, nil
 }
 
 func harnessWrapperAuthError(err error) bool {
@@ -1104,6 +1215,13 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 	return false
 }
 
+func harnessWrapperStreamErrorIsBrokeredPause(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "continue brokered tool call") || errors.Is(err, errHarnessBrokeredApprovalPending)
+}
+
 func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *corev1alpha1.Task, reason string) error {
 	if !taskHasPlannedHarnessWrapperTurn(task) {
 		return nil
@@ -1187,6 +1305,26 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
+	brokeredClasses, err := r.harnessWrapperRequiredBrokeredToolClasses(ctx, task, agent)
+	if err != nil {
+		return harness.StartTurnRequest{}, err
+	}
+	if len(brokeredClasses) > 0 {
+		metadata["brokeredToolClasses"] = strings.Join(brokeredClasses, ",")
+		classMap, err := r.harnessWrapperBrokeredToolClassMap(ctx, task)
+		if err != nil {
+			return harness.StartTurnRequest{}, err
+		}
+		encoded, err := json.Marshal(classMap)
+		if err != nil {
+			return harness.StartTurnRequest{}, fmt.Errorf("marshal brokered tool class map: %w", err)
+		}
+		metadata["brokeredToolClassMap"] = string(encoded)
+	}
+	toolExecutionMode := harnessWrapperToolExecutionMode(task, agent)
+	if toolExecutionMode != "" {
+		metadata["toolExecutionMode"] = string(toolExecutionMode)
+	}
 	turnEnv, err := r.harnessWrapperTurnEnv(ctx, task, agent)
 	if err != nil {
 		return harness.StartTurnRequest{}, err
@@ -1205,7 +1343,7 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 			Subject: "task:" + task.Namespace + "/" + task.Name,
 		},
 		Input:             harness.TurnInput{Prompt: prompt, Env: turnEnv},
-		ToolExecutionMode: harness.ToolExecutionModeObserved,
+		ToolExecutionMode: toolExecutionMode,
 		Metadata:          metadata,
 	}, nil
 }

@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -850,4 +851,106 @@ func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
 	if waitResult.Results[0].Result != "completed with warnings" {
 		t.Errorf("expected message fallback, got %q", waitResult.Results[0].Result)
 	}
+}
+
+func TestWaitForTasksTool_Execute_PreservesStructuredData(t *testing.T) {
+	sr := common.StructuredResult{
+		Version: 1,
+		Summary: "structured child output",
+		Data: map[string]any{
+			"incident": "quincy-north",
+			"score":    float64(0.98),
+			"nested":   map[string]any{"owner": "ops"},
+		},
+		Artifacts: []common.ArtifactRef{{Filename: "evidence.json", ContentType: "application/json", Size: 42}},
+	}
+	srJSON, _ := json.Marshal(sr)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "structured-data", Namespace: defaultNamespace},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	resultStore := newFakeWaitResultStore(map[string]string{"structured-data": string(srJSON)})
+	toolCtx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, ResultStore: resultStore})
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args, _ := json.Marshal(WaitForTasksArgs{Tasks: []string{"structured-data"}, Timeout: "1s"})
+	result, err := tool.Execute(toolCtx, args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	data := waitResult.Results[0].Data
+	if data["incident"] != "quincy-north" || data["score"] != float64(0.98) {
+		t.Fatalf("data = %#v", data)
+	}
+	if got := waitResult.Results[0].Artifacts; len(got) != 1 || got[0].Filename != "evidence.json" {
+		t.Fatalf("artifacts = %#v", got)
+	}
+}
+
+func TestWaitForTasksTool_Execute_TruncatesOversizedStructuredData(t *testing.T) {
+	sr := common.StructuredResult{
+		Version: 1,
+		Summary: "large data",
+		Data: map[string]any{
+			"blob": strings.Repeat("x", maxWaitTaskDataBytes+1),
+		},
+	}
+	srJSON, _ := json.Marshal(sr)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "large-data", Namespace: defaultNamespace},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+	resultStore := newFakeWaitResultStore(map[string]string{"large-data": string(srJSON)})
+	toolCtx := WithToolContext(context.Background(), &ToolContext{Namespace: defaultNamespace, ResultStore: resultStore})
+
+	result, err := NewWaitForTasksTool(fakeClient).Execute(toolCtx, json.RawMessage(`{"tasks":["large-data"],"timeout":"1s"}`))
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	data := waitResult.Results[0].Data
+	if data["truncated"] != true || data["originalBytes"] == nil {
+		t.Fatalf("data = %#v, want truncation marker", data)
+	}
+}
+
+type fakeWaitResultStore struct {
+	values map[string]string
+}
+
+func newFakeWaitResultStore(values map[string]string) *fakeWaitResultStore {
+	return &fakeWaitResultStore{values: values}
+}
+
+func (s *fakeWaitResultStore) GetResult(_ context.Context, _, taskName string) ([]byte, error) {
+	value, ok := s.values[taskName]
+	if !ok {
+		return nil, fmt.Errorf("result not found")
+	}
+	return []byte(value), nil
 }

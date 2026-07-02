@@ -60,9 +60,30 @@ spec:
                 description: Capabilities declares readiness requirements Orka checks
                   against the runtime.
                 properties:
+                  brokeredToolClasses:
+                    description: BrokeredToolClasses lists brokered tool classes the
+                      runtime must advertise when brokered mode is required.
+                    items:
+                      description: AgentRuntimeBrokeredToolClass declares which classes
+                        of Orka-brokered tools a runtime can request.
+                      enum:
+                      - read
+                      - write
+                      - coordination
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  supportsArtifacts:
+                    description: SupportsArtifacts requires the runtime to advertise
+                      artifact/result reference support when true.
+                    type: boolean
                   supportsCancel:
                     description: SupportsCancel requires the runtime to advertise
                       cancellation support when true.
+                    type: boolean
+                  supportsContinuation:
+                    description: SupportsContinuation requires the runtime to advertise
+                      continuation after Orka-brokered tool results when true.
                     type: boolean
                   supportsRuntimeSessions:
                     description: SupportsRuntimeSessions requires the runtime to advertise
@@ -219,8 +240,30 @@ spec:
                 description: ObservedCapabilities contains sanitized capabilities
                   from the last probe.
                 properties:
+                  brokeredToolClasses:
+                    description: BrokeredToolClasses are the brokered tool classes
+                      advertised by /v1/capabilities.
+                    items:
+                      description: AgentRuntimeBrokeredToolClass declares which classes
+                        of Orka-brokered tools a runtime can request.
+                      enum:
+                      - read
+                      - write
+                      - coordination
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
                   maxConcurrentTurns:
                     description: MaxConcurrentTurns is the advertised concurrency
+                      ceiling.
+                    type: integer
+                  maxOutputBytes:
+                    description: MaxOutputBytes is the advertised maximum output payload
+                      size.
+                    format: int64
+                    type: integer
+                  maxTurnSeconds:
+                    description: MaxTurnSeconds is the advertised per-turn duration
                       ceiling.
                     type: integer
                   protocolVersion:
@@ -237,9 +280,17 @@ spec:
                     description: RuntimeVersion is the runtime version advertised
                       by /v1/capabilities.
                     type: string
+                  supportsArtifacts:
+                    description: SupportsArtifacts reports whether the runtime advertises
+                      artifact/result reference support.
+                    type: boolean
                   supportsCancel:
                     description: SupportsCancel reports whether the runtime advertises
                       cancellation support.
+                    type: boolean
+                  supportsContinuation:
+                    description: SupportsContinuation reports whether the runtime
+                      advertises continuation support.
                     type: boolean
                   supportsRuntimeSessions:
                     description: SupportsRuntimeSessions reports whether the runtime

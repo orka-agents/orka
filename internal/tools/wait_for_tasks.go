@@ -44,23 +44,25 @@ type WaitForTasksResult struct {
 
 // TaskResultInfo holds individual task result information
 type TaskResultInfo struct {
-	Task            string          `json:"task"`
-	Agent           string          `json:"agent,omitempty"`
-	Phase           string          `json:"phase"`
-	Result          string          `json:"result,omitempty"`
-	Summary         string          `json:"summary,omitempty"`
-	Verdict         string          `json:"verdict,omitempty"`
-	Feedback        string          `json:"feedback,omitempty"`
-	Files           []string        `json:"files,omitempty"`
-	BaseSHA         string          `json:"baseSHA,omitempty"`
-	HeadSHA         string          `json:"headSHA,omitempty"`
-	PushBranch      string          `json:"pushBranch,omitempty"`
-	WorkspaceRef    string          `json:"workspaceRef,omitempty"`
-	WorkspaceBranch string          `json:"workspaceBranch,omitempty"`
-	Iteration       string          `json:"iteration,omitempty"`
-	FailureDetails  *FailureDetails `json:"failureDetails,omitempty"`
-	Retried         bool            `json:"retried,omitempty"`
-	RetryTaskName   string          `json:"retryTaskName,omitempty"`
+	Task            string               `json:"task"`
+	Agent           string               `json:"agent,omitempty"`
+	Phase           string               `json:"phase"`
+	Result          string               `json:"result,omitempty"`
+	Summary         string               `json:"summary,omitempty"`
+	Verdict         string               `json:"verdict,omitempty"`
+	Feedback        string               `json:"feedback,omitempty"`
+	Files           []string             `json:"files,omitempty"`
+	Data            map[string]any       `json:"data,omitempty"`
+	Artifacts       []common.ArtifactRef `json:"artifacts,omitempty"`
+	BaseSHA         string               `json:"baseSHA,omitempty"`
+	HeadSHA         string               `json:"headSHA,omitempty"`
+	PushBranch      string               `json:"pushBranch,omitempty"`
+	WorkspaceRef    string               `json:"workspaceRef,omitempty"`
+	WorkspaceBranch string               `json:"workspaceBranch,omitempty"`
+	Iteration       string               `json:"iteration,omitempty"`
+	FailureDetails  *FailureDetails      `json:"failureDetails,omitempty"`
+	Retried         bool                 `json:"retried,omitempty"`
+	RetryTaskName   string               `json:"retryTaskName,omitempty"`
 }
 
 // FailureDetails provides structured information about a failed task
@@ -70,7 +72,10 @@ type FailureDetails struct {
 	MaxRetries int    `json:"maxRetries"`
 }
 
-const maxWaitTaskSummaryChars = 4096
+const (
+	maxWaitTaskSummaryChars = 4096
+	maxWaitTaskDataBytes    = 32 * 1024
+)
 
 // NewWaitForTasksTool creates a new wait_for_tasks tool
 func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
@@ -129,7 +134,13 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("invalid timeout %q: %w", timeoutStr, err)
 	}
 
-	ns := os.Getenv(envOrkaTaskNamespace)
+	ns := ""
+	if toolCtx := GetToolContext(ctx); toolCtx != nil {
+		ns = strings.TrimSpace(toolCtx.Namespace)
+	}
+	if ns == "" {
+		ns = os.Getenv(envOrkaTaskNamespace)
+	}
 	if ns == "" {
 		return "", fmt.Errorf("%s environment variable is not set", envOrkaTaskNamespace)
 	}
@@ -193,9 +204,11 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				}
 			}
 
-			// Fetch result if available via HTTP GET to controller
+			// Fetch result if available. Controller-side brokered coordination calls
+			// provide ResultStore through ToolContext; worker calls fall back to the
+			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResult(ctx, taskName)
+				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, taskName)
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
@@ -204,6 +217,8 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 					results[taskName].Verdict = sr.Verdict
 					results[taskName].Feedback = sr.Feedback
 					results[taskName].Files = sr.Files
+					results[taskName].Data = boundWaitTaskData(sr.Data)
+					results[taskName].Artifacts = sr.Artifacts
 					results[taskName].BaseSHA = sr.BaseSHA
 					results[taskName].HeadSHA = sr.HeadSHA
 					results[taskName].PushBranch = sr.PushBranch
@@ -258,6 +273,35 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+func fetchTaskResultForNamespace(ctx context.Context, namespace, taskName string) (string, error) {
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.ResultStore != nil {
+		result, err := toolCtx.ResultStore.GetResult(ctx, namespace, taskName)
+		if err != nil {
+			return "", err
+		}
+		return string(result), nil
+	}
+	return fetchTaskResult(ctx, taskName)
+}
+
+func boundWaitTaskData(data map[string]any) map[string]any {
+	if len(data) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return map[string]any{"error": "data payload could not be encoded"}
+	}
+	if len(encoded) <= maxWaitTaskDataBytes {
+		return data
+	}
+	return map[string]any{
+		"truncated":     true,
+		"originalBytes": len(encoded),
+		"message":       "structured data payload exceeded wait_for_tasks inline limit; use artifact references for large outputs",
+	}
 }
 
 // Ensure WaitForTasksTool implements Tool

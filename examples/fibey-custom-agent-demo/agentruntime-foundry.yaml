@@ -1,0 +1,27 @@
+# Optional namespace-local facade for a Foundry hosted-agent adapter implementing orka.harness.v1.
+# Apply this with secret-foundry.yaml and point an Agent runtimeRef at fibey-foundry-runtime
+# after deploying the adapter Service named fibey-foundry-runtime.
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: fibey-foundry-runtime
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://fibey-foundry-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: fibey-foundry-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+    - observed
+    - brokered
+    brokeredToolClasses:
+    - read
+    - write
+    - coordination
+    supportsCancel: true
+    supportsRuntimeSessions: true
+    supportsContinuation: true

@@ -97,6 +97,12 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := validateAgentRuntimeRequiredCapabilities(runtime, preflight.ObservedCapabilities); err != nil {
 		return observed, false, authRefResourceVersion, err.Error()
 	}
+	if err := validateObservedHarnessCapabilities(preflight.ObservedCapabilities); err != nil {
+		if !capabilityHasToolMode(preflight.ObservedCapabilities, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
+			return observed, false, authRefResourceVersion, "AgentRuntime brokered-only turn conformance is not implemented yet; advertise observed mode for current runtimeRef execution"
+		}
+		return observed, false, authRefResourceVersion, err.Error()
+	}
 	if deepProbe {
 		turnProbe := conformance.Check(probeCtx, conformance.Target{
 			BaseURL:        runtime.Spec.Deployment.Endpoint,
@@ -115,7 +121,63 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 			return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(turnProbe.Message)
 		}
 	}
+	if deepProbe {
+		for _, class := range brokeredClassesToProbe(preflight.ObservedCapabilities) {
+			switch class {
+			case corev1alpha1.AgentRuntimeBrokeredToolClassRead:
+				brokeredReadProbe := conformance.Check(probeCtx, conformance.Target{
+					BaseURL:           runtime.Spec.Deployment.Endpoint,
+					BearerToken:       token,
+					ControlTimeout:    agentRuntimeProbeTimeout,
+					ProbeBrokeredRead: true,
+					RequireAuth:       true,
+				})
+				if !brokeredReadProbe.Passed {
+					return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(brokeredReadProbe.Message)
+				}
+			case corev1alpha1.AgentRuntimeBrokeredToolClassWrite:
+				brokeredWriteProbe := conformance.Check(probeCtx, conformance.Target{
+					BaseURL:            runtime.Spec.Deployment.Endpoint,
+					BearerToken:        token,
+					ControlTimeout:     agentRuntimeProbeTimeout,
+					ProbeBrokeredWrite: true,
+					RequireAuth:        true,
+				})
+				if !brokeredWriteProbe.Passed {
+					return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(brokeredWriteProbe.Message)
+				}
+			case corev1alpha1.AgentRuntimeBrokeredToolClassCoordination:
+				brokeredCoordinationProbe := conformance.Check(probeCtx, conformance.Target{
+					BaseURL:                   runtime.Spec.Deployment.Endpoint,
+					BearerToken:               token,
+					ControlTimeout:            agentRuntimeProbeTimeout,
+					ProbeBrokeredCoordination: true,
+					RequireAuth:               true,
+				})
+				if !brokeredCoordinationProbe.Passed {
+					return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(brokeredCoordinationProbe.Message)
+				}
+			}
+		}
+	}
 	return observed, true, authRefResourceVersion, "AgentRuntime passed Orka harness readiness checks"
+}
+
+func brokeredClassesToProbe(caps *harness.CapabilitiesResponse) []corev1alpha1.AgentRuntimeBrokeredToolClass {
+	if caps == nil || len(caps.BrokeredToolClasses) == 0 {
+		return nil
+	}
+	classes := make([]corev1alpha1.AgentRuntimeBrokeredToolClass, 0, len(caps.BrokeredToolClasses))
+	seen := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
+	for _, class := range caps.BrokeredToolClasses {
+		converted := corev1alpha1.AgentRuntimeBrokeredToolClass(class)
+		if _, ok := seen[converted]; ok {
+			continue
+		}
+		seen[converted] = struct{}{}
+		classes = append(classes, converted)
+	}
+	return classes
 }
 
 func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
@@ -193,9 +255,19 @@ func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, ru
 	return value, strings.TrimSpace(secret.ResourceVersion), nil
 }
 
-func validateObservedHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
+func validateBaseHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
 	if caps == nil {
 		return fmt.Errorf("observed capabilities are missing")
+	}
+	if caps.RuntimeName != sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName) {
+		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
+	}
+	return nil
+}
+
+func validateObservedHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
+	if err := validateBaseHarnessCapabilities(caps); err != nil {
+		return err
 	}
 	if !capabilityHasToolMode(caps, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
 		return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", corev1alpha1.AgentRuntimeToolExecutionModeObserved)
@@ -213,11 +285,8 @@ func validateAgentRuntimeRequiredCapabilities(
 	runtime *corev1alpha1.AgentRuntime,
 	caps *harness.CapabilitiesResponse,
 ) error {
-	if err := validateObservedHarnessCapabilities(caps); err != nil {
+	if err := validateBaseHarnessCapabilities(caps); err != nil {
 		return err
-	}
-	if caps.RuntimeName != sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName) {
-		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
 	}
 	required := runtime.Spec.Capabilities
 	if required == nil {
@@ -229,9 +298,20 @@ func validateAgentRuntimeRequiredCapabilities(
 	if required.SupportsRuntimeSessions != nil && *required.SupportsRuntimeSessions && !caps.SupportsRuntimeSessions {
 		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
 	}
+	if required.SupportsContinuation != nil && *required.SupportsContinuation && !caps.SupportsContinuation {
+		return fmt.Errorf("runtime does not advertise required supportsContinuation capability")
+	}
+	if required.SupportsArtifacts != nil && *required.SupportsArtifacts && !caps.SupportsArtifacts {
+		return fmt.Errorf("runtime does not advertise required supportsArtifacts capability")
+	}
 	for _, requiredMode := range required.ToolExecutionModes {
 		if !capabilityHasToolMode(caps, requiredMode) {
 			return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", requiredMode)
+		}
+	}
+	for _, requiredClass := range required.BrokeredToolClasses {
+		if !capabilityHasBrokeredToolClass(caps, requiredClass) {
+			return fmt.Errorf("runtime does not advertise required brokeredToolClass %q", requiredClass)
 		}
 	}
 	return nil
@@ -242,6 +322,15 @@ func capabilityHasToolMode(caps *harness.CapabilitiesResponse, want corev1alpha1
 		return false
 	}
 	return slices.ContainsFunc(caps.ToolExecutionModes, func(got harness.ToolExecutionMode) bool {
+		return string(got) == string(want)
+	})
+}
+
+func capabilityHasBrokeredToolClass(caps *harness.CapabilitiesResponse, want corev1alpha1.AgentRuntimeBrokeredToolClass) bool {
+	if caps == nil {
+		return false
+	}
+	return slices.ContainsFunc(caps.BrokeredToolClasses, func(got harness.BrokeredToolClass) bool {
 		return string(got) == string(want)
 	})
 }
@@ -260,6 +349,16 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 		seenModes[converted] = struct{}{}
 		modes = append(modes, converted)
 	}
+	classes := make([]corev1alpha1.AgentRuntimeBrokeredToolClass, 0, len(caps.BrokeredToolClasses))
+	seenClasses := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
+	for _, class := range caps.BrokeredToolClasses {
+		converted := corev1alpha1.AgentRuntimeBrokeredToolClass(class)
+		if _, seen := seenClasses[converted]; seen {
+			continue
+		}
+		seenClasses[converted] = struct{}{}
+		classes = append(classes, converted)
+	}
 	return &corev1alpha1.AgentRuntimeObservedCapabilities{
 		ProtocolVersion:           sanitizeAgentRuntimeCapabilityValue(caps.ProtocolVersion),
 		Transport:                 sanitizeAgentRuntimeCapabilityValue(caps.Transport),
@@ -267,11 +366,16 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 		RuntimeVersion:            sanitizeAgentRuntimeCapabilityValue(caps.RuntimeVersion),
 		ProviderKind:              sanitizeAgentRuntimeCapabilityValue(string(caps.ProviderKind)),
 		ToolExecutionModes:        modes,
+		BrokeredToolClasses:       classes,
 		SupportsCancel:            caps.SupportsCancel,
 		SupportsRuntimeSessions:   caps.SupportsRuntimeSessions,
+		SupportsContinuation:      caps.SupportsContinuation,
+		SupportsArtifacts:         caps.SupportsArtifacts,
 		SupportsSuspend:           caps.SupportsSuspend,
 		SupportsWorkspaceSnapshot: caps.SupportsWorkspaceSnapshot,
 		MaxConcurrentTurns:        caps.MaxConcurrentTurns,
+		MaxTurnSeconds:            caps.MaxTurnSeconds,
+		MaxOutputBytes:            caps.MaxOutputBytes,
 	}
 }
 

@@ -2801,15 +2801,15 @@ func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.Works
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if agent != nil && agent.Spec.Runtime != nil {
 		if len(agent.Spec.Runtime.DefaultAllowedTools) > 0 {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowedTools policy metadata")
+			return fmt.Errorf("runtimeRef custom runtimes require task-level allowedTools for brokered tool exposure and do not support defaultAllowedTools policy metadata")
 		}
 		if agent.Spec.Runtime.DefaultAllowBash != nil {
 			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowBash policy metadata")
 		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
-		if len(task.Spec.AgentRuntime.AllowedTools) > 0 || len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowedTools/disallowedTools policy metadata")
+		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes do not support disallowedTools policy metadata")
 		}
 		if task.Spec.AgentRuntime.AllowBash != nil {
 			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowBash policy metadata")
