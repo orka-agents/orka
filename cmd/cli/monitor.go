@@ -603,12 +603,13 @@ func newMonitorIssueWorkflowCmd() *cobra.Command {
 }
 
 func newMonitorCommandIntentCmd(use, short, kind, intent string) *cobra.Command {
+	var targetSHA string
 	cmd := &cobra.Command{Use: use, Short: short, Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		number, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil || number <= 0 {
 			return fmt.Errorf("target number must be a positive integer")
 		}
-		body := repositoryMonitorCommandRequestBody(kind, number, intent, "")
+		body := repositoryMonitorCommandRequestBody(kind, number, intent, targetSHA)
 		c := newClientFromCmd(cmd)
 		result, err := c.DoJSON(context.Background(), http.MethodPost, "/api/v1/monitors/repositories/"+url.PathEscape(args[0])+"/commands", nil, body)
 		if err != nil {
@@ -617,6 +618,12 @@ func newMonitorCommandIntentCmd(use, short, kind, intent string) *cobra.Command 
 		return printStructured(cmd, result)
 	}}
 	addOutputFlag(cmd, outputYAML)
+	if kind == "pull_request" {
+		cmd.Flags().StringVar(&targetSHA, "target-sha", "", "Current pull request head SHA for head-bound commands")
+		if intent != "stop" && intent != "resume" {
+			_ = cmd.MarkFlagRequired("target-sha")
+		}
+	}
 	return cmd
 }
 

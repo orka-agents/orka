@@ -438,7 +438,7 @@ The request body can be omitted to run a full inventory pass. `targetKind` may b
 }
 ```
 
-Supported issue intents are `triage`, `research`, `plan`, `approve_plan`, `implement`, `decompose`, `stop`, and `resume`. Supported pull request intents are `review`, `fix`, `fix_ci`, `update_branch`, `automerge`, `stop`, and `resume`. The command creation endpoint requires monitor operate authorization, validates that the target kind is enabled on the monitor, records a durable command event, and queues a targeted monitor run.
+Supported issue intents are `triage`, `research`, `plan`, `approve_plan`, `implement`, `decompose`, `stop`, and `resume`. Supported pull request intents are `review`, `fix`, `fix_ci`, `update_branch`, `automerge`, `stop`, and `resume`. Head-bound pull request commands (`review`, `fix`, `fix_ci`, `update_branch`, and `automerge`) must include `targetSHA`; `stop` and `resume` can omit it. The command creation endpoint requires monitor operate authorization, validates that the target kind is enabled on the monitor, records a durable command event, and queues a targeted monitor run.
 
 ### List Monitor Commands, Actions, Implementations, and Mutations
 

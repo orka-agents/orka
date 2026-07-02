@@ -826,6 +826,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		return err
 	}
 	req.Intent = strings.TrimSpace(req.Intent)
+	req.TargetSHA = strings.TrimSpace(req.TargetSHA)
 	if req.Kind == repositoryMonitorTargetKindIssue && strings.TrimSpace(req.TargetSHA) != "" {
 		return fiber.NewError(fiber.StatusBadRequest, "targetSHA is only supported for pull_request commands")
 	}
@@ -847,19 +848,17 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if item == nil && repositoryMonitorCommandRequiresInventoriedTarget(req) {
 		return fiber.NewError(fiber.StatusBadRequest, "command target must be present in monitor inventory before this intent can be queued")
 	}
+	if repositoryMonitorPullRequestCommandRequiresTargetSHA(req) && req.TargetSHA == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "targetSHA is required for head-bound pull_request commands")
+	}
 	if item != nil && !repositoryMonitorControlCommandIntent(req.Intent) && !strings.EqualFold(strings.TrimSpace(item.State), "open") {
 		return fiber.NewError(fiber.StatusBadRequest, "command target must be open")
 	}
 	if item != nil && req.Kind == repositoryMonitorTargetKindIssue && !repositoryMonitorControlCommandIntent(req.Intent) && !repositoryMonitorWebhookIssueTargetLabelsAllowed(monitor.Spec, repositoryMonitorLabelsFromItem(item)) {
 		return fiber.NewError(fiber.StatusBadRequest, "command target is outside issue label scope")
 	}
-	if item != nil && req.Kind == repositoryMonitorTargetKindPullRequest {
-		if req.TargetSHA != "" && req.TargetSHA != item.HeadSHA {
-			return fiber.NewError(fiber.StatusBadRequest, "targetSHA must match current pull request head")
-		}
-		if req.TargetSHA == "" {
-			req.TargetSHA = item.HeadSHA
-		}
+	if item != nil && req.Kind == repositoryMonitorTargetKindPullRequest && req.TargetSHA != "" && req.TargetSHA != item.HeadSHA {
+		return fiber.NewError(fiber.StatusBadRequest, "targetSHA must match current pull request head")
 	}
 	snapshot := ""
 	if item != nil && req.Kind == repositoryMonitorTargetKindIssue {
@@ -933,6 +932,10 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 
 func repositoryMonitorCommandRequiresInventoriedTarget(req CreateRepositoryMonitorCommandRequest) bool {
 	return !repositoryMonitorControlCommandIntent(req.Intent)
+}
+
+func repositoryMonitorPullRequestCommandRequiresTargetSHA(req CreateRepositoryMonitorCommandRequest) bool {
+	return req.Kind == repositoryMonitorTargetKindPullRequest && !repositoryMonitorControlCommandIntent(req.Intent)
 }
 
 func repositoryMonitorLabelsFromItem(item *store.MonitorItem) []string {
