@@ -295,3 +295,15 @@ func testGitOutput(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func TestContainedWorkspaceDirRejectsEscapingSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "outside-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+	if _, err := containedWorkspaceDir(root, link); err == nil {
+		t.Fatal("containedWorkspaceDir() error = nil, want escaping symlink rejection")
+	}
+}

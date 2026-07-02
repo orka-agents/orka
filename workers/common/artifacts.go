@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -81,8 +82,27 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 // or are present but empty.
 func MissingArtifacts(filenames []string) ([]string, error) {
 	missing := make([]string, 0, len(filenames))
+	localNames := make([]string, 0, len(filenames))
 	for _, filename := range filenames {
-		info, err := os.Stat(filepath.Join(artifactsDir(), filename))
+		localName, err := artifactFilename(filename)
+		if err != nil {
+			return nil, err
+		}
+		localNames = append(localNames, localName)
+	}
+	artifactRoot := artifactsDir()
+	root, err := os.OpenRoot(artifactRoot)
+	if os.IsNotExist(err) {
+		return append(missing, filenames...), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to open artifacts directory: %w", err)
+	}
+	defer root.Close() //nolint:errcheck
+
+	for i, filename := range filenames {
+		localName := localNames[i]
+		info, err := root.Stat(localName)
 		switch {
 		case os.IsNotExist(err):
 			missing = append(missing, filename)
@@ -97,18 +117,39 @@ func MissingArtifacts(filenames []string) ([]string, error) {
 
 // WriteArtifactFile writes an artifact file into the shared upload directory.
 func WriteArtifactFile(filename string, data []byte) error {
-	filename = filepath.Base(filename)
-	if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\") {
-		return fmt.Errorf("invalid artifact filename %q", filename)
+	rawFilename := filename
+	filename, err := artifactFilename(filename)
+	if err != nil {
+		return fmt.Errorf("invalid artifact filename %q", rawFilename)
 	}
 	artifactRoot := artifactsDir()
 	if err := os.MkdirAll(artifactRoot, 0o755); err != nil {
 		return fmt.Errorf("failed to create artifacts directory: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(artifactRoot, filename), data, 0o644); err != nil {
+	root, err := os.OpenRoot(artifactRoot)
+	if err != nil {
+		return fmt.Errorf("failed to open artifacts directory: %w", err)
+	}
+	defer root.Close() //nolint:errcheck
+	if err := root.WriteFile(filename, data, 0o644); err != nil {
 		return fmt.Errorf("failed to write artifact %s: %w", filename, err)
 	}
 	return nil
+}
+
+func artifactFilename(filename string) (string, error) {
+	if filename == "" || filename == "." || filename == ".." ||
+		strings.ContainsAny(filename, "/\\") || !fs.ValidPath(filename) {
+		return "", fmt.Errorf("invalid artifact filename")
+	}
+	localName, err := filepath.Localize(filename)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsLocal(localName) || localName != filepath.Base(localName) {
+		return "", fmt.Errorf("invalid artifact filename")
+	}
+	return localName, nil
 }
 
 // UploadArtifacts scans /tmp/artifacts and uploads each file to the controller.

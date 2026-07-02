@@ -418,16 +418,21 @@ func containedWorkspaceDir(root, candidate string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace directory: %w", err)
 	}
-	info, err := os.Stat(resolvedCandidate)
+	rel, err := filepath.Rel(resolvedRoot, resolvedCandidate)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("workspace directory %q escapes clone root", candidate)
+	}
+	rootHandle, err := os.OpenRoot(resolvedRoot)
+	if err != nil {
+		return "", fmt.Errorf("open workspace root: %w", err)
+	}
+	defer rootHandle.Close() //nolint:errcheck
+	info, err := rootHandle.Stat(rel)
 	if err != nil {
 		return "", fmt.Errorf("stat workspace directory: %w", err)
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("workspace path %q is not a directory", candidate)
-	}
-	rel, err := filepath.Rel(resolvedRoot, resolvedCandidate)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("workspace directory %q escapes clone root", candidate)
 	}
 	return resolvedCandidate, nil
 }

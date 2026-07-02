@@ -1060,3 +1060,15 @@ func runGitOutputWS(t *testing.T, dir string, args ...string) string {
 	}
 	return string(out)
 }
+
+func TestSafeGitBranchNameRejectsOptionLikeBranch(t *testing.T) {
+	if _, err := safeGitBranchName("--upload-pack=/tmp/pwn"); err == nil {
+		t.Fatal("safeGitBranchName() error = nil, want option-like branch rejection")
+	}
+}
+
+func TestSafeGitRemoteRejectsOptionLikeRemote(t *testing.T) {
+	if _, err := safeGitRemote("--upload-pack=/tmp/pwn"); err == nil {
+		t.Fatal("safeGitRemote() error = nil, want option-like remote rejection")
+	}
+}
