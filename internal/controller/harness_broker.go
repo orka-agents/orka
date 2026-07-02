@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,7 +36,10 @@ const (
 	harnessBrokeredToolCheckMessages  = "check_messages"
 )
 
-var errHarnessBrokeredApprovalPending = errors.New("brokered tool call awaiting approval")
+var (
+	errHarnessBrokeredApprovalPending = errors.New("brokered tool call awaiting approval")
+	harnessBrokeredCoordinationEnvMu  = sync.Mutex{}
+)
 
 type harnessBrokeredApprovalPendingError struct {
 	approvalID string
@@ -132,6 +136,11 @@ func (r *TaskReconciler) executeHarnessBrokeredCoordinationTool(
 	frame harness.HarnessEventFrame,
 	tool toolspkg.Tool,
 ) (string, error) {
+	// Coordination tools still read some policy from the legacy worker env surface.
+	// Serialize this narrow bridge so concurrent controller reconciles cannot leak
+	// one task 's env into another in-process coordination call.
+	harnessBrokeredCoordinationEnvMu.Lock()
+	defer harnessBrokeredCoordinationEnvMu.Unlock()
 	restore := setHarnessBrokeredCoordinationEnv(task, agent)
 	defer restore()
 	toolCtx := &toolspkg.ToolContext{
@@ -670,7 +679,7 @@ func (r *TaskReconciler) continueHarnessBrokeredToolCall(
 	agent *corev1alpha1.Agent,
 	frame harness.HarnessEventFrame,
 ) error {
-	if harnessWrapperToolExecutionMode(task, agent) != harness.ToolExecutionModeBrokered {
+	if harnessWrapperPlannedToolExecutionMode(task) != harness.ToolExecutionModeBrokered {
 		return nil
 	}
 	result, err := r.handleHarnessBrokeredToolCall(ctx, task, agent, frame)
