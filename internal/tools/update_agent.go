@@ -14,7 +14,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 // UpdateAgentTool updates an existing Agent CRD.

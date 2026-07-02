@@ -28,7 +28,7 @@ export default function HeroSection() {
           Get Started
         </Link>
         <Link
-          to="https://github.com/sozercan/orka"
+          to="https://github.com/orka-agents/orka"
           className="button button--secondary button--lg"
         >
           View on GitHub

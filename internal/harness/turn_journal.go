@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // TurnJournal owns the persisted-frame side of harness turn integration: loading

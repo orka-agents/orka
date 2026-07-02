@@ -16,8 +16,8 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 const (

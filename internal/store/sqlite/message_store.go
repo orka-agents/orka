@@ -10,7 +10,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // SendMessage stores a new inter-agent message.

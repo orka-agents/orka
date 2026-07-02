@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -433,8 +433,8 @@ func TestValidateWorkspaceRepoURLRejectsLocalInputs(t *testing.T) {
 		"https://127.0.0.1/repo.git",
 		"https://10.0.0.1/repo.git",
 		"https://metadata.local/repo.git",
-		"https://user@github.com/sozercan/orka.git",
-		"https://github.com/sozercan/orka.git?credential=value",
+		"https://user@github.com/orka-agents/orka.git",
+		"https://github.com/orka-agents/orka.git?credential=value",
 	} {
 		if err := validateWorkspaceRepoURL(repo); err == nil {
 			t.Fatalf("validateWorkspaceRepoURL(%q) error = nil, want rejection", repo)

@@ -16,9 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestListTaskEvents(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"github.com/sozercan/orka/internal/uiembed"
+	"github.com/orka-agents/orka/internal/uiembed"
 )
 
 // setupStaticFiles serves the embedded SPA frontend.

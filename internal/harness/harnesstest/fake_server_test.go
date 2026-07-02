@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 func TestFakeHarnessPassesConformance(t *testing.T) {

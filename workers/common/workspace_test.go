@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (

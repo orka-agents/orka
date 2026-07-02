@@ -19,9 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/tracing"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/tracing"
 )
 
 // CreateContainerTaskTool creates a container-type Task CR.

@@ -19,10 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/tools"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 const (

@@ -20,9 +20,9 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/worker"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func main() {

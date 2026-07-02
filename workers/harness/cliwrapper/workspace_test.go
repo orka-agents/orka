@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const testWindowsOS = "windows"

@@ -1,4 +1,4 @@
-module github.com/sozercan/orka
+module github.com/orka-agents/orka
 
 go 1.26.2
 

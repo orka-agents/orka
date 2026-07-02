@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 func TestHandlers_ProviderCRUD(t *testing.T) {

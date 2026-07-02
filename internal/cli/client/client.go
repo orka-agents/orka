@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sozercan/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 // Client is an HTTP client for the Orka API.

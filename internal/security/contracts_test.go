@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestParseContractsAcceptValidExamples(t *testing.T) {

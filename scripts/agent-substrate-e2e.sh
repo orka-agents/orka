@@ -549,7 +549,7 @@ deploy_orka() {
   (cd "${tmp_config}/config/manager" && "${ROOT_DIR}/bin/kustomize" edit set image "controller=${controller_image}")
   (
     cd "${tmp_config}/config/harness-wrapper"
-    "${ROOT_DIR}/bin/kustomize" edit set image "ghcr.io/sozercan/orka/agent-harness-wrapper=${codex_image}"
+    "${ROOT_DIR}/bin/kustomize" edit set image "ghcr.io/orka-agents/orka/agent-harness-wrapper=${codex_image}"
   )
   kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
   if ! kubectl -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then

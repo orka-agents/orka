@@ -683,7 +683,7 @@ Key configuration values for the Helm chart:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
-| `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
+| `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
 | `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `controller.apiPort` | `8080` | REST API port |
@@ -698,8 +698,8 @@ Key configuration values for the Helm chart:
 | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
 | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
 | `controller.agentSandbox.cleanupPolicy` | `delete` | Default workspace cleanup policy: `delete` or `retain` |
-| `workers.ai.image.repository` | `ghcr.io/sozercan/orka/ai-worker` | AI worker image |
-| `workers.general.image.repository` | `ghcr.io/sozercan/orka/general-worker` | General worker image |
+| `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
+| `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
 | `crds.install` | `true` | Install CRDs |
 | `crds.keep` | `true` | Keep CRDs on uninstall |
@@ -746,7 +746,7 @@ The Helm keys mirror the controller flags: for example,
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
-See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/orka/values.yaml) for the full list.
+See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
 
@@ -809,11 +809,11 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
-| `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
+| `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | AI worker container image |
 | `ORKA_HARNESS_WRAPPER_ENDPOINT` | unset | Required controller environment variable for agent Tasks; points at the CLI harness wrapper HTTP endpoint. |
 | `ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE` | unset | Optional controller token file for authenticated wrapper endpoints. |
 
-| `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
+| `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |
 | `--chat-enabled` | `true` | Enable the chat endpoint |

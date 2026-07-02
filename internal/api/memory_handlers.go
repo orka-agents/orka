@@ -14,7 +14,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func (h *Handlers) ensureMemoryStore() error {

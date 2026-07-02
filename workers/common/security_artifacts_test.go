@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/security"
+	"github.com/orka-agents/orka/internal/security"
 )
 
 func TestEnsureRequiredSecurityArtifactsFollowUpWritesMissingArtifact(t *testing.T) {

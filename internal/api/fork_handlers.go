@@ -22,12 +22,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	forkcontext "github.com/sozercan/orka/internal/fork"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/tracing"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	forkcontext "github.com/orka-agents/orka/internal/fork"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tracing"
 )
 
 type ForkTaskRequest struct {

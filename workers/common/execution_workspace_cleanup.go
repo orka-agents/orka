@@ -12,9 +12,9 @@ import (
 	"os"
 	"strings"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/internal/workspace"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspace"
 )
 
 type executionWorkspaceCleanupOptions struct {

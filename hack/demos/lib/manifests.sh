@@ -598,7 +598,7 @@ EOF
 : "${DEMO_KONTXT_SA_NAME:=orka-kontxt-caller}"
 : "${DEMO_KONTXT_JOB_NAME:=orka-kontxt-caller}"
 : "${DEMO_KONTXT_DENIED_JOB_NAME:=orka-kontxt-caller-denied}"
-: "${DEMO_KONTXT_CALLER_IMAGE:=docker.io/sozercan/orka-kontxt-caller:demo}"
+: "${DEMO_KONTXT_CALLER_IMAGE:=ghcr.io/orka-agents/orka/kontxt-caller:demo}"
 : "${DEMO_KONTXT_TTS_AUDIENCE:=kontxt-tts}"
 : "${DEMO_KONTXT_DENIED_NAMESPACE:=not-default}"
 : "${DEMO_KONTXT_TTS_URL:=http://kontxt-tts.default.svc.cluster.local:8080}"

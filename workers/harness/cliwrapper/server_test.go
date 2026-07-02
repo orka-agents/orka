@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/testutil"
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {

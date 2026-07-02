@@ -16,7 +16,7 @@ import (
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
 
-	"github.com/sozercan/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/metrics"
 )
 
 func TestNewContextTokenTTSConfig(t *testing.T) {

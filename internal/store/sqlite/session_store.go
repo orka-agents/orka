@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // CreateSession inserts a new session record.

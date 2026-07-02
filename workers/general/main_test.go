@@ -21,8 +21,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sozercan/orka/internal/security"
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestRun_Success(t *testing.T) {

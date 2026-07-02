@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (

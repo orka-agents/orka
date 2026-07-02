@@ -16,8 +16,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 // TracingProvider wraps an LLM Provider with OpenTelemetry GenAI tracing.

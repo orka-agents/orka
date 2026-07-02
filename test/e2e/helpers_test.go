@@ -26,11 +26,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/orka/internal/llm"
-	openaiprovider "github.com/sozercan/orka/internal/llm/openai"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/test/utils"
-	workercommon "github.com/sozercan/orka/workers/common"
+	"github.com/orka-agents/orka/internal/llm"
+	openaiprovider "github.com/orka-agents/orka/internal/llm/openai"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/test/utils"
+	workercommon "github.com/orka-agents/orka/workers/common"
 )
 
 const (

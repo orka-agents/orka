@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sozercan/orka/internal/security"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // PrepareSecurityReviewContext materializes the deterministic review context

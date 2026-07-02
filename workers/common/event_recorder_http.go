@@ -14,8 +14,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (

@@ -1,6 +1,6 @@
 package workspace
 
-import "github.com/sozercan/orka/internal/workspace/daemonprotocol"
+import "github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 
 type substrateExecRequest = daemonprotocol.ExecRequest
 type substrateExecResponse = daemonprotocol.ExecResponse

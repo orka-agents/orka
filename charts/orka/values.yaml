@@ -7,7 +7,7 @@ controller:
 
   # Controller image
   image:
-    repository: ghcr.io/sozercan/orka
+    repository: ghcr.io/orka-agents/orka
     tag: latest
     pullPolicy: IfNotPresent
 
@@ -157,13 +157,13 @@ controller:
 workers:
   ai:
     image:
-      repository: ghcr.io/sozercan/orka/ai-worker
+      repository: ghcr.io/orka-agents/orka/ai-worker
       tag: latest
       pullPolicy: IfNotPresent
 
   harnessWrapper:
     image:
-      repository: ghcr.io/sozercan/orka/agent-harness-wrapper
+      repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
       tag: latest
       pullPolicy: IfNotPresent
     auth:

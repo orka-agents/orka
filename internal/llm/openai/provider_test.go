@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm"
 )
 
 const (

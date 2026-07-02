@@ -20,15 +20,15 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
 	repositoryMonitorTestDefaultBranch  = "main"
-	repositoryMonitorTestRepoURL        = "https://github.com/sozercan/orka"
+	repositoryMonitorTestRepoURL        = "https://github.com/orka-agents/orka"
 	repositoryMonitorTestReviewerSecret = "reviewer-credentials"
 	repositoryMonitorTestHeadSHA        = "sha1"
 )
@@ -52,7 +52,7 @@ func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 			UID:       "uid-1",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Branch:  repositoryMonitorTestDefaultBranch,
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
@@ -74,7 +74,7 @@ func TestRepositoryMonitorReconcileRecordsMetadataAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRepositoryMonitor() error = %v", err)
 	}
-	if record.Owner != "sozercan" || record.Repository != "orka" || record.Branch != repositoryMonitorTestDefaultBranch {
+	if record.Owner != "orka-agents" || record.Repository != "orka" || record.Branch != repositoryMonitorTestDefaultBranch {
 		t.Fatalf("record = %#v, want parsed repo metadata", record)
 	}
 
@@ -109,7 +109,7 @@ func TestRepositoryMonitorReconcileSkipsNoOpIdleStatusPatch(t *testing.T) {
 			UID:       "uid-idle",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -159,7 +159,7 @@ func TestRepositoryMonitorReconcileQueuesDueScheduledRun(t *testing.T) {
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL:  "https://github.com/sozercan/orka",
+			RepoURL:  "https://github.com/orka-agents/orka",
 			Branch:   repositoryMonitorTestDefaultBranch,
 			Schedule: "* * * * *",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
@@ -218,7 +218,7 @@ func TestRepositoryMonitorReconcileDoesNotQueueScheduledRunWhenActiveRunExists(t
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL:  "https://github.com/sozercan/orka",
+			RepoURL:  "https://github.com/orka-agents/orka",
 			Branch:   repositoryMonitorTestDefaultBranch,
 			Schedule: "* * * * *",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
@@ -284,7 +284,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedRunBeforeInvalidSchedule(t *te
 			UID:       "uid-invalid-schedule-manual",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL:  "https://github.com/sozercan/orka",
+			RepoURL:  "https://github.com/orka-agents/orka",
 			Schedule: "not a schedule",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
@@ -378,7 +378,7 @@ func TestRepositoryMonitorReconcilePreservesLatestFailedRunStatus(t *testing.T) 
 			UID:       "uid-failed-idle",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -444,7 +444,7 @@ func TestRepositoryMonitorReconcileReplaysLatestSuccessfulRunStatus(t *testing.T
 			UID:       "uid-succeeded-idle",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -528,7 +528,7 @@ func TestRepositoryMonitorReconcileRecoversStaleRunningRun(t *testing.T) {
 			UID:       "uid-stale-running",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -603,7 +603,7 @@ func TestRepositoryMonitorReconcileKeepsFreshRunningRunActive(t *testing.T) {
 			UID:       "uid-fresh-running",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -662,7 +662,7 @@ func TestRepositoryMonitorReconcileMarksRunFailedWhenStartEventWriteFails(t *tes
 			UID:       "uid-event-failure",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -750,7 +750,7 @@ func TestRepositoryMonitorReconcileProcessesQueuedPRInventoryRun(t *testing.T) {
 			UID:       "uid-inventory",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{MaxPerRun: &maxPerRun},
 			},
@@ -948,8 +948,8 @@ func TestRepositoryMonitorReconcileExpiredReviewedHeadRespectsMaxPerRun(t *testi
 	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"ready","sha":"sha1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
-		{"number":2,"title":"Expired review","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"expired","sha":"sha2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"ready","sha":"sha1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]},
+		{"number":2,"title":"Expired review","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"expired","sha":"sha2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}
 	]`)
 	t.Cleanup(server.Close)
 
@@ -1050,7 +1050,7 @@ func TestRepositoryMonitorReconcileSkipsPendingReviewWithoutConsumingCapacity(t 
 			UID:       "uid-pending-review",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{MaxPerRun: &maxPerRun},
 			},
@@ -1152,7 +1152,7 @@ func TestRepositoryMonitorReconcileCreatesTaskForQueuedItemMissingBackingTask(t 
 			UID:       "uid-queued-without-task",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -1228,7 +1228,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t, `[
-		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}
 	]`)
 	t.Cleanup(server.Close)
 
@@ -1240,7 +1240,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 			UID:       "uid-collision",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -1257,8 +1257,8 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 	pr := repositoryMonitorPullRequest{
 		Number:      1,
 		HeadSHA:     "sha1",
-		HeadRepo:    "sozercan/orka",
-		HeadRepoURL: "https://github.com/sozercan/orka.git",
+		HeadRepo:    "orka-agents/orka",
+		HeadRepoURL: "https://github.com/orka-agents/orka.git",
 	}
 	collidingTaskName := repositoryMonitorReviewTaskName(monitor, run, pr)
 	collidingTask := &corev1alpha1.Task{
@@ -1270,7 +1270,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 				labels.LabelCreatedBy:         "repository-monitor",
 				labels.LabelRepositoryMonitor: labels.SelectorValue("collision"),
 				labels.LabelMonitorRun:        labels.SelectorValue("run-collision"),
-				labels.LabelGitHubRepository:  labels.SelectorValue("sozercan/orka"),
+				labels.LabelGitHubRepository:  labels.SelectorValue("orka-agents/orka"),
 				labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
 				labels.LabelGitHubNumber:      labels.SelectorValue("1"),
 			},
@@ -1280,7 +1280,7 @@ func TestRepositoryMonitorReconcileFailsClosedOnReviewTaskNameCollision(t *testi
 				labels.AnnotationMonitorItemKind:        repositoryMonitorPullRequestKind,
 				labels.AnnotationMonitorItemNumber:      "1",
 				labels.AnnotationMonitorHeadSHA:         "sha1",
-				labels.AnnotationGitHubRepository:       "sozercan/orka",
+				labels.AnnotationGitHubRepository:       "orka-agents/orka",
 				labels.AnnotationAgentReadOnly:          "true",
 				labels.AnnotationWorkspaceInitContainer: "true",
 			},
@@ -1340,7 +1340,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 			UID:       "uid-defaulted-task",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -1358,8 +1358,8 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 		Number:      1,
 		BaseBranch:  repositoryMonitorTestDefaultBranch,
 		HeadSHA:     "sha1",
-		HeadRepo:    "sozercan/orka",
-		HeadRepoURL: "https://github.com/sozercan/orka.git",
+		HeadRepo:    "orka-agents/orka",
+		HeadRepoURL: "https://github.com/orka-agents/orka.git",
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1372,7 +1372,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 		Store:  setupControllerSQLiteStore(t),
 	}
 
-	taskName, created, err := reconciler.createRepositoryMonitorReviewTask(ctx, monitor, run, "sozercan", "orka", pr)
+	taskName, created, err := reconciler.createRepositoryMonitorReviewTask(ctx, monitor, run, "orka-agents", "orka", pr)
 	if err != nil {
 		t.Fatalf("createRepositoryMonitorReviewTask() error = %v", err)
 	}
@@ -1393,7 +1393,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	existing.Spec.SuccessfulRunsHistoryLimit = &successfulRunsHistoryLimit
 	existing.Spec.FailedRunsHistoryLimit = &failedRunsHistoryLimit
 
-	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "sozercan/orka", pr); err != nil {
+	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents/orka", pr); err != nil {
 		t.Fatalf("validateRepositoryMonitorReviewTaskMatchesExpected() error = %v", err)
 	}
 }
@@ -1423,7 +1423,7 @@ func TestRepositoryMonitorReconcileKeepsSucceededBackingTaskPendingWithoutTypedR
 			UID:       "uid-queued-terminal-task",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -2429,7 +2429,7 @@ func TestRepositoryMonitorReconcileForkPullRequestTaskUsesHeadRepoWithoutBaseSec
 	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":7,"title":"Fork PR","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"forker"},"base":{"ref":"main","sha":"base7","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"fork-sha","repo":{"full_name":"forker/orka","clone_url":"https://github.com/forker/orka.git"}},"labels":[]}
+		{"number":7,"title":"Fork PR","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"forker"},"base":{"ref":"main","sha":"base7","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature","sha":"fork-sha","repo":{"full_name":"forker/orka","clone_url":"https://github.com/forker/orka.git"}},"labels":[]}
 	]`)
 	t.Cleanup(server.Close)
 
@@ -2497,12 +2497,12 @@ func TestRepositoryMonitorReconcileSameRepoSSHMonitorUsesHTTPSCloneURL(t *testin
 	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":9,"title":"Same repo SSH monitor","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base9","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"ssh-head-sha","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+		{"number":9,"title":"Same repo SSH monitor","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base9","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature","sha":"ssh-head-sha","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}
 	]`)
 	t.Cleanup(server.Close)
 
 	monitor, secret := repositoryMonitorInventoryTestObjects("ssh-same-repo")
-	monitor.Spec.RepoURL = "git@github.com:sozercan/orka.git"
+	monitor.Spec.RepoURL = "git@github.com:orka-agents/orka.git"
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
@@ -2563,7 +2563,7 @@ func TestRepositoryMonitorReconcileMissingHeadRepoDoesNotAttachBaseSecret(t *tes
 	}
 
 	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":8,"title":"Missing head repo","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"forker"},"base":{"ref":"main","sha":"base8","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"unknown-head-sha"},"labels":[]}
+		{"number":8,"title":"Missing head repo","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"forker"},"base":{"ref":"main","sha":"base8","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature","sha":"unknown-head-sha"},"labels":[]}
 	]`)
 	t.Cleanup(server.Close)
 
@@ -2637,7 +2637,7 @@ func TestRepositoryMonitorReconcileProcessesPublicInventoryWithoutGitSecret(t *t
 			UID:       "uid-public-inventory",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -3054,7 +3054,7 @@ func TestRepositoryMonitorReconcileFailsUnsupportedRunTargetKind(t *testing.T) {
 			UID:       "uid-unsupported-run",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -3151,7 +3151,7 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 			UID:       "uid-fifo-runs",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -3218,12 +3218,12 @@ func TestRepositoryMonitorReconcileProcessesOldestQueuedRunFirst(t *testing.T) {
 func newRepositoryMonitorPullRequestInventoryServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
-		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
-		{"number":2,"title":"Draft","state":"open","draft":true,"mergeable_state":"unknown","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"draft","sha":"sha2","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
-		{"number":3,"title":"Blocked","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"cara"},"base":{"ref":"main","sha":"base3","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"blocked","sha":"sha3","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[{"name":"orka:human-review"}]},
-		{"number":4,"title":"Over limit","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"dev"},"base":{"ref":"main","sha":"base4","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"second","sha":"sha4","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
-		{"number":5,"title":"Already reviewed","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"erin"},"base":{"ref":"main","sha":"base5","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"reviewed","sha":"sha5","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]},
-		{"number":6,"title":"Backport","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"frank"},"base":{"ref":"release","sha":"base6","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"head":{"ref":"backport","sha":"sha6","repo":{"full_name":"sozercan/orka","clone_url":"https://github.com/sozercan/orka.git"}},"labels":[]}
+		{"number":1,"title":"Ready","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]},
+		{"number":2,"title":"Draft","state":"open","draft":true,"mergeable_state":"unknown","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"draft","sha":"sha2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]},
+		{"number":3,"title":"Blocked","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"cara"},"base":{"ref":"main","sha":"base3","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"blocked","sha":"sha3","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[{"name":"orka:human-review"}]},
+		{"number":4,"title":"Over limit","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"dev"},"base":{"ref":"main","sha":"base4","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"second","sha":"sha4","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]},
+		{"number":5,"title":"Already reviewed","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"erin"},"base":{"ref":"main","sha":"base5","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"reviewed","sha":"sha5","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]},
+		{"number":6,"title":"Backport","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"frank"},"base":{"ref":"release","sha":"base6","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"backport","sha":"sha6","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}
 	]`)
 }
 
@@ -3240,7 +3240,7 @@ func newRepositoryMonitorPullRequestInventoryServerWithoutAuth(t *testing.T, bod
 func newRepositoryMonitorSinglePullRequestServerWithBody(t *testing.T, number int64, body string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wantPath := fmt.Sprintf("/repos/sozercan/orka/pulls/%d", number)
+		wantPath := fmt.Sprintf("/repos/orka-agents/orka/pulls/%d", number)
 		if r.URL.Path != wantPath {
 			t.Fatalf("request path = %q, want single pull request path %q", r.URL.Path, wantPath)
 		}
@@ -3255,7 +3255,7 @@ func newRepositoryMonitorSinglePullRequestServerWithBody(t *testing.T, number in
 func newRepositoryMonitorPullRequestInventoryServerWithAuth(t *testing.T, body, wantAuth string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/sozercan/orka/pulls" {
+		if r.URL.Path != "/repos/orka-agents/orka/pulls" {
 			t.Fatalf("request path = %q, want pull inventory path", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != wantAuth {
@@ -3284,7 +3284,7 @@ func repositoryMonitorInventoryTestObjects(name string) (*corev1alpha1.Repositor
 			UID:       types.UID("uid-" + name),
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL:      "https://github.com/sozercan/orka",
+			RepoURL:      "https://github.com/orka-agents/orka",
 			GitSecretRef: &corev1.LocalObjectReference{Name: "github-token"},
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
@@ -3307,7 +3307,7 @@ func repositoryMonitorReviewIngestTestMonitor(name string) *corev1alpha1.Reposit
 			UID:       types.UID("uid-" + name),
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -3333,7 +3333,7 @@ func repositoryMonitorReviewIngestTestTask(name, monitorName string, prNumber in
 				labels.AnnotationMonitorItemKind:       repositoryMonitorPullRequestKind,
 				labels.AnnotationMonitorItemNumber:     strconv.FormatInt(prNumber, 10),
 				labels.AnnotationMonitorHeadSHA:        headSHA,
-				labels.AnnotationGitHubRepository:      "sozercan/orka",
+				labels.AnnotationGitHubRepository:      "orka-agents/orka",
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
@@ -3363,7 +3363,7 @@ func repositoryMonitorReviewResultEnvelopeWith(t *testing.T, prNumber int64, hea
 
 	payload := map[string]any{
 		"schemaVersion": repositoryMonitorReviewSchemaVersion,
-		"repo":          "sozercan/orka",
+		"repo":          "orka-agents/orka",
 		"prNumber":      prNumber,
 		"headSHA":       headSHA,
 		"verdict":       verdict,
@@ -3446,7 +3446,7 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 		cfg.PostStatus = http.StatusCreated
 	}
 	if cfg.PostBody == "" {
-		cfg.PostBody = `{"id":123,"html_url":"https://github.com/sozercan/orka/pull/1#pullrequestreview-123"}`
+		cfg.PostBody = `{"id":123,"html_url":"https://github.com/orka-agents/orka/pull/1#pullrequestreview-123"}`
 	}
 	testServer := &repositoryMonitorPublishTestServer{}
 	testServer.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3455,13 +3455,13 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/1":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/pulls/1":
 			_, _ = w.Write([]byte(repositoryMonitorPublishPullBody(cfg)))
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/1/reviews":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/pulls/1/reviews":
 			_, _ = w.Write([]byte(cfg.ReviewsBody))
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/sozercan/orka/pulls/1/files":
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/pulls/1/files":
 			_, _ = w.Write([]byte(cfg.FilesBody))
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/sozercan/orka/pulls/1/reviews":
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/orka-agents/orka/pulls/1/reviews":
 			testServer.PostCount++
 			if err := json.NewDecoder(r.Body).Decode(&testServer.PostedReview); err != nil {
 				t.Fatalf("decode posted review: %v", err)
@@ -3491,16 +3491,16 @@ func repositoryMonitorPublishPullBody(cfg repositoryMonitorPublishTestServerConf
 			"ref": cfg.BaseBranch,
 			"sha": "base1",
 			"repo": map[string]any{
-				"full_name": "sozercan/orka",
-				"clone_url": "https://github.com/sozercan/orka.git",
+				"full_name": "orka-agents/orka",
+				"clone_url": "https://github.com/orka-agents/orka.git",
 			},
 		},
 		"head": map[string]any{
 			"ref": "feature",
 			"sha": cfg.HeadSHA,
 			"repo": map[string]any{
-				"full_name": "sozercan/orka",
-				"clone_url": "https://github.com/sozercan/orka.git",
+				"full_name": "orka-agents/orka",
+				"clone_url": "https://github.com/orka-agents/orka.git",
 			},
 		},
 		"labels": labelItems,
@@ -3692,7 +3692,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidRepoURLWithoutPersistingMetadat
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://token@github.com/sozercan/orka",
+			RepoURL: "https://token@github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -3743,7 +3743,7 @@ func TestRepositoryMonitorReconcileRejectsUnsupportedTargetWithoutPersistingMeta
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Targets: corev1alpha1.RepositoryMonitorTargets{
 				PullRequests: corev1alpha1.RepositoryMonitorPullRequestTarget{Enabled: &pullRequestsEnabled},
 				Issues:       corev1alpha1.RepositoryMonitorIssueTarget{Enabled: true},
@@ -3794,7 +3794,7 @@ func TestRepositoryMonitorReconcileRejectsRequireGreenCIWithoutPersistingMetadat
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},
@@ -3845,7 +3845,7 @@ func TestRepositoryMonitorReconcileRejectsMissingReviewerWithoutPersistingMetada
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 		},
 	}
 	cl := fake.NewClientBuilder().
@@ -3934,7 +3934,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidReviewerAgentWithoutPersistingM
 					Namespace: "default",
 				},
 				Spec: corev1alpha1.RepositoryMonitorSpec{
-					RepoURL: "https://github.com/sozercan/orka",
+					RepoURL: "https://github.com/orka-agents/orka",
 					Agents: corev1alpha1.RepositoryMonitorAgents{
 						Reviewer: &corev1alpha1.AgentReference{Name: tt.reviewer},
 					},
@@ -3991,7 +3991,7 @@ func TestRepositoryMonitorReconcileRejectsInvalidGitSecretWithoutPersistingMetad
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL:      "https://github.com/sozercan/orka",
+			RepoURL:      "https://github.com/orka-agents/orka",
 			GitSecretRef: &corev1.LocalObjectReference{Name: "bad-git-secret"},
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
@@ -4055,7 +4055,7 @@ func TestRepositoryMonitorReconcileUnsuspendSetsReady(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.RepositoryMonitorSpec{
-			RepoURL: "https://github.com/sozercan/orka",
+			RepoURL: "https://github.com/orka-agents/orka",
 			Agents: corev1alpha1.RepositoryMonitorAgents{
 				Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"},
 			},

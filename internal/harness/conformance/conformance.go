@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 const (

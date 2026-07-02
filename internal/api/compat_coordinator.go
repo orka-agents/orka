@@ -12,7 +12,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/sozercan/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm"
 )
 
 type compatCoordinatorSetup struct {

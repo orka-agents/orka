@@ -12,8 +12,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspace"
 )
 
 func forwardWorkspaceStdoutResultMarker(

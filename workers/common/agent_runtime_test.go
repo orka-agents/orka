@@ -25,12 +25,12 @@ import (
 	"testing"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/testutil"
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/internal/workspace"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (

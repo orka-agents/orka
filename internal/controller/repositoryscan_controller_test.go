@@ -24,12 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/security"
-	storepkg "github.com/sozercan/orka/internal/store"
-	sqlitestore "github.com/sozercan/orka/internal/store/sqlite"
-	"github.com/sozercan/orka/workers/common"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
+	storepkg "github.com/orka-agents/orka/internal/store"
+	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 const readyReasonScanFailed = "ScanFailed"

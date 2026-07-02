@@ -18,9 +18,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
-	"github.com/sozercan/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
 func TestTracingProviderName(t *testing.T) {

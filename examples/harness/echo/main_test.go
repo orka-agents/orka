@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 func TestEchoHarnessCancelEndpointMatchesCapabilities(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 

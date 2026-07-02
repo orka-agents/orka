@@ -18,11 +18,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/testutil"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestCreatePRMonitorTool_Metadata(t *testing.T) {
@@ -113,7 +113,7 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 
 	resultJSON, err := tool.Execute(ctx, mustJSON(t, map[string]any{
 		nameField:        "daily-pr-monitor",
-		repoURLField:     "https://github.com/sozercan/orka",
+		repoURLField:     "https://github.com/orka-agents/orka",
 		scheduleField:    "*/15 * * * *",
 		agentRefField:    "reviewer",
 		providerRefField: "default-provider",
@@ -162,14 +162,14 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	if task.Spec.Workspace == nil {
 		t.Fatal("Workspace is nil")
 	}
-	if task.Spec.Workspace.GitRepo != "https://github.com/sozercan/orka" {
+	if task.Spec.Workspace.GitRepo != "https://github.com/orka-agents/orka" {
 		t.Errorf("workspace.gitRepo = %q", task.Spec.Workspace.GitRepo)
 	}
 	if task.Spec.Workspace.GitSecretRef == nil || task.Spec.Workspace.GitSecretRef.Name != testGitCredentialsSecret {
 		t.Fatalf("workspace.gitSecretRef = %#v, want %s", task.Spec.Workspace.GitSecretRef, testGitCredentialsSecret)
 	}
-	if !hasEnvVar(task.Spec.Env, workerenv.GitRepo, "https://github.com/sozercan/orka") {
-		t.Errorf("env missing %s=https://github.com/sozercan/orka: %#v", workerenv.GitRepo, task.Spec.Env)
+	if !hasEnvVar(task.Spec.Env, workerenv.GitRepo, "https://github.com/orka-agents/orka") {
+		t.Errorf("env missing %s=https://github.com/orka-agents/orka: %#v", workerenv.GitRepo, task.Spec.Env)
 	}
 	for _, tool := range prMonitorRequiredTools {
 		if !containsString(task.Spec.AI.Tools, tool) {
@@ -179,7 +179,7 @@ func TestCreatePRMonitorTool_ExecuteCreatesScheduledAITask(t *testing.T) {
 	if !strings.Contains(task.Spec.Prompt, "list_pull_requests") {
 		t.Errorf("prompt missing list_pull_requests: %s", task.Spec.Prompt)
 	}
-	if !strings.Contains(task.Spec.Prompt, "repo_url \"https://github.com/sozercan/orka\"") {
+	if !strings.Contains(task.Spec.Prompt, "repo_url \"https://github.com/orka-agents/orka\"") {
 		t.Errorf("prompt missing repo URL: %s", task.Spec.Prompt)
 	}
 	if !strings.Contains(task.Spec.Prompt, "Focus on regressions.") {
@@ -192,7 +192,7 @@ func TestCreatePRMonitorTool_ExecuteStampsTraceContext(t *testing.T) {
 		t.Fatalf("Init() error = %v", err)
 	}
 	_ = testutil.NewSpanHarness(t)
-	_, gitSecret := githubRepoTaskWithSecret("https://github.com/sozercan/orka")
+	_, gitSecret := githubRepoTaskWithSecret("https://github.com/orka-agents/orka")
 	fc := newFakeClient(
 		&corev1alpha1.Agent{
 			ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: defaultNamespace},
@@ -209,7 +209,7 @@ func TestCreatePRMonitorTool_ExecuteStampsTraceContext(t *testing.T) {
 
 	_, err := (&CreatePRMonitorTool{}).Execute(ctx, mustJSON(t, map[string]any{
 		nameField:      "trace-pr-monitor",
-		repoURLField:   "https://github.com/sozercan/orka",
+		repoURLField:   "https://github.com/orka-agents/orka",
 		scheduleField:  "*/15 * * * *",
 		agentRefField:  "reviewer",
 		"gitSecretRef": gitSecret.Name,
@@ -450,9 +450,9 @@ func TestCreatePRMonitorTool_ExecuteMissingRepoURL(t *testing.T) {
 
 func TestCreatePRMonitorTool_ExecuteRejectsNonRepositoryRepoURL(t *testing.T) {
 	for _, repoURL := range []string{
-		"https://github.com/sozercan/orka/pull/124",
-		"https://github.com/sozercan/orka/issues/124",
-		"https://github.com/sozercan/orka/tree/main",
+		"https://github.com/orka-agents/orka/pull/124",
+		"https://github.com/orka-agents/orka/issues/124",
+		"https://github.com/orka-agents/orka/tree/main",
 	} {
 		t.Run(repoURL, func(t *testing.T) {
 			result := executeCreatePRMonitorForFailure(t, newFakeClient(), map[string]any{

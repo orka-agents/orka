@@ -48,7 +48,7 @@ helm install orka charts/orka \
 make install
 
 # Deploy controller
-make deploy IMG=ghcr.io/sozercan/orka:latest
+make deploy IMG=ghcr.io/orka-agents/orka:latest
 ```
 
 ## Quick Start

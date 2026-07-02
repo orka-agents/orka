@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/harness/harnesstest"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness/harnesstest"
 )
 
 func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {

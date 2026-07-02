@@ -17,7 +17,7 @@ Orka turns your Kubernetes cluster into an AI-powered task execution platform. S
 One `helm install`, one LLM secret, and you're chatting with an orchestrator that handles the rest.
 
 > [!IMPORTANT]
-> **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/sozercan/orka/issues).
+> **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/orka-agents/orka/issues).
 
 ## Why Run AI Agents on Kubernetes?
 

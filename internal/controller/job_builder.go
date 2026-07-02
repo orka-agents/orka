@@ -28,20 +28,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/taskmeta"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/taskmeta"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
 	// DefaultAIWorkerImage is the default image for AI tasks
-	DefaultAIWorkerImage = "ghcr.io/sozercan/orka/ai-worker:latest"
+	DefaultAIWorkerImage = "ghcr.io/orka-agents/orka/ai-worker:latest"
 
 	// DefaultGeneralWorkerImage is the default image for container tasks
-	DefaultGeneralWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
+	DefaultGeneralWorkerImage = "ghcr.io/orka-agents/orka/general-worker:latest"
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"

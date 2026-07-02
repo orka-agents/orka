@@ -21,8 +21,8 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 // apiMode tracks which API surface to use.

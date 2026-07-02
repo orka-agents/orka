@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"

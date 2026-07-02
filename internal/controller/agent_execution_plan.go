@@ -13,7 +13,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 type agentExecutionPath string

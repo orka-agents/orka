@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/workspace/daemonprotocol"
+	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 )
 
 const (

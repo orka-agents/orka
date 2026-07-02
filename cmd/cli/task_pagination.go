@@ -12,7 +12,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sozercan/orka/internal/cli/client"
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 const filteredTaskListPageSize = 500
