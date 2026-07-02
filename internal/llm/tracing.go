@@ -8,6 +8,7 @@ package llm
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,7 +33,8 @@ type TracingProvider struct {
 }
 
 type tracingTracer struct {
-	tracer trace.Tracer
+	tracer               trace.Tracer
+	deferStartAttributes bool
 }
 
 type tracingMetrics struct {
@@ -53,7 +55,11 @@ func NewTracingProvider(p Provider) Provider {
 }
 
 func (tp *TracingProvider) ensureTelemetry() bool {
-	if tp.tracer.Load() == nil && !tracing.GlobalTracerProviderExplicitNoop() {
+	if tracer := tp.tracer.Load(); tracer == nil {
+		if !tracing.GlobalTracerProviderExplicitNoop() {
+			tp.initTracer()
+		}
+	} else if tracer.deferStartAttributes && !defaultGlobalTracerProvider(tracing.GlobalTracerProvider()) {
 		tp.initTracer()
 	}
 	if tp.metrics.Load() == nil && tracing.GlobalMeterProviderActive() {
@@ -63,15 +69,43 @@ func (tp *TracingProvider) ensureTelemetry() bool {
 }
 
 func (tp *TracingProvider) initTracer() {
-	if tp.tracer.Load() != nil {
+	if tracing.GlobalTracerProviderExplicitNoop() {
+		return
+	}
+	provider := tracing.GlobalTracerProvider()
+	deferStartAttributes := defaultGlobalTracerProvider(provider)
+	if current := tp.tracer.Load(); current != nil && (!current.deferStartAttributes || deferStartAttributes) {
 		return
 	}
 	tp.initMu.Lock()
 	defer tp.initMu.Unlock()
-	if tp.tracer.Load() != nil || tracing.GlobalTracerProviderExplicitNoop() {
+	if tracing.GlobalTracerProviderExplicitNoop() {
 		return
 	}
-	tp.tracer.Store(&tracingTracer{tracer: tracing.GenAITracer(genai.InstrumentationName)})
+	provider = tracing.GlobalTracerProvider()
+	deferStartAttributes = defaultGlobalTracerProvider(provider)
+	if current := tp.tracer.Load(); current != nil && (!current.deferStartAttributes || deferStartAttributes) {
+		return
+	}
+	tp.tracer.Store(&tracingTracer{
+		tracer:               provider.Tracer(genai.InstrumentationName, trace.WithSchemaURL(genai.SchemaURL)),
+		deferStartAttributes: deferStartAttributes,
+	})
+}
+
+func defaultGlobalTracerProvider(provider any) bool {
+	return isOTelProviderType(provider, "go.opentelemetry.io/otel/internal/global", "tracerProvider")
+}
+
+func isOTelProviderType(provider any, pkgPath, name string) bool {
+	typ := reflect.TypeOf(provider)
+	if typ == nil {
+		return true
+	}
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	return typ.PkgPath() == pkgPath && typ.Name() == name
 }
 
 func (tp *TracingProvider) initMetrics() {
@@ -116,18 +150,42 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 		return tp.inner.Complete(ctx, req)
 	}
 
-	start := time.Now()
-	providerName := ProviderTelemetryName(tp.inner)
+	var providerName string
 	span := noopTracingSpan
+	spanStarted := false
+	deferStartAttributes := false
 	if tracer := tp.tracer.Load(); tracer != nil {
-		attrs := requestAttributes(req, providerName, false)
-		ctx, span = tracer.tracer.Start(ctx, spanName(req), trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
-		defer span.End()
+		deferStartAttributes = tracer.deferStartAttributes
+		if deferStartAttributes {
+			ctx, span = tracer.tracer.Start(ctx, spanName(req), trace.WithSpanKind(trace.SpanKindClient))
+		} else {
+			providerName = ProviderTelemetryName(tp.inner)
+			attrs := requestAttributes(req, providerName, false)
+			ctx, span = tracer.tracer.Start(ctx, spanName(req), trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+		}
+		spanStarted = true
 	}
 
 	spanRecording := span.IsRecording()
 	metricsActive := tp.metrics.Load() != nil
+	if !spanRecording && !metricsActive {
+		resp, err := tp.inner.Complete(ctx, req)
+		if spanStarted {
+			span.End()
+		}
+		return resp, err
+	}
+	if spanStarted {
+		defer span.End()
+	}
+	if providerName == "" {
+		providerName = ProviderTelemetryName(tp.inner)
+	}
+	if spanRecording && deferStartAttributes {
+		span.SetAttributes(requestAttributes(req, providerName, false)...)
+	}
 
+	start := time.Now()
 	resp, err := tp.inner.Complete(ctx, req)
 	durationSeconds := time.Since(start).Seconds()
 	if err != nil {

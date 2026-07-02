@@ -118,15 +118,15 @@ func TestGetMessagesMultipleMarkRead(t *testing.T) {
 	}
 }
 
-func TestGetMessagesMarkReadBatchesLargeInbox(t *testing.T) {
+func TestGetMessagesMarkReadLargeInbox(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 	const (
 		namespace  = "ns-large-mark-read"
 		taskName   = "reader"
 		parentTask = "parent"
+		count      = 503
 	)
-	count := sqliteMessageReadUpdateBatchSize + 3
 
 	for i := range count {
 		msg := &store.Message{

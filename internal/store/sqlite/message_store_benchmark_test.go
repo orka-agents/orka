@@ -18,11 +18,13 @@ func BenchmarkGetMessagesMarkRead100(b *testing.B) {
 	)
 
 	b.ReportAllocs()
+	b.ResetTimer()
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ { //nolint:intrange,modernize // b.Loop requires the timer to be running at loop boundaries.
+		b.StopTimer()
 		resetBenchmarkMessages(ctx, b, s, namespace, taskName, parentTask, count)
-
 		b.StartTimer()
+
 		messages, err := s.GetMessages(ctx, namespace, taskName, parentTask, true)
 		b.StopTimer()
 
