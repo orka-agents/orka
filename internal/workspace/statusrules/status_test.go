@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/workspace"
+	"github.com/orka-agents/orka/internal/workspace"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 func TestUpdateStatusSanitizesInboundFields(t *testing.T) {

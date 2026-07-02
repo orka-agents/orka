@@ -14,9 +14,9 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/tasktrace"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tasktrace"
 )
 
 const maxTaskTraceEvents = 5000

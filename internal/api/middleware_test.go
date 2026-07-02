@@ -17,8 +17,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	tracingpkg "github.com/sozercan/orka/internal/tracing"
-	tracingtest "github.com/sozercan/orka/internal/tracing/testutil"
+	tracingpkg "github.com/orka-agents/orka/internal/tracing"
+	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
 func TestNewLoggingMiddleware(t *testing.T) {

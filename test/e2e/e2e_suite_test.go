@@ -24,18 +24,18 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/orka/test/utils"
+	"github.com/orka-agents/orka/test/utils"
 )
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "ghcr.io/sozercan/orka:latest"
+	managerImage = "ghcr.io/orka-agents/orka:latest"
 
 	// Worker and harness images to build and load for e2e testing.
-	aiWorkerImage                    = "ghcr.io/sozercan/orka/ai-worker:latest"
-	generalWorkerImage               = "ghcr.io/sozercan/orka/general-worker:latest"
-	harnessWrapperImage              = "ghcr.io/sozercan/orka/agent-harness-wrapper:latest"
-	agentRuntimeExternalHarnessImage = "ghcr.io/sozercan/orka/agent-runtime-external-harness:e2e"
+	aiWorkerImage                    = "ghcr.io/orka-agents/orka/ai-worker:latest"
+	generalWorkerImage               = "ghcr.io/orka-agents/orka/general-worker:latest"
+	harnessWrapperImage              = "ghcr.io/orka-agents/orka/agent-harness-wrapper:latest"
+	agentRuntimeExternalHarnessImage = "ghcr.io/orka-agents/orka/agent-runtime-external-harness:e2e"
 	agentRuntimeExternalE2EEnvVar    = "E2E_AGENTRUNTIME_EXTERNAL"
 
 	// E2E environment configuration (loaded from .env or environment)

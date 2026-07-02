@@ -21,7 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/sozercan/orka/test/utils"
+	"github.com/orka-agents/orka/test/utils"
 )
 
 // namespace where the project is deployed in

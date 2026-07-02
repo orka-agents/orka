@@ -4,7 +4,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sozercan/orka/internal/harness/harnesstest"
+	"github.com/orka-agents/orka/internal/harness/harnesstest"
 )
 
 func TestHarnessConformance(t *testing.T) {

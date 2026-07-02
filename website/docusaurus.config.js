@@ -7,9 +7,9 @@ const {themes: prismThemes} = require('prism-react-renderer');
 const config = {
   title: 'Orka',
   tagline: 'Kubernetes-native AI task orchestration',
-  url: 'https://sozercan.github.io',
+  url: 'https://orka-agents.github.io',
   baseUrl: '/orka/',
-  organizationName: 'sozercan',
+  organizationName: 'orka-agents',
   projectName: 'orka',
   trailingSlash: false,
 
@@ -35,7 +35,7 @@ const config = {
           routeBasePath: 'docs',
           sidebarPath: require.resolve('./sidebars.js'),
           editUrl: ({docPath}) =>
-            `https://github.com/sozercan/orka/edit/main/website/docs/${docPath}`,
+            `https://github.com/orka-agents/orka/edit/main/website/docs/${docPath}`,
         },
         blog: false,
         theme: {
@@ -58,7 +58,7 @@ const config = {
             label: 'Docs',
           },
           {
-            href: 'https://github.com/sozercan/orka',
+            href: 'https://github.com/orka-agents/orka',
             label: 'GitHub',
             position: 'right',
           },
@@ -85,7 +85,7 @@ const config = {
             items: [
               {
                 label: 'GitHub',
-                href: 'https://github.com/sozercan/orka',
+                href: 'https://github.com/orka-agents/orka',
               },
             ],
           },

@@ -11,7 +11,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const initialMessageBatchCapacity = 32

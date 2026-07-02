@@ -12,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sozercan/orka/internal/redact"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/store"
 	moderncsqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )

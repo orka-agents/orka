@@ -30,14 +30,14 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/controller"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/store"
-	chattools "github.com/sozercan/orka/internal/tools"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/store"
+	chattools "github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
 var chatLog = logf.Log.WithName("chat-handler")

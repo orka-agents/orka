@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sozercan/orka/internal/cli/client"
+	"github.com/orka-agents/orka/internal/cli/client"
 )
 
 const (

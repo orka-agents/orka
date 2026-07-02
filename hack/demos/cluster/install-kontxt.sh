@@ -224,10 +224,10 @@ else
   docker push "${live_kontxt_image}"
 fi
 
-# 3b. The Demo 50 caller image (docker.io/sozercan/orka-kontxt-caller:demo) is
+# 3b. The Demo 50 caller image (ghcr.io/orka-agents/orka/kontxt-caller:demo) is
 #     published amd64-only, so it ImagePullBackOffs on an arm64 cluster. Build it
 #     for the node arch and load/push it so the caller Job runs everywhere.
-caller_image="${DEMO_KONTXT_CALLER_IMAGE:-docker.io/sozercan/orka-kontxt-caller:demo}"
+caller_image="${DEMO_KONTXT_CALLER_IMAGE:-ghcr.io/orka-agents/orka/kontxt-caller:demo}"
 node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
 log "Building kontxt caller image ${caller_image} (arch ${node_arch})"
 docker build --platform "linux/${node_arch}" -t "${caller_image}" \

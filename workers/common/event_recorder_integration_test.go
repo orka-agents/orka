@@ -20,11 +20,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	"github.com/sozercan/orka/internal/api"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/store/sqlite"
-	common "github.com/sozercan/orka/workers/common"
+	"github.com/orka-agents/orka/internal/api"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
+	common "github.com/orka-agents/orka/workers/common"
 )
 
 type failingExecutionEventStore struct{}

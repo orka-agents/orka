@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (

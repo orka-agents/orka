@@ -22,15 +22,19 @@ jobs:
       matrix:
         include:
           - image: controller
+            image_suffix: ""
             dockerfile: Dockerfile
             context: .
           - image: ai-worker
+            image_suffix: "/ai-worker"
             dockerfile: workers/ai/Dockerfile
             context: .
           - image: general-worker
+            image_suffix: "/general-worker"
             dockerfile: workers/general/Dockerfile
             context: .
           - image: agent-harness-wrapper
+            image_suffix: "/agent-harness-wrapper"
             dockerfile: workers/harness/Dockerfile
             context: .
     steps:
@@ -51,7 +55,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image_suffix }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -72,7 +76,7 @@ jobs:
       - name: Generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image_suffix }}:${{ steps.meta.outputs.version }}
           format: spdx-json
           output-file: sbom-${{ matrix.image }}.spdx.json
 
@@ -90,14 +94,18 @@ jobs:
       matrix:
         include:
           - image: controller
+            image_suffix: ""
           - image: ai-worker
+            image_suffix: "/ai-worker"
           - image: general-worker
+            image_suffix: "/general-worker"
           - image: agent-harness-wrapper
+            image_suffix: "/agent-harness-wrapper"
     steps:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e0f18c8ea69db56b # v0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ github.ref_name }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image_suffix }}:${{ github.ref_name }}
           format: sarif
           output: trivy-${{ matrix.image }}.sarif
           severity: CRITICAL,HIGH

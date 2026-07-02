@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const publishPhaseFailed = "failed"
@@ -17,7 +17,7 @@ func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "main",
@@ -169,7 +169,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		ID:               "repair-1",
 		MonitorNamespace: "demo",
 		MonitorName:      "orka",
-		Repo:             "sozercan/orka",
+		Repo:             "orka-agents/orka",
 		PRNumber:         42,
 		Intent:           "fix_ci",
 		Phase:            "queued",
@@ -264,7 +264,7 @@ func TestUpsertRepositoryMonitorBranchChangeClearsDependentState(t *testing.T) {
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "main",
@@ -294,7 +294,7 @@ func TestUpsertRepositoryMonitorBranchChangeClearsDependentState(t *testing.T) {
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "release",
@@ -366,7 +366,7 @@ func TestUpsertRepositoryMonitorIdentityChangeClearsDependentState(t *testing.T)
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "main",
@@ -477,7 +477,7 @@ func TestDeleteRepositoryMonitorCascadesMonitorState(t *testing.T) {
 	if err := s.UpsertRepositoryMonitor(ctx, &store.RepositoryMonitorRecord{
 		Namespace: "demo",
 		Name:      "orka",
-		RepoURL:   "https://github.com/sozercan/orka",
+		RepoURL:   "https://github.com/orka-agents/orka",
 	}); err != nil {
 		t.Fatalf("UpsertRepositoryMonitor() error = %v", err)
 	}

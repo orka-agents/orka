@@ -174,7 +174,7 @@ and pick a short or long request body via
 ## Generate Installer YAML
 
 ```bash
-make build-installer IMG=ghcr.io/sozercan/orka:latest
+make build-installer IMG=ghcr.io/orka-agents/orka:latest
 ```
 
 ## Build Gotchas

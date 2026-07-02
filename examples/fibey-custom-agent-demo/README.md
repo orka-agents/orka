@@ -7,8 +7,8 @@ The mock service uses the example Orka harness server as an AgentKit-compatible 
 ## Build/load the mock image for kind
 
 ```bash
-docker build -t ghcr.io/sozercan/orka-example-echo-harness:latest -f examples/harness/echo/Dockerfile .
-kind load docker-image ghcr.io/sozercan/orka-example-echo-harness:latest --name <your-kind-cluster>
+docker build -t ghcr.io/orka-agents/orka/example-echo-harness:latest -f examples/harness/echo/Dockerfile .
+kind load docker-image ghcr.io/orka-agents/orka/example-echo-harness:latest --name <your-kind-cluster>
 ```
 
 ## Using a real AgentKit image

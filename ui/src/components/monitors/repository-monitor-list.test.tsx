@@ -29,8 +29,8 @@ function monitor(overrides: Partial<RepositoryMonitor> = {}): RepositoryMonitor 
   return {
     metadata: { name: 'repo-monitor', namespace: 'default' },
     spec: {
-      repoURL: 'https://github.com/sozercan/orka',
-      owner: 'sozercan',
+      repoURL: 'https://github.com/orka-agents/orka',
+      owner: 'orka-agents',
       repository: 'orka',
       branch: 'main',
       schedule: '*/15 * * * *',
@@ -81,7 +81,7 @@ describe('RepositoryMonitorList', () => {
 
     render(<RepositoryMonitorList />)
 
-    expect(screen.getByText('sozercan/orka')).toBeInTheDocument()
+    expect(screen.getByText('orka-agents/orka')).toBeInTheDocument()
     expect(screen.getByText(/Pending reviews:/)).toHaveTextContent('Pending reviews: 2')
     expect(screen.getByText(/Active repairs:/)).toHaveTextContent('Active repairs: 1')
     expect(screen.getByText('30s ago')).toBeInTheDocument()
@@ -90,12 +90,12 @@ describe('RepositoryMonitorList', () => {
   it('derives the repository display name for CRD-created monitors', () => {
     mockUseRepositoryMonitors.mockReturnValue({
       isLoading: false,
-      data: { items: [monitor({ spec: { repoURL: 'git@github.com:sozercan/orka.git' } })] },
+      data: { items: [monitor({ spec: { repoURL: 'git@github.com:orka-agents/orka.git' } })] },
     })
 
     render(<RepositoryMonitorList />)
 
-    expect(screen.getByText('sozercan/orka')).toBeInTheDocument()
+    expect(screen.getByText('orka-agents/orka')).toBeInTheDocument()
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument()
   })
 
