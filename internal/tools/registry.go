@@ -231,49 +231,42 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		return tool.Execute(ctx, args)
 	}
 
-	start := time.Now()
 	toolTelemetryName := name
 	if !ok {
 		toolTelemetryName = unknownToolTelemetryName
 	}
 	toolTypeValue := toolType(ctx, tool)
 	toolKind := registryToolKind(name)
-	attrs := make([]attribute.KeyValue, 0, 10)
-	attrs = append(attrs,
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolTelemetryName),
-		attribute.String(genai.AttrToolType, toolTypeValue),
-		attribute.String(tracing.AttrToolName, toolTelemetryName),
-		attribute.String(tracing.AttrToolKind, toolKind),
-	)
-	if tc := GetToolContext(ctx); tc != nil {
-		tenant := tc.Tenant
-		if tenant == "" {
-			tenant = tc.Namespace
-		}
-		if tc.TaskID != "" {
-			attrs = append(attrs, attribute.String(tracing.AttrTaskID, tc.TaskID))
-		}
-		if tc.Namespace != "" {
-			attrs = append(attrs, attribute.String(tracing.AttrTaskNamespace, tc.Namespace))
-		}
-		if tenant != "" {
-			attrs = append(attrs, attribute.String(tracing.AttrTenant, tenant))
-		}
-		if tc.ToolCallID != "" {
-			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
-		}
-	}
-	if ok {
-		if description := tool.Description(); description != "" {
-			attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
-		}
-	}
-	tracer := r.genAITracer()
-	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+toolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
-	defer span.End()
-	spanRecording := span.IsRecording()
 	meterActive := tracing.GlobalMeterProviderActive()
+	var start time.Time
+	if meterActive {
+		start = time.Now()
+	}
+
+	tracer := r.genAITracer()
+	spanName := genai.OperationExecuteTool + " " + toolTelemetryName
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider())
+	var span trace.Span
+	if deferStartAttributes {
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal))
+	} else {
+		attrs := registryToolSpanAttributes(ctx, toolTelemetryName, tool, ok, toolTypeValue, toolKind)
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	}
+	spanRecording := span.IsRecording()
+	if spanRecording && deferStartAttributes {
+		span.SetAttributes(registryToolSpanAttributes(ctx, toolTelemetryName, tool, ok, toolTypeValue, toolKind)...)
+	}
+	if !spanRecording && !meterActive {
+		if !ok {
+			span.End()
+			return "", fmt.Errorf("tool %q not found", name)
+		}
+		result, err := tool.Execute(ctx, args)
+		span.End()
+		return result, err
+	}
+	defer span.End()
 
 	if !ok {
 		err := fmt.Errorf("tool %q not found", name)
@@ -319,6 +312,41 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		}
 	}
 	return result, err
+}
+
+func registryToolSpanAttributes(ctx context.Context, toolTelemetryName string, tool Tool, ok bool, toolTypeValue, toolKind string) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, 10)
+	attrs = append(attrs,
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolTelemetryName),
+		attribute.String(genai.AttrToolType, toolTypeValue),
+		attribute.String(tracing.AttrToolName, toolTelemetryName),
+		attribute.String(tracing.AttrToolKind, toolKind),
+	)
+	if tc := GetToolContext(ctx); tc != nil {
+		tenant := tc.Tenant
+		if tenant == "" {
+			tenant = tc.Namespace
+		}
+		if tc.TaskID != "" {
+			attrs = append(attrs, attribute.String(tracing.AttrTaskID, tc.TaskID))
+		}
+		if tc.Namespace != "" {
+			attrs = append(attrs, attribute.String(tracing.AttrTaskNamespace, tc.Namespace))
+		}
+		if tenant != "" {
+			attrs = append(attrs, attribute.String(tracing.AttrTenant, tenant))
+		}
+		if tc.ToolCallID != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
+		}
+	}
+	if ok {
+		if description := tool.Description(); description != "" {
+			attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
+		}
+	}
+	return attrs
 }
 
 func (r *Registry) genAITracer() trace.Tracer {
@@ -408,7 +436,7 @@ func telemetryDisabled() bool {
 // dispatch, for example by request-level allowlists or invalid arguments. It
 // intentionally does not execute the tool.
 func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, message string) {
-	if strings.TrimSpace(name) == "" {
+	if strings.TrimSpace(name) == "" || telemetryDisabled() {
 		return
 	}
 	start := time.Now()

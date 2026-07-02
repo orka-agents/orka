@@ -125,12 +125,18 @@ type ListSessionExecutionEventsResponse struct {
 // NewExecutionEventResponse converts a store event to an API DTO and intentionally
 // omits store-only fields such as ExecutionEvent.Internal.
 func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventResponse {
+	var response ExecutionEventResponse
+	fillExecutionEventResponse(&response, &event)
+	return response
+}
+
+func fillExecutionEventResponse(response *ExecutionEventResponse, event *store.ExecutionEvent) {
 	var provider, model, stopReason string
 	var inTok, outTok int
 	if executionEventTypeCarriesModelTelemetry(event.Type) {
 		provider, model, stopReason, inTok, outTok = executionEventTelemetryFields(event.Type, event.Content)
 	}
-	return ExecutionEventResponse{
+	*response = ExecutionEventResponse{
 		ID:           event.ID,
 		Namespace:    event.Namespace,
 		StreamType:   event.StreamType,
@@ -160,7 +166,7 @@ func NewExecutionEventResponse(event store.ExecutionEvent) ExecutionEventRespons
 func NewListExecutionEventsResponse(namespace, streamType, streamID string, afterSeq, latestSeq int64, storeEvents []store.ExecutionEvent) ListExecutionEventsResponse {
 	responses := make([]ExecutionEventResponse, len(storeEvents))
 	for i := range storeEvents {
-		responses[i] = NewExecutionEventResponse(storeEvents[i])
+		fillExecutionEventResponse(&responses[i], &storeEvents[i])
 	}
 	return ListExecutionEventsResponse{
 		Namespace:  namespace,
@@ -174,22 +180,14 @@ func NewListExecutionEventsResponse(namespace, streamType, streamID string, afte
 
 // NewSessionExecutionEventResponse converts an aggregated store event to a session DTO.
 func NewSessionExecutionEventResponse(event store.SessionExecutionEvent) SessionExecutionEventResponse {
-	response := NewExecutionEventResponse(event.ExecutionEvent)
-	response.Seq = event.SessionSeq
-	response.StreamType = events.ExecutionEventStreamTypeSession
-	response.StreamID = event.SessionName
-	return SessionExecutionEventResponse{
-		ExecutionEventResponse: response,
-		TaskSeq:                event.TaskSeq,
-		TaskStreamID:           event.StreamID,
-	}
+	return newSessionExecutionEventResponse(&event)
 }
 
 // NewListSessionExecutionEventsResponse builds a session timeline DTO.
 func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterSeq, latestSeq int64, storeEvents []store.SessionExecutionEvent) ListSessionExecutionEventsResponse {
 	responses := make([]SessionExecutionEventResponse, len(storeEvents))
 	for i := range storeEvents {
-		responses[i] = NewSessionExecutionEventResponse(storeEvents[i])
+		fillSessionExecutionEventResponse(&responses[i], &storeEvents[i])
 	}
 	return ListSessionExecutionEventsResponse{
 		Namespace:  namespace,
@@ -199,6 +197,21 @@ func NewListSessionExecutionEventsResponse(namespace, sessionName string, afterS
 		LatestSeq:  latestSeq,
 		Events:     responses,
 	}
+}
+
+func newSessionExecutionEventResponse(event *store.SessionExecutionEvent) SessionExecutionEventResponse {
+	var response SessionExecutionEventResponse
+	fillSessionExecutionEventResponse(&response, event)
+	return response
+}
+
+func fillSessionExecutionEventResponse(response *SessionExecutionEventResponse, event *store.SessionExecutionEvent) {
+	fillExecutionEventResponse(&response.ExecutionEventResponse, &event.ExecutionEvent)
+	response.Seq = event.SessionSeq
+	response.StreamType = events.ExecutionEventStreamTypeSession
+	response.StreamID = event.SessionName
+	response.TaskSeq = event.TaskSeq
+	response.TaskStreamID = event.StreamID
 }
 
 func normalizeExecutionEventResponseSeverity(severity string) string {

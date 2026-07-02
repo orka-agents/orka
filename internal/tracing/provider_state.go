@@ -36,6 +36,14 @@ func GlobalTracerProviderExplicitNoop() bool {
 	return isOTelProviderType(otel.GetTracerProvider(), otelTraceNoopPkg, otelTracerProvider)
 }
 
+// IsDefaultGlobalTracerProvider reports whether provider is OpenTelemetry's
+// default delegating global tracer provider. That provider returns no-op spans
+// unless an SDK or auto-instrumentation delegate is active, so hot paths can
+// defer expensive span attribute construction until a returned span records.
+func IsDefaultGlobalTracerProvider(provider any) bool {
+	return isOTelProviderType(provider, otelGlobalPkg, "tracerProvider")
+}
+
 // GlobalMeterProviderActive reports whether a real OpenTelemetry meter provider
 // is currently configured. Unlike the tracer provider, the default global meter
 // provider only records no-op measurements until an SDK meter provider is set.

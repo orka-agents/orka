@@ -115,35 +115,42 @@ func NewToolExecutor() *ToolExecutor {
 
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
-	start := time.Now()
+	if toolExecutorTelemetryDisabled() {
+		return e.executeToolRequest(ctx, tool, args)
+	}
+
 	toolName := toolTelemetryName(tool)
-	attrs := make([]attribute.KeyValue, 0, 9)
-	attrs = append(attrs,
-		executeToolOperationAttr,
-		attribute.String(genai.AttrToolName, toolName),
-		extensionToolTypeAttr,
-		attribute.String(tracing.AttrToolName, toolName),
-		attribute.String(tracing.AttrToolKind, tracing.ToolKindHTTP),
-	)
-	if taskName := os.Getenv(workerenv.TaskName); taskName != "" {
-		attrs = append(attrs, attribute.String(tracing.AttrTaskID, taskName))
+	meterActive := tracing.GlobalMeterProviderActive()
+	var start time.Time
+	if meterActive {
+		start = time.Now()
 	}
-	if e.namespace != "" {
-		attrs = append(attrs,
-			attribute.String(tracing.AttrTaskNamespace, e.namespace),
-			attribute.String(tracing.AttrTenant, e.namespace),
-		)
+
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	spanName := genai.OperationExecuteTool + " " + toolName
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider())
+	var span trace.Span
+	if deferStartAttributes {
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindClient))
+	} else {
+		attrs := toolExecutorSpanAttributes(ctx, e.namespace, toolName)
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	}
-	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
-		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	spanRecording := span.IsRecording()
+	if spanRecording && deferStartAttributes {
+		span.SetAttributes(toolExecutorSpanAttributes(ctx, e.namespace, toolName)...)
 	}
-	ctx, span := tracing.GenAITracer(genai.InstrumentationName).Start(ctx, genai.OperationExecuteTool+" "+toolName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	if !spanRecording && !meterActive {
+		result, err = e.executeToolRequest(ctx, tool, args)
+		span.End()
+		return result, err
+	}
+
 	defer func() {
 		resultSize := len(result)
-		meterActive := tracing.GlobalMeterProviderActive()
 		if err != nil {
 			errType := toolExecutionErrorType(err)
-			if span.IsRecording() {
+			if spanRecording {
 				span.SetStatus(codes.Error, errType)
 				span.SetAttributes(
 					attribute.Int(tracing.AttrToolResultSizeBytes, resultSize),
@@ -154,7 +161,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 				recordExternalToolDuration(ctx, time.Since(start).Seconds(), executeToolOperationAttr, attribute.String(genai.AttrToolName, toolName), extensionToolTypeAttr, attribute.String(genai.AttrErrorType, errType))
 			}
 		} else {
-			if span.IsRecording() {
+			if spanRecording {
 				span.SetAttributes(attribute.Int(tracing.AttrToolResultSizeBytes, resultSize))
 			}
 			if meterActive {
@@ -169,12 +176,51 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 		return "", err
 	}
 	if prepared.request != nil {
-		if span.IsRecording() {
+		if spanRecording {
 			span.SetAttributes(httpToolRequestAttributes(prepared.request)...)
 		}
 		injectTraceHeaders(ctx, prepared.request.Header)
 	}
 
+	return e.executePreparedToolRequest(ctx, prepared)
+}
+
+func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, 9)
+	attrs = append(attrs,
+		executeToolOperationAttr,
+		attribute.String(genai.AttrToolName, toolName),
+		extensionToolTypeAttr,
+		attribute.String(tracing.AttrToolName, toolName),
+		attribute.String(tracing.AttrToolKind, tracing.ToolKindHTTP),
+	)
+	if taskName := os.Getenv(workerenv.TaskName); taskName != "" {
+		attrs = append(attrs, attribute.String(tracing.AttrTaskID, taskName))
+	}
+	if namespace != "" {
+		attrs = append(attrs,
+			attribute.String(tracing.AttrTaskNamespace, namespace),
+			attribute.String(tracing.AttrTenant, namespace),
+		)
+	}
+	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	return attrs
+}
+
+func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
+	prepared, err := e.prepareRequest(ctx, tool, args)
+	if err != nil {
+		return "", err
+	}
+	if prepared.request != nil {
+		injectTraceHeaders(ctx, prepared.request.Header)
+	}
+	return e.executePreparedToolRequest(ctx, prepared)
+}
+
+func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
 	// Configure timeout
 	httpClient := e.client
 	if prepared.httpConfig.Timeout != nil {
@@ -206,6 +252,10 @@ func (e ToolRequestAttemptedError) Unwrap() error { return e.Err }
 func ToolRequestWasAttempted(err error) bool {
 	var attempted ToolRequestAttemptedError
 	return errors.As(err, &attempted)
+}
+
+func toolExecutorTelemetryDisabled() bool {
+	return tracing.GlobalTracerProviderExplicitNoop() && !tracing.GlobalMeterProviderActive()
 }
 
 func recordExternalToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
