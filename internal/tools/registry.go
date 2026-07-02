@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -246,7 +245,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 
 	tracer := r.genAITracer()
 	spanName := genai.OperationExecuteTool + " " + toolTelemetryName
-	deferStartAttributes := defaultGlobalTracerProvider(tracing.GlobalTracerProvider())
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider())
 	var span trace.Span
 	if deferStartAttributes {
 		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal))
@@ -431,21 +430,6 @@ func (r *Registry) recordToolDuration(ctx context.Context, seconds float64, tool
 
 func telemetryDisabled() bool {
 	return tracing.GlobalTracerProviderExplicitNoop() && !tracing.GlobalMeterProviderActive()
-}
-
-func defaultGlobalTracerProvider(provider any) bool {
-	return isOTelProviderType(provider, "go.opentelemetry.io/otel/internal/global", "tracerProvider")
-}
-
-func isOTelProviderType(provider any, pkgPath, name string) bool {
-	typ := reflect.TypeOf(provider)
-	if typ == nil {
-		return true
-	}
-	if typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-	return typ.PkgPath() == pkgPath && typ.Name() == name
 }
 
 // RecordRejectedToolCall records a failed tool invocation that is rejected before

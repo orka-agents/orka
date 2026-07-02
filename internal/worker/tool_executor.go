@@ -17,7 +17,6 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -129,7 +128,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 
 	tracer := tracing.GenAITracer(genai.InstrumentationName)
 	spanName := genai.OperationExecuteTool + " " + toolName
-	deferStartAttributes := defaultGlobalTracerProvider(tracing.GlobalTracerProvider())
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider())
 	var span trace.Span
 	if deferStartAttributes {
 		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindClient))
@@ -257,21 +256,6 @@ func ToolRequestWasAttempted(err error) bool {
 
 func toolExecutorTelemetryDisabled() bool {
 	return tracing.GlobalTracerProviderExplicitNoop() && !tracing.GlobalMeterProviderActive()
-}
-
-func defaultGlobalTracerProvider(provider any) bool {
-	return isOTelProviderType(provider, "go.opentelemetry.io/otel/internal/global", "tracerProvider")
-}
-
-func isOTelProviderType(provider any, pkgPath, name string) bool {
-	typ := reflect.TypeOf(provider)
-	if typ == nil {
-		return true
-	}
-	if typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-	return typ.PkgPath() == pkgPath && typ.Name() == name
 }
 
 func recordExternalToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {

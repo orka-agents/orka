@@ -8,7 +8,6 @@ package llm
 
 import (
 	"context"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,7 +58,7 @@ func (tp *TracingProvider) ensureTelemetry() bool {
 		if !tracing.GlobalTracerProviderExplicitNoop() {
 			tp.initTracer()
 		}
-	} else if tracer.deferStartAttributes && !defaultGlobalTracerProvider(tracing.GlobalTracerProvider()) {
+	} else if tracer.deferStartAttributes && !tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider()) {
 		tp.initTracer()
 	}
 	if tp.metrics.Load() == nil && tracing.GlobalMeterProviderActive() {
@@ -73,7 +72,7 @@ func (tp *TracingProvider) initTracer() {
 		return
 	}
 	provider := tracing.GlobalTracerProvider()
-	deferStartAttributes := defaultGlobalTracerProvider(provider)
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(provider)
 	if current := tp.tracer.Load(); current != nil && (!current.deferStartAttributes || deferStartAttributes) {
 		return
 	}
@@ -83,7 +82,7 @@ func (tp *TracingProvider) initTracer() {
 		return
 	}
 	provider = tracing.GlobalTracerProvider()
-	deferStartAttributes = defaultGlobalTracerProvider(provider)
+	deferStartAttributes = tracing.IsDefaultGlobalTracerProvider(provider)
 	if current := tp.tracer.Load(); current != nil && (!current.deferStartAttributes || deferStartAttributes) {
 		return
 	}
@@ -91,21 +90,6 @@ func (tp *TracingProvider) initTracer() {
 		tracer:               provider.Tracer(genai.InstrumentationName, trace.WithSchemaURL(genai.SchemaURL)),
 		deferStartAttributes: deferStartAttributes,
 	})
-}
-
-func defaultGlobalTracerProvider(provider any) bool {
-	return isOTelProviderType(provider, "go.opentelemetry.io/otel/internal/global", "tracerProvider")
-}
-
-func isOTelProviderType(provider any, pkgPath, name string) bool {
-	typ := reflect.TypeOf(provider)
-	if typ == nil {
-		return true
-	}
-	if typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-	return typ.PkgPath() == pkgPath && typ.Name() == name
 }
 
 func (tp *TracingProvider) initMetrics() {
