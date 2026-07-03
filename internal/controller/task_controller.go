@@ -2814,7 +2814,7 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 			return fmt.Errorf("runtimeRef custom runtimes require task-level allowedTools for brokered tool exposure and do not support defaultAllowedTools policy metadata")
 		}
 		if agent.Spec.Runtime.DefaultAllowBash != nil {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowBash policy metadata")
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
 		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
@@ -2822,23 +2822,23 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 			return fmt.Errorf("runtimeRef custom runtimes do not support disallowedTools policy metadata")
 		}
 		if task.Spec.AgentRuntime.AllowBash != nil {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowBash policy metadata")
+			return fmt.Errorf("runtimeRef custom runtimes do not support allowBash policy metadata")
 		}
 	}
 	if agent != nil && agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support agent secretRef credential delivery")
+		return fmt.Errorf("runtimeRef custom runtimes do not support agent secretRef credential delivery")
 	}
 	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support task secretRef credential delivery")
+		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
 	}
 	if ws := effectiveWorkspace(task); ws != nil && ws.GitSecretRef != nil && strings.TrimSpace(ws.GitSecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support workspace gitSecretRef credential delivery")
+		return fmt.Errorf("runtimeRef custom runtimes do not support workspace gitSecretRef credential delivery")
 	}
 	if task != nil && task.Spec.PriorTaskRef != nil {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support priorTaskRef workspace handoff")
+		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
 	}
 	if taskRequestsReadOnlyAgent(task) {
-		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes in observed mode because Orka cannot enforce remote tool side effects")
+		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes because Orka cannot enforce remote tool side effects")
 	}
 	return nil
 }

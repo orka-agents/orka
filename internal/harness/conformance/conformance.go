@@ -397,6 +397,8 @@ func runBrokeredProbe(
 		result.addFailure(fmt.Sprintf("continue brokered turn failed: %v", err))
 		return
 	}
+	continueStreamCtx, continueStreamCancel := context.WithTimeout(ctx, controlTimeout)
+	defer continueStreamCancel()
 	if initialStreamEnded {
 		reconnected, sawToolResult, sawTerminal, reconnectErr := streamBrokeredContinuationFrames(
 			streamCtx,
@@ -450,7 +452,7 @@ func runBrokeredProbe(
 			}
 			if !terminalSeen {
 				reconnected, sawToolResult, sawTerminal, reconnectErr := streamBrokeredContinuationFrames(
-					streamCtx,
+					continueStreamCtx,
 					client,
 					request,
 					*requested,

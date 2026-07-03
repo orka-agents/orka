@@ -194,9 +194,10 @@ type delegationContext struct {
 	priority     *int32
 }
 
-func delegatedAgentAllowed(agentName, agentNamespace, allowedAgents string) bool {
+func delegatedAgentAllowed(agentName, agentNamespace, taskNamespace, allowedAgents string) bool {
 	agentName = strings.TrimSpace(agentName)
 	agentNamespace = strings.TrimSpace(agentNamespace)
+	taskNamespace = strings.TrimSpace(taskNamespace)
 	for allowed := range strings.SplitSeq(allowedAgents, ",") {
 		allowed = strings.TrimSpace(allowed)
 		if allowed == "" {
@@ -209,7 +210,7 @@ func delegatedAgentAllowed(agentName, agentNamespace, allowedAgents string) bool
 			}
 			continue
 		}
-		if allowed == agentName {
+		if allowed == agentName && (agentNamespace == "" || agentNamespace == taskNamespace) {
 			return true
 		}
 	}
@@ -296,7 +297,7 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 
 	// Validate agent is allowed, including namespace when the allowlist entry is
 	// namespaced as namespace/name. Bare names retain existing same-name behavior.
-	if allowedAgents != "" && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, allowedAgents) {
+	if allowedAgents != "" && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, taskNS, allowedAgents) {
 		return nil, fmt.Errorf("agent %q is not in the allowed agents list", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
 	}
 
@@ -416,8 +417,10 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	inheritTaskProvenance(childTask, dc.parentTask)
 
-	// Set owner reference if parent task exists
-	if dc.parentTask.UID != "" {
+	// Set owner reference only for same-namespace children. Kubernetes treats
+	// cross-namespace owner references for namespaced objects as invalid and may
+	// garbage-collect the child; labels/annotations still preserve lineage.
+	if dc.parentTask.UID != "" && dc.parentTask.Namespace == dc.namespace {
 		isController := true
 		blockOwnerDeletion := true
 		childTask.OwnerReferences = []metav1.OwnerReference{
