@@ -104,20 +104,15 @@ func TestCheckFailsWhenTerminalFrameOmitted(t *testing.T) {
 func TestCheckFailsWhenDuplicateStartAccepted(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.allowDuplicateStart = true
+	server.duplicateStartMismatch = true
 	defer server.Close()
 
 	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
-	if !strings.Contains(result.Message, "duplicate start turn was accepted") {
-		t.Fatalf("Message = %q, want duplicate start rejection", result.Message)
-	}
-	server.mu.Lock()
-	cancelCount := server.cancelCount
-	server.mu.Unlock()
-	if cancelCount == 0 {
-		t.Fatal("cancel count = 0, want duplicate-accepted turn cleanup")
+	if !strings.Contains(result.Message, "accepted correlation id") {
+		t.Fatalf("Message = %q, want duplicate start identity failure", result.Message)
 	}
 }
 
@@ -261,6 +256,7 @@ type agentKitOrkaFixture struct {
 	omitEventStreamPath      bool
 	frameType                harness.FrameType
 	allowDuplicateStart      bool
+	duplicateStartMismatch   bool
 	outputFrames             int
 	outputText               string
 	cancelCount              int
@@ -360,7 +356,8 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	f.mu.Lock()
-	if _, exists := f.turns[request.TurnID]; exists && !f.allowDuplicateStart {
+	_, duplicate := f.turns[request.TurnID]
+	if duplicate && !f.allowDuplicateStart {
 		f.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "turn already exists")
 		return
@@ -375,6 +372,9 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
 		EventStreamPath:  eventStreamPath,
+	}
+	if duplicate && f.duplicateStartMismatch {
+		response.CorrelationID = "duplicate-mismatch"
 	}
 	if f.omitEventStreamPath {
 		response.EventStreamPath = ""

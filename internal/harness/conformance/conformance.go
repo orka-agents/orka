@@ -579,14 +579,22 @@ func capabilitiesHaveBrokeredClass(caps *harness.CapabilitiesResponse, want harn
 }
 
 func assertDuplicateStartRejected(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest) bool {
-	_, err := client.StartTurn(ctx, request)
+	started, err := client.StartTurn(ctx, request)
 	if err == nil {
-		result.addFailure("duplicate start turn was accepted")
-		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start was accepted")
+		expectedPath, pathErr := harness.EventStreamPath(request.TurnID)
+		if pathErr == nil &&
+			started.RuntimeSessionID == request.RuntimeSessionID &&
+			started.TurnID == request.TurnID &&
+			started.CorrelationID == request.CorrelationID &&
+			strings.TrimSpace(started.EventStreamPath) == expectedPath {
+			return true
+		}
+		result.addFailure("duplicate start turn was accepted with mismatched identity")
+		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start identity mismatch")
 		return false
 	}
 	if !isDuplicateStartRejectedError(err) {
-		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection", err))
+		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection or identical response", err))
 		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start returned an unexpected error")
 		return false
 	}

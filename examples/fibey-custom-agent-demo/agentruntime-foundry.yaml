@@ -21,7 +21,6 @@ spec:
     brokeredToolClasses:
     - read
     - write
-    - coordination
     supportsCancel: true
     supportsRuntimeSessions: true
     supportsContinuation: true
