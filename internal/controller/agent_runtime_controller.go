@@ -258,7 +258,9 @@ func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNam
 	switch {
 	case len(parts) == 2:
 		serviceName, serviceNamespace = parts[0], parts[1]
-	case len(parts) >= 3 && parts[2] == k8sServiceDNSLabel:
+	case len(parts) == 3 && parts[2] == k8sServiceDNSLabel:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	case len(parts) == 5 && parts[2] == k8sServiceDNSLabel && parts[3] == k8sClusterDNSLabel && parts[4] == k8sLocalDNSLabel:
 		serviceName, serviceNamespace = parts[0], parts[1]
 	default:
 		return "", "", false
