@@ -699,10 +699,33 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 		if payload.Approved != nil {
 			approved = *payload.Approved
 		}
-		if len(payload.ToolResult) == 0 && payload.ToolResultRef != "" && r.ResultStore != nil {
-			if stored, err := r.ResultStore.GetResult(ctx, task.Namespace, payload.ToolResultRef); err == nil {
-				payload.ToolResult = json.RawMessage(stored)
+		if len(payload.ToolResult) == 0 && payload.ToolResultRef != "" {
+			if r.ResultStore == nil {
+				result := harness.ToolCallResult{
+					Version:          harness.ProtocolVersion,
+					RuntimeSessionID: frame.RuntimeSessionID,
+					TurnID:           frame.TurnID,
+					ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+					IdempotencyKey:   idempotencyKey,
+					Approved:         false,
+					Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result store is unavailable"},
+				}
+				return result, true, nil
 			}
+			stored, err := r.ResultStore.GetResult(ctx, task.Namespace, payload.ToolResultRef)
+			if err != nil {
+				result := harness.ToolCallResult{
+					Version:          harness.ProtocolVersion,
+					RuntimeSessionID: frame.RuntimeSessionID,
+					TurnID:           frame.TurnID,
+					ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+					IdempotencyKey:   idempotencyKey,
+					Approved:         false,
+					Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result is unavailable"},
+				}
+				return result, true, nil
+			}
+			payload.ToolResult = json.RawMessage(stored)
 		}
 		result := harness.ToolCallResult{
 			Version:          harness.ProtocolVersion,

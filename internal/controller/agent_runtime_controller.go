@@ -442,6 +442,9 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 	classes := make([]corev1alpha1.AgentRuntimeBrokeredToolClass, 0, len(caps.BrokeredToolClasses))
 	seenClasses := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
 	for _, class := range caps.BrokeredToolClasses {
+		if !harness.IsKnownBrokeredToolClass(class) {
+			continue
+		}
 		converted := corev1alpha1.AgentRuntimeBrokeredToolClass(class)
 		if _, seen := seenClasses[converted]; seen {
 			continue
