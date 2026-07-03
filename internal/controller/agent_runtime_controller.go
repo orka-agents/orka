@@ -224,13 +224,13 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		return nil
 	}
 	host := parsed.Hostname()
-	if isLocalOrClusterAgentRuntimeEndpoint(host) {
+	if isLoopbackAgentRuntimeEndpoint(host) {
 		return nil
 	}
-	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok {
+	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok && serviceNamespace == runtime.Namespace {
 		if r != nil && r.Client != nil {
 			service := &corev1.Service{}
-			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil {
+			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil && service.Spec.Type != corev1.ServiceTypeExternalName {
 				return nil
 			}
 		}
@@ -238,7 +238,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 	return fmt.Errorf("deployment.endpoint must use https for non-local AgentRuntime endpoints")
 }
 
-func isLocalOrClusterAgentRuntimeEndpoint(host string) bool {
+func isLoopbackAgentRuntimeEndpoint(host string) bool {
 	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
 	if host == "" {
 		return false
@@ -246,7 +246,7 @@ func isLocalOrClusterAgentRuntimeEndpoint(host string) bool {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return addr.IsLoopback()
 	}
-	return host == "localhost" || strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
+	return host == "localhost"
 }
 
 func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNamespace string, ok bool) {
@@ -255,17 +255,18 @@ func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNam
 		return "", "", false
 	}
 	parts := strings.Split(host, ".")
-	switch len(parts) {
-	case 1:
-		return "", "", false
-	case 2:
-		if parts[0] == "" || parts[1] == "" {
-			return "", "", false
-		}
-		return parts[0], parts[1], true
+	switch {
+	case len(parts) == 2:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	case len(parts) >= 3 && parts[2] == k8sServiceDNSLabel:
+		serviceName, serviceNamespace = parts[0], parts[1]
 	default:
 		return "", "", false
 	}
+	if serviceName == "" || serviceNamespace == "" {
+		return "", "", false
+	}
+	return serviceName, serviceNamespace, true
 }
 
 func validateAgentRuntimeBearerSecretUse(runtimeName string, endpoint string, secret *corev1.Secret) error {

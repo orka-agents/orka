@@ -236,16 +236,19 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	agent *corev1alpha1.Agent,
 	frame harness.HarnessEventFrame,
 ) (harness.ToolCallResult, error) {
-	idempotencyKey := harness.ToolRequestIdempotencyKey(frame.RuntimeSessionID, frame.TurnID, frame.ToolCallID)
+	toolName := strings.TrimSpace(frame.ToolName)
+	toolCallID := strings.TrimSpace(frame.ToolCallID)
+	frame.ToolName = toolName
+	frame.ToolCallID = toolCallID
+	idempotencyKey := harness.ToolRequestIdempotencyKey(frame.RuntimeSessionID, frame.TurnID, toolCallID)
 	result := harness.ToolCallResult{
 		Version:          harness.ProtocolVersion,
 		RuntimeSessionID: frame.RuntimeSessionID,
 		TurnID:           frame.TurnID,
-		ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+		ToolCallID:       toolCallID,
 		IdempotencyKey:   idempotencyKey,
 		Approved:         true,
 	}
-	toolName := strings.TrimSpace(frame.ToolName)
 	if toolName == "" || result.ToolCallID == "" {
 		err := fmt.Errorf("brokered tool name and toolCallID are required")
 		result.Error = brokeredToolError("invalid_tool_call", err)

@@ -324,6 +324,31 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	}
 }
 
+func TestHarnessWrapperBrokeredReplayNormalizesToolIdentity(t *testing.T) {
+	var executions atomic.Int32
+	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executions.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer toolServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace}, Spec: corev1alpha1.ToolSpec{Description: "Read incident", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead, HTTP: &corev1alpha1.HTTPExecution{URL: toolServer.URL}}}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	frame := harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: "runtime-session", TurnID: "turn-1", CorrelationID: "corr-1", Seq: 1, ToolName: " read_incident ", ToolCallID: " call-1 ", Content: json.RawMessage(`{"incident":"inc-1"}`)}
+	if result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame); err != nil || result.Error != nil {
+		t.Fatalf("first handle = %#v, %v", result, err)
+	}
+	if result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame); err != nil || result.Error != nil {
+		t.Fatalf("replay handle = %#v, %v", result, err)
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("executions = %d, want replay from normalized ledger", executions.Load())
+	}
+}
+
 func TestHarnessWrapperBrokeredReplayRejectsChangedArguments(t *testing.T) {
 	var executions atomic.Int32
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
