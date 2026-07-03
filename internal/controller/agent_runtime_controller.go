@@ -227,7 +227,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 	if isLocalOrClusterAgentRuntimeEndpoint(host) {
 		return nil
 	}
-	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok && serviceNamespace == runtime.Namespace {
+	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host, runtime.Namespace); ok {
 		if r != nil && r.Client != nil {
 			service := &corev1.Service{}
 			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil {
@@ -246,16 +246,30 @@ func isLocalOrClusterAgentRuntimeEndpoint(host string) bool {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return addr.IsLoopback()
 	}
-	return host == "localhost" || strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local") || !strings.Contains(host, ".")
+	return host == "localhost" || strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
 }
 
-func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNamespace string, ok bool) {
+func parseAgentRuntimeServiceNamespaceHost(host, defaultNamespace string) (serviceName, serviceNamespace string, ok bool) {
 	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
-	parts := strings.Split(host, ".")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	defaultNamespace = strings.ToLower(strings.TrimSpace(defaultNamespace))
+	if host == "" {
 		return "", "", false
 	}
-	return parts[0], parts[1], true
+	parts := strings.Split(host, ".")
+	switch len(parts) {
+	case 1:
+		if defaultNamespace == "" {
+			return "", "", false
+		}
+		return parts[0], defaultNamespace, true
+	case 2:
+		if parts[0] == "" || parts[1] == "" {
+			return "", "", false
+		}
+		return parts[0], parts[1], true
+	default:
+		return "", "", false
+	}
 }
 
 func validateAgentRuntimeBearerSecretUse(runtimeName string, endpoint string, secret *corev1.Secret) error {
@@ -305,6 +319,11 @@ func validateBaseHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
 	}
 	if caps.RuntimeName != sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName) {
 		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
+	}
+	for _, class := range caps.BrokeredToolClasses {
+		if !harness.IsKnownBrokeredToolClass(class) {
+			return fmt.Errorf("unsupported brokeredToolClass %q", class)
+		}
 	}
 	return nil
 }

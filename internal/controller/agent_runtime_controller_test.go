@@ -631,11 +631,19 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(cluster-local) error = %v", err)
 	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime.default:8080"
+	runtime.Spec.Deployment.Endpoint = "http://runtime:8080"
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(short-service) error = %v", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "http://runtime.default:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(service-namespace) error = %v", err)
+	}
+	runtime.Spec.Deployment.Endpoint = "http://missing:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(missing short service) = %v, want https requirement", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://runtime.dev:8080"
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
@@ -652,6 +660,19 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
 	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "credentials") {
 		t.Fatalf("validateAgentRuntimeSpec(credentials) = %v, want credentials rejection", err)
+	}
+}
+
+func TestValidateAgentRuntimeExecutableCapabilitiesRejectsUnknownBrokeredClass(t *testing.T) {
+	err := validateAgentRuntimeExecutableCapabilities(&harness.CapabilitiesResponse{
+		RuntimeName:             "runtime-a",
+		ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeBrokered},
+		BrokeredToolClasses:     []harness.BrokeredToolClass{harness.BrokeredToolClass("admin")},
+		SupportsRuntimeSessions: true,
+		SupportsContinuation:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported brokeredToolClass") {
+		t.Fatalf("validateAgentRuntimeExecutableCapabilities() error = %v, want brokered class rejection", err)
 	}
 }
 
