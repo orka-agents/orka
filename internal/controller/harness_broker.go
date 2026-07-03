@@ -228,6 +228,7 @@ func argsOrEmptyObject(args json.RawMessage) json.RawMessage {
 	return args
 }
 
+//nolint:gocyclo // Brokered tool handling is a compact policy/approval/idempotency state machine.
 func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -285,15 +286,36 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 			result.Error = brokeredToolError("tool_class_changed", err)
 			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil))
 		}
+		if started, err := r.hasUnresolvedHarnessBrokeredToolExecution(ctx, task, frame, idempotencyKey, argsDigest); err != nil {
+			return result, err
+		} else if started {
+			err := fmt.Errorf("brokered coordination tool %q has an unresolved prior execution ledger entry", toolName)
+			result.Error = brokeredToolError("tool_execution_outcome_unknown", err)
+			content := brokeredToolEventContent(result, map[string]any{
+				"targetArgsDigest": argsDigest,
+				"outcomeUnknown":   true,
+			})
+			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
+		}
+		startedContent := brokeredToolEventContent(result, map[string]any{
+			"targetArgsDigest": argsDigest,
+			"brokeredClass":    string(corev1alpha1.AgentRuntimeBrokeredToolClassCoordination),
+			"executionState":   "started",
+		})
+		if err := r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallStarted, "brokered coordination tool execution started", startedContent); err != nil {
+			return result, err
+		}
 		output, err := r.executeHarnessBrokeredCoordinationTool(ctx, task, agent, frame, tool)
 		if err != nil {
 			result.Error = brokeredToolError("coordination_tool_failed", err)
-			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil))
+			content := brokeredToolEventContent(result, map[string]any{"targetArgsDigest": argsDigest})
+			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
 		}
 		result.Output = brokeredToolOutput(output)
 		content := brokeredToolEventContent(result, map[string]any{
-			"resultLength":  len(output),
-			"brokeredClass": string(corev1alpha1.AgentRuntimeBrokeredToolClassCoordination),
+			"targetArgsDigest": argsDigest,
+			"resultLength":     len(output),
+			"brokeredClass":    string(corev1alpha1.AgentRuntimeBrokeredToolClassCoordination),
 		})
 		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallCompleted, "brokered coordination tool call completed", content)
 	}

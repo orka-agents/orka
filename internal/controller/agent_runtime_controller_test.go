@@ -645,6 +645,10 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-looking external) = %v, want https requirement", err)
 	}
+	runtime.Spec.Deployment.Endpoint = "http://10.0.0.5:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(private IP) = %v, want https requirement", err)
+	}
 	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
 	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "credentials") {
 		t.Fatalf("validateAgentRuntimeSpec(credentials) = %v, want credentials rejection", err)

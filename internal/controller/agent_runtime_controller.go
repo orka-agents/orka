@@ -244,7 +244,7 @@ func isLocalOrClusterAgentRuntimeEndpoint(host string) bool {
 		return false
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
-		return addr.IsLoopback() || addr.IsPrivate()
+		return addr.IsLoopback()
 	}
 	return host == "localhost" || strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local") || !strings.Contains(host, ".")
 }
