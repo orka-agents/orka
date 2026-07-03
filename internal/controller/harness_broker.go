@@ -575,6 +575,9 @@ func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 			continue
 		}
 		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
+			if event.Type == events.ExecutionEventTypeToolCallStarted && payload.ExecutionState == "started" {
+				return true, nil
+			}
 			continue
 		}
 		switch event.Type {

@@ -683,9 +683,10 @@ func TestHarnessWrapperBrokeredWriteToolFailsClosedForUnresolvedExecutionLedger(
 	appendApprovalDecisionForTest(t, r, task, approvalID, events.ExecutionEventTypeApprovalApproved)
 	idempotencyKey := harness.ToolRequestIdempotencyKey(frame.RuntimeSessionID, frame.TurnID, frame.ToolCallID)
 	content, _ := json.Marshal(map[string]any{
-		"brokered":       true,
-		"idempotencyKey": idempotencyKey,
-		"executionState": "started",
+		"brokered":         true,
+		"idempotencyKey":   idempotencyKey,
+		"targetArgsDigest": "sha256:different",
+		"executionState":   "started",
 	})
 	if _, err := r.ExecutionEventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  task.Namespace,

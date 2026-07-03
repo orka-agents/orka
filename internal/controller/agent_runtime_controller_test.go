@@ -580,6 +580,9 @@ func reconcileRequestFor(obj client.Object) ctrl.Request {
 
 func newAgentRuntimeUnitReconciler(t *testing.T, objs ...client.Object) *AgentRuntimeReconciler {
 	t.Helper()
+	previousAllowLoopback := agentRuntimeAllowInsecureLoopbackForTests
+	agentRuntimeAllowInsecureLoopbackForTests = true
+	t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = previousAllowLoopback })
 	scheme := newTestScheme()
 	fc := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -627,6 +630,12 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy() = %v, want https requirement", err)
 	}
+	runtime.Spec.Deployment.Endpoint = "http://127.0.0.1:8080"
+	agentRuntimeAllowInsecureLoopbackForTests = false
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(loopback) = %v, want https requirement", err)
+	}
+	agentRuntimeAllowInsecureLoopbackForTests = true
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}}}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
 	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"

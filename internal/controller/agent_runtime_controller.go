@@ -31,6 +31,8 @@ import (
 	"github.com/orka-agents/orka/internal/harness/conformance"
 )
 
+var agentRuntimeAllowInsecureLoopbackForTests bool
+
 const (
 	agentRuntimeReadyCondition = "Ready"
 	agentRuntimeReasonReady    = "ConformancePassed"
@@ -224,7 +226,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		return nil
 	}
 	host := parsed.Hostname()
-	if isLoopbackAgentRuntimeEndpoint(host) {
+	if isLoopbackAgentRuntimeEndpoint(host) && agentRuntimeAllowInsecureLoopbackForTests {
 		return nil
 	}
 	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok && serviceNamespace == runtime.Namespace {
