@@ -19,6 +19,9 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 > [!IMPORTANT]
 > **Orka is experimental and under active development.** APIs, CRDs, and behavior may change without notice between releases, and it is not yet recommended for production use. Feedback, bug reports, and feature ideas are very welcome — please [open an issue](https://github.com/orka-agents/orka/issues).
 
+> [!NOTE]
+> The organization and repositories are intended to be donated to a community-governed foundation at the appropriate time. Until then, the project is governed by Microsoft policy, and external contributors may be required to sign the Microsoft Contributor License Agreement (CLA).
+
 ## Why Run AI Agents on Kubernetes?
 
 **No API keys on developer machines** — LLM credentials live in Kubernetes Secrets, managed by your platform team. Developers connect via ServiceAccount tokens — no risk of leaked keys in dotfiles, shell history, or laptops.
