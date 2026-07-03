@@ -4152,6 +4152,63 @@ func TestRepositoryMonitorIssueContentDigestIgnoresOrkaLabels(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorIssueActionTaskRawResultMode(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("issue-result-mode")
+	monitor.Spec.Agents.Planner = &corev1alpha1.AgentReference{Name: "planner"}
+	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "77", Number: 77, Title: "Metrics", State: "open", SnapshotDigest: "sha256:issue77"}
+	run := &store.MonitorRun{ID: "run-result-mode", MonitorNamespace: "default", MonitorName: monitor.Name, TargetKind: repositoryMonitorIssueKind, TargetNumber: 77}
+	command := &store.CommandEvent{ID: "cmd-result-mode", MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 77, Intent: "plan", Status: "accepted"}
+
+	planTaskName, queued, err := reconciler.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, "orka-agents", "orka", repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner)
+	if err != nil || !queued {
+		t.Fatalf("create plan task queued=%v err=%v", queued, err)
+	}
+	var planTask corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: planTaskName}, &planTask); err != nil {
+		t.Fatalf("Get plan task error = %v", err)
+	}
+	if !taskEnvHasValue(planTask.Spec.Env, workerenv.ResultStdout, "true") {
+		t.Fatalf("plan task env = %#v, want %s=true", planTask.Spec.Env, workerenv.ResultStdout)
+	}
+
+	implementationTaskName, queued, err := reconciler.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, "orka-agents", "orka", repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer)
+	if err != nil || !queued {
+		t.Fatalf("create implementation task queued=%v err=%v", queued, err)
+	}
+	var implementationTask corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: implementationTaskName}, &implementationTask); err != nil {
+		t.Fatalf("Get implementation task error = %v", err)
+	}
+	if taskEnvHasValue(implementationTask.Spec.Env, workerenv.ResultStdout, "true") {
+		t.Fatalf("implementation task env = %#v, want workspace finalization to remain enabled", implementationTask.Spec.Env)
+	}
+}
+
+func taskEnvHasValue(env []corev1.EnvVar, name, value string) bool {
+	for _, entry := range env {
+		if entry.Name == name && entry.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRepositoryMonitorReconcileInventoriesIssues(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

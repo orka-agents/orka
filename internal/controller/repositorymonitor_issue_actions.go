@@ -339,6 +339,9 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		{Name: "ORKA_GITHUB_REPOSITORY", Value: owner + "/" + repository},
 		{Name: "ORKA_GITHUB_ACTION", Value: actionKind},
 	}
+	if repositoryMonitorIssueActionRequiresRawResult(actionKind) {
+		env = append(env, corev1.EnvVar{Name: workerenv.ResultStdout, Value: "true"})
+	}
 	allowedTools := readOnlyAgentAllowedTools()
 	if actionKind == repositoryMonitorIssueActionImplementation {
 		allowedTools = nil
@@ -408,6 +411,15 @@ func repositoryMonitorIssuePromptPriorActions(records []store.ActionRecord) []ma
 
 func repositoryMonitorIssueActionTaskName(monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, item *store.MonitorItem, actionKind string) string {
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monissue-%s-%d-%s-%s", monitor.Name, item.Number, actionKind, run.ID), 63)
+}
+
+func repositoryMonitorIssueActionRequiresRawResult(actionKind string) bool {
+	switch actionKind {
+	case repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch, repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionDecompose:
+		return true
+	default:
+		return false
+	}
 }
 
 func repositoryMonitorIssueImplementationBranch(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, command *store.CommandEvent) string {
