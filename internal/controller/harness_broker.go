@@ -159,9 +159,10 @@ func (r *TaskReconciler) executeHarnessBrokeredCoordinationTool(
 
 func setHarnessBrokeredCoordinationEnv(task *corev1alpha1.Task, agent *corev1alpha1.Agent) func() {
 	values := map[string]string{
-		workerenv.TaskName:      task.Name,
-		workerenv.TaskNamespace: task.Namespace,
-		workerenv.ParentTask:    harnessBrokeredParentTaskName(task),
+		workerenv.TaskName:                  task.Name,
+		workerenv.TaskNamespace:             task.Namespace,
+		workerenv.ParentTask:                harnessBrokeredParentTaskName(task),
+		workerenv.CoordinationAllowedAgents: "",
 		workerenv.CoordinationDepth: func() string {
 			if task.Annotations != nil {
 				if depth := strings.TrimSpace(task.Annotations[labels.AnnotationCoordinationDepth]); depth != "" {

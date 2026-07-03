@@ -631,11 +631,11 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(cluster-local) error = %v", err)
 	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime:8080"
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(short-service) error = %v", err)
+	runtime.Spec.Deployment.Endpoint = "http://runtime:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(short-service) = %v, want https requirement", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://runtime.default:8080"
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {

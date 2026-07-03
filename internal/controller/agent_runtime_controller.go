@@ -227,7 +227,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 	if isLocalOrClusterAgentRuntimeEndpoint(host) {
 		return nil
 	}
-	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host, runtime.Namespace); ok {
+	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok {
 		if r != nil && r.Client != nil {
 			service := &corev1.Service{}
 			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil {
@@ -249,19 +249,15 @@ func isLocalOrClusterAgentRuntimeEndpoint(host string) bool {
 	return host == "localhost" || strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local")
 }
 
-func parseAgentRuntimeServiceNamespaceHost(host, defaultNamespace string) (serviceName, serviceNamespace string, ok bool) {
+func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNamespace string, ok bool) {
 	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
-	defaultNamespace = strings.ToLower(strings.TrimSpace(defaultNamespace))
 	if host == "" {
 		return "", "", false
 	}
 	parts := strings.Split(host, ".")
 	switch len(parts) {
 	case 1:
-		if defaultNamespace == "" {
-			return "", "", false
-		}
-		return parts[0], defaultNamespace, true
+		return "", "", false
 	case 2:
 		if parts[0] == "" || parts[1] == "" {
 			return "", "", false
