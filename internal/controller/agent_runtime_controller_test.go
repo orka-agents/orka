@@ -627,7 +627,7 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy() = %v, want https requirement", err)
 	}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}}}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
 	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
@@ -641,11 +641,16 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(service-namespace) error = %v", err)
 	}
+	selectorlessService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "selectorless-runtime", Namespace: "default"}}
 	externalNameService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
 		Spec:       corev1.ServiceSpec{Type: corev1.ServiceTypeExternalName, ExternalName: "runtime.example.com"},
 	}
-	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service, externalNameService)
+	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service, selectorlessService, externalNameService)
+	runtime.Spec.Deployment.Endpoint = "http://selectorless-runtime.default.svc.cluster.local:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(selectorless service) = %v, want https requirement", err)
+	}
 	runtime.Spec.Deployment.Endpoint = "http://external-runtime.default.svc.cluster.local:8080"
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(externalName) = %v, want https requirement", err)

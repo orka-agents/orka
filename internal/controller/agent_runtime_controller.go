@@ -230,7 +230,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok && serviceNamespace == runtime.Namespace {
 		if r != nil && r.Client != nil {
 			service := &corev1.Service{}
-			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil && service.Spec.Type != corev1.ServiceTypeExternalName {
+			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil && service.Spec.Type != corev1.ServiceTypeExternalName && len(service.Spec.Selector) > 0 {
 				return nil
 			}
 		}
