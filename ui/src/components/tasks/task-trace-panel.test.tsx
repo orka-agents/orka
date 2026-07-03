@@ -63,7 +63,7 @@ describe('TaskTracePanel', () => {
     server.use(
       http.get(`${API}/tasks/:id/trace`, () => {
         calls += 1
-        if (calls === 1) return new HttpResponse('boom', { status: 500 })
+        if (calls <= 2) return new HttpResponse('boom', { status: 500 })
         return HttpResponse.json(makeTrace({ latestSeq: 1, timeline: [] }))
       }),
     )

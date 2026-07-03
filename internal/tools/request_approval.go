@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sozercan/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/approvals"
 )
 
 const requestApprovalToolName = "request_approval"

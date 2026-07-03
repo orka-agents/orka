@@ -3,7 +3,7 @@ name: Lint
 on:
   push:
     paths-ignore:
-      - ".codex/**"
+      - ".agents/**"
       - ".claude/**"
       - "website/**"
       - '**.md'
@@ -11,7 +11,7 @@ on:
       - '.gitignore'
   pull_request:
     paths-ignore:
-      - ".codex/**"
+      - ".agents/**"
       - ".claude/**"
       - "website/**"
       - '**.md'

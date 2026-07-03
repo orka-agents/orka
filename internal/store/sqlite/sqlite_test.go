@@ -2,12 +2,13 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const contentHello = "hello"
@@ -25,6 +26,79 @@ func setupTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 	return NewStore(db, ":memory:")
+}
+
+func TestMigrateBackfillsMonitorItemGitHubUpdatedAtSentinel(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.Exec(`CREATE TABLE monitor_items (
+		monitor_namespace     TEXT NOT NULL,
+		monitor_name          TEXT NOT NULL,
+		kind                  TEXT NOT NULL,
+		item_key              TEXT NOT NULL,
+		number                INTEGER NOT NULL DEFAULT 0,
+		sha                   TEXT NOT NULL DEFAULT '',
+		title                 TEXT NOT NULL DEFAULT '',
+		body                  TEXT NOT NULL DEFAULT '',
+		html_url              TEXT NOT NULL DEFAULT '',
+		author                TEXT NOT NULL DEFAULT '',
+		state                 TEXT NOT NULL DEFAULT '',
+		labels_json           TEXT NOT NULL DEFAULT '[]',
+		snapshot_digest       TEXT NOT NULL DEFAULT '',
+		workflow_phase        TEXT NOT NULL DEFAULT '',
+		linked_pr_number      INTEGER NOT NULL DEFAULT 0,
+		last_command_id       TEXT NOT NULL DEFAULT '',
+		last_command_intent   TEXT NOT NULL DEFAULT '',
+		last_action_id        TEXT NOT NULL DEFAULT '',
+		last_action_kind      TEXT NOT NULL DEFAULT '',
+		last_action_task_name TEXT NOT NULL DEFAULT '',
+		base_branch           TEXT NOT NULL DEFAULT '',
+		head_branch           TEXT NOT NULL DEFAULT '',
+		head_sha              TEXT NOT NULL DEFAULT '',
+		base_sha              TEXT NOT NULL DEFAULT '',
+		draft                 BOOLEAN NOT NULL DEFAULT FALSE,
+		mergeable_state       TEXT NOT NULL DEFAULT '',
+		ci_state              TEXT NOT NULL DEFAULT '',
+		skip_reason           TEXT NOT NULL DEFAULT '',
+		last_review_id        TEXT NOT NULL DEFAULT '',
+		last_reviewed_head_sha TEXT NOT NULL DEFAULT '',
+		last_verdict          TEXT NOT NULL DEFAULT '',
+		repair_state          TEXT NOT NULL DEFAULT '',
+		automerge_state       TEXT NOT NULL DEFAULT '',
+		status_comment_id     TEXT NOT NULL DEFAULT '',
+		status_comment_url    TEXT NOT NULL DEFAULT '',
+		last_publish_id       TEXT NOT NULL DEFAULT '',
+		last_publish_phase    TEXT NOT NULL DEFAULT '',
+		last_publish_reason   TEXT NOT NULL DEFAULT '',
+		last_publish_url      TEXT NOT NULL DEFAULT '',
+		updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (monitor_namespace, monitor_name, kind, item_key)
+	)`)
+	if err != nil {
+		t.Fatalf("create old monitor_items table error = %v", err)
+	}
+	const updatedAt = "2026-06-01T12:34:56Z"
+	_, err = db.Exec(`INSERT INTO monitor_items (monitor_namespace, monitor_name, kind, item_key, number, updated_at) VALUES ('demo', 'orka', 'issue', '123', 123, ?)`, updatedAt)
+	if err != nil {
+		t.Fatalf("insert old monitor_items row error = %v", err)
+	}
+
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate() error = %v", err)
+	}
+
+	var githubUpdatedAt string
+	if err := db.QueryRow(`SELECT github_updated_at FROM monitor_items WHERE monitor_namespace = 'demo' AND monitor_name = 'orka' AND kind = 'issue' AND item_key = '123'`).Scan(&githubUpdatedAt); err != nil {
+		t.Fatalf("select github_updated_at error = %v", err)
+	}
+	if githubUpdatedAt != updatedAt {
+		t.Fatalf("github_updated_at = %q, want %q", githubUpdatedAt, updatedAt)
+	}
 }
 
 func TestResultStore(t *testing.T) {

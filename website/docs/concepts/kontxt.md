@@ -126,7 +126,7 @@ Orka also uses selected signed transaction context values for request-specific c
   "taskType": "agent",
   "agent": "security-reviewer",
   "allowedAgents": ["security-reviewer", "patcher"],
-  "repo": "https://github.com/sozercan/orka",
+  "repo": "https://github.com/orka-agents/orka",
   "branch": "kontxt",
   "allowedTools": ["file_read", "web_search"],
   "allowedProviders": ["openai"],
@@ -253,7 +253,7 @@ A token that can create one agent Task in `default`, bound to a repository/branc
     "namespace": "default",
     "taskType": "agent",
     "agent": "coder",
-    "repo": "https://github.com/sozercan/orka",
+    "repo": "https://github.com/orka-agents/orka",
     "branch": "kontxt",
     "allowedTools": ["file_read", "file_write"]
   }

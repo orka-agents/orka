@@ -23,11 +23,11 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/sozercan/orka/internal/security"
-	securityslices "github.com/sozercan/orka/internal/security/slices"
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/security"
+	securityslices "github.com/orka-agents/orka/internal/security/slices"
+	"github.com/orka-agents/orka/internal/workerenv"
 
-	"github.com/sozercan/orka/workers/common"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 var (

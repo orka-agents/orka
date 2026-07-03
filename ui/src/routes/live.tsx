@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { AgentGridView } from '@/components/tasks/agent-grid-view'
+import { RuntimeCanvas } from '@/components/runtime/runtime-canvas'
 
 export const Route = createFileRoute('/live')({
-  component: AgentGridView,
+  component: RuntimeCanvas,
 })

@@ -144,6 +144,15 @@ spec:
   timeZone: "UTC"               # optional IANA time zone
   historyDays: 30                # optional initial history window
   validationMode: light          # off, light, or full
+  validationMaxFindingsPerRun: 8 # optional auto-validation task cap for light mode
+  validationMinSeverity: medium  # optional auto-validation severity threshold
+  validationMinConfidence: medium # optional auto-validation confidence threshold
+  customScanInstructionsRef:     # optional ConfigMap-backed additive scanner instructions
+    name: repo-security-policy
+    key: policy                  # optional; defaults to policy
+  falsePositivePolicyRef:        # optional ConfigMap-backed false-positive policy
+    name: repo-security-policy
+    key: false-positives
   analysisAgentRef:
     name: security-reviewer
   patchAgentRef:                 # optional; defaults to the analysis agent when omitted
@@ -170,10 +179,17 @@ spec:
 | `timeZone` | string | No | IANA time zone used by `schedule`. |
 | `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
 | `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
+| `validationMaxFindingsPerRun` | int32 | No | Maximum automatic validation tasks to enqueue per scan run in `light` mode. |
+| `validationMinSeverity` | string | No | Minimum severity eligible for automatic validation. Defaults are mode-dependent. |
+| `validationMinConfidence` | string | No | Minimum confidence eligible for automatic validation. Defaults are mode-dependent. |
+| `customScanInstructionsRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive scanner instructions. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
+| `falsePositivePolicyRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive false-positive policy text. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
 | `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
 | `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
-| `maxFindingsPerRun` | int32 | No | Bounds scan output volume. |
+| `maxFindingsPerRun` | int32 | No | Bounds accepted scan findings per run after validation and deterministic dropped-finding filters. |
 | `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
+
+`PolicyConfigMapKeyRef` uses `name` plus optional `key`; when `key` is omitted, Orka reads the `policy` key. Policy ConfigMap values are capped at 32 KiB and rejected if they look like they contain secrets, tokens, private keys, or credentials. Custom policy text is additive only; it cannot disable Orka's default evidence, no-secret, or finding-quality rules.
 
 **Status fields:**
 
@@ -667,7 +683,7 @@ Key configuration values for the Helm chart:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `controller.replicas` | `1` | Controller replicas |
-| `controller.image.repository` | `ghcr.io/sozercan/orka` | Controller image |
+| `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
 | `controller.watchNamespace` | `""` | Namespace scope (empty = cluster-wide) |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `controller.apiPort` | `8080` | REST API port |
@@ -682,8 +698,8 @@ Key configuration values for the Helm chart:
 | `controller.agentSandbox.claimTimeout` | `2m` | Timeout for workspace claim and readiness operations |
 | `controller.agentSandbox.commandTimeout` | `30m` | Timeout for agent runtime execution inside the sandbox |
 | `controller.agentSandbox.cleanupPolicy` | `delete` | Default workspace cleanup policy: `delete` or `retain` |
-| `workers.ai.image.repository` | `ghcr.io/sozercan/orka/ai-worker` | AI worker image |
-| `workers.general.image.repository` | `ghcr.io/sozercan/orka/general-worker` | General worker image |
+| `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
+| `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
 | `crds.install` | `true` | Install CRDs |
 | `crds.keep` | `true` | Keep CRDs on uninstall |
@@ -730,7 +746,7 @@ The Helm keys mirror the controller flags: for example,
 `controller.contextToken.tts.toolTokenTTL` renders
 `--context-token-tool-token-ttl`.
 
-See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/orka/values.yaml) for the full list.
+See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/charts/orka/values.yaml) for the full list.
 
 ## Controller Flags
 
@@ -793,11 +809,11 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--task-provenance-admission-enabled` | `ORKA_TASK_PROVENANCE_ADMISSION_ENABLED` env or `false` | Enable validating admission that rejects untrusted direct Kubernetes Task writes to Orka-managed provenance fields (`spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations) |
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or `orka-ai-worker` | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation |
-| `--ai-worker-image` | `ghcr.io/sozercan/orka/ai-worker:latest` | AI worker container image |
+| `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | AI worker container image |
 | `ORKA_HARNESS_WRAPPER_ENDPOINT` | unset | Required controller environment variable for agent Tasks; points at the CLI harness wrapper HTTP endpoint. |
 | `ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE` | unset | Optional controller token file for authenticated wrapper endpoints. |
 
-| `--general-worker-image` | `ghcr.io/sozercan/orka/general-worker:latest` | General worker container image |
+| `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Storage backend (sqlite) |
 | `--store-path` | `/data/orka.db` | Path to SQLite database file |
 | `--chat-enabled` | `true` | Enable the chat endpoint |
@@ -814,7 +830,7 @@ See [charts/orka/values.yaml](https://github.com/sozercan/orka/blob/main/charts/
 | `--health-probe-bind-address` | `:8081` | Health probe address |
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
-| `--enable-tracing` | `false` | Enable OpenTelemetry distributed tracing (requires `OTEL_EXPORTER_OTLP_ENDPOINT`) |
+| `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
 
 ### Agent Sandbox Controller Settings
 
@@ -940,27 +956,49 @@ monitoring:
 
 Context-token metrics are described in more detail in [Kontxt TxToken integration](kontxt.md#observability). All context-token labels use low-cardinality values only.
 
-## OpenTelemetry Tracing
+## OpenTelemetry telemetry
 
-Orka supports opt-in OpenTelemetry distributed tracing for debugging and performance analysis. Tracing is disabled by default (zero overhead).
+Orka supports opt-in OpenTelemetry traces and GenAI metrics for debugging,
+performance analysis, and backend cost/latency dashboards. Telemetry is
+disabled by default and uses OpenTelemetry no-op providers until enabled.
 
-### Enabling Tracing
+### Enabling telemetry
 
-Add the `--enable-tracing` flag to the controller:
+Add the `--enable-telemetry` flag to the controller and configure an OTLP
+collector endpoint. The legacy `--enable-tracing` alias enables the same traces
+and metrics:
 
 ```yaml
 args:
-  - --enable-tracing
+  - --enable-telemetry
 env:
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
     value: "jaeger-collector.observability.svc:4317"
+  - name: OTEL_EXPORTER_OTLP_INSECURE
+    value: "true"
 ```
 
 | Flag / Environment Variable | Default | Description |
 |------------------------------|---------|-------------|
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC collector endpoint |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | SDK default `localhost:4317` | OTLP collector endpoint for traces and metrics |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | Trace-specific OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | Metrics-specific OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | SDK default gRPC | Set to `http/protobuf` for OTLP/HTTP collectors |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | unset | Signal-specific exporter protocol overrides |
+| `OTEL_EXPORTER_OTLP_INSECURE` and signal-specific insecure vars | SDK default | Disable TLS for in-cluster/dev collectors that require it |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | SDK default | Standard OpenTelemetry sampler configuration |
+
+Controller-local defaults such as `localhost:4317` are valid only for the
+controller process. AI worker Jobs receive telemetry enablement only when the
+controller has a non-loopback, worker-reachable OTLP endpoint. The controller
+copies non-secret OTLP endpoint/protocol/insecure/timeout/compression settings
+to AI worker Pods and intentionally does not copy OTLP headers, certificate or
+client-key env vars, `OTEL_RESOURCE_ATTRIBUTES`, or baggage.
+
+Harness-wrapper and agent-runtime worker telemetry is explicit opt-in. Set
+`ORKA_ENABLE_TELEMETRY=true` and OTLP exporter env on those workloads when you
+want their process-local `task.run` spans exported.
 
 ### Instrumented Components
 

@@ -101,6 +101,30 @@ func migrate(db *sql.DB) error {
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (namespace, session_name) REFERENCES sessions(namespace, name) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS runtime_sessions (
+			id              TEXT NOT NULL,
+			namespace       TEXT NOT NULL,
+			session_name    TEXT NOT NULL,
+			active_task     TEXT NOT NULL DEFAULT '',
+			agent_name      TEXT NOT NULL DEFAULT '',
+			provider        TEXT NOT NULL,
+			state           TEXT NOT NULL,
+			cleanup_policy  TEXT NOT NULL,
+			idle_timeout_ns INTEGER NOT NULL DEFAULT 0,
+			max_lifetime_ns INTEGER NOT NULL DEFAULT 0,
+			created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (namespace, id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_namespace_updated
+			ON runtime_sessions(namespace, updated_at DESC, id ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_owner
+			ON runtime_sessions(namespace, session_name, provider, state, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_active_task
+			ON runtime_sessions(namespace, active_task, updated_at DESC)
+			WHERE active_task <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_cleanup
+			ON runtime_sessions(namespace, state, cleanup_policy, updated_at ASC)`,
 		`CREATE TABLE IF NOT EXISTS plan_states (
 			namespace     TEXT NOT NULL,
 			task_name     TEXT NOT NULL,
@@ -739,7 +763,7 @@ func migrate(db *sql.DB) error {
 	}); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`UPDATE monitor_items SET github_updated_at = updated_at WHERE github_updated_at IS NULL`); err != nil {
+	if _, err := db.Exec(`UPDATE monitor_items SET github_updated_at = updated_at WHERE github_updated_at IS NULL OR github_updated_at = '0001-01-01T00:00:00Z'`); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 	if err := ensureSQLiteColumns(db, "command_events", []sqliteColumnMigration{

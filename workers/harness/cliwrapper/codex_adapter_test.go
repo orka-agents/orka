@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/harness"
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestCodexAdapterBuildsLegacyCompatibleArgs(t *testing.T) {

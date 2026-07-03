@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const publishPhaseFailed = "failed"
@@ -18,7 +18,7 @@ func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "main",
@@ -170,7 +170,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		ID:               "repair-1",
 		MonitorNamespace: "demo",
 		MonitorName:      "orka",
-		Repo:             "sozercan/orka",
+		Repo:             "orka-agents/orka",
 		PRNumber:         42,
 		Intent:           "fix_ci",
 		Phase:            "queued",
@@ -265,7 +265,7 @@ func TestUpsertRepositoryMonitorBranchChangeClearsDependentState(t *testing.T) {
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "main",
@@ -295,7 +295,7 @@ func TestUpsertRepositoryMonitorBranchChangeClearsDependentState(t *testing.T) {
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "release",
@@ -367,7 +367,7 @@ func TestUpsertRepositoryMonitorIdentityChangeClearsDependentState(t *testing.T)
 		Namespace:  "demo",
 		Name:       "orka",
 		UID:        "uid-1",
-		RepoURL:    "https://github.com/sozercan/orka",
+		RepoURL:    "https://github.com/orka-agents/orka",
 		Owner:      "sozercan",
 		Repository: "orka",
 		Branch:     "main",
@@ -478,7 +478,7 @@ func TestDeleteRepositoryMonitorCascadesMonitorState(t *testing.T) {
 	if err := s.UpsertRepositoryMonitor(ctx, &store.RepositoryMonitorRecord{
 		Namespace: "demo",
 		Name:      "orka",
-		RepoURL:   "https://github.com/sozercan/orka",
+		RepoURL:   "https://github.com/orka-agents/orka",
 	}); err != nil {
 		t.Fatalf("UpsertRepositoryMonitor() error = %v", err)
 	}
@@ -621,7 +621,7 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 		t.Fatalf("got action = %#v, want cancelled with reason and completion", gotAction)
 	}
 
-	job := &store.ImplementationJob{ID: "impl-1", MonitorNamespace: "demo", MonitorName: "orka", Repo: "sozercan/orka", IssueNumber: 123, PlanID: "act-plan", SnapshotDigest: "sha256:issue", Phase: "implementation_queued", Attempt: 1, Branch: "orka/issue-123", TaskName: "task-1"}
+	job := &store.ImplementationJob{ID: "impl-1", MonitorNamespace: "demo", MonitorName: "orka", Repo: "orka-agents/orka", IssueNumber: 123, PlanID: "act-plan", SnapshotDigest: "sha256:issue", Phase: "implementation_queued", Attempt: 1, Branch: "orka/issue-123", TaskName: "task-1"}
 	if err := s.CreateImplementationJob(ctx, job); err != nil {
 		t.Fatalf("CreateImplementationJob() error = %v", err)
 	}

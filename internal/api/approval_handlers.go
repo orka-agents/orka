@@ -20,12 +20,12 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 
-	"github.com/sozercan/orka/internal/approvals"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 type ListTaskApprovalsResponse struct {
@@ -51,11 +51,9 @@ func (h *Handlers) ListTaskApprovals(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "listTaskApprovals", namespace, taskName); err != nil {
-		return err
-	}
-	task, err := h.loadReadableTask(c, namespace, taskName, "listTaskApprovals")
+	task, err := h.taskAccess().loadReadable(c, "listTaskApprovals", namespace, taskName)
 	if err != nil {
+
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -82,7 +80,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "decideTaskApproval", h.contextTokenAuthorization.TaskUpdateScopes); err != nil {
 		return err
 	}
-	task, err := h.loadReadableTask(c, namespace, taskName, "decideTaskApproval")
+	task, err := h.taskAccess().loadAuthorized(c, "decideTaskApproval", namespace, taskName)
 	if err != nil {
 		return err
 	}

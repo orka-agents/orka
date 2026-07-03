@@ -6,7 +6,7 @@ MIT License - see LICENSE file for details.
 
 package tools
 
-import "github.com/sozercan/orka/internal/workerenv"
+import "github.com/orka-agents/orka/internal/workerenv"
 
 const (
 	envOrkaTaskName                  = workerenv.TaskName

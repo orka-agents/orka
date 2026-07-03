@@ -15,8 +15,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/google/uuid"
 
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 // handleStreamingMessages handles an Anthropic Messages API request with streaming and tool execution.

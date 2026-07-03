@@ -12,7 +12,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const maxArtifactSize = 10 << 20 // 10MB

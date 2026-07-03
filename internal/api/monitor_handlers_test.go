@@ -17,14 +17,14 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/store/sqlite"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-const monitorTestRepoURL = "https://github.com/sozercan/orka"
-const monitorTestReviewerSecret = "reviewer-credentials"
+const monitorTestRepoURL = "https://github.com/orka-agents/orka"
+const monitorTestReviewerObjectName = "reviewer-auth-ref"
 
 func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenConfig, mode string, objects ...crclient.Object) (*fiber.App, *Handlers) {
 	t.Helper()
@@ -83,14 +83,14 @@ func repositoryMonitorHandlerTestAgent(name string, runtimeType corev1alpha1.Age
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: runtimeType},
-			SecretRef: &corev1.LocalObjectReference{Name: monitorTestReviewerSecret},
+			SecretRef: &corev1.LocalObjectReference{Name: monitorTestReviewerObjectName},
 		},
 	}
 }
 
 func repositoryMonitorHandlerTestReviewerSecret() *corev1.Secret {
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: monitorTestReviewerSecret, Namespace: "demo"},
+		ObjectMeta: metav1.ObjectMeta{Name: monitorTestReviewerObjectName, Namespace: "demo"},
 		Data: map[string][]byte{
 			workerenv.AnthropicAPIKey: []byte("anthropic-key"),
 		},
@@ -120,7 +120,7 @@ func TestRepositoryMonitorHandlers_CRUDAndManualRun(t *testing.T) {
 	require.Equal(t, "main", created.Spec.Branch)
 	require.NotNil(t, created.Spec.Targets.PullRequests.Enabled)
 	require.True(t, *created.Spec.Targets.PullRequests.Enabled)
-	require.Equal(t, "sozercan", created.Spec.Owner)
+	require.Equal(t, "orka-agents", created.Spec.Owner)
 	require.Equal(t, "orka", created.Spec.Repository)
 
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/monitors/repositories?namespace=demo", nil))
@@ -221,7 +221,7 @@ func TestCreateRepositoryMonitor_DerivesRepositoryIdentityFromURL(t *testing.T) 
 
 	var created corev1alpha1.RepositoryMonitor
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
-	require.Equal(t, "sozercan", created.Spec.Owner)
+	require.Equal(t, "orka-agents", created.Spec.Owner)
 	require.Equal(t, "orka", created.Spec.Repository)
 }
 
@@ -481,9 +481,9 @@ func TestCreateRepositoryMonitor_RejectsNonGitHubAndCredentialURLs(t *testing.T)
 		name    string
 		repoURL string
 	}{
-		{name: "non GitHub HTTPS host", repoURL: "https://evil.example/sozercan/orka"},
-		{name: "HTTPS credentials", repoURL: "https://token@github.com/sozercan/orka"},
-		{name: "non GitHub SSH host", repoURL: "git@evil.example:sozercan/orka.git"},
+		{name: "non GitHub HTTPS host", repoURL: "https://evil.example/orka-agents/orka"},
+		{name: "HTTPS credentials", repoURL: "https://token@github.com/orka-agents/orka"},
+		{name: "non GitHub SSH host", repoURL: "git@evil.example:orka-agents/orka.git"},
 	}
 
 	for _, tt := range tests {
@@ -729,7 +729,7 @@ func TestCreateRepositoryMonitorCommandEventQueuesRun(t *testing.T) {
 	var command store.CommandEvent
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&command))
 	require.Equal(t, "api", command.Source)
-	require.Equal(t, "sozercan/orka", command.Repo)
+	require.Equal(t, "orka-agents/orka", command.Repo)
 	require.Equal(t, "plan", command.Intent)
 	runs, _, err := handlers.repositoryMonitorStore.ListMonitorRuns(t.Context(), store.MonitorRunFilter{Namespace: "demo", MonitorName: "repo-monitor", TargetKind: "issue", TargetNumber: 7, Limit: 10})
 	require.NoError(t, err)

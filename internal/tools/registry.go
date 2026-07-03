@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/approvals"
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -154,6 +154,18 @@ type Tool interface {
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
+
+	telemetryMu            sync.Mutex
+	tracerProvider         any
+	tracer                 trace.Tracer
+	meterProvider          any
+	toolDurationHistogram  metric.Float64Histogram
+	toolDurationMetricOpts map[toolDurationMetricKey]metric.MeasurementOption
+}
+
+type toolDurationMetricKey struct {
+	toolName string
+	toolType string
 }
 
 // NewRegistry creates a new tool registry
@@ -175,6 +187,13 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	tool, ok := r.tools[name]
+	return tool, ok
+}
+
+func (r *Registry) get(name string) (Tool, bool) {
+	r.mu.RLock()
+	tool, ok := r.tools[name]
+	r.mu.RUnlock()
 	return tool, ok
 }
 
@@ -204,26 +223,120 @@ func (r *Registry) Names() []string {
 // Execute executes a tool by name. It is the DRY instrumentation point for
 // built-in registry tools used by chat, proxy-compatible handlers, and workers.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	start := time.Now()
-	tool, ok := r.Get(name)
+	tool, ok := r.get(name)
+	if telemetryDisabled() {
+		if !ok {
+			return "", fmt.Errorf("tool %q not found", name)
+		}
+		return tool.Execute(ctx, args)
+	}
+
 	toolTelemetryName := name
 	if !ok {
 		toolTelemetryName = unknownToolTelemetryName
 	}
 	toolTypeValue := toolType(ctx, tool)
 	toolKind := registryToolKind(name)
-	attrs := []attribute.KeyValue{
+	meterActive := tracing.GlobalMeterProviderActive()
+	var start time.Time
+	if meterActive {
+		start = time.Now()
+	}
+
+	tracer := r.genAITracer()
+	spanName := genai.OperationExecuteTool + " " + toolTelemetryName
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider())
+	var span trace.Span
+	if deferStartAttributes {
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal))
+	} else {
+		attrs := registryToolSpanAttributes(ctx, toolTelemetryName, tool, ok, toolTypeValue, toolKind)
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	}
+	spanRecording := span.IsRecording()
+	if spanRecording && deferStartAttributes {
+		span.SetAttributes(registryToolSpanAttributes(ctx, toolTelemetryName, tool, ok, toolTypeValue, toolKind)...)
+	}
+	if !spanRecording && !meterActive {
+		if !ok {
+			span.End()
+			return "", fmt.Errorf("tool %q not found", name)
+		}
+		result, err := tool.Execute(ctx, args)
+		span.End()
+		return result, err
+	}
+	defer span.End()
+
+	if !ok {
+		err := fmt.Errorf("tool %q not found", name)
+		if spanRecording {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.SetAttributes(attribute.String(genai.AttrErrorType, "tool_not_found"))
+		}
+		if meterActive {
+			r.recordToolDuration(ctx, time.Since(start).Seconds(), toolTelemetryName, toolTypeValue, "tool_not_found")
+		}
+		return "", err
+	}
+
+	result, err := tool.Execute(ctx, args)
+	duration := time.Since(start).Seconds()
+	if spanRecording {
+		span.SetAttributes(attribute.Int(tracing.AttrToolResultSizeBytes, len(result)))
+	}
+	metricErrType := ""
+	if err != nil {
+		errType := fmt.Sprintf("%T", err)
+		if spanRecording {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		}
+		metricErrType = errType
+	} else if spanRecording || meterActive {
+		if failed, errType, message := failedToolResult(result); failed {
+			if spanRecording {
+				span.SetStatus(codes.Error, message)
+				span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			}
+			metricErrType = errType
+		}
+	}
+	if meterActive {
+		if metricErrType != "" {
+			r.recordToolDuration(ctx, duration, toolTelemetryName, toolTypeValue, metricErrType)
+		} else {
+			r.recordSuccessfulToolDuration(ctx, duration, toolTelemetryName, toolTypeValue)
+		}
+	}
+	return result, err
+}
+
+func registryToolSpanAttributes(ctx context.Context, toolTelemetryName string, tool Tool, ok bool, toolTypeValue, toolKind string) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, 10)
+	attrs = append(attrs,
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
 		attribute.String(genai.AttrToolName, toolTelemetryName),
 		attribute.String(genai.AttrToolType, toolTypeValue),
-	}
-	attrs = append(attrs, tracing.ToolAttributes(toolTelemetryName, toolKind, -1, "")...)
+		attribute.String(tracing.AttrToolName, toolTelemetryName),
+		attribute.String(tracing.AttrToolKind, toolKind),
+	)
 	if tc := GetToolContext(ctx); tc != nil {
 		tenant := tc.Tenant
 		if tenant == "" {
 			tenant = tc.Namespace
 		}
-		attrs = append(attrs, tracing.TaskAttributes(tc.TaskID, tc.Namespace, tenant, "", "")...)
+		if tc.TaskID != "" {
+			attrs = append(attrs, attribute.String(tracing.AttrTaskID, tc.TaskID))
+		}
+		if tc.Namespace != "" {
+			attrs = append(attrs, attribute.String(tracing.AttrTaskNamespace, tc.Namespace))
+		}
+		if tenant != "" {
+			attrs = append(attrs, attribute.String(tracing.AttrTenant, tenant))
+		}
 		if tc.ToolCallID != "" {
 			attrs = append(attrs, attribute.String(genai.AttrToolCallID, tc.ToolCallID))
 		}
@@ -233,49 +346,97 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 			attrs = append(attrs, attribute.String(genai.AttrToolDescription, description))
 		}
 	}
-	tracer := tracing.GenAITracer(genai.InstrumentationName)
-	ctx, span := tracer.Start(ctx, genai.OperationExecuteTool+" "+toolTelemetryName, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
-	defer span.End()
+	return attrs
+}
 
-	// Keep histogram labels low-cardinality and separate from span-only task/result attributes.
-	metricAttrs := []attribute.KeyValue{
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolTelemetryName),
-		attribute.String(genai.AttrToolType, toolTypeValue),
+func (r *Registry) genAITracer() trace.Tracer {
+	provider := tracing.GlobalTracerProvider()
+	r.telemetryMu.Lock()
+	defer r.telemetryMu.Unlock()
+	if r.tracer != nil && tracing.SameProvider(r.tracerProvider, provider) {
+		return r.tracer
 	}
-	if !ok {
-		err := fmt.Errorf("tool %q not found", name)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		span.SetAttributes(attribute.String(genai.AttrErrorType, "tool_not_found"))
-		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, "tool_not_found"))
-		recordToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
-		return "", err
-	}
+	r.tracerProvider = provider
+	r.tracer = provider.Tracer(genai.InstrumentationName, trace.WithSchemaURL(genai.SchemaURL))
+	return r.tracer
+}
 
-	result, err := tool.Execute(ctx, args)
-	duration := time.Since(start).Seconds()
-	span.SetAttributes(tracing.ToolAttributes("", "", len(result), "")...)
+func (r *Registry) getToolDurationHistogram() (metric.Float64Histogram, bool) {
+	if !tracing.GlobalMeterProviderActive() {
+		return nil, false
+	}
+	provider := tracing.GlobalMeterProvider()
+	r.telemetryMu.Lock()
+	defer r.telemetryMu.Unlock()
+	if r.toolDurationHistogram != nil && tracing.SameProvider(r.meterProvider, provider) {
+		return r.toolDurationHistogram, true
+	}
+	meter := provider.Meter(genai.InstrumentationName, metric.WithSchemaURL(genai.SchemaURL))
+	histogram, err := meter.Float64Histogram(
+		genai.MetricExecuteToolDuration,
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	)
 	if err != nil {
-		errType := fmt.Sprintf("%T", err)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
-	} else if failed, errType, message := failedToolResult(result); failed {
-		span.SetStatus(codes.Error, message)
-		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-		metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+		r.meterProvider = provider
+		r.toolDurationHistogram = nil
+		return nil, false
 	}
-	recordToolDuration(ctx, duration, metricAttrs...)
-	return result, err
+	r.meterProvider = provider
+	r.toolDurationHistogram = histogram
+	return histogram, true
+}
+
+func (r *Registry) toolDurationMetricOption(toolName, toolType string) metric.MeasurementOption {
+	key := toolDurationMetricKey{toolName: toolName, toolType: toolType}
+	r.telemetryMu.Lock()
+	defer r.telemetryMu.Unlock()
+	if r.toolDurationMetricOpts == nil {
+		r.toolDurationMetricOpts = make(map[toolDurationMetricKey]metric.MeasurementOption)
+	}
+	if opt, ok := r.toolDurationMetricOpts[key]; ok {
+		return opt
+	}
+	attrs := attribute.NewSet(
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolName),
+		attribute.String(genai.AttrToolType, toolType),
+	)
+	opt := metric.WithAttributeSet(attrs)
+	r.toolDurationMetricOpts[key] = opt
+	return opt
+}
+
+func (r *Registry) recordSuccessfulToolDuration(ctx context.Context, seconds float64, toolName, toolType string) {
+	histogram, ok := r.getToolDurationHistogram()
+	if !ok {
+		return
+	}
+	histogram.Record(ctx, seconds, r.toolDurationMetricOption(toolName, toolType))
+}
+
+func (r *Registry) recordToolDuration(ctx context.Context, seconds float64, toolName, toolType, errType string) {
+	histogram, ok := r.getToolDurationHistogram()
+	if !ok {
+		return
+	}
+	histogram.Record(ctx, seconds, metric.WithAttributes(
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, toolName),
+		attribute.String(genai.AttrToolType, toolType),
+		attribute.String(genai.AttrErrorType, errType),
+	))
+}
+
+func telemetryDisabled() bool {
+	return tracing.GlobalTracerProviderExplicitNoop() && !tracing.GlobalMeterProviderActive()
 }
 
 // RecordRejectedToolCall records a failed tool invocation that is rejected before
 // dispatch, for example by request-level allowlists or invalid arguments. It
 // intentionally does not execute the tool.
 func RecordRejectedToolCall(ctx context.Context, name, toolCallID, errType, message string) {
-	if strings.TrimSpace(name) == "" {
+	if strings.TrimSpace(name) == "" || telemetryDisabled() {
 		return
 	}
 	start := time.Now()
@@ -314,12 +475,22 @@ func FailedToolResultForTelemetry(result string) (bool, string, string) {
 }
 
 func failedToolResult(result string) (bool, string, string) {
-	var body map[string]any
+	// Most successful tool results are compact JSON with "success":true and no
+	// false literal. Avoid the generic map unmarshal on that hot path; only parse
+	// when a structured failure is possible.
+	if !strings.Contains(result, "false") {
+		return false, "", ""
+	}
+	var body map[string]json.RawMessage
 	if json.Unmarshal([]byte(result), &body) != nil {
 		return false, "", ""
 	}
-	success, ok := body["success"].(bool)
-	if !ok || success {
+	successJSON, ok := body["success"]
+	if !ok {
+		return false, "", ""
+	}
+	var success bool
+	if json.Unmarshal(successJSON, &success) != nil || success {
 		return false, "", ""
 	}
 

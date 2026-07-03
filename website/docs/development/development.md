@@ -104,6 +104,11 @@ Run focused telemetry tests with:
 go test ./internal/tracing/... ./internal/llm/ ./internal/tools/ ./internal/worker ./workers/ai ./workers/harness/cliwrapper -run 'Tracing|Telemetry|GenAI|ExecuteTool|TraceContext|Traceparent|TaskRun|DelegateTrace' -v
 ```
 
+The live Kind e2e coverage for collector export lives in
+`test/e2e/otel_genai_test.go`. It patches the controller with
+`--enable-telemetry`, points it at an in-cluster OpenTelemetry Collector, and
+asserts that AI worker Jobs export GenAI model/tool spans and metrics.
+
 Run disabled-telemetry hot-path benchmarks with:
 
 ```bash
@@ -169,7 +174,7 @@ and pick a short or long request body via
 ## Generate Installer YAML
 
 ```bash
-make build-installer IMG=ghcr.io/sozercan/orka:latest
+make build-installer IMG=ghcr.io/orka-agents/orka:latest
 ```
 
 ## Build Gotchas

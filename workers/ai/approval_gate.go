@@ -20,14 +20,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/approvals"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/llm"
-	"github.com/sozercan/orka/internal/tools"
-	"github.com/sozercan/orka/internal/workerenv"
-	"github.com/sozercan/orka/workers/common"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/workers/common"
 )
 
 const (

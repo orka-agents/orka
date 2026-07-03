@@ -15,9 +15,9 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
-	"github.com/sozercan/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
 )
 
 const tracingToolName = "tracing_test_tool"
@@ -185,5 +185,57 @@ func TestRegistryExecuteMissingToolEmitsFailedSpanAndMetric(t *testing.T) {
 	rm := metrics.Collect(t)
 	if countMetricDataPoints(rm, genai.MetricExecuteToolDuration) != 1 {
 		t.Fatalf("missing %s datapoint", genai.MetricExecuteToolDuration)
+	}
+}
+
+func TestFailedToolResultForTelemetry(t *testing.T) {
+	tests := []struct {
+		name        string
+		result      string
+		wantFailed  bool
+		wantErrType string
+		wantMessage string
+	}{
+		{
+			name:   "success true skips failure",
+			result: `{"success":true}`,
+		},
+		{
+			name:        "structured failure",
+			result:      `{"success":false,"error":"bad input","errorType":"invalid_arguments"}`,
+			wantFailed:  true,
+			wantErrType: "invalid_arguments",
+			wantMessage: "bad input",
+		},
+		{
+			name:        "escaped success key keeps structured failure semantics",
+			result:      `{"\u0073uccess":false}`,
+			wantFailed:  true,
+			wantErrType: "tool_error",
+			wantMessage: "tool_error",
+		},
+		{
+			name:   "case variant is not structured failure",
+			result: `{"Success":false,"error":"bad input","errorType":"invalid_arguments"}`,
+		},
+		{
+			name:   "plain JSON with false is not structured failure",
+			result: `{"data":false}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotFailed, gotErrType, gotMessage := FailedToolResultForTelemetry(tt.result)
+			if gotFailed != tt.wantFailed {
+				t.Fatalf("failed = %v, want %v", gotFailed, tt.wantFailed)
+			}
+			if gotErrType != tt.wantErrType {
+				t.Fatalf("errType = %q, want %q", gotErrType, tt.wantErrType)
+			}
+			if gotMessage != tt.wantMessage {
+				t.Fatalf("message = %q, want %q", gotMessage, tt.wantMessage)
+			}
+		})
 	}
 }

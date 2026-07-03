@@ -25,11 +25,11 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/tools"
-	"github.com/sozercan/orka/internal/tracing"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
+	"github.com/orka-agents/orka/internal/tracing"
 )
 
 const queryTrue = "true"
@@ -589,19 +589,9 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "getTask", namespace, id); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
 	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "getTask", task); err != nil {
+	task, err := h.taskAccess().loadReadable(c, "getTask", namespace, id)
+	if err != nil {
 		return err
 	}
 
@@ -671,19 +661,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "getTaskLogs", namespace, id); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
 	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "getTaskLogs", task); err != nil {
+	task, err := h.taskAccess().loadReadable(c, "getTaskLogs", namespace, id)
+	if err != nil {
 		return err
 	}
 
@@ -783,19 +763,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "getTaskResult", namespace, id); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
 	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "getTaskResult", task); err != nil {
+	task, err := h.taskAccess().loadReadable(c, "getTaskResult", namespace, id)
+	if err != nil {
 		return err
 	}
 
@@ -823,19 +793,9 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "getTaskPlan", namespace, id); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
 	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "getTaskPlan", task); err != nil {
+	task, err := h.taskAccess().loadReadable(c, "getTaskPlan", namespace, id)
+	if err != nil {
 		return err
 	}
 
@@ -1575,20 +1535,8 @@ func (h *Handlers) GetTaskChildren(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	if h.contextTokenAuthorization.Enabled() {
-		ui := GetUserInfo(c)
-		if ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
-			parentTask := &corev1alpha1.Task{}
-			if err := h.client.Get(ctx, types.NamespacedName{Name: taskName, Namespace: namespace}, parentTask); err != nil {
-				if apierrors.IsNotFound(err) {
-					return fiber.NewError(fiber.StatusNotFound, "task not found")
-				}
-				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-			}
-			if err := h.authorizeContextTokenLoadedTask(c, "getTaskChildren", parentTask); err != nil {
-				return err
-			}
-		}
+	if _, err := h.taskAccess().loadReadableForContextToken(c, "getTaskChildren", namespace, taskName); err != nil {
+		return err
 	}
 
 	var taskList corev1alpha1.TaskList
@@ -1625,19 +1573,9 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "listTaskArtifacts", namespace, id); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
 	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "listTaskArtifacts", task); err != nil {
+	_, err = h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
+	if err != nil {
 		return err
 	}
 
@@ -1665,19 +1603,9 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "downloadTaskArtifact", namespace, id); err != nil {
-		return err
-	}
-
-	task := &corev1alpha1.Task{}
 	ctx := c.Context()
-	if err := h.client.Get(ctx, types.NamespacedName{Name: id, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "downloadTaskArtifact", task); err != nil {
+	_, err = h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
+	if err != nil {
 		return err
 	}
 

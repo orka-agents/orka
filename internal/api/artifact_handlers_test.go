@@ -24,9 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/store/sqlite"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 // setupTestHandlersWithArtifactStore creates Handlers backed by an in-memory
@@ -115,7 +115,7 @@ func TestUploadArtifactAllowsHarnessWrapperControlPlaneUpload(t *testing.T) {
 		Namespace: "orka-system",
 		Username:  "system:serviceaccount:orka-system:agent-harness-wrapper",
 	}
-	require.NoError(t, h.verifyHarnessWrapperArtifactUpload(context.Background(), userInfo, "default", "wrapped-task"))
+	require.NoError(t, h.internalCallerAuthorizer().verifyHarnessWrapperArtifactUpload(context.Background(), userInfo, "default", "wrapped-task"))
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, userInfo)

@@ -827,7 +827,7 @@ Plus a projected token Volume the Job will mount with audience
 this a *kontxt* subject token, not a Kubernetes bearer.
 
 **`lib/manifests.sh: render_kontxt_caller_job()`** — the valid caller. Runs
-a busybox-shaped image (use `ghcr.io/sozercan/orka-kontxt-demo:latest`,
+a busybox-shaped image (use `ghcr.io/orka-agents/orka/kontxt-demo:latest`,
 built from `hack/demos/images/kontxt-caller/`) with the literal 3-step
 loop that beat 4's grep expects:
 

@@ -15,10 +15,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/store"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -38,10 +38,7 @@ func (h *Handlers) ListTaskEvents(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "listTaskEvents", namespace, taskName); err != nil {
-		return err
-	}
-	if err := h.ensureTaskReadable(c, namespace, taskName, "listTaskEvents"); err != nil {
+	if err := h.taskAccess().ensureReadable(c, "listTaskEvents", namespace, taskName); err != nil {
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -82,10 +79,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "streamTaskEvents", namespace, taskName); err != nil {
-		return err
-	}
-	if err := h.ensureTaskReadable(c, namespace, taskName, "streamTaskEvents"); err != nil {
+	if err := h.taskAccess().ensureReadable(c, "streamTaskEvents", namespace, taskName); err != nil {
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -471,25 +465,6 @@ func (h *Handlers) writeSessionDeletedStreamComplete(
 		log.Error(err, "failed to check session existence for event stream", "namespace", namespace, "session", sessionName)
 	}
 	return true
-}
-
-func (h *Handlers) ensureTaskReadable(c fiber.Ctx, namespace, taskName, action string) error {
-	_, err := h.loadReadableTask(c, namespace, taskName, action)
-	return err
-}
-
-func (h *Handlers) loadReadableTask(c fiber.Ctx, namespace, taskName, action string) (*corev1alpha1.Task, error) {
-	task := &corev1alpha1.Task{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, action, task); err != nil {
-		return nil, err
-	}
-	return task, nil
 }
 
 func sessionNameForTask(task *corev1alpha1.Task) string {

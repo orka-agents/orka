@@ -29,6 +29,7 @@ vi.mock('@tanstack/react-router', async () => {
     },
     useNavigate: () => mockNavigate,
     useLocation: () => ({ pathname: '/tasks/smoke-task' }),
+    useSearch: () => ({ tab: 'overview' }),
   }
 })
 

@@ -28,20 +28,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/metrics"
-	"github.com/sozercan/orka/internal/taskmeta"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/taskmeta"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
 	// DefaultAIWorkerImage is the default image for AI tasks
-	DefaultAIWorkerImage = "ghcr.io/sozercan/orka/ai-worker:latest"
+	DefaultAIWorkerImage = "ghcr.io/orka-agents/orka/ai-worker:latest"
 
 	// DefaultGeneralWorkerImage is the default image for container tasks
-	DefaultGeneralWorkerImage = "ghcr.io/sozercan/orka/general-worker:latest"
+	DefaultGeneralWorkerImage = "ghcr.io/orka-agents/orka/general-worker:latest"
 
 	// DefaultInitImage is the default image for init containers
 	DefaultInitImage = "busybox:1.37"
@@ -237,6 +237,26 @@ func envFlagEnabled(name string) bool {
 
 func agentHasFallbackProviders(agent *corev1alpha1.Agent) bool {
 	return agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0
+}
+
+var (
+	defaultTaskResourceCPURequest    = *resource.NewMilliQuantity(100, resource.DecimalSI)
+	defaultTaskResourceMemoryRequest = *resource.NewQuantity(512*1024*1024, resource.BinarySI)
+	defaultTaskResourceCPULimit      = *resource.NewQuantity(1, resource.DecimalSI)
+	defaultTaskResourceMemoryLimit   = *resource.NewQuantity(2*1024*1024*1024, resource.BinarySI)
+)
+
+func defaultTaskResourceRequirements() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    defaultTaskResourceCPURequest,
+			corev1.ResourceMemory: defaultTaskResourceMemoryRequest,
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    defaultTaskResourceCPULimit,
+			corev1.ResourceMemory: defaultTaskResourceMemoryLimit,
+		},
+	}
 }
 
 func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
@@ -551,16 +571,7 @@ func (b *JobBuilder) buildResources(task *corev1alpha1.Task, agent *corev1alpha1
 	// test suites — 512Mi was too small for `go test ./...` on medium repos
 	// and silently OOMKilled workers. Agents/tasks can still override via
 	// agent.spec.resources or task.spec.resources (checked above).
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("512Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1"),
-			corev1.ResourceMemory: resource.MustParse("2Gi"),
-		},
-	}
+	return defaultTaskResourceRequirements()
 }
 
 // buildEnvVars builds the environment variables for the container

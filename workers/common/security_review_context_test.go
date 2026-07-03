@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sozercan/orka/internal/security"
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestPrepareSecurityReviewContextWritesManifestAndAppendsPrompt(t *testing.T) {

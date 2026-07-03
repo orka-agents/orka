@@ -107,6 +107,10 @@ Session streams do not close on task terminal events because a session can have 
 
 ## Task trace API
 
+This is Orka's event-derived task trace read model. It is separate from
+OpenTelemetry distributed traces: `orka task trace` reads stored execution
+events through the Orka API, not your OTLP collector/backend.
+
 ```http
 GET /api/v1/tasks/:id/trace?namespace=<ns>
 ```

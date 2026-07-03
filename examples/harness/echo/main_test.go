@@ -4,14 +4,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/sozercan/orka/internal/harness"
+	"github.com/orka-agents/orka/internal/harness"
 )
 
 func TestEchoHarnessCancelEndpointMatchesCapabilities(t *testing.T) {
-	s := &server{turns: map[harness.HarnessTurnID]harness.StartTurnRequest{}}
+	s := &server{runtimeName: "orka-example-echo-harness", turns: map[harness.HarnessTurnID]harness.StartTurnRequest{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.health)
 	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)
@@ -62,5 +63,38 @@ func TestEchoHarnessCancelEndpointMatchesCapabilities(t *testing.T) {
 		cancelled.TurnID != request.TurnID ||
 		cancelled.RuntimeSessionID != request.RuntimeSessionID {
 		t.Fatalf("CancelTurn() = %#v", cancelled)
+	}
+}
+
+func TestEchoHarnessRejectsDuplicateStartTurn(t *testing.T) {
+	s := &server{runtimeName: "orka-example-echo-harness", turns: map[harness.HarnessTurnID]harness.StartTurnRequest{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc(harness.HealthPath, s.health)
+	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)
+	mux.HandleFunc(harness.TurnsPath, s.startTurn)
+	mux.HandleFunc(harness.TurnsPath+"/", s.turn)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	client, err := harness.NewClient(srv.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	request := harness.StartTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task",
+		SessionName:      "session",
+		RuntimeSessionID: "runtime",
+		TurnID:           "turn",
+		CorrelationID:    "corr",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("first StartTurn() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "turn already exists") {
+		t.Fatalf("second StartTurn() error = %v, want duplicate rejection", err)
 	}
 }

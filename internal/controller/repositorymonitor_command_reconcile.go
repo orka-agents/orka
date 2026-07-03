@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/store"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const repositoryMonitorTriggerLabelCommand = "github_label_command"

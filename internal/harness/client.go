@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/events"
+	"github.com/orka-agents/orka/internal/events"
 )
 
 const maxFetchTurnOutputBytes = 50 << 20

@@ -279,7 +279,8 @@ Common query parameters:
 - `cursor` — store cursor for `GET /api/v1/security/repositories/:name/scans`, `GET /api/v1/security/repositories/:name/slices`, `GET /api/v1/security/repositories/:name/dropped-findings`, and `GET /api/v1/security/repositories/:name/findings`.
 - `severity`, `validationStatus`, `state`, `sliceID`, `category` — filters for `GET /api/v1/security/repositories/:name/findings`.
 - `status` — filter for `GET /api/v1/security/repositories/:name/slices`.
-- `scanRunID`, `sliceID` — filters for `GET /api/v1/security/repositories/:name/dropped-findings`.
+- `scanRunID`, `sliceID`, `layer` — filters for `GET /api/v1/security/repositories/:name/dropped-findings`. `layer` is one of `validation`, `filter`, or `cap`.
+- `reason` — exact dropped-finding reason filter; use `reason=contains=<text>` for substring matching.
 - `recommended=true` — filters findings to recommended remediation candidates.
 
 ### Create Repository Scan
@@ -298,6 +299,11 @@ Common query parameters:
     "ref": "v1.2.3",
     "schedule": "0 2 * * *",
     "validationMode": "light",
+    "validationMaxFindingsPerRun": 8,
+    "validationMinSeverity": "medium",
+    "validationMinConfidence": "medium",
+    "customScanInstructionsRef": {"name": "repo-security-policy", "key": "policy"},
+    "falsePositivePolicyRef": {"name": "repo-security-policy", "key": "false-positives"},
     "analysisAgentRef": {"name": "security-reviewer"}
   }
 }
@@ -306,6 +312,8 @@ Common query parameters:
 **Response (201):** The created `RepositoryScan` resource.
 
 Required fields are `name`, `spec.repoURL`, and `spec.analysisAgentRef.name`. The API defaults or infers provider, owner, repository, branch, and validation mode where possible. Set `spec.ref` to pin scan tasks to a specific tag, branch, or commit SHA; when `ref` is set without `branch`, scan workspaces check out that ref directly instead of forcing the default `main` branch.
+
+The request accepts the same `RepositoryScan` spec fields as the CRD, including automatic validation tuning (`validationMaxFindingsPerRun`, `validationMinSeverity`, `validationMinConfidence`) and ConfigMap-backed scanner policy refs (`customScanInstructionsRef`, `falsePositivePolicyRef`). Policy ConfigMaps must be in the same namespace and opt in with `orka.ai/security-policy: "true"` as a label or annotation.
 
 ### Security Findings Workflow
 
@@ -322,7 +330,7 @@ Review slice and dropped-output inspection:
 
 1. List slices with `GET /api/v1/security/repositories/:name/slices?namespace=default`.
 2. Inspect one slice with `GET /api/v1/security/repositories/:name/slices/:sliceID?namespace=default`.
-3. List rejected v2 model output with `GET /api/v1/security/repositories/:name/dropped-findings?namespace=default&scanRunID=scan_...`.
+3. List rejected v2 model output with `GET /api/v1/security/repositories/:name/dropped-findings?namespace=default&scanRunID=scan_...&layer=filter&reason=contains=rate-limit`.
 
 ## Repository Monitors
 

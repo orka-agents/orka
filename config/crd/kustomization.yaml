@@ -5,6 +5,7 @@ resources:
 - bases/core.orka.ai_tasks.yaml
 - bases/core.orka.ai_tools.yaml
 - bases/core.orka.ai_agents.yaml
+- bases/core.orka.ai_agentruntimes.yaml
 - bases/core.orka.ai_providers.yaml
 - bases/core.orka.ai_skills.yaml
 - bases/core.orka.ai_repositoryscans.yaml

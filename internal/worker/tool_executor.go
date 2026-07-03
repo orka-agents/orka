@@ -26,11 +26,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/workerenv"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -50,6 +50,17 @@ const (
 	mcpInitializeMethod              = "initialize"
 	mcpInitializedNotificationMethod = "notifications/initialized"
 	toolIdempotencyKeyHeader         = "Idempotency-Key"
+	toolHTTPResponseBodyLimit        = 10 << 20
+)
+
+var (
+	executeToolOperationAttr = attribute.String(genai.AttrOperationName, genai.OperationExecuteTool)
+	extensionToolTypeAttr    = attribute.String(genai.AttrToolType, genai.ToolTypeExtension)
+
+	executeToolDurationOptions = []metric.Float64HistogramOption{
+		metric.WithUnit(genai.UnitSeconds),
+		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+	}
 )
 
 type toolCallIDContextKey struct{}
@@ -104,34 +115,59 @@ func NewToolExecutor() *ToolExecutor {
 
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
-	start := time.Now()
+	if toolExecutorTelemetryDisabled() {
+		return e.executeToolRequest(ctx, tool, args)
+	}
+
 	toolName := toolTelemetryName(tool)
-	attrs := []attribute.KeyValue{
-		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-		attribute.String(genai.AttrToolName, toolName),
-		attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
+	meterActive := tracing.GlobalMeterProviderActive()
+	var start time.Time
+	if meterActive {
+		start = time.Now()
 	}
-	attrs = append(attrs, tracing.ToolAttributes(toolName, tracing.ToolKindHTTP, -1, "")...)
-	attrs = append(attrs, tracing.TaskAttributes(os.Getenv(workerenv.TaskName), e.namespace, e.namespace, "", "")...)
-	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
-		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+
+	tracer := tracing.GenAITracer(genai.InstrumentationName)
+	spanName := genai.OperationExecuteTool + " " + toolName
+	deferStartAttributes := tracing.IsDefaultGlobalTracerProvider(tracing.GlobalTracerProvider())
+	var span trace.Span
+	if deferStartAttributes {
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindClient))
+	} else {
+		attrs := toolExecutorSpanAttributes(ctx, e.namespace, toolName)
+		ctx, span = tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	}
-	ctx, span := tracing.GenAITracer(genai.InstrumentationName).Start(ctx, genai.OperationExecuteTool+" "+toolName, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	spanRecording := span.IsRecording()
+	if spanRecording && deferStartAttributes {
+		span.SetAttributes(toolExecutorSpanAttributes(ctx, e.namespace, toolName)...)
+	}
+	if !spanRecording && !meterActive {
+		result, err = e.executeToolRequest(ctx, tool, args)
+		span.End()
+		return result, err
+	}
+
 	defer func() {
 		resultSize := len(result)
-		span.SetAttributes(tracing.ToolAttributes("", "", resultSize, "")...)
-		metricAttrs := []attribute.KeyValue{
-			attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-			attribute.String(genai.AttrToolName, toolName),
-			attribute.String(genai.AttrToolType, genai.ToolTypeExtension),
-		}
 		if err != nil {
 			errType := toolExecutionErrorType(err)
-			span.SetStatus(codes.Error, errType)
-			span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-			metricAttrs = append(metricAttrs, attribute.String(genai.AttrErrorType, errType))
+			if spanRecording {
+				span.SetStatus(codes.Error, errType)
+				span.SetAttributes(
+					attribute.Int(tracing.AttrToolResultSizeBytes, resultSize),
+					attribute.String(genai.AttrErrorType, errType),
+				)
+			}
+			if meterActive {
+				recordExternalToolDuration(ctx, time.Since(start).Seconds(), executeToolOperationAttr, attribute.String(genai.AttrToolName, toolName), extensionToolTypeAttr, attribute.String(genai.AttrErrorType, errType))
+			}
+		} else {
+			if spanRecording {
+				span.SetAttributes(attribute.Int(tracing.AttrToolResultSizeBytes, resultSize))
+			}
+			if meterActive {
+				recordExternalToolDuration(ctx, time.Since(start).Seconds(), executeToolOperationAttr, attribute.String(genai.AttrToolName, toolName), extensionToolTypeAttr)
+			}
 		}
-		recordExternalToolDuration(ctx, time.Since(start).Seconds(), metricAttrs...)
 		span.End()
 	}()
 
@@ -140,10 +176,51 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 		return "", err
 	}
 	if prepared.request != nil {
-		span.SetAttributes(httpToolRequestAttributes(prepared.request)...)
+		if spanRecording {
+			span.SetAttributes(httpToolRequestAttributes(prepared.request)...)
+		}
 		injectTraceHeaders(ctx, prepared.request.Header)
 	}
 
+	return e.executePreparedToolRequest(ctx, prepared)
+}
+
+func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, 9)
+	attrs = append(attrs,
+		executeToolOperationAttr,
+		attribute.String(genai.AttrToolName, toolName),
+		extensionToolTypeAttr,
+		attribute.String(tracing.AttrToolName, toolName),
+		attribute.String(tracing.AttrToolKind, tracing.ToolKindHTTP),
+	)
+	if taskName := os.Getenv(workerenv.TaskName); taskName != "" {
+		attrs = append(attrs, attribute.String(tracing.AttrTaskID, taskName))
+	}
+	if namespace != "" {
+		attrs = append(attrs,
+			attribute.String(tracing.AttrTaskNamespace, namespace),
+			attribute.String(tracing.AttrTenant, namespace),
+		)
+	}
+	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	return attrs
+}
+
+func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
+	prepared, err := e.prepareRequest(ctx, tool, args)
+	if err != nil {
+		return "", err
+	}
+	if prepared.request != nil {
+		injectTraceHeaders(ctx, prepared.request.Header)
+	}
+	return e.executePreparedToolRequest(ctx, prepared)
+}
+
+func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
 	// Configure timeout
 	httpClient := e.client
 	if prepared.httpConfig.Timeout != nil {
@@ -177,12 +254,15 @@ func ToolRequestWasAttempted(err error) bool {
 	return errors.As(err, &attempted)
 }
 
+func toolExecutorTelemetryDisabled() bool {
+	return tracing.GlobalTracerProviderExplicitNoop() && !tracing.GlobalMeterProviderActive()
+}
+
 func recordExternalToolDuration(ctx context.Context, seconds float64, attrs ...attribute.KeyValue) {
 	meter := tracing.GenAIMeter(genai.InstrumentationName)
 	histogram, err := meter.Float64Histogram(
 		genai.MetricExecuteToolDuration,
-		metric.WithUnit(genai.UnitSeconds),
-		metric.WithExplicitBucketBoundaries(genai.ToolDurationBuckets...),
+		executeToolDurationOptions...,
 	)
 	if err != nil {
 		return
@@ -213,8 +293,10 @@ func toolExecutionErrorType(err error) string {
 }
 
 func toolTelemetryName(tool *corev1alpha1.Tool) string {
-	if tool != nil && strings.TrimSpace(tool.Name) != "" {
-		return strings.TrimSpace(tool.Name)
+	if tool != nil {
+		if name := strings.TrimSpace(tool.Name); name != "" {
+			return name
+		}
 	}
 	return "http_tool"
 }
@@ -223,7 +305,7 @@ func httpToolRequestAttributes(req *http.Request) []attribute.KeyValue {
 	if req == nil {
 		return nil
 	}
-	attrs := []attribute.KeyValue{}
+	attrs := make([]attribute.KeyValue, 0, 3)
 	if req.Method != "" {
 		attrs = append(attrs, attribute.String("http.request.method", req.Method))
 	}
@@ -252,7 +334,7 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	respBody, err := readLimitedHTTPResponseBody(resp.Body, resp.ContentLength)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -260,6 +342,17 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 		return nil, fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))
 	}
 	return respBody, nil
+}
+
+func readLimitedHTTPResponseBody(body io.Reader, contentLength int64) ([]byte, error) {
+	limited := io.LimitReader(body, toolHTTPResponseBodyLimit)
+	if contentLength > 0 && contentLength <= toolHTTPResponseBodyLimit {
+		var respBody bytes.Buffer
+		respBody.Grow(int(contentLength))
+		_, err := respBody.ReadFrom(limited)
+		return respBody.Bytes(), err
+	}
+	return io.ReadAll(limited)
 }
 
 type toolIdempotencyKeyContextKey struct{}
@@ -653,7 +746,7 @@ func (e *ToolExecutor) terminateMCPSession(ctx context.Context, httpClient *http
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	respBody, err := readLimitedHTTPResponseBody(resp.Body, resp.ContentLength)
 	if err != nil {
 		return fmt.Errorf("failed to read MCP session termination response: %w", err)
 	}
@@ -725,7 +818,7 @@ func readMCPHTTPResponseBody(resp *http.Response, expectedResponseID string) ([]
 	if isMCPEventStream(resp.Header.Get("Content-Type")) && strings.TrimSpace(expectedResponseID) != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return readMCPEventStreamResponse(resp.Body, expectedResponseID)
 	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	respBody, err := readLimitedHTTPResponseBody(resp.Body, resp.ContentLength)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +906,7 @@ func isMCPEventStream(contentType string) bool {
 
 func readMCPEventStreamResponse(body io.Reader, expectedResponseID string) ([]byte, error) {
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
+	scanner.Buffer(make([]byte, 0, 64*1024), toolHTTPResponseBodyLimit)
 	totalDataBytes := 0
 	var data []string
 	flush := func() []byte {
@@ -842,7 +935,7 @@ func readMCPEventStreamResponse(body io.Reader, expectedResponseID string) ([]by
 		if after, ok := strings.CutPrefix(line, "data:"); ok {
 			after = strings.TrimPrefix(after, " ")
 			totalDataBytes += len(after)
-			if totalDataBytes > 10<<20 {
+			if totalDataBytes > toolHTTPResponseBodyLimit {
 				return nil, fmt.Errorf("MCP event stream response exceeded 10MB limit")
 			}
 			data = append(data, after)
@@ -859,7 +952,7 @@ func readMCPEventStreamResponse(body io.Reader, expectedResponseID string) ([]by
 
 func firstSSEData(body []byte) []byte {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
+	scanner.Buffer(make([]byte, 0, 64*1024), toolHTTPResponseBodyLimit)
 	var data []string
 	flush := func() []byte {
 		if len(data) == 0 {
@@ -1000,15 +1093,18 @@ func toolAuthInject(httpConfig corev1alpha1.HTTPExecution) string {
 }
 
 func interpolateToolURL(url string, params map[string]any) string {
-	interpolatedKeys := map[string]bool{}
+	if !strings.Contains(url, "{{") {
+		return url
+	}
+	var interpolatedKeys []string
 	for key, val := range params {
 		placeholder := "{{" + key + "}}"
 		if strings.Contains(url, placeholder) {
 			url = strings.ReplaceAll(url, placeholder, neturl.PathEscape(fmt.Sprintf("%v", val)))
-			interpolatedKeys[key] = true
+			interpolatedKeys = append(interpolatedKeys, key)
 		}
 	}
-	for key := range interpolatedKeys {
+	for _, key := range interpolatedKeys {
 		delete(params, key)
 	}
 	return url

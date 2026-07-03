@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api-client'
+import { ApiError, api } from '@/lib/api-client'
 import { executionEventApiPath } from '@/lib/execution-events'
 import { useUIStore } from '@/stores/ui'
 import type {
@@ -65,13 +65,25 @@ export function useSessionEvents(sessionId: string, enabled = true) {
   })
 }
 
-export function useTaskTrace(taskId: string, enabled = true, taskUid?: string) {
+export function useTaskTrace(
+  taskId: string,
+  enabled = true,
+  taskUid?: string,
+  refetchInterval: number | false = false,
+) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
     queryKey: ['taskTrace', taskId, namespace, taskUid ?? ''],
     queryFn: () =>
       api.get<TaskTrace>(executionEventApiPath.taskTrace(taskId), { namespace }),
     enabled: enabled && !!taskId,
+    retry: (failureCount, error) =>
+      !(error instanceof ApiError && error.status === 501) && failureCount < 1,
+    retryDelay: 100,
+    refetchInterval: (query) =>
+      query.state.error instanceof ApiError && query.state.error.status === 501
+        ? false
+        : refetchInterval,
   })
 }
 
@@ -99,7 +111,9 @@ export function useTaskApprovals(
         namespace,
       }),
     enabled: enabled && !!taskId,
+    retry: false,
     refetchInterval: (query) => {
+      if (query.state.error instanceof ApiError && query.state.error.status === 501) return false
       if (!pollIntervalMs) return false
       // A settled task won't change a pending approval (it's read-only), so stop
       // polling instead of refetching the same pending row indefinitely.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func defaultMonitorLimit(limit int) int {

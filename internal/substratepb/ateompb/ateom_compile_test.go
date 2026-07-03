@@ -3,7 +3,7 @@ package ateompb_test
 import (
 	"testing"
 
-	ateompb "github.com/sozercan/orka/internal/substratepb/ateompb"
+	ateompb "github.com/orka-agents/orka/internal/substratepb/ateompb"
 	"google.golang.org/grpc"
 )
 

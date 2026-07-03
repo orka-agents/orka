@@ -1,8 +1,8 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-AI_WORKER_IMG ?= ghcr.io/sozercan/orka/ai-worker:latest
-GENERAL_WORKER_IMG ?= ghcr.io/sozercan/orka/general-worker:latest
-HARNESS_WRAPPER_IMG ?= ghcr.io/sozercan/orka/agent-harness-wrapper:latest
+AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
+GENERAL_WORKER_IMG ?= ghcr.io/orka-agents/orka/general-worker:latest
+HARNESS_WRAPPER_IMG ?= ghcr.io/orka-agents/orka/agent-harness-wrapper:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -175,8 +175,8 @@ demo-cluster-up-all-down: ## Tear down the unified demo cluster
 
 .PHONY: demo-images
 demo-images: ## Build + kind-load demo-only images (kontxt-caller + sandbox runtime)
-	docker build -t docker.io/sozercan/orka-kontxt-caller:demo hack/demos/images/kontxt-caller
-	kind load docker-image docker.io/sozercan/orka-kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
+	docker build -t ghcr.io/orka-agents/orka/kontxt-caller:demo hack/demos/images/kontxt-caller
+	kind load docker-image ghcr.io/orka-agents/orka/kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
 	docker build -t orka-sandbox-runtime:demo -f hack/demos/images/sandbox-runtime/Dockerfile .
 	kind load docker-image orka-sandbox-runtime:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
 
@@ -298,7 +298,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	cd config/harness-wrapper && "$(KUSTOMIZE)" edit set image ghcr.io/sozercan/orka/agent-harness-wrapper=${HARNESS_WRAPPER_IMG}
+	cd config/harness-wrapper && "$(KUSTOMIZE)" edit set image ghcr.io/orka-agents/orka/agent-harness-wrapper=${HARNESS_WRAPPER_IMG}
 	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	@if ! "$(KUBECTL)" -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then \
 		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \

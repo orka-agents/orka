@@ -12,13 +12,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/sozercan/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const requirePushBranchEnvVar = workerenv.RequirePushBranch
@@ -62,8 +63,8 @@ func PrepareWorkspace(workDir string) error {
 	saToken := workerServiceAccountToken()
 
 	// Fetch the prior task's result.
-	url := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", controllerURL, priorTask, ns)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	resultURL := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", controllerURL, priorTask, ns)
+	req, err := http.NewRequest(http.MethodGet, resultURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request for prior task result: %w", err)
 	}
@@ -140,12 +141,9 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
 		return nil
 	}
-	baseBranch := strings.TrimSpace(cfg.PRBaseBranch)
-	baseRepo := strings.TrimSpace(cfg.PRBaseRepo)
-	baseSHA := strings.TrimSpace(cfg.PRBaseSHA)
-	fetchSource := gitOriginRemote
-	if baseRepo != "" {
-		fetchSource = baseRepo
+	baseBranch, baseRepo, baseSHA, fetchSource, err := pullRequestReviewGitContext(cfg)
+	if err != nil {
+		return err
 	}
 	baseBranchRef := pullRequestReviewBaseBranchRef(fetchSource, baseBranch)
 	baseRef := baseSHA
@@ -266,6 +264,29 @@ Truncation: %s
 	return nil
 }
 
+func pullRequestReviewGitContext(cfg *AgentConfig) (baseBranch, baseRepo, baseSHA, fetchSource string, err error) {
+	baseBranch, err = safeGitBranchName(cfg.PRBaseBranch)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("invalid PR base branch: %w", err)
+	}
+	baseRepo = strings.TrimSpace(cfg.PRBaseRepo)
+	if baseRepo != "" {
+		baseRepo, err = safeGitRemote(baseRepo)
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("invalid PR base repo: %w", err)
+		}
+	}
+	baseSHA = strings.TrimSpace(cfg.PRBaseSHA)
+	if baseSHA != "" && !isHexGitObjectID(baseSHA) {
+		return "", "", "", "", fmt.Errorf("invalid PR base SHA %q", shortGitSHA(baseSHA))
+	}
+	fetchSource = gitOriginRemote
+	if baseRepo != "" {
+		fetchSource = baseRepo
+	}
+	return baseBranch, baseRepo, baseSHA, fetchSource, nil
+}
+
 func pullRequestReviewBaseBranchRef(fetchSource, baseBranch string) string {
 	if fetchSource == gitOriginRemote {
 		return "refs/remotes/origin/" + baseBranch
@@ -274,6 +295,15 @@ func pullRequestReviewBaseBranchRef(fetchSource, baseBranch string) string {
 }
 
 func fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef string) error {
+	var err error
+	baseBranch, err = safeGitBranchName(baseBranch)
+	if err != nil {
+		return fmt.Errorf("invalid PR base branch: %w", err)
+	}
+	fetchSource, err = safeGitRemote(fetchSource)
+	if err != nil {
+		return fmt.Errorf("invalid PR base repo: %w", err)
+	}
 	refspec := "+refs/heads/" + baseBranch + ":" + baseRef
 	if _, err := execGit(workDir, "fetch", fetchSource, refspec); err != nil {
 		return fmt.Errorf("fetch PR base branch %q failed: %w", baseBranch, err)
@@ -282,6 +312,15 @@ func fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef 
 }
 
 func ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef string) error {
+	var err error
+	fetchSource, err = safeGitRemote(fetchSource)
+	if err != nil {
+		return fmt.Errorf("invalid PR base repo: %w", err)
+	}
+	baseBranch, err = safeGitBranchName(baseBranch)
+	if err != nil {
+		return fmt.Errorf("invalid PR base branch: %w", err)
+	}
 	if pullRequestReviewMergeBaseExists(workDir, baseRef) {
 		return nil
 	}
@@ -365,6 +404,13 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	pushBranch := os.Getenv(workerenv.PushBranch)
 	requirePushBranch := strings.EqualFold(os.Getenv(requirePushBranchEnvVar), "true")
 	allowEmptyPushBranch := strings.EqualFold(os.Getenv(workerenv.AllowEmptyPushBranch), "true")
+	var pushBranchErr error
+	if strings.TrimSpace(pushBranch) != "" {
+		pushBranch, pushBranchErr = safeGitBranchName(pushBranch)
+		if pushBranchErr != nil {
+			return nil, fmt.Errorf("invalid %s: %w", workerenv.PushBranch, pushBranchErr)
+		}
+	}
 	if requirePushBranch && pushBranch == "" {
 		return nil, fmt.Errorf("%s is true but %s is empty", requirePushBranchEnvVar, workerenv.PushBranch)
 	}
@@ -535,8 +581,16 @@ func headContainsRemoteBranch(workDir, branch string) (bool, error) {
 }
 
 func headContainsBaseSHA(workDir, baseSHA, baseRepo string) (bool, error) {
+	if !isHexGitObjectID(strings.TrimSpace(baseSHA)) {
+		return false, fmt.Errorf("invalid PR base SHA %q", shortGitSHA(baseSHA))
+	}
 	if !commitExists(workDir, baseSHA) {
 		if repo := strings.TrimSpace(baseRepo); repo != "" {
+			var err error
+			repo, err = safeGitRemote(repo)
+			if err != nil {
+				return false, fmt.Errorf("invalid PR base repo: %w", err)
+			}
 			if _, err := execGit(workDir, "fetch", "--depth=1", repo, baseSHA); err != nil && !commitExists(workDir, baseSHA) {
 				return false, fmt.Errorf("fetching PR base SHA %s failed: %w", shortGitSHA(baseSHA), err)
 			}
@@ -555,6 +609,9 @@ func commitExists(workDir, sha string) bool {
 	if strings.TrimSpace(sha) == "" {
 		return false
 	}
+	if !isHexGitObjectID(sha) {
+		return false
+	}
 	_, err := execGit(workDir, "cat-file", "-e", sha+"^{commit}")
 	return err == nil
 }
@@ -568,8 +625,8 @@ func shortGitSHA(sha string) string {
 }
 
 func fetchRemoteBranch(workDir, branch string) (string, bool, error) {
-	branch = strings.TrimSpace(branch)
-	if branch == "" {
+	branch, err := safeGitBranchName(branch)
+	if err != nil {
 		return "", false, nil
 	}
 	ref := "refs/heads/" + branch
@@ -589,6 +646,15 @@ func fetchRemoteBranch(workDir, branch string) (string, bool, error) {
 }
 
 func waitForRemoteBranchVisibilityWithGit(workDir, remote, branch string, timeout time.Duration) error {
+	var err error
+	remote, err = safeGitRemote(remote)
+	if err != nil {
+		return err
+	}
+	branch, err = safeGitBranchName(branch)
+	if err != nil {
+		return err
+	}
 	deadline := time.Now().Add(timeout)
 	ref := "refs/heads/" + branch
 	var lastErr error
@@ -619,9 +685,10 @@ func resetReservedWorkspacePaths(workDir string) {
 
 // execGit runs a git command in the given directory and returns combined output.
 func execGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
-	cmd.Dir = dir
-	cmd.SysProcAttr = gitCommandSysProcAttr()
+	cmd, err := newWorkspaceGitCommand(dir, args...)
+	if err != nil {
+		return "", err
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -631,15 +698,75 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	stdout.limit = limit
 	var stderr limitedOutputBuffer
 	stderr.limit = 64 * 1024
-	cmd := exec.Command("git", gitSafeDirectoryArgs(dir, args...)...)
-	cmd.Dir = dir
-	cmd.SysProcAttr = gitCommandSysProcAttr()
+	cmd, err := newWorkspaceGitCommand(dir, args...)
+	if err != nil {
+		return "", false, err
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return stdout.String(), stdout.truncated, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return stdout.String(), stdout.truncated, nil
+}
+
+func newWorkspaceGitCommand(dir string, args ...string) (*exec.Cmd, error) {
+	if err := validateGitInvocation(args); err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("git")
+	cmd.Args = append([]string{"git"}, gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Dir = dir
+	cmd.SysProcAttr = gitCommandSysProcAttr()
+	return cmd, nil
+}
+
+func validateGitInvocation(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing git subcommand")
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("invalid git subcommand %q", args[0])
+	}
+	for _, arg := range args {
+		if strings.ContainsAny(arg, "\x00\r\n") {
+			return fmt.Errorf("invalid git argument")
+		}
+	}
+	return nil
+}
+
+func safeGitBranchName(branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, "/") ||
+		strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".") {
+		return "", fmt.Errorf("invalid branch name")
+	}
+	if strings.ContainsAny(branch, "\x00\r\n ~^:?*[\\") || strings.Contains(branch, "..") ||
+		strings.Contains(branch, "//") || strings.Contains(branch, "@{") {
+		return "", fmt.Errorf("invalid branch name")
+	}
+	return branch, nil
+}
+
+func safeGitRemote(remote string) (string, error) {
+	remote = strings.TrimSpace(remote)
+	if remote == "" || strings.HasPrefix(remote, "-") || strings.ContainsAny(remote, "\x00\r\n") {
+		return "", fmt.Errorf("invalid git remote")
+	}
+	if remote == gitOriginRemote {
+		return remote, nil
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil || parsed.Scheme == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("invalid git remote")
+	}
+	switch parsed.Scheme {
+	case "https", "ssh", "git", "file":
+		return remote, nil
+	default:
+		return "", fmt.Errorf("unsupported git remote scheme %q", parsed.Scheme)
+	}
 }
 
 type limitedOutputBuffer struct {

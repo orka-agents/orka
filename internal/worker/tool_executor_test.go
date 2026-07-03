@@ -26,12 +26,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/contexttoken"
-	"github.com/sozercan/orka/internal/tracing"
-	"github.com/sozercan/orka/internal/tracing/genai"
-	"github.com/sozercan/orka/internal/tracing/testutil"
-	"github.com/sozercan/orka/internal/workerenv"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/tracing"
+	"github.com/orka-agents/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/workerenv"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -131,6 +131,67 @@ func TestToolExecutor_Execute_PreservesLargeJSONIntegers(t *testing.T) {
 	}
 	if strings.Contains(receivedBody, `9007199254740992`) {
 		t.Fatalf("request body = %s, large integer was rounded", receivedBody)
+	}
+}
+
+type zeroLengthRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f zeroLengthRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestToolExecutor_Execute_CustomTransportReadsZeroContentLengthBody(t *testing.T) {
+	executor := &ToolExecutor{
+		client: &http.Client{Transport: zeroLengthRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: "http://tool.test"},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("Execute() = %q, want response body", result)
+	}
+}
+
+func TestToolExecutor_Execute_CustomTransportAllowsEmptyBodyWithContentLength(t *testing.T) {
+	executor := &ToolExecutor{
+		client: &http.Client{Transport: zeroLengthRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader(``)),
+				ContentLength: 42,
+			}, nil
+		})},
+		namespace:  "default",
+		secretPath: "/secrets/tools",
+	}
+	tool := &corev1alpha1.Tool{
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{URL: "http://tool.test"},
+		},
+	}
+
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != "" {
+		t.Fatalf("Execute() = %q, want empty response body", result)
 	}
 }
 

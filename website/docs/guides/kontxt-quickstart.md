@@ -378,7 +378,7 @@ spec:
             - name: TASK_NAME
               value: kontxt-mit-license-check
             - name: REPO_URL
-              value: https://github.com/sozercan/orka.git
+              value: https://github.com/orka-agents/orka.git
           command:
             - /bin/sh
             - -c
@@ -423,7 +423,7 @@ spec:
               : "${ORKA_TRANSACTION_ID:?missing transaction id}"
               test "${ORKA_TRANSACTION_PROFILE:-}" = kontxt
 
-              repo="${REPO_URL:-https://github.com/sozercan/orka.git}"
+              repo="${REPO_URL:-https://github.com/orka-agents/orka.git}"
               export HOME=/tmp
               workdir="$(mktemp -d)"
               git clone --depth 1 "${repo}" "${workdir}" >/dev/null 2>&1
@@ -534,7 +534,7 @@ task=kontxt-mit-license-check
 transactionID=txn-...
 3/3 wait for the Orka worker and print its result
 task phase=Succeeded
-MIT license check passed for https://github.com/sozercan/orka.git in transaction txn-...
+MIT license check passed for https://github.com/orka-agents/orka.git in transaction txn-...
 ```
 
 The caller Job Pod and worker Pod are separate:

@@ -65,7 +65,7 @@ The workflow is model-free and secret-free. It generates the webhook secret duri
 Run the same validation locally with:
 
 ```bash
-GITHUB_LABEL_TRIGGER_TARGET_REPO_URL=https://github.com/sozercan/orka \
+GITHUB_LABEL_TRIGGER_TARGET_REPO_URL=https://github.com/orka-agents/orka \
 GITHUB_LABEL_TRIGGER_TARGET_NUMBER=1 \
 bash scripts/live-github-label-trigger-e2e.sh
 ```

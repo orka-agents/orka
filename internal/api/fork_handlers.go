@@ -22,12 +22,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	corev1alpha1 "github.com/sozercan/orka/api/v1alpha1"
-	"github.com/sozercan/orka/internal/events"
-	forkcontext "github.com/sozercan/orka/internal/fork"
-	"github.com/sozercan/orka/internal/labels"
-	"github.com/sozercan/orka/internal/store"
-	"github.com/sozercan/orka/internal/tracing"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
+	forkcontext "github.com/orka-agents/orka/internal/fork"
+	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tracing"
 )
 
 type ForkTaskRequest struct {
@@ -53,7 +53,8 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenTaskRead(c, "forkTask", namespace, sourceName); err != nil {
+	access := h.taskAccess()
+	if err := access.authorizeReadable(c, "forkTask", namespace, sourceName); err != nil {
 		return err
 	}
 	if h.executionEventStore == nil {
@@ -67,14 +68,8 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		}
 	}
 
-	source := &corev1alpha1.Task{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: sourceName, Namespace: namespace}, source); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "task not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
-	}
-	if err := h.authorizeContextTokenLoadedTask(c, "forkTask", source); err != nil {
+	source, err := access.loadAuthorized(c, "forkTask", namespace, sourceName)
+	if err != nil {
 		return err
 	}
 

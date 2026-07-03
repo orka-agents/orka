@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/sozercan/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -593,26 +594,39 @@ func openRepoRegularFile(root, repoPath string) (*os.File, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	fullPath := filepath.Join(cleanRoot, filepath.FromSlash(repoPath))
-	cleanPath, err := filepath.Abs(fullPath)
+	localPath, err := localRepoFilePath(repoPath)
 	if err != nil {
 		return nil, 0, err
 	}
-	if cleanPath != cleanRoot && !strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator)) {
-		return nil, 0, fmt.Errorf("path escapes root")
-	}
-	info, err := os.Lstat(cleanPath)
+	rootHandle, err := os.OpenRoot(cleanRoot)
 	if err != nil {
 		return nil, 0, err
 	}
-	if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	defer rootHandle.Close() //nolint:errcheck
+	info, err := rootHandle.Lstat(localPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, 0, fmt.Errorf("not a regular file")
 	}
-	file, err := os.Open(cleanPath)
+	file, err := rootHandle.Open(localPath)
 	if err != nil {
 		return nil, 0, err
 	}
 	return file, int(info.Size()), nil
+}
+
+func localRepoFilePath(repoPath string) (string, error) {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" || repoPath == "." || !fs.ValidPath(repoPath) {
+		return "", fmt.Errorf("invalid repository path")
+	}
+	localPath, err := filepath.Localize(repoPath)
+	if err != nil {
+		return "", err
+	}
+	return localPath, nil
 }
 
 func numberedExcerpt(content string, maxBytes int) (string, int, bool) {

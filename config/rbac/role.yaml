@@ -145,6 +145,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentruntimes
   - agents
   - providers
   - repositorymonitors
@@ -164,6 +165,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentruntimes/finalizers
   - agents/finalizers
   - providers/finalizers
   - repositorymonitors/finalizers
@@ -177,6 +179,7 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentruntimes/status
   - agents/status
   - providers/status
   - repositorymonitors/status
