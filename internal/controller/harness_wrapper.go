@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,6 +115,9 @@ type harnessRuntimeTarget struct {
 	AuthRefName            string
 	AuthRefField           string
 	AuthRefResourceVersion string
+	ToolExecutionModes     []corev1alpha1.AgentRuntimeToolExecutionMode
+	BrokeredToolClasses    []corev1alpha1.AgentRuntimeBrokeredToolClass
+	SupportsContinuation   bool
 }
 
 type agentRuntimeDependencyNotReadyError struct {
@@ -342,6 +346,19 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 		AuthRefName:            strings.TrimSpace(ref.Name),
 		AuthRefField:           strings.TrimSpace(ref.Key),
 		AuthRefResourceVersion: authRefResourceVersion,
+		ToolExecutionModes: func() []corev1alpha1.AgentRuntimeToolExecutionMode {
+			if runtime.Status.ObservedCapabilities == nil {
+				return nil
+			}
+			return append([]corev1alpha1.AgentRuntimeToolExecutionMode(nil), runtime.Status.ObservedCapabilities.ToolExecutionModes...)
+		}(),
+		BrokeredToolClasses: func() []corev1alpha1.AgentRuntimeBrokeredToolClass {
+			if runtime.Status.ObservedCapabilities == nil {
+				return nil
+			}
+			return append([]corev1alpha1.AgentRuntimeBrokeredToolClass(nil), runtime.Status.ObservedCapabilities.BrokeredToolClasses...)
+		}(),
+		SupportsContinuation: runtime.Status.ObservedCapabilities != nil && runtime.Status.ObservedCapabilities.SupportsContinuation,
 	}, nil
 }
 
@@ -436,6 +453,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
 		}
 		request.Metadata = harnessWrapperApplyRuntimeTargetMetadata(request.Metadata, target)
+		if err := applyHarnessRuntimeToolExecutionMode(&request, target); err != nil {
+			return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
+		}
 		if err := r.patchHarnessWrapperPlannedTurn(ctx, task, request); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1163,6 +1183,43 @@ func (r *TaskReconciler) validateHarnessWrapperCapabilities(
 			return fmt.Errorf("runtime does not advertise required supportsContinuation capability")
 		}
 	}
+	return nil
+}
+
+func applyHarnessRuntimeToolExecutionMode(request *harness.StartTurnRequest, target harnessRuntimeTarget) error {
+	if request == nil || strings.TrimSpace(target.RuntimeRefName) == "" {
+		return nil
+	}
+	observed := slices.Contains(target.ToolExecutionModes, corev1alpha1.AgentRuntimeToolExecutionModeObserved)
+	brokered := slices.Contains(target.ToolExecutionModes, corev1alpha1.AgentRuntimeToolExecutionModeBrokered)
+	requestedClasses := harnessWrapperRequiredBrokeredClassesFromTurnRequest(*request)
+	if len(request.Input.Tools) > 0 || len(requestedClasses) > 0 {
+		if !brokered {
+			return fmt.Errorf("AgentRuntime %q does not advertise brokered tool execution", target.RuntimeRefName)
+		}
+		if !target.SupportsContinuation {
+			return fmt.Errorf("AgentRuntime %q does not advertise brokered continuation", target.RuntimeRefName)
+		}
+		for _, class := range requestedClasses {
+			if !slices.Contains(target.BrokeredToolClasses, class) {
+				return fmt.Errorf("AgentRuntime %q does not advertise brokeredToolClass %q", target.RuntimeRefName, class)
+			}
+		}
+		request.ToolExecutionMode = harness.ToolExecutionModeBrokered
+		if request.Metadata == nil {
+			request.Metadata = map[string]string{}
+		}
+		request.Metadata["toolExecutionMode"] = string(harness.ToolExecutionModeBrokered)
+		return nil
+	}
+	if !observed {
+		return fmt.Errorf("AgentRuntime %q does not advertise observed mode and task exposes no brokered tools", target.RuntimeRefName)
+	}
+	request.ToolExecutionMode = harness.ToolExecutionModeObserved
+	if request.Metadata == nil {
+		request.Metadata = map[string]string{}
+	}
+	request.Metadata["toolExecutionMode"] = string(harness.ToolExecutionModeObserved)
 	return nil
 }
 
