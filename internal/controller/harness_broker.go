@@ -668,7 +668,11 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 			Error:            payload.ToolError,
 		}
 		if len(result.Output) == 0 && result.Error == nil {
-			continue
+			if event.Type == events.ExecutionEventTypeToolCallCompleted {
+				result.Output = json.RawMessage(`{"success":true,"replayed":true}`)
+			} else {
+				continue
+			}
 		}
 		return result, true, nil
 	}
@@ -681,7 +685,12 @@ func brokeredToolEventContent(result harness.ToolCallResult, extra map[string]an
 		"approved":       result.Approved,
 	}
 	if len(result.Output) > 0 {
-		content["toolResult"] = result.Output
+		content["toolResultLength"] = len(result.Output)
+		preview := events.RedactExecutionEventText(string(result.Output))
+		if len(preview) > 512 {
+			preview = preview[:512] + "...[truncated]"
+		}
+		content["toolResultPreview"] = preview
 	}
 	if result.Error != nil {
 		content["toolError"] = result.Error
