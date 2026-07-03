@@ -4,7 +4,7 @@ This project distributes container images that include or embed third-party comp
 
 ## GitHub Copilot CLI
 
-Orka embeds the GitHub Copilot CLI in the `agent-harness-wrapper` binary using `github.com/github/copilot-sdk/go/cmd/bundler`. The SDK version in `go.mod` resolves the embedded CLI version at build time. For `github.com/github/copilot-sdk/go` v0.1.25, the bundler resolves `@github/copilot` 0.0.411 and embeds the corresponding Linux platform CLI package for the target image architecture.
+Orka embeds the GitHub Copilot CLI in the `agent-harness-wrapper` binary using `github.com/github/copilot-sdk/go/cmd/bundler`. The embedded CLI version is resolved at build time by the bundler based on the `github.com/github/copilot-sdk/go` version in `go.mod`.
 
 GitHub Copilot CLI License
 
