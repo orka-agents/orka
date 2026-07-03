@@ -305,7 +305,9 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		if err := r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallStarted, "brokered coordination tool execution started", startedContent); err != nil {
 			return result, err
 		}
-		output, err := r.executeHarnessBrokeredCoordinationTool(ctx, task, agent, frame, tool)
+		execCtx, cancel := context.WithTimeout(ctx, harnessWrapperBrokeredToolTimeout)
+		defer cancel()
+		output, err := r.executeHarnessBrokeredCoordinationTool(execCtx, task, agent, frame, tool)
 		if err != nil {
 			result.Error = brokeredToolError("coordination_tool_failed", err)
 			content := brokeredToolEventContent(result, map[string]any{"targetArgsDigest": argsDigest})
@@ -487,7 +489,7 @@ func (r *TaskReconciler) harnessBrokeredApprovalState(
 	if err != nil {
 		return approvals.Approval{}, false, err
 	}
-	for _, approval := range approvals.Derive(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Time{}) {
+	for _, approval := range approvals.Derive(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC()) {
 		if approval.ID == approvalID {
 			return approval, true, nil
 		}
