@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -318,7 +320,15 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
 		}
 		result.Output = brokeredToolOutput(output)
+		resultRef, err := r.saveHarnessBrokeredToolResult(ctx, task, idempotencyKey, result.Output)
+		if err != nil {
+			result.Error = brokeredToolError("tool_result_store_failed", err)
+			result.Output = nil
+			content := brokeredToolEventContent(result, map[string]any{"targetArgsDigest": argsDigest})
+			return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
+		}
 		content := brokeredToolEventContent(result, map[string]any{
+			"toolResultRef":    resultRef,
 			"targetArgsDigest": argsDigest,
 			"resultLength":     len(output),
 			"brokeredClass":    string(corev1alpha1.AgentRuntimeBrokeredToolClassCoordination),
@@ -410,7 +420,19 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
 	}
 	result.Output = brokeredToolOutput(output)
+	resultRef, err := r.saveHarnessBrokeredToolResult(ctx, task, idempotencyKey, result.Output)
+	if err != nil {
+		result.Error = brokeredToolError("tool_result_store_failed", err)
+		result.Output = nil
+		content := brokeredToolEventContent(result, map[string]any{
+			"targetArgsDigest":        argsDigest,
+			"approvalID":              approvalID,
+			"executionIdempotencyKey": execIdempotencyKey,
+		})
+		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
+	}
 	content := brokeredToolEventContent(result, map[string]any{
+		"toolResultRef":           resultRef,
 		"targetArgsDigest":        argsDigest,
 		"executionIdempotencyKey": execIdempotencyKey,
 		"resultLength":            len(output),
@@ -542,6 +564,25 @@ func (r *TaskReconciler) recordHarnessBrokeredApprovalRequested(
 	return err
 }
 
+func (r *TaskReconciler) saveHarnessBrokeredToolResult(ctx context.Context, task *corev1alpha1.Task, idempotencyKey string, output json.RawMessage) (string, error) {
+	if len(output) == 0 {
+		return "", nil
+	}
+	if r == nil || r.ResultStore == nil {
+		return "", fmt.Errorf("result store is required for brokered tool result replay")
+	}
+	ref := harnessBrokeredToolResultRef(task, idempotencyKey)
+	if err := r.ResultStore.SaveResult(ctx, task.Namespace, ref, []byte(output)); err != nil {
+		return "", fmt.Errorf("store brokered tool result: %w", err)
+	}
+	return ref, nil
+}
+
+func harnessBrokeredToolResultRef(task *corev1alpha1.Task, idempotencyKey string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(idempotencyKey)))
+	return strings.TrimSpace(task.Name) + "-brokered-" + hex.EncodeToString(sum[:])[:24]
+}
+
 func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -623,6 +664,7 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 			IdempotencyKey   string             `json:"idempotencyKey"`
 			TargetArgsDigest string             `json:"targetArgsDigest,omitempty"`
 			Approved         *bool              `json:"approved,omitempty"`
+			ToolResultRef    string             `json:"toolResultRef,omitempty"`
 			ToolResult       json.RawMessage    `json:"toolResult,omitempty"`
 			ToolError        *harness.ErrorInfo `json:"toolError,omitempty"`
 		}
@@ -656,6 +698,11 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 		approved := true
 		if payload.Approved != nil {
 			approved = *payload.Approved
+		}
+		if len(payload.ToolResult) == 0 && payload.ToolResultRef != "" && r.ResultStore != nil {
+			if stored, err := r.ResultStore.GetResult(ctx, task.Namespace, payload.ToolResultRef); err == nil {
+				payload.ToolResult = json.RawMessage(stored)
+			}
 		}
 		result := harness.ToolCallResult{
 			Version:          harness.ProtocolVersion,
