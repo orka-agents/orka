@@ -98,7 +98,15 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 	}
 	seenIssueKeys := repositoryMonitorIssueKeys(issues)
 	issues = filterRepositoryMonitorTargetIssues(issues, run)
-	slices.SortFunc(issues, func(a, b repositoryMonitorIssue) int { return int(a.Number - b.Number) })
+	slices.SortFunc(issues, func(a, b repositoryMonitorIssue) int {
+		if a.Number < b.Number {
+			return -1
+		}
+		if a.Number > b.Number {
+			return 1
+		}
+		return 0
+	})
 
 	maxPerRun := repositoryMonitorMaxIssuesPerRun(monitor.Spec)
 	selected := 0

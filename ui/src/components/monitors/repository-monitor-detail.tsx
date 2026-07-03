@@ -127,9 +127,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       </TableCell>
                       <TableCell><Badge variant="outline">{item.repairState || 'none'}</Badge></TableCell>
                       <TableCell className="space-x-1">
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'review', targetSHA: item.headSHA })} disabled={createCommand.isPending || !item.number}>Review</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix', targetSHA: item.headSHA })} disabled={createCommand.isPending || !item.number}>Fix</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'automerge', targetSHA: item.headSHA })} disabled={createCommand.isPending || !item.number}>Automerge</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'review', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Review</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'automerge', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Automerge</Button>
                       </TableCell>
                     </TableRow>
                   ))}
