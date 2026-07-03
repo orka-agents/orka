@@ -562,7 +562,7 @@ func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 	}
 	started := false
 	for _, event := range listed {
-		if event.ToolCallID != frame.ToolCallID || event.ToolName != frame.ToolName {
+		if event.ToolCallID != frame.ToolCallID {
 			continue
 		}
 		var payload struct {
@@ -573,6 +573,9 @@ func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 		}
 		if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
 			continue
+		}
+		if event.ToolName != frame.ToolName {
+			return true, nil
 		}
 		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
 			if event.Type == events.ExecutionEventTypeToolCallStarted && payload.ExecutionState == "started" {
@@ -612,7 +615,7 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 	}
 	for i := len(listed) - 1; i >= 0; i-- {
 		event := listed[i]
-		if event.ToolCallID != frame.ToolCallID || event.ToolName != frame.ToolName {
+		if event.ToolCallID != frame.ToolCallID {
 			continue
 		}
 		var payload struct {
@@ -625,6 +628,18 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 		}
 		if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
 			continue
+		}
+		if event.ToolName != frame.ToolName {
+			result := harness.ToolCallResult{
+				Version:          harness.ProtocolVersion,
+				RuntimeSessionID: frame.RuntimeSessionID,
+				TurnID:           frame.TurnID,
+				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+				IdempotencyKey:   idempotencyKey,
+				Approved:         false,
+				Error:            &harness.ErrorInfo{Code: "tool_call_id_reused", Message: "brokered tool call id was reused for a different tool"},
+			}
+			return result, true, nil
 		}
 		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
 			result := harness.ToolCallResult{

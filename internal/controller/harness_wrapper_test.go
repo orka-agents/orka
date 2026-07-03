@@ -324,6 +324,43 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	}
 }
 
+func TestHarnessWrapperBrokeredRejectsToolCallIDReuseAcrossTools(t *testing.T) {
+	var readExecutions atomic.Int32
+	readServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		readExecutions.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer readServer.Close()
+	var otherExecutions atomic.Int32
+	otherServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherExecutions.Add(1)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer otherServer.Close()
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident", "other_read"}}
+	readTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace}, Spec: corev1alpha1.ToolSpec{Description: "Read incident", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead, HTTP: &corev1alpha1.HTTPExecution{URL: readServer.URL}}}
+	otherTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "other_read", Namespace: task.Namespace}, Spec: corev1alpha1.ToolSpec{Description: "Other read", BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead, HTTP: &corev1alpha1.HTTPExecution{URL: otherServer.URL}}}
+	r := newUnitReconciler(newTestScheme(), task, agent, readTool, otherTool)
+	frame := harness.HarnessEventFrame{Version: harness.ProtocolVersion, Type: harness.FrameToolCallRequested, RuntimeSessionID: "runtime-session", TurnID: "turn-1", CorrelationID: "corr-1", Seq: 1, ToolName: "read_incident", ToolCallID: "call-1", Content: json.RawMessage(`{"incident":"inc-1"}`)}
+	if result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame); err != nil || result.Error != nil {
+		t.Fatalf("first handle = %#v, %v", result, err)
+	}
+	frame.ToolName = "other_read"
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("reused id handle error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "tool_call_id_reused" {
+		t.Fatalf("result = %#v, want tool_call_id_reused", result)
+	}
+	if readExecutions.Load() != 1 || otherExecutions.Load() != 0 {
+		t.Fatalf("executions read=%d other=%d, want only initial tool", readExecutions.Load(), otherExecutions.Load())
+	}
+}
+
 func TestHarnessWrapperBrokeredReplayNormalizesToolIdentity(t *testing.T) {
 	var executions atomic.Int32
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
