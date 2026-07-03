@@ -52,6 +52,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		now := time.Now()
 		completedAt = &now
 	}
+	blockedReason, actionError := repositoryMonitorWorkActionReasonFields(status, reason)
 	if existing, err := r.Store.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
 		if existing.Status == repositoryMonitorWorkActionStatusCancelled && desiredAction != repositoryMonitorCommandIntentStop && desiredAction != repositoryMonitorCommandIntentResume {
 			return nil
@@ -68,8 +69,8 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		existing.Status = status
 		existing.Phase = phase
 		existing.TaskName = firstNonEmptyWorkflow(taskName, existing.TaskName)
-		existing.BlockedReason = reason
-		existing.Error = reason
+		existing.BlockedReason = blockedReason
+		existing.Error = actionError
 		if completedAt != nil {
 			existing.CompletedAt = completedAt
 		}
@@ -110,8 +111,8 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		Status:               status,
 		Phase:                phase,
 		TaskName:             taskName,
-		BlockedReason:        reason,
-		Error:                reason,
+		BlockedReason:        blockedReason,
+		Error:                actionError,
 		MetadataJSON:         string(metadata),
 		CreatedAt:            time.Now(),
 		CompletedAt:          completedAt,
@@ -218,6 +219,17 @@ func (r *RepositoryMonitorReconciler) updateImplementationJobForTask(ctx context
 
 func repositoryMonitorImplementationJobID(taskName string) string {
 	return "impl-" + repositoryMonitorShortHash(taskName)
+}
+
+func repositoryMonitorWorkActionReasonFields(status, reason string) (blockedReason, actionError string) {
+	switch status {
+	case repositoryMonitorWorkActionStatusBlocked:
+		return reason, ""
+	case repositoryMonitorWorkActionStatusFailed:
+		return "", reason
+	default:
+		return "", ""
+	}
 }
 
 func runID(run *store.MonitorRun) string {

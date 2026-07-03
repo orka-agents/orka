@@ -4152,6 +4152,48 @@ func TestRepositoryMonitorIssueContentDigestIgnoresOrkaLabels(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorWorkActionReasonFields(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "reason-fields", Namespace: "default", UID: types.UID("uid-reason-fields")}}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	run := &store.MonitorRun{ID: "run-reason", MonitorNamespace: "default", MonitorName: monitor.Name}
+	command := &store.CommandEvent{ID: "cmd-reason", MonitorNamespace: "default", MonitorName: monitor.Name, Intent: "stop", IdempotencyKey: "idem-reason"}
+
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, 77, "", "sha256:reason", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusSucceeded, "stopped", "", "stopped_by_command"); err != nil {
+		t.Fatalf("record succeeded action error = %v", err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop))
+	if err != nil {
+		t.Fatalf("GetWorkAction(succeeded) error = %v", err)
+	}
+	if action.BlockedReason != "" || action.Error != "" {
+		t.Fatalf("succeeded action BlockedReason=%q Error=%q, want both empty", action.BlockedReason, action.Error)
+	}
+
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, 77, "", "sha256:reason", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusBlocked, "blocked", "", "guarded"); err != nil {
+		t.Fatalf("record blocked action error = %v", err)
+	}
+	action, err = monitorStore.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop))
+	if err != nil {
+		t.Fatalf("GetWorkAction(blocked) error = %v", err)
+	}
+	if action.BlockedReason != "guarded" || action.Error != "" {
+		t.Fatalf("blocked action BlockedReason=%q Error=%q, want blocked reason only", action.BlockedReason, action.Error)
+	}
+
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, 77, "", "sha256:reason", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusFailed, "failed", "", "boom"); err != nil {
+		t.Fatalf("record failed action error = %v", err)
+	}
+	action, err = monitorStore.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop))
+	if err != nil {
+		t.Fatalf("GetWorkAction(failed) error = %v", err)
+	}
+	if action.BlockedReason != "" || action.Error != "boom" {
+		t.Fatalf("failed action BlockedReason=%q Error=%q, want error only", action.BlockedReason, action.Error)
+	}
+}
+
 func TestRepositoryMonitorIssueActionTaskRawResultMode(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
