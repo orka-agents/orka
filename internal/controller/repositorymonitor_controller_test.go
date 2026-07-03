@@ -3657,6 +3657,9 @@ func assertRepositoryMonitorReviewTask(t *testing.T, ctx context.Context, cl crc
 	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.PRBaseSHA); got != "base1" {
 		t.Fatalf("%s = %q, want base1", workerenv.PRBaseSHA, got)
 	}
+	if got := repositoryMonitorTaskEnvValue(task.Spec.Env, workerenv.ResultStdout); got != scheduledRunLabelValue {
+		t.Fatalf("%s = %q, want "+scheduledRunLabelValue+" so review JSON is preserved", workerenv.ResultStdout, got)
+	}
 	if task.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue("inventory") || task.Labels[labels.LabelMonitorRun] != labels.SelectorValue("run-1") {
 		t.Fatalf("task labels = %#v, want monitor and run labels", task.Labels)
 	}
@@ -4152,6 +4155,21 @@ func TestRepositoryMonitorIssueContentDigestIgnoresOrkaLabels(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorMutationResultAcceptsPushEnvelope(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "mutation-envelope", Namespace: "default"}}
+	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "77", Number: 77, SnapshotDigest: "sha256:issue77"}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "mutation-task", Namespace: "default", Annotations: map[string]string{repositoryMonitorIssueAnnotationCommandID: "cmd-mutation"}}}
+	raw := []byte(`{"version":1,"summary":"pushed","baseSHA":"base","headSHA":"head","pushBranch":"orka/issue-77"}`)
+
+	record := repositoryMonitorActionRecordFromTask(monitor, item, task, repositoryMonitorIssueActionMutateToPR, raw)
+	if record.Verdict != repositoryMonitorIssueVerdictSuccess {
+		t.Fatalf("mutation verdict = %q, want %q; summary=%q", record.Verdict, repositoryMonitorIssueVerdictSuccess, record.Summary)
+	}
+	if record.Summary != "pushed" {
+		t.Fatalf("summary = %q, want pushed", record.Summary)
+	}
+}
+
 func TestRepositoryMonitorWorkActionReasonFields(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -4225,7 +4243,7 @@ func TestRepositoryMonitorIssueActionTaskRawResultMode(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: planTaskName}, &planTask); err != nil {
 		t.Fatalf("Get plan task error = %v", err)
 	}
-	if !taskEnvHasValue(planTask.Spec.Env, workerenv.ResultStdout, "true") {
+	if !taskEnvHasValue(planTask.Spec.Env, workerenv.ResultStdout, scheduledRunLabelValue) {
 		t.Fatalf("plan task env = %#v, want %s=true", planTask.Spec.Env, workerenv.ResultStdout)
 	}
 
@@ -4237,8 +4255,8 @@ func TestRepositoryMonitorIssueActionTaskRawResultMode(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: implementationTaskName}, &implementationTask); err != nil {
 		t.Fatalf("Get implementation task error = %v", err)
 	}
-	if taskEnvHasValue(implementationTask.Spec.Env, workerenv.ResultStdout, "true") {
-		t.Fatalf("implementation task env = %#v, want workspace finalization to remain enabled", implementationTask.Spec.Env)
+	if !taskEnvHasValue(implementationTask.Spec.Env, workerenv.ResultStdout, scheduledRunLabelValue) {
+		t.Fatalf("implementation task env = %#v, want %s=true so patch JSON is preserved", implementationTask.Spec.Env, workerenv.ResultStdout)
 	}
 }
 

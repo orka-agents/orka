@@ -291,6 +291,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			Env: []corev1.EnvVar{
 				{Name: workerenv.PRBaseRepo, Value: repositoryMonitorHTTPSCloneURL(owner, repository)},
 				{Name: workerenv.PRBaseSHA, Value: pr.BaseSHA},
+				{Name: workerenv.ResultStdout, Value: scheduledRunLabelValue},
 			},
 		},
 	}

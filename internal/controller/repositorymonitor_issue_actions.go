@@ -340,7 +340,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		{Name: "ORKA_GITHUB_ACTION", Value: actionKind},
 	}
 	if repositoryMonitorIssueActionRequiresRawResult(actionKind) {
-		env = append(env, corev1.EnvVar{Name: workerenv.ResultStdout, Value: "true"})
+		env = append(env, corev1.EnvVar{Name: workerenv.ResultStdout, Value: scheduledRunLabelValue})
 	}
 	allowedTools := readOnlyAgentAllowedTools()
 	if actionKind == repositoryMonitorIssueActionImplementation {
@@ -415,7 +415,7 @@ func repositoryMonitorIssueActionTaskName(monitor *corev1alpha1.RepositoryMonito
 
 func repositoryMonitorIssueActionRequiresRawResult(actionKind string) bool {
 	switch actionKind {
-	case repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch, repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionDecompose:
+	case repositoryMonitorIssueActionTriage, repositoryMonitorIssueActionResearch, repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionImplementation, repositoryMonitorIssueActionDecompose:
 		return true
 	default:
 		return false
@@ -573,13 +573,22 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 	if verdict == "" && boolField(payload, "needsHuman") {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 	}
+	if actionKind == repositoryMonitorIssueActionMutateToPR && verdict == "" {
+		if strings.TrimSpace(sr.PushError) != "" {
+			verdict = repositoryMonitorReviewVerdictFailed
+		} else if strings.TrimSpace(sr.PushBranch) != "" {
+			verdict = repositoryMonitorIssueVerdictSuccess
+		}
+	}
 	if repositoryMonitorIssueActionMissingRequiredResult(actionKind, body) {
 		verdict = repositoryMonitorReviewVerdictFailed
 		summary = firstNonEmptyIssueAction(summary, "issue action result missing required fields")
 	}
-	if reason := repositoryMonitorIssueActionResultMismatch(item, body); reason != "" {
-		verdict = repositoryMonitorReviewVerdictStale
-		summary = reason
+	if actionKind != repositoryMonitorIssueActionMutateToPR {
+		if reason := repositoryMonitorIssueActionResultMismatch(item, body); reason != "" {
+			verdict = repositoryMonitorReviewVerdictStale
+			summary = reason
+		}
 	}
 	confidence := stringField(body, "confidence")
 	sum := sha256.Sum256([]byte(payload))
@@ -1031,7 +1040,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueMutationTask(c
 			Labels:      map[string]string{labels.LabelManaged: "true", labels.LabelCreatedBy: "repository-monitor", labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name), labels.LabelGitHubTarget: labels.SelectorValue(repositoryMonitorIssueKind), labels.LabelGitHubNumber: labels.SelectorValue(strconv.FormatInt(item.Number, 10))},
 			Annotations: map[string]string{labels.AnnotationRepositoryMonitorName: monitor.Name, labels.AnnotationMonitorItemKind: repositoryMonitorIssueKind, labels.AnnotationMonitorItemNumber: strconv.FormatInt(item.Number, 10), repositoryMonitorIssueAnnotationSnapshotDigest: item.SnapshotDigest, repositoryMonitorIssueAnnotationActionKind: repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueAnnotationCommandID: record.CommandEventID},
 		},
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &agentRef, Prompt: "Apply the prior implementation diff, run configured validation if practical, make no unrelated changes, and finish so Orka can push the configured branch. Do not open or merge pull requests.", Timeout: &timeout, Priority: &priority, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{Workspace: workspace}, PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: implementationTask.Name, Namespace: implementationTask.Namespace}, Env: []corev1.EnvVar{{Name: workerenv.RequirePushBranch, Value: "true"}}},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &agentRef, Prompt: "Apply the prior implementation diff, run configured validation if practical, make no unrelated changes, and finish so Orka can push the configured branch. Do not open or merge pull requests.", Timeout: &timeout, Priority: &priority, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{Workspace: workspace}, PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: implementationTask.Name, Namespace: implementationTask.Namespace}, Env: []corev1.EnvVar{{Name: workerenv.RequirePushBranch, Value: scheduledRunLabelValue}}},
 	}
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return "", err
