@@ -1974,6 +1974,31 @@ func TestHarnessWrapperCapabilitiesUseInputToolsForRequiredBrokeredClasses(t *te
 	}
 }
 
+func TestHarnessWrapperBuiltInToolFiltersStayMetadataOnly(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{
+		AllowedTools:    []string{"Read", "Grep"},
+		DisallowedTools: []string{"Bash", "Write"},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	if request.ToolExecutionMode != harness.ToolExecutionModeObserved {
+		t.Fatalf("ToolExecutionMode = %q, want observed", request.ToolExecutionMode)
+	}
+	if len(request.Input.Tools) != 0 {
+		t.Fatalf("Input.Tools = %#v, want no brokered tools for built-in CLI runtime", request.Input.Tools)
+	}
+	if request.Metadata["allowedTools"] != "Read,Grep" {
+		t.Fatalf("metadata allowedTools = %q, want Read,Grep", request.Metadata["allowedTools"])
+	}
+	if request.Metadata["disallowedTools"] != "Bash,Write" {
+		t.Fatalf("metadata disallowedTools = %q, want Bash,Write", request.Metadata["disallowedTools"])
+	}
+}
+
 func TestHarnessWrapperTurnRequestCarriesSafeBrokeredToolSchemas(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}

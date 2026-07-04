@@ -1595,9 +1595,12 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	if err != nil {
 		return harness.StartTurnRequest{}, err
 	}
-	toolDefinitions, err := r.harnessWrapperBrokeredToolDefinitions(ctx, task)
-	if err != nil {
-		return harness.StartTurnRequest{}, err
+	var toolDefinitions []harness.ToolDefinition
+	if toolExecutionMode == harness.ToolExecutionModeBrokered {
+		toolDefinitions, err = r.harnessWrapperBrokeredToolDefinitions(ctx, task)
+		if err != nil {
+			return harness.StartTurnRequest{}, err
+		}
 	}
 	runtimeIdentity := harnessWrapperRuntimeSessionIdentity(task, agent, runtimeName)
 	return harness.StartTurnRequest{
