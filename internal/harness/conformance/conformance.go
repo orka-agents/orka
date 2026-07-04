@@ -401,7 +401,7 @@ func runBrokeredProbe(
 	defer continueStreamCancel()
 	if initialStreamEnded {
 		reconnected, sawToolResult, sawTerminal, reconnectErr := streamBrokeredContinuationFrames(
-			streamCtx,
+			continueStreamCtx,
 			client,
 			request,
 			*requested,
