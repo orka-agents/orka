@@ -55,6 +55,7 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 
 // Reconcile validates an external Orka harness endpoint and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
