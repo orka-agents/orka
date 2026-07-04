@@ -139,6 +139,28 @@ type fatalFoundryPollError struct {
 func (e fatalFoundryPollError) Error() string { return e.err.Error() }
 func (e fatalFoundryPollError) Unwrap() error { return e.err }
 
+const foundryEndpointRequirement = "foundry endpoint must use https " +
+	"(http allowed only for loopback) and must not include credentials, query, or fragment"
+
+func foundryEndpointIsSafe(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	if parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(trimmed, "#") {
+		return false
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return true
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") {
+		return false
+	}
+	host := strings.Trim(strings.ToLower(parsed.Hostname()), "[]")
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
 func exactlyOneFoundryAuth(cfg config) bool {
 	hasKey := strings.TrimSpace(cfg.foundryKey) != ""
 	hasBearer := strings.TrimSpace(cfg.authBearer) != ""
@@ -198,13 +220,15 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	ready := s.cfg.adapterBearer != "" &&
 		s.cfg.endpoint != "" &&
+		foundryEndpointIsSafe(s.cfg.endpoint) &&
 		s.cfg.agentID != "" &&
 		exactlyOneFoundryAuth(s.cfg)
 	status := harness.HealthStatusOK
 	msg := "ready"
 	if !ready {
 		status = harness.HealthStatusDegraded
-		msg = "adapter bearer, endpoint, agent id, and exactly one Foundry auth mode are required"
+		msg = "adapter bearer, safe Foundry endpoint, agent id, and exactly one Foundry auth mode are required; " +
+			foundryEndpointRequirement
 	}
 	harness.WriteJSON(w, http.StatusOK, harness.HealthResponse{Version: harness.ProtocolVersion, Status: status, Ready: ready, CheckedAt: time.Now().UTC(), Message: msg, Metadata: map[string]string{"backend": "foundry"}}) //nolint:lll
 }
@@ -773,6 +797,9 @@ func (s *server) doJSON(ctx context.Context, method, path string, body any, out 
 	if s.cfg.endpoint == "" {
 		return fmt.Errorf("foundry endpoint is required")
 	}
+	if !foundryEndpointIsSafe(s.cfg.endpoint) {
+		return errors.New(foundryEndpointRequirement)
+	}
 	if !exactlyOneFoundryAuth(s.cfg) {
 		return fmt.Errorf("exactly one Foundry auth mode is required")
 	}
@@ -784,7 +811,11 @@ func (s *server) doJSON(ctx context.Context, method, path string, body any, out 
 		}
 		reqBody = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, s.foundryURL(path), reqBody)
+	foundryURL, err := s.foundryURL(path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, foundryURL, reqBody)
 	if err != nil {
 		return err
 	}
@@ -812,16 +843,22 @@ func (s *server) doJSON(ctx context.Context, method, path string, body any, out 
 	return nil
 }
 
-func (s *server) foundryURL(path string) string {
-	u := s.cfg.endpoint + path
+func (s *server) foundryURL(path string) (string, error) {
+	if s.cfg.endpoint == "" {
+		return "", fmt.Errorf("foundry endpoint is required")
+	}
+	if !foundryEndpointIsSafe(s.cfg.endpoint) {
+		return "", errors.New(foundryEndpointRequirement)
+	}
+	u := strings.TrimRight(s.cfg.endpoint, "/") + path
 	if s.cfg.apiVersion == "" {
-		return u
+		return u, nil
 	}
 	sep := "?"
 	if strings.Contains(u, "?") {
 		sep = "&"
 	}
-	return u + sep + "api-version=" + url.QueryEscape(s.cfg.apiVersion)
+	return u + sep + "api-version=" + url.QueryEscape(s.cfg.apiVersion), nil
 }
 
 func (s *server) appendFailed(turn *turnState, reason, msg string) {

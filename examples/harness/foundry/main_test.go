@@ -142,6 +142,57 @@ func TestFoundryAdapterPassesBrokeredReadConformance(t *testing.T) {
 	}
 }
 
+func TestFoundryAdapterPassesBrokeredWriteConformance(t *testing.T) {
+	foundry := newFakeFoundry(t, "requires_action")
+	adapter := newTestFoundryAdapter(foundry.URL)
+	defer adapter.Close()
+	result := conformance.Check(context.Background(), conformance.Target{
+		BaseURL:            adapter.URL,
+		BearerToken:        "adapter-token",
+		ControlTimeout:     2 * time.Second,
+		ProbeBrokeredWrite: true,
+		RequireAuth:        true,
+	})
+	if !result.Passed {
+		t.Fatalf("brokered write conformance failed: %s", result.Message)
+	}
+}
+
+func TestFoundryEndpointIsSafe(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     bool
+	}{
+		{name: "https", endpoint: "https://example.openai.azure.com", want: true},
+		{name: "https with path", endpoint: "https://example.openai.azure.com/openai/assistants", want: true},
+		{name: "http localhost", endpoint: "http://localhost:8080", want: true},
+		{name: "http ipv4 loopback", endpoint: "http://127.0.0.1:8080", want: true},
+		{name: "http ipv6 loopback", endpoint: "http://[::1]:8080", want: true},
+		{name: "http remote", endpoint: "http://example.openai.azure.com", want: false},
+		{name: "https userinfo", endpoint: "https://user@example.openai.azure.com", want: false},
+		{name: "https query", endpoint: "https://example.openai.azure.com?api-version=v1", want: false},
+		{name: "https bare query", endpoint: "https://example.openai.azure.com?", want: false},
+		{name: "https fragment", endpoint: "https://example.openai.azure.com#frag", want: false},
+		{name: "https bare fragment", endpoint: "https://example.openai.azure.com#", want: false},
+		{name: "missing scheme", endpoint: "example.openai.azure.com", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := foundryEndpointIsSafe(tt.endpoint); got != tt.want {
+				t.Fatalf("foundryEndpointIsSafe(%q) = %v, want %v", tt.endpoint, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFoundryURLRejectsUnsafeEndpoint(t *testing.T) {
+	s := &server{cfg: config{endpoint: "http://example.openai.azure.com", apiVersion: "v1"}}
+	if _, err := s.foundryURL("/threads"); err == nil {
+		t.Fatalf("foundryURL accepted unsafe endpoint")
+	}
+}
+
 type fakeFoundry struct {
 	*httptest.Server
 	status              string
