@@ -7,6 +7,8 @@ metadata:
   name: sample-agentkit-runtime
 spec:
   # Namespace-local facade for an operator-deployed AgentKit Serve adapter.
+  # Current AgentKit Serve Orka support is observed mode only; do not add brokered
+  # classes or supportsContinuation until AgentKit passes those conformance profiles.
   # Adapter/runtime credentials live in the adapter deployment, not in Orka Tool
   # credentials or the remote workload.
   contractVersion: orka.harness.v1
@@ -20,11 +22,5 @@ spec:
   capabilities:
     toolExecutionModes:
     - observed
-    - brokered
-    brokeredToolClasses:
-    - read
-    - write
-    - coordination
     supportsCancel: true
     supportsRuntimeSessions: true
-    supportsContinuation: true

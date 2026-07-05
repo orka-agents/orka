@@ -21,6 +21,37 @@ Orka Task
 
 ## Minimal runtime facade
 
+For an observed-only backend such as current AgentKit Serve Orka mode, advertise
+only observed capabilities:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: agentkit-runtime
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://agentkit-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: agentkit-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes: [observed]
+    supportsCancel: true
+    supportsRuntimeSessions: true
+```
+
+The checked-in AgentKit Serve facades report lifecycle/output frames for
+AgentKit-owned observed runs. Do not add `brokeredToolClasses` or
+`supportsContinuation` to an AgentKit facade unless that deployment enables an
+AgentKit brokered profile that has passed the matching Orka conformance probe.
+
+For a backend that has already passed a brokered profile, include only the
+profile it actually supports:
+
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
 kind: AgentRuntime

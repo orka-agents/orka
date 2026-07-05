@@ -12,6 +12,8 @@ The checked-in backend is a deterministic generic HTTP harness fixture. It adver
 | `fibey-agentkit-runtime` | AgentKit Serve adapter | Adapter/runtime config only |
 | `fibey-foundry-runtime` | Foundry adapter | Adapter Secret; no Orka Tool production credentials |
 
+`fibey-agentkit-runtime` is intentionally observed-only in the checked-in demo: it should show `toolExecutionModes: [observed]`, `supportsCancel: true`, and `supportsRuntimeSessions: true`, with no `brokeredToolClasses` or `supportsContinuation`. AgentKit brokered read/write/coordination exist only for deployments that explicitly enable those conformance-gated profiles.
+
 All facades are namespace-local `AgentRuntime` objects. Remote execution backends do **not** receive production Orka Tool credentials. In brokered mode, remote backends request tools and Orka owns authorization, approvals, idempotency, credential resolution, execution/brokering, events, lineage, and audit.
 
 ## Build/load the generic HTTP fixture image for kind
@@ -59,8 +61,31 @@ To test AgentKit Serve or Foundry, keep the Orka workflow and tool policy the sa
 
 Optional facade manifests are checked in but not included in the default `kustomization.yaml` because they require separately deployed adapters:
 
+For a local/kind AgentKit observed-mode demo with no model credentials, build and
+load an AgentKit test-agent image from the AgentKit Serve checkout, then deploy
+the offline echo fixture Service used only for readiness/conformance demos:
+
 ```bash
-# AgentKit Serve adapter facade; requires a Service named fibey-agentkit-runtime.
+# From /path/to/agentkit.serve:
+make build-agentkit build-serve build-test-agent AGENT_IMAGE=hello-agent:test
+kind load docker-image hello-agent:test --name <your-kind-cluster>
+
+# From this Orka checkout:
+kubectl apply -f examples/fibey-custom-agent-demo/secret-agentkit.yaml
+kubectl apply -f examples/fibey-custom-agent-demo/agentkit-runtime-offline.example.yaml
+kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-agentkit.yaml
+kubectl apply -f examples/fibey-custom-agent-demo/agent-agentkit.yaml
+kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-runtime --timeout=60s
+```
+
+The example deployment sets `AGENTKIT_PROTOCOL=orka`, reads
+`AGENTKIT_AUTH_TOKEN` from the Orka client-auth Secret, and sets
+`AGENTKIT_ORKA_OFFLINE_ECHO=1` so the AgentRuntime readiness probe and demo task
+complete without live provider credentials. Remove `AGENTKIT_ORKA_OFFLINE_ECHO`
+and provide normal model/runtime credentials for production AgentKit services.
+
+```bash
+# AgentKit Serve observed-mode facade; requires a Service named fibey-agentkit-runtime.
 kubectl apply -f examples/fibey-custom-agent-demo/secret-agentkit.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-agentkit.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-agentkit.yaml
@@ -85,4 +110,4 @@ examples/fibey-custom-agent-demo/switch-backend.sh http
 The script validates the selected `AgentRuntime` and `Agent`, then patches only
 the Task's `spec.agentRef.name`.
 
-Brokered mode is used only when the selected runtime advertises brokered capabilities and the task/agent exposes allowed tools. Orka-owned side-effect tools stay behind Orka brokered governance; production tool credentials are not handed to the remote backend.
+Brokered mode is used only when the selected runtime advertises brokered capabilities and the task/agent exposes allowed tools. Current AgentKit Serve facades do not advertise brokered mode, so AgentKit-owned tools remain internal to AgentKit and Orka observes only lifecycle/output frames. Orka-owned side-effect tools stay behind Orka brokered governance; production tool credentials are not handed to the remote backend.
