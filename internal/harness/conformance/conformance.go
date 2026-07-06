@@ -246,7 +246,7 @@ func runBrokeredProbe(
 		Name:          "conformance_" + string(profile),
 		Description:   "Synthetic Orka conformance tool schema",
 		BrokeredClass: profile,
-		Parameters:    json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		Parameters:    json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`),
 	}}
 	if result.ObservedCapabilities != nil && strings.TrimSpace(result.ObservedCapabilities.RuntimeName) != "" {
 		request.Metadata["runtime"] = strings.TrimSpace(result.ObservedCapabilities.RuntimeName)

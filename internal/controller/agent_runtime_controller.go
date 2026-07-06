@@ -37,7 +37,7 @@ const (
 	agentRuntimeReadyCondition = "Ready"
 	agentRuntimeReasonReady    = "ConformancePassed"
 	agentRuntimeReasonNotReady = "ConformanceFailed"
-	agentRuntimeProbeTimeout   = 10 * time.Second
+	agentRuntimeProbeTimeout   = 60 * time.Second
 	agentRuntimeRequeue        = 30 * time.Second
 
 	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"

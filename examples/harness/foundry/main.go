@@ -443,8 +443,6 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 	}
 	turn.continueMu.Lock()
 	defer turn.continueMu.Unlock()
-	turn.pollMu.Lock()
-	defer turn.pollMu.Unlock()
 	s.mu.Lock()
 	if turn.completed {
 		s.mu.Unlock()
@@ -497,8 +495,6 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 	}
 	turn.continueMu.Lock()
 	defer turn.continueMu.Unlock()
-	turn.pollMu.Lock()
-	defer turn.pollMu.Unlock()
 	s.mu.Lock()
 	if turn.completed {
 		s.mu.Unlock()

@@ -206,6 +206,43 @@ func TestCheckPassesBrokeredCoordinationProfile(t *testing.T) {
 	}
 }
 
+func TestCheckBrokeredProbeUsesFoundryCompatibleObjectSchema(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	defer server.Close()
+
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	for _, request := range server.turns {
+		if request.ToolExecutionMode != harness.ToolExecutionModeBrokered {
+			continue
+		}
+		if len(request.Input.Tools) != 1 {
+			t.Fatalf("brokered tool count = %d, want 1", len(request.Input.Tools))
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(request.Input.Tools[0].Parameters, &schema); err != nil {
+			t.Fatalf("unmarshal tool schema: %v", err)
+		}
+		if schema["type"] != "object" {
+			t.Fatalf("schema type = %#v, want object", schema["type"])
+		}
+		if _, ok := schema["properties"].(map[string]any); !ok {
+			t.Fatalf("schema properties = %#v, want object", schema["properties"])
+		}
+		if schema["additionalProperties"] != true {
+			t.Fatalf("schema additionalProperties = %#v, want true", schema["additionalProperties"])
+		}
+		return
+	}
+	t.Fatal("did not observe brokered start request")
+}
+
 func TestCheckBrokeredReadFailsWhenClassNotAdvertised(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	defer server.Close()
