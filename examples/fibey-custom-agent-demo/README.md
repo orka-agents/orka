@@ -63,7 +63,22 @@ Optional facade manifests are checked in but not included in the default `kustom
 
 For a local/kind AgentKit observed-mode demo with no model credentials, build and
 load an AgentKit test-agent image from the AgentKit Serve checkout, then deploy
-the offline echo fixture Service used only for readiness/conformance demos:
+the offline echo fixture Service used only for readiness/conformance demos. The
+AgentKitfile used for this image must declare the Orka per-turn env names that the
+controller sends, because AgentKit rejects undeclared `input.env` values. Add
+these entries to the test AgentKitfile before building:
+
+```yaml
+env:
+  - name: ORKA_CONTROLLER_URL
+  - name: ORKA_RESULT_ENDPOINT
+  - name: ORKA_PARENT_TASK
+  - name: ORKA_PRIOR_TASK
+  - name: ORKA_PRIOR_TASK_NAMESPACE
+  - name: ORKA_COORDINATION_DEPTH
+```
+
+Then build/load/apply:
 
 ```bash
 # From /path/to/agentkit.serve:
