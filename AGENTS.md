@@ -92,6 +92,7 @@ Do NOT delete `// +kubebuilder:scaffold:*` comments.
 - Agent CLI runtimes (`codex`, `claude`, `copilot`) run through the `agent-harness-wrapper`; the old per-runtime worker images/entrypoints are gone.
 - Harness-wrapper success maps `TurnCompleted` to `AgentRuntimeCompleted` + terminal task events; do not expect a worker `ResultSubmitted` event on harness-backed agent tasks.
 - Harness wrapper `GET /v1/health` and `GET /v1/capabilities` are intentionally unauthenticated; mutating turn endpoints (`POST /v1/turns`, cancel) require the wrapper bearer token.
+- `runtimeRef` AgentRuntime tasks are remote-runtime tasks; do not expect a Kubernetes Job/Pod per task. Orka remains the governance plane, brokered tools execute through Orka, and remote adapters receive only harness auth plus safe tool schemas, never downstream production tool credentials.
 - The harness wrapper may emit restricted PodSecurity warnings because it runs as root with limited capabilities for child process/credential setup; rollout success plus runtime live tests are the source of truth.
 - Coordination memory tools: `recall_memory`, `remember`, `propose_memory`, `search_transcript`
 - Do not store secrets, credentials, tokens, raw transcripts, or one-off task status in durable memory
