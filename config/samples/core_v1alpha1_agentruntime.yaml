@@ -4,15 +4,20 @@ metadata:
   labels:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
-  name: sample-agentkit
+  name: sample-http-runtime
 spec:
+  # Namespace-local AgentRuntime facade for a remote execution backend.
+  # The endpoint may point at a generic HTTP runtime, AgentKit Serve adapter,
+  # Foundry adapter, or another backend implementing orka.harness.v1.
+  # The bearer token authenticates Orka to the runtime endpoint; it is not a
+  # downstream production tool credential.
   contractVersion: orka.harness.v1
   deployment:
     mode: external-endpoint
-    endpoint: http://sample-agentkit.default.svc.cluster.local:8080
+    endpoint: http://sample-http-runtime.default.svc.cluster.local:8080
   clientAuth:
     bearerTokenSecretRef:
-      name: sample-agentkit-harness-token
+      name: sample-http-runtime-token
       key: token
   capabilities:
     toolExecutionModes:

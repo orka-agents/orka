@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: support-tool
+  labels:
+    app.kubernetes.io/name: support-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: support-tool
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: support-tool
+    spec:
+      containers:
+      - name: support-tool
+        image: ghcr.io/orka-agents/orka/example-echo-harness:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: ORKA_REMOTE_HTTP_RUNTIME_ADDR
+          value: :8080
+        - name: ORKA_REMOTE_HTTP_RUNTIME_NAME
+          value: support-tool
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /v1/health
+            port: http
+          periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: support-tool
+spec:
+  selector:
+    app.kubernetes.io/name: support-tool
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

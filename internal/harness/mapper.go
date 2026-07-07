@@ -106,7 +106,7 @@ func mapFrameType(frame HarnessEventFrame) (eventType, severity, summary string)
 	case FrameToolResultReceived:
 		return events.ExecutionEventTypeToolCallCompleted, severity, "tool result received"
 	case FrameApprovalRequested:
-		return events.ExecutionEventTypeApprovalRequested, severity, "approval requested"
+		return events.ExecutionEventTypeAgentRuntimeCommandStarted, events.ExecutionEventSeverityWarning, "runtime reported approval request; Orka broker owns canonical approvals"
 	case FrameTurnCompleted:
 		return events.ExecutionEventTypeAgentRuntimeCompleted, severity, "harness turn completed"
 	case FrameTurnFailed:

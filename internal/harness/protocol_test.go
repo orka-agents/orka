@@ -26,7 +26,12 @@ func TestStartTurnRequestValidationAndJSONRoundTrip(t *testing.T) {
 		ToolPolicyRef:     &PolicyRef{Name: "default-tools"},
 		ApprovalPolicyRef: &PolicyRef{Name: "default-approvals"},
 		EventCursor:       7,
-		Input:             TurnInput{Prompt: "hello", ContextRefs: []ContextRef{{Kind: "event", Name: protocolTestTaskName, Seq: 7}}},
+		Input: TurnInput{Prompt: "hello", ContextRefs: []ContextRef{{Kind: "event", Name: protocolTestTaskName, Seq: 7}}, Tools: []ToolDefinition{{
+			Name:          "read_incident",
+			Description:   "Read incident status",
+			BrokeredClass: BrokeredToolClassRead,
+			Parameters:    json.RawMessage(`{"type":"object","properties":{"incident":{"type":"string"}}}`),
+		}}},
 		ToolExecutionMode: ToolExecutionModeObserved,
 	}
 	if err := request.Validate(); err != nil {
@@ -91,16 +96,47 @@ func TestStartTurnRequestValidationErrorsAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestStartTurnRequestRejectsInvalidToolDefinitions(t *testing.T) {
+	request := StartTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        protocolTestNamespace,
+		TaskName:         protocolTestTaskName,
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     AuthIdentity{Subject: "user:test"},
+		Input: TurnInput{Tools: []ToolDefinition{{
+			Name:          "read_incident",
+			BrokeredClass: BrokeredToolClass("admin"),
+		}}},
+	}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported brokered class") {
+		t.Fatalf("Validate() = %v, want brokered class error", err)
+	}
+	request.Input.Tools[0].BrokeredClass = BrokeredToolClassRead
+	request.Input.Tools[0].Parameters = json.RawMessage(`{"type":`)
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "parameters must be valid JSON") {
+		t.Fatalf("Validate() = %v, want parameter JSON error", err)
+	}
+}
+
 func TestCapabilitiesAndHealthValidateVersionedDTOs(t *testing.T) {
 	capabilities := CapabilitiesResponse{
 		Version:                 ProtocolVersion,
 		ProtocolVersion:         ProtocolVersion,
 		Transport:               HTTPTransport,
 		RuntimeName:             "fake",
-		ProviderKind:            ProviderKindKubernetesService,
+		ProviderKind:            ProviderKindRemote,
 		ToolExecutionModes:      []ToolExecutionMode{ToolExecutionModeObserved, ToolExecutionModeBrokered},
+		BrokeredToolClasses:     []BrokeredToolClass{BrokeredToolClassRead, BrokeredToolClassWrite},
 		SupportsCancel:          true,
 		SupportsRuntimeSessions: true,
+		SupportsContinuation:    true,
+		SupportsArtifacts:       true,
+		MaxTurnSeconds:          600,
+		MaxOutputBytes:          1048576,
 	}
 	if err := capabilities.Validate(); err != nil {
 		t.Fatalf("Capabilities Validate() error = %v", err)
@@ -112,6 +148,86 @@ func TestCapabilitiesAndHealthValidateVersionedDTOs(t *testing.T) {
 	capabilities.Version = "orka.harness.v2"
 	if err := capabilities.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported version") {
 		t.Fatalf("Capabilities Validate() = %v, want unsupported version", err)
+	}
+}
+
+func TestCapabilitiesRejectBrokeredClassesWithoutBrokeredMode(t *testing.T) {
+	capabilities := CapabilitiesResponse{
+		Version:              ProtocolVersion,
+		ProtocolVersion:      ProtocolVersion,
+		Transport:            HTTPTransport,
+		RuntimeName:          "fake",
+		ProviderKind:         ProviderKindRemote,
+		ToolExecutionModes:   []ToolExecutionMode{ToolExecutionModeObserved},
+		BrokeredToolClasses:  []BrokeredToolClass{BrokeredToolClassRead},
+		MaxConcurrentTurns:   1,
+		SupportsContinuation: true,
+	}
+	if err := capabilities.Validate(); err == nil || !strings.Contains(err.Error(), "brokeredToolClasses require") {
+		t.Fatalf("Capabilities Validate() = %v, want brokered class dependency error", err)
+	}
+}
+
+func TestContinueTurnRequestValidationAndResponseIdentity(t *testing.T) {
+	request := ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        protocolTestNamespace,
+		TaskName:         protocolTestTaskName,
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		ToolResults: []ToolCallResult{{
+			Version:          ProtocolVersion,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			ToolCallID:       "tool-1",
+			IdempotencyKey:   "runtime-a:turn-a:tool-1",
+			Approved:         true,
+			Output:           json.RawMessage(`{"success":true}`),
+		}},
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("ContinueTurnRequest Validate() error = %v", err)
+	}
+	response := ContinueTurnResponse{
+		Version:          ProtocolVersion,
+		Accepted:         true,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+	}
+	if err := response.ValidateFor(request); err != nil {
+		t.Fatalf("ContinueTurnResponse ValidateFor() error = %v", err)
+	}
+	response.TurnID = "other"
+	if err := response.ValidateFor(request); err == nil || !strings.Contains(err.Error(), "want") {
+		t.Fatalf("ContinueTurnResponse ValidateFor() = %v, want identity error", err)
+	}
+}
+
+func TestContinueTurnRequestRequiresToolResultPayload(t *testing.T) {
+	request := ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        protocolTestNamespace,
+		TaskName:         protocolTestTaskName,
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+	}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "at least one tool result") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want missing tool result error", err)
+	}
+	request.ToolResults = []ToolCallResult{{
+		Version:          ProtocolVersion,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		ToolCallID:       "tool-1",
+		IdempotencyKey:   "runtime-a:turn-a:tool-1",
+	}}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "output or error") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want missing payload error", err)
 	}
 }
 

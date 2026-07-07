@@ -4,9 +4,9 @@ slug: /agent-runtimes
 
 # Agent Runtimes
 
-Agent runtimes let Orka delegate task execution to external agent CLIs—such as Codex CLI, Claude Code CLI, and GitHub Copilot CLI—instead of running tasks through Orka's built-in AI worker. This gives your tasks access to full autonomous coding capabilities (file read/write/edit, bash execution, git operations) provided by battle-tested agent runtimes, while Orka handles scheduling, lifecycle management, secrets, sessions, and Kubernetes-native orchestration.
+Agent runtimes cover two paths: built-in CLI runtimes such as Codex CLI, Claude Code CLI, and GitHub Copilot CLI, and bring-your-own remote execution backends selected through `AgentRuntime` and `spec.runtime.runtimeRef`. Built-in CLI runtimes give tasks autonomous coding capabilities (file read/write/edit, bash execution, git operations), while `AgentRuntime` lets teams run workloads on a generic HTTP runtime, AgentKit Serve, Foundry, or another adapter. Orka keeps scheduling, lifecycle, sessions, approvals, tool governance, idempotency, events, lineage, and result storage.
 
-## Supported Runtimes
+## Supported built-in CLI runtimes
 
 | Runtime | `runtime.type` | Secret Key | Status |
 |---------|---------------|------------|--------|
@@ -23,6 +23,42 @@ PR-blocking live CI currently exercises these runtime scenarios against real mod
 - `copilot` + Gemini with a pinned public repo checkout
 
 This coverage is about Orka's runtime wiring and task/session/workspace behavior. The live backend used in CI is harness infrastructure, not the main product under test.
+
+## Bring-your-own AgentRuntime
+
+`AgentRuntime` is the Orka-facing interface for remote execution backends. The backend can be a generic self-hosted HTTP runtime, AgentKit Serve, Foundry, or a future adapter. Orka keeps task lifecycle, approvals, tool governance, idempotency, events, lineage, and results.
+
+Remote backends must not receive production Orka Tool credentials. In brokered mode, they request tool calls and Orka authorizes, approves, executes or brokers, injects idempotency, and audits them.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: sample-http-runtime
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://sample-http-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: sample-http-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+      - observed
+    supportsCancel: true
+    supportsRuntimeSessions: true
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: remote-agent
+spec:
+  runtime:
+    runtimeRef:
+      name: sample-http-runtime
+```
 
 ## Quick Start
 
@@ -42,9 +78,9 @@ kubectl create secret generic copilot-token \
   --from-literal=GITHUB_TOKEN=<github-token>
 ```
 
-### Azure AI Foundry
+### Azure AI Foundry for Claude Code CLI
 
-Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. To use Azure AI Foundry, include the Foundry-specific environment variables in the secret:
+Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. This is the Claude Code CLI credential path. A Foundry hosted-agent adapter is a separate remote execution backend behind `AgentRuntime`. To use Azure AI Foundry with Claude Code CLI, include the Foundry-specific environment variables in the secret:
 
 ```bash
 kubectl create secret generic claude-credentials \
@@ -122,7 +158,7 @@ curl http://localhost:8080/api/v1/tasks/refactor-task/result \
 
 ## Agent Configuration
 
-An Agent resource with a `runtime` field defines the CLI runtime to use for `type: agent` tasks. The `runtime` field is mutually exclusive with `providerRef` (which is for `type: ai` tasks).
+An Agent resource with a `runtime` field defines either a built-in CLI runtime with `runtime.type` or a namespace-local `AgentRuntime` facade with `runtime.runtimeRef` for `type: agent` tasks. The `runtime` field is mutually exclusive with `providerRef` (which is for `type: ai` tasks).
 
 ### Full Reference
 
@@ -134,9 +170,12 @@ metadata:
 spec:
   # runtime marks this Agent for type: agent tasks
   runtime:
-    # type: which CLI runtime to use (required)
+    # type: which built-in CLI runtime to use (set exactly one of type or runtimeRef)
     # Valid values: "copilot", "claude", "codex"
     type: claude
+    # runtimeRef selects a namespace-local AgentRuntime facade instead of a built-in CLI runtime.
+    # runtimeRef:
+    #   name: sample-http-runtime
 
     # defaultMaxTurns: default max agent loop iterations per task
     # Range: 1-1000, Default: 50
@@ -605,7 +644,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 ### Task fails immediately
 
 - **Type mismatch**: `type: agent` tasks require an Agent with `runtime` configured. `type: ai` tasks cannot use Agents with `runtime`.
-- **Invalid runtime type**: `runtime.type` must be `copilot`, `claude`, or `codex`.
+- **Invalid runtime type**: `runtime.type` must be `copilot`, `claude`, or `codex`; for remote execution backends, use `runtime.runtimeRef` pointing at a Ready namespace-local `AgentRuntime`.
 - **Worker image not available**: Check that the harness wrapper image is accessible from your cluster:
   ```bash
   kubectl describe pod -l orka.ai/worker-type=agent

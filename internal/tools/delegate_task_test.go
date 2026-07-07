@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,6 +48,8 @@ const (
 	parentTransactionToken = "parent-tx-token"
 	childTransactionScope  = "orka:agents:run"
 )
+
+const testAgentCatalogNS = "catalog"
 
 func researcherAgent() *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
@@ -302,6 +305,58 @@ func TestDelegateTaskTool_Execute(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDelegateTaskTool_CrossNamespaceAgentKeepsChildInParentNamespace(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, testAgentCatalogNS+"/researcher")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	catalogAgent := researcherAgent()
+	catalogAgent.Namespace = testAgentCatalogNS
+	k8sClient := newFakeClient(parentTask(), catalogAgent)
+	tool := NewDelegateTaskTool(k8sClient)
+	result, err := tool.Execute(context.Background(), json.RawMessage(fmt.Sprintf(`{
+		"agent":"researcher",
+		"agentNamespace":%q,
+		"prompt":"Research cross namespace"
+	}`, testAgentCatalogNS)))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var parsed DelegateTaskResult
+	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	child := &corev1alpha1.Task{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{Name: parsed.TaskName, Namespace: defaultNamespace}, child); err != nil {
+		t.Fatalf("get child task in parent namespace: %v", err)
+	}
+	if child.Spec.AgentRef == nil || child.Spec.AgentRef.Name != "researcher" || child.Spec.AgentRef.Namespace != testAgentCatalogNS {
+		t.Fatalf("child AgentRef = %#v, want %s/researcher", child.Spec.AgentRef, testAgentCatalogNS)
+	}
+}
+
+func TestDelegateTaskTool_CrossNamespaceAgentDeniedWhenAllowedAgentsLacksNamespace(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaCoordinationDepth, "0")
+	t.Setenv(envOrkaCoordinationAllowedAgents, "default/researcher")
+	t.Setenv(envOrkaCoordinationMaxDepth, "3")
+
+	catalogAgent := researcherAgent()
+	catalogAgent.Namespace = testAgentCatalogNS
+	k8sClient := newFakeClient(parentTask(), catalogAgent)
+	_, err := NewDelegateTaskTool(k8sClient).Execute(context.Background(), json.RawMessage(fmt.Sprintf(`{
+		"agent":"researcher",
+		"agentNamespace":%q,
+		"prompt":"Research cross namespace"
+	}`, testAgentCatalogNS)))
+	if err == nil || !strings.Contains(err.Error(), "allowed agents") {
+		t.Fatalf("Execute() error = %v, want allowed agents denial", err)
 	}
 }
 

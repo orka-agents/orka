@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	TurnResourceEvents = "events"
-	TurnResourceCancel = "cancel"
-	TurnResourceOutput = "output"
+	TurnResourceEvents   = "events"
+	TurnResourceContinue = "continue"
+	TurnResourceCancel   = "cancel"
+	TurnResourceOutput   = "output"
 )
 
 // ErrTurnPathNotFound reports that a request path is not a two-segment harness
@@ -51,6 +52,11 @@ func EventStreamPath(turnID HarnessTurnID) (string, error) {
 // CancelTurnPath builds the escaped cancel path for a turn.
 func CancelTurnPath(turnID HarnessTurnID) (string, error) {
 	return TurnResourcePath(turnID, TurnResourceCancel)
+}
+
+// ContinueTurnPath builds the continuation path for a suspended turn.
+func ContinueTurnPath(turnID HarnessTurnID) (string, error) {
+	return TurnResourcePath(turnID, TurnResourceContinue)
 }
 
 // OutputTurnPath builds the escaped output fetch path for a turn.

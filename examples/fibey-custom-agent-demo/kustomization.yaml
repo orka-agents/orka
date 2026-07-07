@@ -1,6 +1,6 @@
 resources:
 - secret.yaml
-- mock-agentkit-service.yaml
+- mock-http-runtime-service.yaml
 - agentruntime.yaml
 - agent.yaml
 - task.yaml

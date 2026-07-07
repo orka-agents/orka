@@ -1,0 +1,23 @@
+# Optional namespace-local facade for an AgentKit Serve adapter implementing orka.harness.v1.
+# Current AgentKit Serve Orka support is observed mode only; brokered tool classes
+# stay unadvertised until AgentKit passes the corresponding conformance profiles.
+# Apply this with secret-agentkit.yaml and point an Agent runtimeRef at fibey-agentkit-runtime
+# after deploying the adapter Service named fibey-agentkit-runtime.
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: fibey-agentkit-runtime
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://fibey-agentkit-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: fibey-agentkit-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+    - observed
+    supportsCancel: true
+    supportsRuntimeSessions: true

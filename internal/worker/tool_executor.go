@@ -113,6 +113,25 @@ func NewToolExecutor() *ToolExecutor {
 	}
 }
 
+// NewToolExecutorForNamespace creates a Tool CRD executor with explicit
+// dependencies. Controller-side brokered AgentRuntime tool execution uses this
+// path so Orka, not the remote backend, resolves tool credentials.
+func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interface, httpClient *http.Client) *ToolExecutor {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &ToolExecutor{
+		client:     httpClient,
+		secretPath: "/secrets/tools",
+		namespace:  namespace,
+		k8sClient:  k8sClient,
+	}
+}
+
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
 	if toolExecutorTelemetryDisabled() {

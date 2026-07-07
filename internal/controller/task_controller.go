@@ -75,6 +75,9 @@ const (
 	// ConditionTypeJobCreated indicates a Job has been created
 	ConditionTypeJobCreated = "JobCreated"
 
+	// ConditionTypeWaitingForApproval indicates a running task is parked on a human approval.
+	ConditionTypeWaitingForApproval = "WaitingForApproval"
+
 	// jobCreationVisibilityGracePeriod avoids failing a task when the controller cache
 	// has not observed the Job immediately after create.
 	jobCreationVisibilityGracePeriod = 30 * time.Second
@@ -2238,6 +2241,13 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		t.Status.Message = message
 		t.Status.ResultRef = resultRef
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeWaitingForApproval,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            "task is terminal",
+		})
+		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeComplete,
 			Status:             conditionStatus,
 			LastTransitionTime: now,
@@ -2801,34 +2811,34 @@ func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.Works
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
 	if agent != nil && agent.Spec.Runtime != nil {
 		if len(agent.Spec.Runtime.DefaultAllowedTools) > 0 {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowedTools policy metadata")
+			return fmt.Errorf("runtimeRef custom runtimes require task-level allowedTools for brokered tool exposure and do not support defaultAllowedTools policy metadata")
 		}
 		if agent.Spec.Runtime.DefaultAllowBash != nil {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support defaultAllowBash policy metadata")
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
 		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
-		if len(task.Spec.AgentRuntime.AllowedTools) > 0 || len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowedTools/disallowedTools policy metadata")
+		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
+			return fmt.Errorf("runtimeRef custom runtimes do not support disallowedTools policy metadata")
 		}
 		if task.Spec.AgentRuntime.AllowBash != nil {
-			return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support allowBash policy metadata")
+			return fmt.Errorf("runtimeRef custom runtimes do not support allowBash policy metadata")
 		}
 	}
 	if agent != nil && agent.Spec.SecretRef != nil && strings.TrimSpace(agent.Spec.SecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support agent secretRef credential delivery")
+		return fmt.Errorf("runtimeRef custom runtimes do not support agent secretRef credential delivery")
 	}
 	if task != nil && task.Spec.SecretRef != nil && strings.TrimSpace(task.Spec.SecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support task secretRef credential delivery")
+		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
 	}
 	if ws := effectiveWorkspace(task); ws != nil && ws.GitSecretRef != nil && strings.TrimSpace(ws.GitSecretRef.Name) != "" {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support workspace gitSecretRef credential delivery")
+		return fmt.Errorf("runtimeRef custom runtimes do not support workspace gitSecretRef credential delivery")
 	}
 	if task != nil && task.Spec.PriorTaskRef != nil {
-		return fmt.Errorf("runtimeRef custom runtimes in observed mode do not support priorTaskRef workspace handoff")
+		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
 	}
 	if taskRequestsReadOnlyAgent(task) {
-		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes in observed mode because Orka cannot enforce remote tool side effects")
+		return fmt.Errorf("read-only agent tasks do not support runtimeRef custom runtimes because Orka cannot enforce remote tool side effects")
 	}
 	return nil
 }

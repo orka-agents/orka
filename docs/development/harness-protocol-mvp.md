@@ -65,13 +65,14 @@ The implementation contract is now represented by `internal/harness` and is froz
 | `/v1/capabilities` | `GET` | Return `CapabilitiesResponse`. |
 | `/v1/turns` | `POST` | Accept `StartTurnRequest` and return `StartTurnResponse`. |
 | `/v1/turns/{turnID}/events?afterSeq=N` | `GET` | Stream `HarnessEventFrame` values as SSE `data:` records. |
+| `/v1/turns/{turnID}/continue` | `POST` | Accept `ContinueTurnRequest` carrying Orka-brokered tool results and return `ContinueTurnResponse` when the continuation profile is advertised. |
 | `/v1/turns/{turnID}/cancel` | `POST` | Accept `CancelTurnRequest` and return `CancelTurnResponse`. |
 
 Every DTO carries `version: "orka.harness.v1"`. A missing or unsupported version is a deterministic validation error. Provider-specific fields, including Agent Substrate actor identifiers, are excluded from base request DTOs and belong only in provider capability metadata/status.
 
 ### Required turn fields
 
-`StartTurnRequest` requires namespace, task name, session name, runtime session id, turn id, correlation id, deadline, and a verified auth identity subject or username. Tool and approval policies are safe object references. Raw TxTokens are not valid DTO fields. Resolved literal credentials destined for the runtime subprocess (provider API keys, git tokens already read from a Secret by the controller) ARE permitted in `input.env` (`TurnEnvVar`): the request body is the controller-to-wrapper credential delivery channel, equivalent to mounting a Secret into the wrapper pod. The prohibition below scopes raw secrets out of observable/durable surfaces, not this in-memory request body.
+`StartTurnRequest` requires namespace, task name, session name, runtime session id, turn id, correlation id, deadline, and a verified auth identity subject or username. Tool and approval policies are safe object references. Raw TxTokens are not valid DTO fields. Resolved literal credentials destined for a controller-managed local runtime subprocess (provider API keys, git tokens already read from a Secret by the controller) ARE permitted in `input.env` (`TurnEnvVar`): that request body is equivalent to mounting a Secret into the wrapper pod. Remote execution backends must not receive production Orka Tool credentials; governed tool access is through brokered Orka calls. When brokered tools are allowed, `input.tools` carries only safe schema metadata: tool name, description, brokered class, and JSON parameters. It intentionally omits downstream URLs, headers, Secret refs, and credentials.
 
 ```json
 {
@@ -87,8 +88,16 @@ Every DTO carries `version: "orka.harness.v1"`. A missing or unsupported version
   "toolPolicyRef": {"name": "default-tools"},
   "approvalPolicyRef": {"name": "default-approvals"},
   "eventCursor": 7,
-  "toolExecutionMode": "observed",
-  "input": {"prompt": "summarize this repository"}
+  "toolExecutionMode": "brokered",
+  "input": {
+    "prompt": "summarize this incident",
+    "tools": [{
+      "name": "support-ticket-lookup",
+      "description": "Look up sanitized support evidence",
+      "brokeredClass": "read",
+      "parameters": {"type": "object"}
+    }]
+  }
 }
 ```
 
@@ -102,7 +111,7 @@ Harness frames are mapped to existing Orka execution event types so task/session
 | `RuntimeOutput` | `ModelMessage` | Runtime output is sanitized before persistence. |
 | `ToolCallRequested` | `ToolCallStarted` | `toolName` and `toolCallID` are preserved. |
 | `ToolResultReceived` | `ToolCallCompleted` | Failed tool results can carry safe error content. |
-| `ApprovalRequested` | `ApprovalRequested` | Reuses durable approval event lifecycle. |
+| `ApprovalRequested` | `AgentRuntimeCommandStarted` | Runtime-originated approval frames are diagnostics only; Orka creates canonical `ApprovalRequested` events when broker policy requires approval. |
 | `TurnCompleted` | `AgentRuntimeCompleted` | Terminal turn metadata is included in content. |
 | `TurnFailed` | `AgentRuntimeFailed` | Severity is forced to `error`. |
 | `TurnCancelled` | `AgentRuntimeCancelled` | Cancellation is terminal for the harness turn, but not controller-owned task cancellation. |
@@ -113,8 +122,14 @@ Redaction/truncation runs in the harness mapper and again at the event store bou
 
 ### Tool execution modes
 
-- `observed`: the harness executes tools itself and emits tool lifecycle frames. This is compatible with opaque runtimes but Orka cannot prevent side effects before observation.
-- `brokered`: the harness requests tool execution through Orka. The idempotency key is `runtimeSessionID:turnID:toolCallID`; duplicate requests must return the same result or a deterministic conflict. Approval-required brokered calls emit the existing approval events and do not execute until approved.
+- `observed`: the remote execution backend may use its own internal tools; Orka records lifecycle, output, and terminal results but cannot govern backend-internal side effects.
+- `brokered`: the backend requests Orka Tool execution through Orka. Orka owns authorization, approval, idempotency, credential resolution, execution/brokering, and audit. The idempotency key is `runtimeSessionID:turnID:toolCallID`; duplicate requests must return the same result or a deterministic conflict. Approval-required brokered calls emit approval events and do not execute until approved.
+
+Capabilities use a small mandatory core plus optional profiles. `toolExecutionModes` advertises `observed` and/or `brokered`. Brokered runtimes may additionally advertise `brokeredToolClasses` (`read`, `write`, `coordination`), `supportsContinuation`, `supportsArtifacts`, `maxTurnSeconds`, and `maxOutputBytes`. Foundry-, AgentKit-, or backend-native identifiers belong in adapter-owned metadata, not in the Orka-facing contract.
+
+Structured task results may use the `workers/common.StructuredResult` JSON envelope. In addition to summary/verdict/diff metadata, the envelope supports a generic `data` object for machine-readable payloads and `artifacts` references for larger outputs. `wait_for_tasks` preserves `data` when it fits the inline bound and propagates artifact references; oversized data is replaced with an explicit truncation marker so large payloads can move to artifacts instead of task summaries.
+
+Brokered coordination tools follow the same governance path as Tool CRDs. `delegate_task` supports explicit `agentNamespace` and `taskNamespace` fields: child tasks stay in the parent/task namespace by default, while the target Agent may live in a namespace-local facade or an allowed catalog namespace. The legacy `namespace` field remains a compatibility shortcut for callers that intentionally want both lookup and child task creation in the same namespace.
 
 ### RuntimeSession lifecycle
 

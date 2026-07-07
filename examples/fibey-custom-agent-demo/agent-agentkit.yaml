@@ -1,0 +1,12 @@
+# Optional Agent that selects the AgentKit Serve backend facade.
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: fibey-remote-agentkit
+spec:
+  runtime:
+    runtimeRef:
+      name: fibey-agentkit-runtime
+  systemPrompt:
+    inline: |
+      You are Fibey's AgentKit-backed incident scout. Produce a concise dossier and request Orka-brokered tools for evidence or consequential actions.

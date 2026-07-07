@@ -162,6 +162,20 @@ type StructuredResult struct {
 	Files      []string `json:"files,omitempty"`
 	PushBranch string   `json:"pushBranch,omitempty"`
 	PushError  string   `json:"pushError,omitempty"`
+	// Data carries generic machine-readable task output. Keep large payloads in
+	// artifacts and put references here; parent/coordinator summaries may bound it.
+	Data      map[string]any `json:"data,omitempty"`
+	Artifacts []ArtifactRef  `json:"artifacts,omitempty"`
+}
+
+// ArtifactRef is a safe structured reference to a task artifact. The artifact
+// bytes remain in Orka artifact storage; this envelope carries only metadata
+// that coordinators and remote runtimes can use to fetch or reason about it.
+type ArtifactRef struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // FormatStructuredResult serializes a StructuredResult to JSON bytes.

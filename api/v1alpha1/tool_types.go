@@ -23,6 +23,11 @@ type ToolSpec struct {
 	// +optional
 	Parameters *apiextensionsv1.JSON `json:"parameters,omitempty"`
 
+	// BrokeredToolClass declares the governed class for remote AgentRuntime brokered calls.
+	// Tools without this field are not exposed to remote runtimes through brokered governance.
+	// +optional
+	BrokeredToolClass AgentRuntimeBrokeredToolClass `json:"brokeredToolClass,omitempty"`
+
 	// HTTP defines the HTTP execution configuration. It is required unless MCP
 	// is set.
 	// +optional

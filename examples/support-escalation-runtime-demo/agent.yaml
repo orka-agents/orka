@@ -1,0 +1,11 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: support-remote-investigator
+spec:
+  runtime:
+    runtimeRef:
+      name: support-http-runtime
+  systemPrompt:
+    inline: |
+      You are a support escalation investigator. Use Orka-brokered tools for evidence gathering and summarize the customer's likely issue and next safe action.

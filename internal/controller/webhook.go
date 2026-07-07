@@ -24,6 +24,14 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	urlSchemeHTTP      = "http"
+	urlSchemeHTTPS     = "https"
+	k8sServiceDNSLabel = "svc"
+	k8sClusterDNSLabel = "cluster"
+	k8sLocalDNSLabel   = "local"
+)
+
 // isAllowedWebhookURL validates that the webhook URL does not target internal/private networks.
 func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawURL, namespace string) error {
 	u, err := url.Parse(rawURL)
@@ -32,7 +40,7 @@ func isAllowedWebhookURL(ctx context.Context, kubeClient ctrlclient.Reader, rawU
 	}
 
 	// Only allow http and https schemes
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != urlSchemeHTTP && u.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("webhook URL scheme %q not allowed, must be http or https", u.Scheme)
 	}
 
@@ -112,12 +120,12 @@ func parseClusterServiceHost(host string) (serviceName, namespace string, ok boo
 	parts := strings.Split(host, ".")
 	switch len(parts) {
 	case 3:
-		if parts[2] != "svc" {
+		if parts[2] != k8sServiceDNSLabel {
 			return "", "", false
 		}
 		return parts[0], parts[1], true
 	case 5:
-		if parts[2] != "svc" || parts[3] != "cluster" || parts[4] != "local" {
+		if parts[2] != k8sServiceDNSLabel || parts[3] != k8sClusterDNSLabel || parts[4] != k8sLocalDNSLabel {
 			return "", "", false
 		}
 		return parts[0], parts[1], true
