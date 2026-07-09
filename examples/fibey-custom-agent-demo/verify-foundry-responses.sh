@@ -103,6 +103,7 @@ TERMINAL_TYPES = {
     "TurnCompleted",
     "TaskCompleted",
 }
+READ_REQUEST_TYPES = {"ToolCallRequested", "ToolCallStarted"}
 WRITE_EXEC_TYPES = {"ToolCallStarted"}
 
 
@@ -189,7 +190,7 @@ for index, event in enumerate(events, start=1):
         ordered_events.append(event)
 
 events = ordered_events
-read_events = [e for e in events if tool_name(e) in READ_TOOLS]
+read_events = [e for e in events if tool_name(e) in READ_TOOLS and event_type(e) in READ_REQUEST_TYPES]
 write_events = [e for e in events if tool_name(e) in WRITE_TOOLS]
 approval_events = [e for e in events if event_type(e) == "ApprovalRequested"]
 write_exec_events = [e for e in write_events if event_type(e) in WRITE_EXEC_TYPES]
