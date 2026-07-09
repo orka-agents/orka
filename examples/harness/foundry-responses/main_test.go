@@ -1055,7 +1055,7 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 		Input: "please read telemetry",
 	})
 
-	outputs, err := functionCallOutputs([]harness.ToolCallResult{{
+	outputs, _, err := functionCallOutputs([]harness.ToolCallResult{{
 		Version:          harness.ProtocolVersion,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
@@ -1374,7 +1374,7 @@ func TestCanonicalErrorAndDeclineOutputFixtures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			outputs, err := functionCallOutputs([]harness.ToolCallResult{tt.result})
+			outputs, _, err := functionCallOutputs([]harness.ToolCallResult{tt.result})
 			if err != nil {
 				t.Fatalf("functionCallOutputs: %v", err)
 			}

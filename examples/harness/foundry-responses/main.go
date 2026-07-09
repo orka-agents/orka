@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -444,7 +445,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		harness.WriteJSON(w, http.StatusAccepted, continueResponse(req, "continue accepted"))
 		return
 	}
-	outputs, err := functionCallOutputs(resultsToSubmit)
+	outputs, payloadByCall, err := functionCallOutputs(resultsToSubmit)
 	if err != nil {
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -465,6 +466,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		AgentSessionID:     foundrySessionID,
 		Input:              outputs,
 	}
+	s.markSubmittedPayloads(turn, payloadByCall)
 	if err := s.postResponses(ctx, req.RuntimeSessionID, continuation, &response); err != nil {
 		s.mu.Lock()
 		s.appendFailedLocked(
@@ -766,12 +768,17 @@ func (s *server) recordContinueResults(
 			continue
 		}
 		toSubmit = append(toSubmit, turn.bufferedResults[id])
-		turn.submittedPayloads[id] = turn.bufferedPayloads[id]
 	}
 	if len(toSubmit) == 0 {
 		return nil, nil
 	}
 	return toSubmit, nil
+}
+
+func (s *server) markSubmittedPayloads(turn *turnState, payloadByCall map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	maps.Copy(turn.submittedPayloads, payloadByCall)
 }
 
 func (s *server) ensureTerminalContinueIsDuplicate(turn *turnState, results []harness.ToolCallResult) error {
@@ -796,12 +803,13 @@ func (s *server) ensureTerminalContinueIsDuplicate(turn *turnState, results []ha
 	return nil
 }
 
-func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionCallOutput, error) {
+func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionCallOutput, map[string]string, error) {
 	outputs := make([]responsesFunctionCallOutput, 0, len(results))
+	payloadByCall := map[string]string{}
 	for _, result := range results {
 		payload, err := canonicalToolResultOutput(result)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		outputs = append(
 			outputs,
@@ -812,8 +820,9 @@ func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionC
 				Status: "completed",
 			},
 		)
+		payloadByCall[result.ToolCallID] = payload
 	}
-	return outputs, nil
+	return outputs, payloadByCall, nil
 }
 
 func canonicalToolResultOutput(result harness.ToolCallResult) (string, error) {
