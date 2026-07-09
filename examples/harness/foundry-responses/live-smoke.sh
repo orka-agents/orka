@@ -344,11 +344,11 @@ fi
 
 kubectl get namespace "$namespace" >/dev/null 2>&1 || kubectl create namespace "$namespace" >/dev/null
 # Validate CRDs/admission for non-secret resources before writing live credentials.
-emit_runtime_yaml | kubectl -n "$namespace" apply --server-side --dry-run=server -f - >/dev/null
+emit_runtime_yaml | kubectl -n "$namespace" apply --server-side --field-manager=orka-foundry-responses-live-smoke --dry-run=server -f - >/dev/null
 emit_secret_yaml | kubectl -n "$namespace" apply --server-side --field-manager=orka-foundry-responses-live-smoke -f - >/dev/null
 kubectl -n "$namespace" annotate secret "${runtime_name}-token" kubectl.kubernetes.io/last-applied-configuration- --overwrite >/dev/null 2>&1 || true
 kubectl -n "$namespace" annotate secret "${runtime_name}-adapter-config" kubectl.kubernetes.io/last-applied-configuration- --overwrite >/dev/null 2>&1 || true
-emit_runtime_yaml | kubectl -n "$namespace" apply -f -
+emit_runtime_yaml | kubectl -n "$namespace" apply --server-side --field-manager=orka-foundry-responses-live-smoke -f -
 if kubectl -n "$namespace" get "deployment/${runtime_name}" >/dev/null 2>&1; then
   kubectl -n "$namespace" rollout restart "deployment/${runtime_name}" >/dev/null
 fi
