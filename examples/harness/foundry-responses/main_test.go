@@ -359,6 +359,48 @@ func TestResponsesAdapterDuplicateContinueIsIdempotentAndConflictsReject(t *test
 	}
 }
 
+func TestResponsesAdapterSendsBrokeredContinuationProofHeader(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{
+		scenario:      "function_call",
+		toolName:      "support-ticket-lookup",
+		requiredProof: "proof-for-test",
+	})
+	s := newServer(config{
+		runtimeName:         "foundry-responses-test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            foundry.endpoint(),
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		continuationProof:   "proof-for-test",
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	adapter := httptest.NewServer(s.handler())
+	t.Cleanup(adapter.Close)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-continuation-proof")
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamAllFrames(t, client, request.TurnID)
+	requested := findFrame(frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want tool request", frames)
+	}
+	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
+	if _, err := client.ContinueTurn(context.Background(), continueRequest); err != nil {
+		t.Fatalf("ContinueTurn: %v", err)
+	}
+	if got := foundry.requestHeader(1).Get("X-AgentKit-Brokered-Continuation-Proof"); got != "proof-for-test" {
+		t.Fatalf("continuation proof header = %q, want proof-for-test", got)
+	}
+	if got := foundry.requestHeader(0).Get("X-AgentKit-Brokered-Continuation-Proof"); got != "" {
+		t.Fatalf("initial proof header = %q, want empty", got)
+	}
+}
+
 func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{
 		scenario:           "function_call",
@@ -398,6 +440,45 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	failed := findFrame(frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "foundry_continuation_unknown" {
 		t.Fatalf("failed frame = %#v, want fail-closed continuation failure", failed)
+	}
+}
+
+func TestResponsesAdapterPendingToolTimesOutWithoutContinuation(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     10 * time.Millisecond,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           brokeredReadRequest("foundry-timeout"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.turns[turn.request.TurnID] = turn
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID: "resp-1",
+		Output: []responsesOutput{{
+			Type:      "function_call",
+			CallID:    "call-1",
+			Name:      "support-ticket-lookup",
+			Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+		}},
+	})
+	time.Sleep(50 * time.Millisecond)
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "approval_wait_exceeded" {
+		t.Fatalf("failed frame = %#v, want approval_wait_exceeded", failed)
 	}
 }
 
@@ -729,6 +810,7 @@ type fakeResponsesConfig struct {
 	scenario           string
 	toolName           string
 	continuationStatus int
+	requiredProof      string
 }
 
 type fakeResponses struct {

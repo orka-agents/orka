@@ -28,6 +28,7 @@ Use this adapter for AgentKit agents deployed as Foundry hosted agents. Use `exa
 | `ORKA_FOUNDRY_RESPONSES_API_KEY` | Static API-key auth mode. Tests/demo only unless your deployment standard permits it. |
 | `ORKA_FOUNDRY_RESPONSES_AUTH_BEARER` | Static bearer auth mode. Tests/demo only unless supplied by a production token refresher sidecar. |
 | `ORKA_FOUNDRY_RESPONSES_TOKEN_AUDIENCE` | Reserved for future workload-identity token refresh support; currently not used. |
+| `ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF` | Optional Orka-only proof value sent as `X-AgentKit-Brokered-Continuation-Proof` on hosted Responses continuations. Set it to match AgentKit's `AGENTKIT_FOUNDRY_BROKERED_CONTINUATION_PROOF` when that guard is enabled. |
 | `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` | Comma-separated static classes the hosted AgentKit deployment has been configured and conformance-tested to request, e.g. `read` or `read,write`. Empty means observed-only. |
 | `ORKA_FOUNDRY_RESPONSES_POLL_TIMEOUT` | Per-request timeout for hosted Responses calls, default `20s`. |
 | `ORKA_FOUNDRY_RESPONSES_STATE_RETENTION` | How long terminal in-memory turn/session state is retained, default `10m`. |

@@ -45,6 +45,7 @@ const (
 	envRequestTimeout      = "ORKA_FOUNDRY_RESPONSES_POLL_TIMEOUT"
 	envStateRetention      = "ORKA_FOUNDRY_RESPONSES_STATE_RETENTION"
 	envMaxApprovalWait     = "ORKA_FOUNDRY_RESPONSES_MAX_APPROVAL_WAIT"
+	envContinuationProof   = "ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF"
 	envBrokeredToolClasses = "ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES"
 	envAudience            = "ORKA_FOUNDRY_RESPONSES_TOKEN_AUDIENCE"
 )
@@ -62,6 +63,7 @@ type config struct {
 	requestTimeout      time.Duration
 	stateRetention      time.Duration
 	maxApprovalWait     time.Duration
+	continuationProof   string
 	brokeredToolClasses []harness.BrokeredToolClass
 	configError         string
 }
@@ -170,6 +172,7 @@ func loadConfig() config {
 		requestTimeout:      parseDurationEnv(envRequestTimeout, defaultRequestTimeout),
 		stateRetention:      parseDurationEnv(envStateRetention, defaultStateRetention),
 		maxApprovalWait:     parseDurationEnv(envMaxApprovalWait, defaultMaxApprovalWait),
+		continuationProof:   strings.TrimSpace(os.Getenv(envContinuationProof)),
 		brokeredToolClasses: classes,
 	}
 	_ = os.Getenv(envAudience) // Reserved for a future workload-identity token provider; never logged.
@@ -556,6 +559,7 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 			}
 			turn.pendingTools[call.callID] = call.name
 			turn.pendingSince[call.callID] = now
+			s.schedulePendingToolTimeoutLocked(turn, call.callID)
 			s.appendFrameLocked(
 				turn,
 				harness.FrameToolCallRequested,
@@ -844,6 +848,9 @@ func (s *server) postResponses(
 	if s.cfg.authBearer != "" {
 		req.Header.Set("Authorization", "Bearer "+s.cfg.authBearer)
 	}
+	if body.PreviousResponseID != "" && s.cfg.continuationProof != "" {
+		req.Header.Set("X-AgentKit-Brokered-Continuation-Proof", s.cfg.continuationProof)
+	}
 	if session.ID != "" {
 		req.Header.Set("x-agent-session-id", session.ID)
 	}
@@ -1103,6 +1110,30 @@ func (s *server) updateTurnSessionLocked(turn *turnState) {
 	if session.ID != "" {
 		turn.foundrySessionID = session.ID
 	}
+}
+
+func (s *server) schedulePendingToolTimeoutLocked(turn *turnState, toolCallID string) {
+	wait := s.cfg.maxApprovalWait
+	if wait <= 0 {
+		return
+	}
+	turnID := turn.request.TurnID
+	time.AfterFunc(wait, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		current := s.turns[turnID]
+		if current != turn || turn.completed {
+			return
+		}
+		if _, pending := turn.pendingTools[toolCallID]; !pending {
+			return
+		}
+		s.appendFailedLocked(
+			turn,
+			"approval_wait_exceeded",
+			"maximum brokered tool wait exceeded",
+		)
+	})
 }
 
 func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
