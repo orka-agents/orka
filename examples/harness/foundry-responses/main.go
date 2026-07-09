@@ -84,6 +84,7 @@ type foundrySession struct {
 
 type turnState struct {
 	request           harness.StartTurnRequest
+	initializing      bool
 	responseID        string
 	foundrySessionID  string
 	pendingTools      map[string]string
@@ -306,12 +307,18 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 			harness.WriteError(w, http.StatusConflict, "turn already exists")
 			return
 		}
+		if existing.initializing {
+			s.mu.Unlock()
+			harness.WriteError(w, http.StatusConflict, "turn initialization in progress")
+			return
+		}
 		s.mu.Unlock()
 		harness.WriteJSON(w, http.StatusAccepted, response)
 		return
 	}
 	turn := &turnState{
 		request:           req,
+		initializing:      true,
 		pendingTools:      map[string]string{},
 		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
@@ -337,6 +344,9 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	s.updateTurnSessionLocked(turn)
 	s.mu.Unlock()
 	s.handleResponsesResponse(turn, response)
+	s.mu.Lock()
+	turn.initializing = false
+	s.mu.Unlock()
 	harness.WriteJSON(w, http.StatusAccepted, startTurnResponse(req, eventsPath))
 }
 
@@ -1158,6 +1168,9 @@ func (s *server) schedulePendingToolTimeoutLocked(turn *turnState, toolCallID st
 			return
 		}
 		if _, pending := turn.pendingTools[toolCallID]; !pending {
+			return
+		}
+		if _, submitted := turn.submittedPayloads[toolCallID]; submitted {
 			return
 		}
 		s.appendFailedLocked(

@@ -209,6 +209,44 @@ func TestResponsesAdapterContinuationUsesTurnSessionAfterSessionMapCleanup(t *te
 	}
 }
 
+func TestResponsesAdapterDuplicateStartDuringInitializationRejected(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		select {
+		case <-received:
+		default:
+			close(received)
+		}
+		<-release
+		writeJSON(w, finalResponsesMessage())
+	}))
+	t.Cleanup(foundry.Close)
+	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter := newTestResponsesAdapter(t, endpoint, nil)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-duplicate-start")
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := client.StartTurn(context.Background(), request)
+		firstErr <- err
+	}()
+	<-received
+	if _, err := client.StartTurn(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "initialization in progress") {
+		t.Fatalf("duplicate StartTurn error = %v, want initialization conflict", err)
+	}
+	close(release)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("initial StartTurn: %v", err)
+	}
+}
+
 func TestResponsesAdapterPassesObservedConformanceByDefault(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
 	adapter := newTestResponsesAdapter(t, foundry.endpoint(), nil)
@@ -618,6 +656,36 @@ func TestResponsesAdapterPendingToolTimesOutWithoutContinuation(t *testing.T) {
 	failed := findFrame(turn.frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "approval_wait_exceeded" {
 		t.Fatalf("failed frame = %#v, want approval_wait_exceeded", failed)
+	}
+}
+
+func TestResponsesAdapterPendingTimeoutSkipsSubmittedCall(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     10 * time.Millisecond,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           brokeredReadRequest("foundry-timeout-submitted"),
+		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
+		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{"call-1": `{"approved":true}`},
+	}
+	server.turns[turn.request.TurnID] = turn
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.schedulePendingToolTimeoutLocked(turn, "call-1")
+	time.Sleep(50 * time.Millisecond)
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if failed := findFrame(turn.frames, harness.FrameTurnFailed); failed != nil {
+		t.Fatalf("failed frame = %#v, submitted call should not time out", failed)
 	}
 }
 
