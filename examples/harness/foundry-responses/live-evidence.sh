@@ -253,8 +253,7 @@ for index, event in enumerate(events, start=1):
         "hasIdempotencyEvidence": has_idempotency(event),
         "hasError": bool(event_field(event, "error", "errorCode")),
     })
-Path(sys.argv[2]).write_text(json.dumps({"eventCount": len(events), "events": summary}, indent=2, sort_keys=True) + "
-")
+Path(sys.argv[2]).write_text(json.dumps({"eventCount": len(events), "events": summary}, indent=2, sort_keys=True) + "\n")
 PY
 scan_saved_artifact "$events_json" "task events summary"
 python3 - "$approvals_tmp" "$approvals_json" <<'PY'
@@ -280,8 +279,7 @@ for index, item in enumerate(items, start=1):
         "status": item.get("status") or item.get("decision"),
         "toolName": item.get("toolName") or item.get("tool"),
     })
-Path(sys.argv[2]).write_text(json.dumps({"approvalCount": len(items), "approvals": summary}, indent=2, sort_keys=True) + "
-")
+Path(sys.argv[2]).write_text(json.dumps({"approvalCount": len(items), "approvals": summary}, indent=2, sort_keys=True) + "\n")
 PY
 scan_saved_artifact "$approvals_json" "task approvals summary"
 
