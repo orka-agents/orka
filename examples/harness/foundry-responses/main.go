@@ -367,11 +367,12 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	s.turns[req.TurnID] = turn
 	s.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.requestTimeout)
+	ctx, cancel := s.foundryRequestContext(r.Context(), req.Deadline)
 	defer cancel()
 	var response responsesResponse
 	initialRequest := responsesRequest{Input: req.Input.Prompt}
-	if err := s.postResponses(ctx, req.RuntimeSessionID, initialRequest, &response); err != nil {
+	foundrySessionID, err := s.postResponses(ctx, req.RuntimeSessionID, initialRequest, &response)
+	if err != nil {
 		s.mu.Lock()
 		delete(s.turns, req.TurnID)
 		s.mu.Unlock()
@@ -379,7 +380,7 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	s.updateTurnSessionLocked(turn)
+	s.recordTurnSessionLocked(turn, foundrySessionID)
 	s.mu.Unlock()
 	s.handleResponsesResponse(turn, response)
 	s.mu.Lock()
@@ -518,7 +519,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.requestTimeout)
+	ctx, cancel := s.foundryRequestContext(r.Context(), turn.request.Deadline)
 	defer cancel()
 	var response responsesResponse
 	continuation := responsesRequest{
@@ -526,7 +527,8 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		AgentSessionID:     foundrySessionID,
 		Input:              outputs,
 	}
-	if err := s.postResponses(ctx, req.RuntimeSessionID, continuation, &response); err != nil {
+	updatedSessionID, err := s.postResponses(ctx, req.RuntimeSessionID, continuation, &response)
+	if err != nil {
 		s.mu.Lock()
 		s.appendFailedLocked(
 			turn,
@@ -539,13 +541,19 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		return
 	}
 	s.mu.Lock()
+	if turn.completed {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn completed while hosted continuation was in flight")
+		return
+	}
 	for _, result := range resultsToSubmit {
 		toolName := turn.pendingTools[result.ToolCallID]
 		if toolName == "" {
 			toolName = result.ToolCallID
 		}
-		s.appendFrameLocked(
+		frame := s.newFrame(
 			turn,
+			int64(len(turn.frames)+1),
 			harness.FrameToolResultReceived,
 			"brokered tool result received",
 			func(f *harness.HarnessEventFrame) {
@@ -555,12 +563,23 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 				f.Error = result.Error
 			},
 		)
+		if !harnessFrameFitsSSE(frame) {
+			s.appendFailedLocked(
+				turn,
+				"brokered_tool_result_frame_too_large",
+				"brokered tool result exceeded the harness SSE frame limit",
+			)
+			s.mu.Unlock()
+			harness.WriteError(w, http.StatusBadGateway, "brokered tool result exceeds harness SSE frame limit")
+			return
+		}
+		s.appendPreparedFrameLocked(turn, frame)
 		delete(turn.pendingTools, result.ToolCallID)
 		delete(turn.pendingSince, result.ToolCallID)
 		delete(turn.bufferedResults, result.ToolCallID)
 		delete(turn.bufferedPayloads, result.ToolCallID)
 	}
-	s.updateTurnSessionLocked(turn)
+	s.recordTurnSessionLocked(turn, updatedSessionID)
 	s.mu.Unlock()
 	s.handleResponsesResponse(turn, response)
 	harness.WriteJSON(w, http.StatusAccepted, continueResponse(req, "continue accepted"))
@@ -666,13 +685,12 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 				return
 			}
 		}
-		now := time.Now().UTC()
-		for _, call := range calls {
-			turn.pendingTools[call.callID] = call.name
-			turn.pendingSince[call.callID] = now
-			s.schedulePendingToolTimeoutLocked(turn, call.callID)
-			s.appendFrameLocked(
+		frames := make([]harness.HarnessEventFrame, 0, len(calls))
+		baseSeq := int64(len(turn.frames) + 1)
+		for index, call := range calls {
+			frame := s.newFrame(
 				turn,
+				baseSeq+int64(index),
 				harness.FrameToolCallRequested,
 				"foundry hosted tool call requested",
 				func(f *harness.HarnessEventFrame) {
@@ -681,6 +699,22 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 					f.Content = call.args
 				},
 			)
+			if !harnessFrameFitsSSE(frame) {
+				s.appendFailedLocked(
+					turn,
+					"foundry_tool_call_frame_too_large",
+					"hosted function call exceeded the harness SSE frame limit",
+				)
+				return
+			}
+			frames = append(frames, frame)
+		}
+		now := time.Now().UTC()
+		for index, call := range calls {
+			turn.pendingTools[call.callID] = call.name
+			turn.pendingSince[call.callID] = now
+			s.schedulePendingToolTimeoutLocked(turn, call.callID)
+			s.appendPreparedFrameLocked(turn, frames[index])
 		}
 		return
 	}
@@ -689,14 +723,24 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 		s.appendFailedLocked(turn, "foundry_output_too_large", "foundry completion exceeded advertised output limit")
 		return
 	}
-	s.appendFrameLocked(
+	completedFrame := s.newFrame(
 		turn,
+		int64(len(turn.frames)+1),
 		harness.FrameTurnCompleted,
 		"foundry hosted response completed",
 		func(f *harness.HarnessEventFrame) {
 			f.Completed = &harness.TurnCompleted{Result: result, FinalEventSeq: f.Seq}
 		},
 	)
+	if !harnessFrameFitsSSE(completedFrame) {
+		s.appendFailedLocked(
+			turn,
+			"foundry_output_frame_too_large",
+			"foundry completion exceeded the harness SSE frame limit",
+		)
+		return
+	}
+	s.appendPreparedFrameLocked(turn, completedFrame)
 	turn.completed = true
 	s.scheduleTurnCleanupLocked(turn)
 }
@@ -847,10 +891,36 @@ func (s *server) recordContinueResults(
 			continue
 		}
 		toSubmit = append(toSubmit, turn.bufferedResults[id])
-		turn.submittedPayloads[id] = turn.bufferedPayloads[id]
 	}
 	if len(toSubmit) == 0 {
 		return nil, nil
+	}
+	baseSeq := int64(len(turn.frames) + 1)
+	for index, result := range toSubmit {
+		toolName := firstNonBlank(turn.pendingTools[result.ToolCallID], result.ToolCallID)
+		frame := s.newFrame(
+			turn,
+			baseSeq+int64(index),
+			harness.FrameToolResultReceived,
+			"brokered tool result received",
+			func(f *harness.HarnessEventFrame) {
+				f.ToolName = toolName
+				f.ToolCallID = result.ToolCallID
+				f.Content = result.Output
+				f.Error = result.Error
+			},
+		)
+		if !harnessFrameFitsSSE(frame) {
+			s.appendFailedLocked(
+				turn,
+				"brokered_tool_result_frame_too_large",
+				"brokered tool result exceeded the harness SSE frame limit",
+			)
+			return nil, fmt.Errorf("brokered tool result %q exceeds harness SSE frame limit", result.ToolCallID)
+		}
+	}
+	for _, result := range toSubmit {
+		turn.submittedPayloads[result.ToolCallID] = turn.bufferedPayloads[result.ToolCallID]
 	}
 	return toSubmit, nil
 }
@@ -945,13 +1015,13 @@ func (s *server) postResponses(
 	runtimeSessionID harness.RuntimeSessionID,
 	body responsesRequest,
 	out *responsesResponse,
-) error {
+) (string, error) {
 	if !exactlyOneFoundryAuth(s.cfg) {
-		return fmt.Errorf("exactly one Foundry auth mode is required")
+		return "", fmt.Errorf("exactly one Foundry auth mode is required")
 	}
 	endpoint, err := s.responsesEndpoint()
 	if err != nil {
-		return err
+		return "", err
 	}
 	s.mu.Lock()
 	session := s.runtimeSessions[runtimeSessionID]
@@ -968,11 +1038,11 @@ func (s *server) postResponses(
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -991,7 +1061,7 @@ func (s *server) postResponses(
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	sessionID = firstNonBlank(
@@ -1001,7 +1071,7 @@ func (s *server) postResponses(
 	)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf(
+		return "", fmt.Errorf(
 			"foundry hosted Responses request failed: HTTP %d: %s",
 			resp.StatusCode,
 			strings.TrimSpace(string(data)),
@@ -1010,16 +1080,11 @@ func (s *server) postResponses(
 	if out != nil {
 		decoder := json.NewDecoder(io.LimitReader(resp.Body, maxFoundryBodyBytes))
 		if err := decoder.Decode(out); err != nil {
-			return fmt.Errorf("decode Foundry hosted Responses response: %w", err)
+			return "", fmt.Errorf("decode Foundry hosted Responses response: %w", err)
 		}
 		sessionID = firstNonBlank(out.AgentSessionID, sessionID)
 	}
-	if sessionID != "" {
-		s.mu.Lock()
-		s.runtimeSessions[runtimeSessionID] = foundrySession{ID: sessionID, LastSeen: time.Now().UTC()}
-		s.mu.Unlock()
-	}
-	return nil
+	return sessionID, nil
 }
 
 func (s *server) responsesEndpoint() (string, error) {
@@ -1127,6 +1192,21 @@ func exactlyOneFoundryAuth(cfg config) bool {
 	hasKey := strings.TrimSpace(cfg.foundryAuth) != ""
 	hasBearer := strings.TrimSpace(cfg.authBearer) != ""
 	return hasKey != hasBearer
+}
+
+func (s *server) foundryRequestContext(
+	parent context.Context,
+	turnDeadline time.Time,
+) (context.Context, context.CancelFunc) {
+	timeout := s.cfg.requestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	if !turnDeadline.IsZero() && turnDeadline.Before(deadline) {
+		deadline = turnDeadline
+	}
+	return context.WithDeadline(context.WithoutCancel(parent), deadline)
 }
 
 func (s *server) validateStartRequest(req harness.StartTurnRequest) error {
@@ -1245,11 +1325,13 @@ func isFailureStatus(status string) bool {
 	}
 }
 
-func (s *server) updateTurnSessionLocked(turn *turnState) {
-	session := s.runtimeSessions[turn.request.RuntimeSessionID]
-	if session.ID != "" {
-		turn.foundrySessionID = session.ID
+func (s *server) recordTurnSessionLocked(turn *turnState, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
 	}
+	turn.foundrySessionID = sessionID
+	s.runtimeSessions[turn.request.RuntimeSessionID] = foundrySession{ID: sessionID, LastSeen: time.Now().UTC()}
 }
 
 func (s *server) schedulePendingToolTimeoutLocked(turn *turnState, toolCallID string) {
@@ -1283,8 +1365,9 @@ func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
 	if turn.completed {
 		return
 	}
-	s.appendFrameLocked(
+	failedFrame := s.newFrame(
 		turn,
+		int64(len(turn.frames)+1),
 		harness.FrameTurnFailed,
 		"foundry hosted response failed",
 		func(f *harness.HarnessEventFrame) {
@@ -1292,6 +1375,21 @@ func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
 			f.Error = &harness.ErrorInfo{Code: reason, Message: msg}
 		},
 	)
+	if !harnessFrameFitsSSE(failedFrame) {
+		failedFrame = s.newFrame(
+			turn,
+			int64(len(turn.frames)+1),
+			harness.FrameTurnFailed,
+			"foundry hosted response failed",
+			func(f *harness.HarnessEventFrame) {
+				fallbackReason := "foundry_failure_frame_too_large"
+				message := "failure detail exceeded the harness SSE frame limit"
+				f.Failed = &harness.TurnFailed{Reason: fallbackReason, Message: message}
+				f.Error = &harness.ErrorInfo{Code: fallbackReason, Message: message}
+			},
+		)
+	}
+	s.appendPreparedFrameLocked(turn, failedFrame)
 	turn.completed = true
 	s.scheduleTurnCleanupLocked(turn)
 }
@@ -1335,7 +1433,17 @@ func (s *server) appendFrameLocked(
 	summary string,
 	mutate func(*harness.HarnessEventFrame),
 ) {
-	seq := int64(len(turn.frames) + 1)
+	frame := s.newFrame(turn, int64(len(turn.frames)+1), typ, summary, mutate)
+	s.appendPreparedFrameLocked(turn, frame)
+}
+
+func (s *server) newFrame(
+	turn *turnState,
+	seq int64,
+	typ harness.FrameType,
+	summary string,
+	mutate func(*harness.HarnessEventFrame),
+) harness.HarnessEventFrame {
 	frame := harness.HarnessEventFrame{
 		Version:          harness.ProtocolVersion,
 		Type:             typ,
@@ -1350,6 +1458,15 @@ func (s *server) appendFrameLocked(
 	if mutate != nil {
 		mutate(&frame)
 	}
+	return frame
+}
+
+func harnessFrameFitsSSE(frame harness.HarnessEventFrame) bool {
+	payload, err := json.Marshal(frame)
+	return err == nil && len("data: ")+len(payload) < harness.MaxSSEFrameBytes
+}
+
+func (s *server) appendPreparedFrameLocked(turn *turnState, frame harness.HarnessEventFrame) {
 	turn.frames = append(turn.frames, frame)
 	if turn.frameUpdates != nil {
 		close(turn.frameUpdates)

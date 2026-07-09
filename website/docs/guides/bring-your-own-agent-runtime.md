@@ -91,6 +91,8 @@ For AgentKit agents deployed as Foundry hosted agents, use the `examples/harness
 
 Advertise only the brokered classes that the hosted AgentKit deployment is statically configured and conformance-tested to request:
 
+Readiness deep-probes each advertised class. Since hosted Responses requests do not carry request-level tools, the AgentKit deployment must also statically expose the probe-only `conformance_read` and/or `conformance_write` schema for those classes. Leave a class unadvertised until that live probe succeeds; local fake-server conformance alone does not satisfy the readiness gate.
+
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
 kind: AgentRuntime

@@ -20,54 +20,35 @@
           "frameType": "ToolCallRequested"
         }
       },
-      "toolCallID": "write-call-1"
+      "toolCallID": "shared-id"
     },
     {
       "seq": 3,
       "eventType": "ApprovalRequested",
       "toolName": "dispatch-work-order",
-      "toolCallID": "approval-1",
+      "toolCallID": "shared-id",
       "content": {
-        "approvalID": "approval-1",
-        "targetTool": "dispatch-work-order",
-        "toolCallID": "write-call-1"
+        "toolCallID": "shared-id"
       }
     },
     {
       "seq": 4,
       "eventType": "ApprovalApproved",
-      "toolCallID": "approval-1",
-      "content": {
-        "approvalID": "approval-1",
-        "decision": "approve"
-      }
+      "toolCallID": "shared-id"
     },
     {
       "seq": 5,
       "eventType": "ToolCallStarted",
       "toolName": "dispatch-work-order",
+      "toolCallID": "shared-id",
       "content": {
-        "approvalID": "approval-1",
         "brokeredClass": "write",
         "executionState": "started",
-        "idempotencyKey": "approval-1"
-      },
-      "toolCallID": "write-call-1"
+        "idempotencyKey": "shared-id"
+      }
     },
     {
       "seq": 6,
-      "eventType": "ToolCallStarted",
-      "toolName": "dispatch-work-order",
-      "content": {
-        "approvalID": "approval-1",
-        "brokeredClass": "write",
-        "executionState": "started",
-        "idempotencyKey": "approval-1"
-      },
-      "toolCallID": "write-call-1"
-    },
-    {
-      "seq": 7,
       "eventType": "AgentRuntimeCompleted"
     }
   ]

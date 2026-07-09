@@ -17,11 +17,11 @@ spec:
   clientAuth:
     bearerTokenSecretRef:
       name: sample-foundry-responses-runtime-token
-      key: token
+      key: harness-bearer
   capabilities:
-    # Mirror only the classes the hosted AgentKit deployment is statically
-    # configured and conformance-tested to request. Add write only after the
-    # hosted AgentKit write schema and Orka brokered-write conformance pass.
+    # Mirror only classes whose hosted AgentKit deployment statically includes
+    # the matching probe-only conformance_read/conformance_write schema and has
+    # passed live AgentRuntime conformance. Add write only after that gate.
     toolExecutionModes:
     - observed
     - brokered

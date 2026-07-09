@@ -26,6 +26,8 @@ Optional environment:
   ORKA_FOUNDRY_RESPONSES_ADAPTER_BEARER_TOKEN generated if absent for this run
   ORKA_FOUNDRY_RESPONSES_API_VERSION          default: v1
   ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES default: read
+    Every advertised class requires the hosted agent to statically expose the
+    matching probe-only conformance_read/conformance_write schema.
   ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF optional
 
 The script never prints secret values. Do not run with shell tracing (set -x).

@@ -275,9 +275,11 @@ for index, item in enumerate(items, start=1):
     item = item if isinstance(item, dict) else {}
     summary.append({
         "index": index,
-        "type": item.get("type") or item.get("eventType"),
-        "status": item.get("status") or item.get("decision"),
-        "toolName": item.get("toolName") or item.get("tool"),
+        "id": item.get("id"),
+        "status": item.get("status"),
+        "targetTool": item.get("targetTool"),
+        "toolCallID": item.get("toolCallID"),
+        "decisionTime": item.get("decisionTime"),
     })
 Path(sys.argv[2]).write_text(json.dumps({"approvalCount": len(items), "approvals": summary}, indent=2, sort_keys=True) + "\n")
 PY

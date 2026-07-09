@@ -13,6 +13,15 @@
     },
     {
       "seq": 2,
+      "eventType": "ApprovalApproved",
+      "toolCallID": "approval-1",
+      "content": {
+        "approvalID": "approval-1",
+        "decision": "approve"
+      }
+    },
+    {
+      "seq": 3,
       "eventType": "ToolCallStarted",
       "toolName": "dispatch-work-order",
       "content": {
@@ -23,7 +32,7 @@
       "toolCallID": "write-call-1"
     },
     {
-      "seq": 3,
+      "seq": 4,
       "eventType": "ApprovalRequested",
       "toolName": "dispatch-work-order",
       "toolCallID": "approval-1",
@@ -31,15 +40,6 @@
         "approvalID": "approval-1",
         "targetTool": "dispatch-work-order",
         "toolCallID": "write-call-1"
-      }
-    },
-    {
-      "seq": 4,
-      "eventType": "ApprovalApproved",
-      "toolCallID": "approval-1",
-      "content": {
-        "approvalID": "approval-1",
-        "decision": "approve"
       }
     },
     {
@@ -56,18 +56,6 @@
     },
     {
       "seq": 6,
-      "eventType": "ToolCallStarted",
-      "toolName": "dispatch-work-order",
-      "content": {
-        "approvalID": "approval-1",
-        "brokeredClass": "write",
-        "executionState": "started",
-        "idempotencyKey": "approval-1"
-      },
-      "toolCallID": "write-call-1"
-    },
-    {
-      "seq": 7,
       "eventType": "AgentRuntimeCompleted"
     }
   ]

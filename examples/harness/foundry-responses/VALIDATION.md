@@ -99,7 +99,9 @@ The following remain required before declaring the full hosted Foundry/Fibey pla
 complete:
 
 1. Deploy an AgentKit prototype as a real Foundry hosted agent with static safe
-   brokered schemas and a configured brokered continuation proof.
+   brokered schemas, the probe-only `conformance_read`/`conformance_write`
+   schemas for every advertised class, and a configured brokered continuation
+   proof.
 2. Deploy the Orka `foundry-responses` adapter with real Foundry auth and a real
    hosted `/responses` endpoint.
 3. Verify `AgentRuntime` readiness for the read profile.

@@ -99,6 +99,34 @@ expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-duplicate-write.json \
   "duplicate write execution starts for dispatch-work-order" \
   "duplicate-write"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-missing-approval-decision.json \
+  "missing ApprovalApproved event" \
+  "missing-approval-decision"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-declined-write.json \
+  "follows ApprovalDeclined" \
+  "declined-write"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-missing-approval-id.json \
+  "is missing approvalID" \
+  "missing-approval-id"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-decision-before-request.json \
+  "has no matching preceding ApprovalApproved" \
+  "decision-before-request"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-overlapping-write-marker.json \
+  "missing write ToolCallStarted event after approval" \
+  "overlapping-write-marker"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-mismatched-write-request.json \
+  "has no matching preceding mapped request" \
+  "mismatched-write-request"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-partial-idempotency.json \
+  "write execution for escalate-incident is missing idempotency key evidence" \
+  "partial-idempotency"
 
 if [[ "$run_full" == "1" ]]; then
   run make test

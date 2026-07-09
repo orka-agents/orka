@@ -12,8 +12,8 @@ Orka task events. By default it calls `orka task events --output json`. Use
 Expected evidence:
   - read brokered tool request for check-network-telemetry or get-active-incidents
   - write brokered tool request for dispatch-work-order or escalate-incident
-  - ApprovalRequested is present before write ToolCallStarted
-  - an idempotency key is present in write ToolCallStarted content
+  - matching ApprovalRequested and ApprovalApproved events precede write execution
+  - an idempotency key is present in the write execution ledger event
   - terminal TaskSucceeded/AgentRuntimeCompleted/TurnCompleted-style event exists
 
 This verifier does not approve tasks and never reads Foundry credentials.
@@ -103,10 +103,6 @@ TERMINAL_TYPES = {
     "TurnCompleted",
     "TaskCompleted",
 }
-READ_REQUEST_TYPES = {"ToolCallRequested", "ToolCallStarted"}
-WRITE_EXEC_TYPES = {"ToolCallStarted"}
-
-
 def field(event, name):
     if not isinstance(event, dict):
         return None
@@ -122,6 +118,22 @@ def field(event, name):
             decoded = None
         if isinstance(decoded, dict) and name in decoded:
             return decoded[name]
+    return None
+
+
+def content_field(event, name):
+    if not isinstance(event, dict):
+        return None
+    content = event.get("content")
+    if isinstance(content, dict):
+        return content.get(name)
+    if isinstance(content, str):
+        try:
+            decoded = json.loads(content)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(decoded, dict):
+            return decoded.get(name)
     return None
 
 
@@ -176,8 +188,39 @@ def idempotency_value(value):
     return ""
 
 
-def contains_idempotency(event):
-    return bool(idempotency_value(event))
+def approval_id(event):
+    for key in ("approvalID", "approvalId"):
+        value = field(event, key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def tool_call_id(event):
+    for key in ("toolCallID", "toolCallId"):
+        value = field(event, key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def is_write_execution_start(event):
+    if event_type(event) != "ToolCallStarted":
+        return False
+    if is_harness_tool_request(event):
+        return False
+    return field(event, "executionState") == "started" and field(event, "brokeredClass") == "write"
+
+
+def is_harness_tool_request(event):
+    if event_type(event) == "ToolCallRequested":
+        return True
+    harness_identity = field(event, "harness")
+    return (
+        event_type(event) == "ToolCallStarted"
+        and isinstance(harness_identity, dict)
+        and harness_identity.get("frameType") == "ToolCallRequested"
+    )
 
 
 ordered_events = []
@@ -190,33 +233,75 @@ for index, event in enumerate(events, start=1):
         ordered_events.append(event)
 
 events = ordered_events
-read_events = [e for e in events if tool_name(e) in READ_TOOLS and event_type(e) in READ_REQUEST_TYPES]
+read_events = [e for e in events if tool_name(e) in READ_TOOLS and is_harness_tool_request(e)]
 write_events = [e for e in events if tool_name(e) in WRITE_TOOLS]
-approval_events = [e for e in events if event_type(e) == "ApprovalRequested"]
-write_exec_events = [e for e in write_events if event_type(e) in WRITE_EXEC_TYPES]
-write_start_events = [e for e in write_events if event_type(e) == "ToolCallStarted"]
+write_request_events = [e for e in write_events if is_harness_tool_request(e)]
+approval_request_events = [e for e in events if event_type(e) == "ApprovalRequested"]
+approval_approved_events = [e for e in events if event_type(e) == "ApprovalApproved"]
+approval_declined_events = [e for e in events if event_type(e) == "ApprovalDeclined"]
+write_exec_events = [e for e in write_events if is_write_execution_start(e)]
+write_start_events = write_exec_events
 terminal_events = [e for e in events if event_type(e) in TERMINAL_TYPES]
 idempotency_events = [e for e in write_exec_events if idempotency_value(e)]
 
 failures = []
 if not read_events:
     failures.append("missing read brokered tool event for check-network-telemetry/get-active-incidents")
-if not write_events:
+if not write_request_events:
     failures.append("missing write brokered tool event for dispatch-work-order/escalate-incident")
-if not approval_events:
+if not approval_request_events:
     failures.append("missing ApprovalRequested event")
+if not approval_approved_events:
+    failures.append("missing ApprovalApproved event")
 if not write_exec_events:
     failures.append("missing write ToolCallStarted event after approval")
-if write_exec_events and approval_events:
+if write_exec_events:
     for event in write_exec_events:
         write_tool = tool_name(event)
         write_order = seq(event)
-        matching_approvals = [
-            approval for approval in approval_events
-            if tool_name(approval) == write_tool and seq(approval) < write_order
+        if not idempotency_value(event):
+            failures.append(f"write execution for {write_tool} is missing idempotency key evidence")
+        write_tool_call_id = tool_call_id(event)
+        if not write_tool_call_id:
+            failures.append(f"write execution for {write_tool} is missing toolCallID")
+            continue
+        matching_write_requests = [
+            request for request in write_request_events
+            if tool_name(request) == write_tool
+            and tool_call_id(request) == write_tool_call_id
+            and seq(request) < write_order
         ]
-        if not matching_approvals:
-            failures.append(f"write execution for {write_tool} has no preceding approval")
+        if not matching_write_requests:
+            failures.append(f"write execution for {write_tool} has no matching preceding mapped request")
+            continue
+        write_approval_id = approval_id(event)
+        if not write_approval_id:
+            failures.append(f"write execution for {write_tool} is missing approvalID")
+            continue
+        matching_approval_requests = [
+            approval for approval in approval_request_events
+            if approval_id(approval) == write_approval_id
+            and tool_name(approval) == write_tool
+            and content_field(approval, "toolCallID") == write_tool_call_id
+            and seq(approval) < write_order
+            and any(seq(request) < seq(approval) for request in matching_write_requests)
+        ]
+        if not matching_approval_requests:
+            failures.append(f"write execution for {write_tool} has no matching preceding ApprovalRequested")
+        matching_approved = [
+            approval for approval in approval_approved_events
+            if approval_id(approval) == write_approval_id
+            and seq(approval) < write_order
+            and any(seq(request) < seq(approval) for request in matching_approval_requests)
+        ]
+        if not matching_approved:
+            failures.append(f"write execution for {write_tool} has no matching preceding ApprovalApproved")
+        matching_declined = [
+            approval for approval in approval_declined_events
+            if approval_id(approval) == write_approval_id and seq(approval) < write_order
+        ]
+        if matching_declined:
+            failures.append(f"write execution for {write_tool} follows ApprovalDeclined")
 if not idempotency_events:
     failures.append("missing write ToolCallStarted idempotency key evidence")
 
@@ -254,8 +339,9 @@ if failures:
 
 print("Fibey Foundry Responses verification passed:")
 print(f"- read events: {len(read_events)}")
-print(f"- write events: {len(write_events)}")
-print(f"- approvals: {len(approval_events)}")
+print(f"- write requests: {len(write_request_events)}")
+print(f"- approval requests: {len(approval_request_events)}")
+print(f"- approval decisions: {len(approval_approved_events)}")
 print(f"- idempotency evidence events: {len(idempotency_events)}")
 print(f"- terminal events: {len(terminal_events)}")
 PY

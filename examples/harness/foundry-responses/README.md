@@ -55,6 +55,8 @@ Capabilities must reflect the **static schemas actually deployed in AgentKit**:
 - If it is `read`, the adapter advertises brokered read only.
 - Advertise `write` only after the hosted AgentKit deployment has a static write schema and passes write conformance. Orka will still gate the write with approval/idempotency, but the hosted model must not be told it can request writes unless that path is intentionally enabled.
 
+AgentRuntime readiness deliberately deep-probes every advertised brokered class. Because this adapter never sends request-level `tools`, the hosted AgentKit deployment must statically expose the probe-only `conformance_read` and/or `conformance_write` schemas in addition to its real tools. These schemas take an empty object and must be safe to call: Orka's conformance client supplies the synthetic result and no production tool credential is sent to Foundry. Fake-server tests alone are not sufficient; if the hosted deployment cannot request the matching probe tool, leave that brokered class unadvertised and readiness will fail closed.
+
 ## Protocol mapping
 
 Initial turn:
@@ -110,7 +112,7 @@ docker build -t ghcr.io/orka-agents/orka/foundry-responses-harness-adapter:lates
 
 ## Kubernetes smoke skeleton
 
-`kubernetes.example.yaml` contains a credentials-free Deployment, Service, Secret placeholders, and matching `AgentRuntime` facade for a read-profile hosted Responses smoke. Replace the `REDACTED` values through your secret-management flow, set the hosted Responses endpoint or project/agent-name pair, and keep `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` narrowed to classes whose static AgentKit schemas passed conformance.
+`kubernetes.example.yaml` contains a credentials-free Deployment, Service, Secret placeholders, and matching `AgentRuntime` facade for a read-profile hosted Responses smoke. Replace the `REDACTED` values through your secret-management flow, set the hosted Responses endpoint or project/agent-name pair, ensure the hosted agent statically exposes the probe-only `conformance_read` schema, and keep `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` narrowed to classes whose live AgentRuntime conformance passed.
 
 ```bash
 kubectl apply -f examples/harness/foundry-responses/kubernetes.example.yaml

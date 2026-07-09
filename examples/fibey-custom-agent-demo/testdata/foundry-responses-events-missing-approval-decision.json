@@ -35,39 +35,18 @@
     },
     {
       "seq": 4,
-      "eventType": "ApprovalApproved",
-      "toolCallID": "approval-1",
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
       "content": {
         "approvalID": "approval-1",
-        "decision": "approve"
-      }
+        "brokeredClass": "write",
+        "executionState": "started",
+        "idempotencyKey": "approval-1"
+      },
+      "toolCallID": "write-call-1"
     },
     {
       "seq": 5,
-      "eventType": "ToolCallStarted",
-      "toolName": "dispatch-work-order",
-      "content": {
-        "approvalID": "approval-1",
-        "brokeredClass": "write",
-        "executionState": "started",
-        "idempotencyKey": "approval-1"
-      },
-      "toolCallID": "write-call-1"
-    },
-    {
-      "seq": 6,
-      "eventType": "ToolCallStarted",
-      "toolName": "dispatch-work-order",
-      "content": {
-        "approvalID": "approval-1",
-        "brokeredClass": "write",
-        "executionState": "started",
-        "idempotencyKey": "approval-1"
-      },
-      "toolCallID": "write-call-1"
-    },
-    {
-      "seq": 7,
       "eventType": "AgentRuntimeCompleted"
     }
   ]

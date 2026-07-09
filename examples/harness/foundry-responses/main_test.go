@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,6 +169,74 @@ func TestResponsesAdapterRuntimeSessionHeaderReuse(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterInterleavedResponsesRetainResponseSpecificSession(t *testing.T) {
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := ioReadAll(r.Body)
+		var request responsesRequest
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		prompt, _ := request.Input.(string)
+		writeJSON(w, map[string]any{
+			"id":               "response-" + prompt,
+			"agent_session_id": "session-" + prompt,
+			"status":           "completed",
+			"output": []any{map[string]any{
+				"type":    "message",
+				"role":    "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": "done"}},
+			}},
+		})
+	}))
+	t.Cleanup(foundry.Close)
+	server := newServer(config{
+		runtimeName:    "foundry-responses-test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
+	}, &http.Client{Timeout: time.Second})
+	firstRequest := responsesStartTurnRequest("foundry-interleaved-session-a")
+	secondRequest := responsesStartTurnRequest("foundry-interleaved-session-b")
+	secondRequest.RuntimeSessionID = firstRequest.RuntimeSessionID
+
+	var firstResponse responsesResponse
+	firstSession, err := server.postResponses(
+		context.Background(),
+		firstRequest.RuntimeSessionID,
+		responsesRequest{Input: "a"},
+		&firstResponse,
+	)
+	if err != nil {
+		t.Fatalf("first postResponses: %v", err)
+	}
+	var secondResponse responsesResponse
+	secondSession, err := server.postResponses(
+		context.Background(),
+		secondRequest.RuntimeSessionID,
+		responsesRequest{Input: "b"},
+		&secondResponse,
+	)
+	if err != nil {
+		t.Fatalf("second postResponses: %v", err)
+	}
+
+	firstTurn := &turnState{request: firstRequest}
+	secondTurn := &turnState{request: secondRequest}
+	server.mu.Lock()
+	server.recordTurnSessionLocked(secondTurn, secondSession)
+	server.recordTurnSessionLocked(firstTurn, firstSession)
+	server.mu.Unlock()
+	if firstTurn.foundrySessionID != "session-a" {
+		t.Fatalf("first turn session = %q, want session-a", firstTurn.foundrySessionID)
+	}
+	if secondTurn.foundrySessionID != "session-b" {
+		t.Fatalf("second turn session = %q, want session-b", secondTurn.foundrySessionID)
+	}
+}
+
 func TestResponsesAdapterContinuationUsesTurnSessionAfterSessionMapCleanup(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
 	adapter, server := newTestResponsesAdapterWithServer(
@@ -294,6 +363,54 @@ func TestResponsesAdapterInitialPostSurvivesControlDisconnect(t *testing.T) {
 	}
 	if got := postCount.Load(); got != 1 {
 		t.Fatalf("hosted post count = %d, want 1 after control disconnect and retry", got)
+	}
+}
+
+func TestResponsesAdapterFoundryRequestContextDetachesAndUsesEarlierTurnDeadline(t *testing.T) {
+	server := newServer(config{requestTimeout: time.Second}, &http.Client{Timeout: time.Second})
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	turnDeadline := time.Now().Add(100 * time.Millisecond)
+	ctx, cancel := server.foundryRequestContext(parent, turnDeadline)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("detached context inherited control cancellation: %v", err)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("detached context has no deadline")
+	}
+	if delta := deadline.Sub(turnDeadline); delta < -10*time.Millisecond || delta > 10*time.Millisecond {
+		t.Fatalf("deadline = %v, want turn deadline %v", deadline, turnDeadline)
+	}
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("detached context error = %v, want deadline exceeded", ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("detached context did not stop at turn deadline")
+	}
+}
+
+func TestResponsesAdapterInitialPostHonorsTurnDeadline(t *testing.T) {
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(900 * time.Millisecond)
+		writeJSON(w, finalResponsesMessage())
+	}))
+	t.Cleanup(foundry.Close)
+	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter := newTestResponsesAdapter(t, endpoint, nil)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-initial-deadline")
+	request.Deadline = time.Now().Add(150 * time.Millisecond)
+
+	started := time.Now()
+	if _, err := client.StartTurn(context.Background(), request); err == nil {
+		t.Fatal("StartTurn past turn deadline succeeded, want failure")
+	}
+	if elapsed := time.Since(started); elapsed > 800*time.Millisecond {
+		t.Fatalf("StartTurn elapsed = %v, want turn deadline to beat request timeout", elapsed)
 	}
 }
 
@@ -660,6 +777,42 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 	}
 	if _, ok := requestMap(t, foundry.requestBody(0))["brokered_continuation_proof"]; ok {
 		t.Fatal("initial request included brokered continuation proof body")
+	}
+}
+
+func TestResponsesAdapterContinuationHonorsOriginalTurnDeadline(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
+	adapter := newTestResponsesAdapter(
+		t,
+		foundry.endpoint(),
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-continuation-deadline")
+	request.Deadline = time.Now().Add(300 * time.Millisecond)
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	requested := findFrame(frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want tool request", frames)
+	}
+	if wait := time.Until(request.Deadline); wait > 0 {
+		time.Sleep(wait + 10*time.Millisecond)
+	}
+	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
+	if _, err := client.ContinueTurn(context.Background(), continueRequest); err == nil {
+		t.Fatal("ContinueTurn after original deadline succeeded, want failure")
+	}
+	if got := foundry.postCount.Load(); got != 1 {
+		t.Fatalf("hosted post count = %d, want no continuation after turn deadline", got)
+	}
+	frames = streamCurrentFrames(t, client, request.TurnID)
+	failed := findFrame(frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed == nil || failed.Failed.Reason != "foundry_continuation_unknown" {
+		t.Fatalf("failed frame = %#v, want foundry_continuation_unknown", failed)
 	}
 }
 
@@ -1398,6 +1551,124 @@ func TestResponsesLargeOutputFails(t *testing.T) {
 	failed := findFrame(turn.frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "foundry_output_too_large" {
 		t.Fatalf("failed frame = %#v, want foundry_output_too_large", failed)
+	}
+}
+
+func TestResponsesOutputThatExceedsSSEFrameLimitFails(t *testing.T) {
+	server := newServer(config{
+		runtimeName:     "test",
+		adapterBearer:   "adapter-auth-value",
+		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:     "foundry-auth-value",
+		requestTimeout:  time.Second,
+		stateRetention:  time.Minute,
+		maxApprovalWait: time.Minute,
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           responsesStartTurnRequest("foundry-large-frame-output"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-large-frame",
+		Status: "completed",
+		Output: []responsesOutput{{
+			Type:    "message",
+			Content: strings.Repeat("\"", maxFoundryOutputBytes),
+		}},
+	})
+	if hasFrameType(turn.frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, oversized SSE frame should not complete", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_output_frame_too_large" {
+		t.Fatalf("failed frame = %#v, want foundry_output_frame_too_large", failed)
+	}
+}
+
+func TestResponsesOversizedToolCallFrameFailsBeforeRequestingTool(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           brokeredReadRequest("foundry-large-tool-call-frame"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	arguments, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
+	if err != nil {
+		t.Fatalf("marshal arguments: %v", err)
+	}
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-large-tool-call",
+		Status: "completed",
+		Output: []responsesOutput{{
+			Type:      "function_call",
+			CallID:    "call-1",
+			Name:      "support-ticket-lookup",
+			Arguments: arguments,
+		}},
+	})
+	if hasFrameType(turn.frames, harness.FrameToolCallRequested) {
+		t.Fatalf("frames = %#v, oversized tool call should not be requested", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_tool_call_frame_too_large" {
+		t.Fatalf("failed frame = %#v, want foundry_tool_call_frame_too_large", failed)
+	}
+}
+
+func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-large-tool-result-frame")
+	turn := &turnState{
+		request:           request,
+		responseID:        "resp-1",
+		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
+		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	output, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	result := toolResultForRequest(request, "call-1", true, output, nil)
+	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{result}); err == nil {
+		t.Fatal("recordContinueResults oversized output error = nil")
+	}
+	if hasFrameType(turn.frames, harness.FrameToolResultReceived) {
+		t.Fatalf("frames = %#v, oversized tool result should not be streamed", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "brokered_tool_result_frame_too_large" {
+		t.Fatalf("failed frame = %#v, want brokered_tool_result_frame_too_large", failed)
 	}
 }
 

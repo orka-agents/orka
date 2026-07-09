@@ -68,7 +68,9 @@ spec:
               name: sample-foundry-responses-adapter-config
               key: continuation-proof
               optional: true
-        # Advertise only classes whose static AgentKit brokered schemas passed conformance.
+        # The hosted agent must statically expose probe-only conformance_read
+        # before read can pass AgentRuntime readiness. Advertise only classes
+        # whose live brokered conformance passed.
         - name: ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES
           value: read
         ports:
