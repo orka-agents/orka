@@ -571,6 +571,10 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
 		return
 	}
+	if !isCompletionStatus(response.Status) {
+		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
+		return
+	}
 	calls, err := s.extractFunctionCalls(turn.request, response.Output)
 	if err != nil {
 		s.appendFailedLocked(turn, "foundry_function_call_invalid", err.Error())
@@ -714,6 +718,8 @@ func (s *server) recordContinueResults(
 		return nil, fmt.Errorf("no tool calls are pending for this turn")
 	}
 	now := time.Now().UTC()
+	newResults := map[string]harness.ToolCallResult{}
+	newPayloads := map[string]string{}
 	for _, result := range results {
 		payload, err := canonicalToolResultOutput(result)
 		if err != nil {
@@ -755,8 +761,18 @@ func (s *server) recordContinueResults(
 			}
 			return nil, fmt.Errorf("conflicting duplicate result for tool call %q", result.ToolCallID)
 		}
-		turn.bufferedResults[result.ToolCallID] = result
-		turn.bufferedPayloads[result.ToolCallID] = payload
+		if buffered, exists := newPayloads[result.ToolCallID]; exists {
+			if buffered == payload {
+				continue
+			}
+			return nil, fmt.Errorf("conflicting duplicate result for tool call %q", result.ToolCallID)
+		}
+		newResults[result.ToolCallID] = result
+		newPayloads[result.ToolCallID] = payload
+	}
+	for id, result := range newResults {
+		turn.bufferedResults[id] = result
+		turn.bufferedPayloads[id] = newPayloads[id]
 	}
 	readyCount := 0
 	for id := range turn.pendingTools {
@@ -1159,6 +1175,15 @@ func outputItemText(item responsesOutput) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+func isCompletionStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "completed":
+		return true
+	default:
+		return false
+	}
 }
 
 func isFailureStatus(status string) bool {

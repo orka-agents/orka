@@ -594,6 +594,36 @@ func TestResponsesAdapterSendsBrokeredContinuationProofHeader(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterRejectedContinueDoesNotBufferPartialResults(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-partial-reject")
+	valid := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
+	unknown := toolResultForRequest(request, "call-missing", true, json.RawMessage(`{"success":true}`), nil)
+	turn := &turnState{
+		request:           request,
+		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
+		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{valid, unknown}); err == nil {
+		t.Fatalf("recordContinueResults succeeded, want unknown tool result error")
+	}
+	if len(turn.bufferedResults) != 0 || len(turn.bufferedPayloads) != 0 {
+		t.Fatalf("buffered state = %#v/%#v, want no partial buffering", turn.bufferedResults, turn.bufferedPayloads)
+	}
+}
+
 func TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",
@@ -1314,6 +1344,41 @@ func TestResponsesInitialPlatformErrorDoesNotRetainTurn(t *testing.T) {
 	}
 }
 
+//nolint:dupl // Mirrors failure-status regression with a distinct non-terminal status.
+func TestResponsesNonTerminalStatusDoesNotCompleteWithPartialText(t *testing.T) {
+	server := newServer(config{
+		runtimeName:     "test",
+		adapterBearer:   "adapter-auth-value",
+		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:     "foundry-auth-value",
+		requestTimeout:  time.Second,
+		stateRetention:  time.Minute,
+		maxApprovalWait: time.Minute,
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           responsesStartTurnRequest("foundry-in-progress"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-in-progress",
+		Status: "in_progress",
+		Output: []responsesOutput{{Type: "message", Content: "partial text"}},
+	})
+	if hasFrameType(turn.frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, in-progress response should not complete", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_in_progress" {
+		t.Fatalf("failed frame = %#v, want foundry_in_progress", failed)
+	}
+}
+
+//nolint:dupl // Mirrors non-terminal-status regression with a distinct failed status.
 func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	server := newServer(config{
 		runtimeName:     "test",
