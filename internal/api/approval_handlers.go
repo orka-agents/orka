@@ -82,6 +82,9 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "decideTaskApproval", h.contextTokenAuthorization.TaskUpdateScopes); err != nil {
 		return err
 	}
+	if err := authorizeKubernetesApprovalDecision(c.Context(), h.clientset, GetUserInfo(c), namespace, taskName); err != nil {
+		return err
+	}
 	task, err := h.loadReadableTask(c, namespace, taskName, "decideTaskApproval")
 	if err != nil {
 		return err

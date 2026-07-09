@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -187,4 +189,77 @@ func tokenReviewUserMiddleware(userInfo *UserInfo) fiber.Handler {
 		c.Locals(UserInfoContextKey, userInfo)
 		return c.Next()
 	}
+}
+
+func TestTaskApprovalDecisionRequiresKubernetesApprovalRBACForTokenReviewUser(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
+	_, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-task", TaskName: "approval-task", Type: events.ExecutionEventTypeApprovalRequested, Content: content})
+	require.NoError(t, err)
+
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-task"))
+	h.clientset = denyingSubjectAccessReviewClient(t, nil, func(review *authorizationv1.SubjectAccessReview) {
+		require.Equal(t, "system:serviceaccount:default:limited", review.Spec.User)
+		require.NotNil(t, review.Spec.ResourceAttributes)
+		require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+		require.Equal(t, "approval-task", review.Spec.ResourceAttributes.Name)
+		require.Equal(t, "update", review.Spec.ResourceAttributes.Verb)
+		require.Equal(t, corev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+		require.Equal(t, "tasks", review.Spec.ResourceAttributes.Resource)
+		require.Equal(t, "approvals", review.Spec.ResourceAttributes.Subresource)
+	})
+	app.Use(tokenReviewUserMiddleware(limitedTokenReviewUser("default")))
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-task/approvals/approval-1/decision?namespace=default", bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	listed, err := eventStore.ListExecutionEvents(context.Background(), store.ExecutionEventFilter{Namespace: "default", StreamID: "approval-task"})
+	require.NoError(t, err)
+	require.Len(t, listed, 1, "denied approval decision must not append a terminal event")
+}
+
+func TestTaskApprovalDecisionRejectsWorkerServiceAccountEvenWithKubernetesRBAC(t *testing.T) {
+	eventStore := store.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "action": "create_pr"})
+	_, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "approval-task", TaskName: "approval-task", Type: events.ExecutionEventTypeApprovalRequested, Content: content})
+	require.NoError(t, err)
+
+	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "approval-task"))
+	sarCalls := 0
+	h.clientset = allowingSubjectAccessReviewClient(t, func(review *authorizationv1.SubjectAccessReview) {
+		sarCalls++
+	})
+	app.Use(tokenReviewUserMiddleware(&UserInfo{
+		Username:  "system:serviceaccount:default:ai-worker",
+		Groups:    []string{"system:serviceaccounts", "system:serviceaccounts:default"},
+		Namespace: "default",
+		AuthType:  AuthTypeTokenReview,
+	}))
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/approval-task/approvals/approval-1/decision?namespace=default", bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Zero(t, sarCalls, "worker service accounts should be rejected before SAR grants can authorize approval decisions")
+}
+
+func allowingSubjectAccessReviewClient(t *testing.T, assertReview func(*authorizationv1.SubjectAccessReview)) *kubefake.Clientset {
+	t.Helper()
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction := action.(k8stesting.CreateAction)
+		review := createAction.GetObject().(*authorizationv1.SubjectAccessReview)
+		if assertReview != nil {
+			assertReview(review)
+		}
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+	return kubeClient
 }
