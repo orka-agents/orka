@@ -599,6 +599,66 @@ func TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterContinuesToolExecutionFailurePayload(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
+	adapter := newTestResponsesAdapter(
+		t,
+		foundry.endpoint(),
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-tool-failure")
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamAllFrames(t, client, request.TurnID)
+	requested := findFrame(frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want tool request", frames)
+	}
+	failure := harness.ContinueTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		ToolResults: []harness.ToolCallResult{toolResultForRequest(
+			request,
+			requested.ToolCallID,
+			true,
+			nil,
+			&harness.ErrorInfo{Code: "tool_execution_failed", Message: "downstream failed"},
+		)},
+	}
+	if _, err := client.ContinueTurn(context.Background(), failure); err != nil {
+		t.Fatalf("ContinueTurn tool failure: %v", err)
+	}
+	continuation := requestMap(t, foundry.requestBody(1))
+	items, ok := continuation["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("continuation input = %#v, want one item", continuation["input"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("continuation item = %#v, want object", items[0])
+	}
+	wantOutput := `{"approved":false,"error":{"code":"tool_execution_failed","message":"downstream failed"}}`
+	if got := item["output"]; got != wantOutput {
+		t.Fatalf("failure output = %#v, want %s", got, wantOutput)
+	}
+	frames = streamAllFrames(t, client, request.TurnID)
+	toolResult := findFrame(frames, harness.FrameToolResultReceived)
+	if toolResult == nil || toolResult.Error == nil || toolResult.Error.Code != "tool_execution_failed" {
+		t.Fatalf("tool result frame = %#v, want tool_execution_failed", toolResult)
+	}
+	if !hasFrameType(frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, want final completion after tool failure continuation", frames)
+	}
+}
+
 func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{
 		scenario:           "function_call",
