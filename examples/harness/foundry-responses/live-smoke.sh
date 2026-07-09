@@ -213,8 +213,10 @@ metadata:
   name: "${runtime_name}-adapter-config"
 data:
   ${foundry_key_name}: $(encode_base64 "$foundry_value")
-  continuation-proof: $(encode_base64 "$continuation_proof")
 YAML
+  if [[ -n "$continuation_proof" ]]; then
+    printf '  continuation-proof: %s\n' "$(encode_base64 "$continuation_proof")"
+  fi
 }
 
 emit_runtime_yaml() {
