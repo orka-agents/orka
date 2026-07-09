@@ -322,6 +322,76 @@ func TestResponsesAdapterPassesBrokeredWriteConformance(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterWriteParksUntilDeclinedApprovalContinue(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "dispatch-work-order"})
+	adapter := newTestResponsesAdapter(
+		t,
+		foundry.endpoint(),
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassWrite},
+	)
+	client := newHarnessClient(t, adapter)
+	request := brokeredWriteRequest("foundry-write-declined")
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamAllFrames(t, client, request.TurnID)
+	requested := findFrame(frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want write tool request", frames)
+	}
+	if requested.ToolName != "dispatch-work-order" {
+		t.Fatalf("ToolName = %q, want dispatch-work-order", requested.ToolName)
+	}
+	if hasFrameType(frames, harness.FrameToolResultReceived) || hasFrameType(frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, write should park until Orka continuation", frames)
+	}
+	if foundry.postCount.Load() != 1 {
+		t.Fatalf("hosted post count before approval = %d, want 1", foundry.postCount.Load())
+	}
+
+	declined := harness.ContinueTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		ToolResults: []harness.ToolCallResult{toolResultForRequest(
+			request,
+			requested.ToolCallID,
+			false,
+			nil,
+			&harness.ErrorInfo{Code: "approval_declined", Message: "human declined"},
+		)},
+	}
+	if _, err := client.ContinueTurn(context.Background(), declined); err != nil {
+		t.Fatalf("ContinueTurn declined approval: %v", err)
+	}
+	continuation := requestMap(t, foundry.requestBody(1))
+	items, ok := continuation["input"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("continuation input = %#v, want one item", continuation["input"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("continuation item = %#v, want object", items[0])
+	}
+	wantOutput := `{"approved":false,"error":{"code":"approval_declined","message":"human declined"}}`
+	if got := item["output"]; got != wantOutput {
+		t.Fatalf("declined output = %#v, want %s", got, wantOutput)
+	}
+	frames = streamAllFrames(t, client, request.TurnID)
+	toolResult := findFrame(frames, harness.FrameToolResultReceived)
+	if toolResult == nil || toolResult.Error == nil || toolResult.Error.Code != "approval_declined" {
+		t.Fatalf("tool result frame = %#v, want approval_declined", toolResult)
+	}
+	if !hasFrameType(frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, want final completion after declined continuation", frames)
+	}
+}
+
 func TestResponsesAdapterRejectsUnknownToolBeforeOrkaExecution(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "unknown-tool"})
 	adapter := newTestResponsesAdapter(
@@ -1478,6 +1548,20 @@ func brokeredReadRequest(name string) harness.StartTurnRequest {
 		Description:   "Look up support ticket",
 		BrokeredClass: harness.BrokeredToolClassRead,
 		Parameters:    json.RawMessage(`{"type":"object","properties":{"incident":{"type":"string"}}}`),
+	}}
+	return request
+}
+
+func brokeredWriteRequest(name string) harness.StartTurnRequest {
+	request := responsesStartTurnRequest(name)
+	request.ToolExecutionMode = harness.ToolExecutionModeBrokered
+	request.Input.Tools = []harness.ToolDefinition{{
+		Name:          "dispatch-work-order",
+		Description:   "Dispatch a work order",
+		BrokeredClass: harness.BrokeredToolClassWrite,
+		Parameters: json.RawMessage(
+			`{"type":"object","properties":{"incident":{"type":"string"}},"required":["incident"]}`,
+		),
 	}}
 	return request
 }
