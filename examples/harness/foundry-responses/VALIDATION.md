@@ -118,3 +118,12 @@ complete:
      --task fibey-foundry-responses-quincy-north-alert \
      --namespace <namespace>
    ```
+
+   To collect a credentials-safe evidence bundle after the run:
+
+   ```bash
+   examples/harness/foundry-responses/live-evidence.sh \
+     --namespace <namespace> \
+     --runtime fibey-agentkit-foundry-responses \
+     --task fibey-foundry-responses-quincy-north-alert
+   ```

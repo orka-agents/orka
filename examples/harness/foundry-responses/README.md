@@ -136,6 +136,12 @@ For the live Foundry hosted AgentKit smoke gate, first run the credentials-safe 
 ```bash
 examples/harness/foundry-responses/live-smoke.sh
 examples/harness/foundry-responses/live-smoke.sh --apply --wait
+
+# After the live task completes, capture redacted evidence.
+examples/harness/foundry-responses/live-evidence.sh \
+  --namespace <namespace> \
+  --runtime fibey-agentkit-foundry-responses \
+  --task fibey-foundry-responses-quincy-north-alert
 ```
 
 The tests use a fake hosted Responses server and golden fixtures for initial requests, function calls, `ToolCallRequested`, continuations, final messages, error encoding, and buffered multiple-call behavior.
