@@ -571,6 +571,10 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
 		return
 	}
+	if strings.TrimSpace(response.Status) == "" {
+		s.appendFailedLocked(turn, "foundry_status_missing", "Foundry hosted Responses status is missing")
+		return
+	}
 	if !isCompletionStatus(response.Status) {
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
 		return
@@ -1178,12 +1182,7 @@ func outputItemText(item responsesOutput) string {
 }
 
 func isCompletionStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "completed":
-		return true
-	default:
-		return false
-	}
+	return strings.EqualFold(strings.TrimSpace(status), "completed")
 }
 
 func isFailureStatus(status string) bool {

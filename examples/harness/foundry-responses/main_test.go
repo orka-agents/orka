@@ -782,7 +782,8 @@ func TestResponsesRepeatedSubmittedFunctionCallFailsTurn(t *testing.T) {
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
 	server.handleResponsesResponse(turn, responsesResponse{
-		ID: "resp-repeat",
+		ID:     "resp-repeat",
+		Status: "completed",
 		Output: []responsesOutput{{
 			Type:      "function_call",
 			CallID:    "call-1",
@@ -818,7 +819,8 @@ func TestResponsesMixedRepeatedFunctionCallFailsTurn(t *testing.T) {
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
 	server.handleResponsesResponse(turn, responsesResponse{
-		ID: "resp-repeat",
+		ID:     "resp-repeat",
+		Status: "completed",
 		Output: []responsesOutput{
 			{
 				Type:      "function_call",
@@ -865,7 +867,8 @@ func TestResponsesAdapterPendingToolTimesOutWithoutContinuation(t *testing.T) {
 	server.turns[turn.request.TurnID] = turn
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
 	server.handleResponsesResponse(turn, responsesResponse{
-		ID: "resp-1",
+		ID:     "resp-1",
+		Status: "completed",
 		Output: []responsesOutput{{
 			Type:      "function_call",
 			CallID:    "call-1",
@@ -1313,7 +1316,8 @@ func TestResponsesLargeOutputFails(t *testing.T) {
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
 	server.handleResponsesResponse(turn, responsesResponse{
-		ID: "resp-large",
+		ID:     "resp-large",
+		Status: "completed",
 		Output: []responsesOutput{{
 			Type:    "message",
 			Content: strings.Repeat("x", maxFoundryOutputBytes+1),
@@ -1461,6 +1465,38 @@ func TestSanitizeEndpointDoesNotReturnRawMalformedURL(t *testing.T) {
 	}
 }
 
+func TestResponsesMissingStatusDoesNotCompleteWithPartialText(t *testing.T) {
+	server := newServer(config{
+		runtimeName:     "test",
+		adapterBearer:   "adapter-auth-value",
+		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:     "foundry-auth-value",
+		requestTimeout:  time.Second,
+		stateRetention:  time.Minute,
+		maxApprovalWait: time.Minute,
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           responsesStartTurnRequest("foundry-missing-status"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-missing-status",
+		Output: []responsesOutput{{Type: "message", Content: "partial text"}},
+	})
+	if hasFrameType(turn.frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, missing status response should not complete", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_status_missing" {
+		t.Fatalf("failed frame = %#v, want foundry_status_missing", failed)
+	}
+}
+
 func TestResponsesFunctionCallWithoutResponseIDFailsBeforeToolRequest(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",
@@ -1482,6 +1518,7 @@ func TestResponsesFunctionCallWithoutResponseIDFailsBeforeToolRequest(t *testing
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
 	server.handleResponsesResponse(turn, responsesResponse{
+		Status: "completed",
 		Output: []responsesOutput{{
 			Type:      "function_call",
 			CallID:    "call-1",
@@ -1612,7 +1649,8 @@ func newFakeResponses(t *testing.T, cfg fakeResponsesConfig) *fakeResponses {
 				writeJSON(
 					w,
 					map[string]any{
-						"id": "resp-1",
+						"id":     "resp-1",
+						"status": "completed",
 						"output": []any{
 							map[string]any{
 								"type":      "function_call",
@@ -1655,6 +1693,7 @@ func functionCallResponse(toolName string) map[string]any {
 	return map[string]any{
 		"id":               "resp-1",
 		"agent_session_id": fakeSessionID,
+		"status":           "completed",
 		"output": []any{
 			map[string]any{
 				"type":      "function_call",
@@ -1667,7 +1706,7 @@ func functionCallResponse(toolName string) map[string]any {
 }
 
 func multipleCallsResponse() map[string]any {
-	return map[string]any{"id": "resp-1", "agent_session_id": fakeSessionID, "output": []any{
+	return map[string]any{"id": "resp-1", "agent_session_id": fakeSessionID, "status": "completed", "output": []any{
 		map[string]any{
 			"type":      "function_call",
 			"call_id":   "call-1",
@@ -1687,6 +1726,7 @@ func finalResponsesMessage() map[string]any {
 	return map[string]any{
 		"id":               "resp-2",
 		"agent_session_id": fakeSessionID,
+		"status":           "completed",
 		"output": []any{
 			map[string]any{
 				"type":    "message",
