@@ -1,0 +1,8 @@
+{
+  "id": "resp-1",
+  "agent_session_id": "session-1",
+  "output": [
+    {"type":"function_call","call_id":"call-1","name":"support-ticket-lookup","arguments":"{\"incident\":\"inc-1\"}"},
+    {"type":"function_call","call_id":"call-2","name":"support-ticket-lookup","arguments":"{\"incident\":\"inc-2\"}"}
+  ]
+}

@@ -4,26 +4,29 @@ metadata:
   labels:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
-  name: sample-foundry-runtime
+  name: sample-foundry-responses-runtime
 spec:
-  # Namespace-local facade for an operator-deployed Azure AI Foundry hosted-agent adapter.
-  # Foundry credentials belong to the adapter Secret. Orka Tool credentials stay in
-  # Orka-governed credential sources and are used only by brokered execution.
+  # Namespace-local facade for an operator-deployed Foundry hosted Responses
+  # adapter (examples/harness/foundry-responses). Foundry credentials belong to
+  # the adapter Secret. Orka Tool credentials stay in Orka-governed credential
+  # sources and are used only by brokered execution.
   contractVersion: orka.harness.v1
   deployment:
     mode: external-endpoint
-    endpoint: http://sample-foundry-runtime.default.svc.cluster.local:8080
+    endpoint: http://sample-foundry-responses-runtime.default.svc.cluster.local:8080
   clientAuth:
     bearerTokenSecretRef:
-      name: sample-foundry-runtime-token
+      name: sample-foundry-responses-runtime-token
       key: token
   capabilities:
+    # Mirror only the classes the hosted AgentKit deployment is statically
+    # configured and conformance-tested to request. Add write only after the
+    # hosted AgentKit write schema and Orka brokered-write conformance pass.
     toolExecutionModes:
     - observed
     - brokered
     brokeredToolClasses:
     - read
-    - write
     supportsCancel: true
     supportsRuntimeSessions: true
     supportsContinuation: true

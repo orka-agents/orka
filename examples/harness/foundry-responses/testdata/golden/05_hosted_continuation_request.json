@@ -1,0 +1,12 @@
+{
+  "previous_response_id": "resp-1",
+  "agent_session_id": "session-1",
+  "input": [
+    {
+      "type": "function_call_output",
+      "call_id": "call-1",
+      "output": "{\"approved\":true,\"output\":{\"success\":true}}",
+      "status": "completed"
+    }
+  ]
+}

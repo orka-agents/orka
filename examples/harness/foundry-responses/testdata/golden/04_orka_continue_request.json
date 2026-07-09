@@ -1,0 +1,20 @@
+{
+  "version": "orka.harness.v1",
+  "namespace": "default",
+  "taskName": "foundry-brokered",
+  "sessionName": "foundry-brokered",
+  "runtimeSessionID": "foundry-brokered-runtime",
+  "turnID": "foundry-brokered-turn",
+  "correlationID": "foundry-brokered-corr",
+  "toolResults": [
+    {
+      "version": "orka.harness.v1",
+      "runtimeSessionID": "foundry-brokered-runtime",
+      "turnID": "foundry-brokered-turn",
+      "toolCallID": "call-1",
+      "idempotencyKey": "foundry-brokered-runtime:foundry-brokered-turn:call-1",
+      "approved": true,
+      "output": {"success":true}
+    }
+  ]
+}
