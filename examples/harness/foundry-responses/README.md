@@ -131,6 +131,13 @@ For the full deterministic local validation bundle, including the focused Orka h
 examples/harness/foundry-responses/validate.sh
 ```
 
+For the live Foundry hosted AgentKit smoke gate, first run the credentials-safe preflight and then apply only when your current Kubernetes context is the intended Orka cluster:
+
+```bash
+examples/harness/foundry-responses/live-smoke.sh
+examples/harness/foundry-responses/live-smoke.sh --apply --wait
+```
+
 The tests use a fake hosted Responses server and golden fixtures for initial requests, function calls, `ToolCallRequested`, continuations, final messages, error encoding, and buffered multiple-call behavior.
 
 See [`VALIDATION.md`](VALIDATION.md) for the brokered-plan evidence matrix, local commands, and remaining live Foundry/Fibey gates.

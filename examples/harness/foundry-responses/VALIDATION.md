@@ -75,6 +75,19 @@ uv run --extra dev pytest -q \
 
 ## Live gates that cannot be satisfied by local fixtures
 
+Use the credentials-safe live smoke helper as the first live preflight/deploy step:
+
+```bash
+examples/harness/foundry-responses/live-smoke.sh
+examples/harness/foundry-responses/live-smoke.sh --apply --wait
+```
+
+The helper validates required environment without printing secret values and can
+deploy the adapter `Deployment`, `Service`, `Secret` placeholders, and matching
+`AgentRuntime` facade into the selected namespace. It does not replace the
+required real hosted AgentKit deployment, downstream tools, human approvals, or
+Fibey scenario verification.
+
 The following remain required before declaring the full hosted Foundry/Fibey plan
 complete:
 
