@@ -138,7 +138,7 @@ type pendingFunctionCall struct {
 }
 
 const responsesEndpointRequirement = "foundry hosted Responses endpoint must use https " +
-	"(http allowed only for loopback), target /responses, and must not include foundryAuths, " +
+	"(http allowed only for loopback), target /responses, and must not include credentials, " +
 	"fragments, or query parameters other than api-version"
 
 func main() {
