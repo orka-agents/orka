@@ -116,6 +116,11 @@ kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-foundry-responses
 # Optional literal brokered Fibey read/write scenario once downstream services exist.
 kubectl apply -f examples/fibey-custom-agent-demo/tools-foundry-responses.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/task-foundry-responses.yaml
+
+# After the task runs through read, write approval, and completion, verify evidence.
+examples/fibey-custom-agent-demo/verify-foundry-responses.sh \
+  --task fibey-foundry-responses-quincy-north-alert \
+  --namespace default
 ```
 
 Run the same task against another backend by changing only `spec.agentRef.name`, for example:

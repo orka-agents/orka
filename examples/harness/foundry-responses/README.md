@@ -125,7 +125,7 @@ For write-profile smoke, first prove the hosted AgentKit deployment has a static
 go test ./examples/harness/foundry-responses
 ```
 
-For the full deterministic local validation bundle, including the focused Orka harness/controller suites and optional sibling AgentKit fixture tests when available:
+For the full deterministic local validation bundle, including the focused Orka harness/controller suites and explicit AgentKit fixture tests when --agentkit is provided:
 
 ```bash
 examples/harness/foundry-responses/validate.sh

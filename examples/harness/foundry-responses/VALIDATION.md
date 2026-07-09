@@ -36,8 +36,14 @@ Full non-e2e validation:
 make test
 ```
 
-When the sibling AgentKit checkout is available, run the shared deterministic
-Foundry brokered protocol suite from the AgentKit checkout's `runtimes/common` directory:
+When a clean AgentKit checkout is available, run the shared deterministic
+Foundry brokered protocol suite explicitly:
+
+```bash
+examples/harness/foundry-responses/validate.sh --agentkit ../agentkit
+```
+
+Equivalent manual command from the AgentKit checkout's `runtimes/common` directory:
 
 ```bash
 uv run --extra dev pytest -q \
@@ -104,4 +110,11 @@ complete:
    credential/tool URL leakage in logs.
 7. Run the Fibey read/write scenario with `check-network-telemetry`,
    `get-active-incidents`, `dispatch-work-order`, and optional
-   `escalate-incident`, then verify replay produces no second dispatch.
+   `escalate-incident`, then verify replay produces no second dispatch. Capture
+   Orka task events and run:
+
+   ```bash
+   examples/fibey-custom-agent-demo/verify-foundry-responses.sh \
+     --task fibey-foundry-responses-quincy-north-alert \
+     --namespace <namespace>
+   ```

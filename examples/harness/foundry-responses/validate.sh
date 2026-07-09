@@ -10,8 +10,8 @@ No live Foundry endpoint, token, API key, or Kubernetes cluster is required.
 
 Options:
   --agentkit PATH  Also run AgentKit's deterministic Foundry brokered protocol
-                   tests from PATH/runtimes/common. If omitted, the script uses
-                   a sibling ../agentkit checkout when present.
+                   tests from PATH/runtimes/common. This is explicit because a
+                   sibling AgentKit checkout may contain unrelated local changes.
   --full           Also run `make test` for the full non-e2e Orka suite.
   -h, --help       Show this help.
 USAGE
@@ -65,13 +65,6 @@ done < <(find examples -type f -name '*.sh' -print0 | sort -z)
 
 if [[ "$run_full" == "1" ]]; then
   run make test
-fi
-
-if [[ -z "$agentkit_root" ]]; then
-  sibling_agentkit="$(cd "$repo_root/.." && pwd)/agentkit"
-  if [[ -d "$sibling_agentkit/runtimes/common" ]]; then
-    agentkit_root="$sibling_agentkit"
-  fi
 fi
 
 if [[ -n "$agentkit_root" ]]; then
