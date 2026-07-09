@@ -76,7 +76,7 @@ Adapter emits `ToolCallRequested` with the exact `call_id`, function name, and c
 Orka continuation:
 
 ```json
-{"type":"function_call_output","call_id":"call_1","output":"{\"approved\":true,\"output\":{\"success\":true}}"}
+{"type":"function_call_output","call_id":"call_1","output":"{\"approved\":true,\"output\":{\"success\":true}}","status":"completed"}
 ```
 
 The hosted continuation request includes `previous_response_id`, `agent_session_id` when a Foundry session is known, and one or more `function_call_output` items. Raw REST calls include the hosted-agent feature header required by Foundry hosted-agent endpoints.
