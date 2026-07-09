@@ -127,6 +127,8 @@ go test ./examples/harness/foundry-responses
 
 The tests use a fake hosted Responses server and golden fixtures for initial requests, function calls, `ToolCallRequested`, continuations, final messages, error encoding, and buffered multiple-call behavior.
 
+See [`VALIDATION.md`](VALIDATION.md) for the brokered-plan evidence matrix, local commands, and remaining live Foundry/Fibey gates.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
