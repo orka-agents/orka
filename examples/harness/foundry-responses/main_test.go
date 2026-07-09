@@ -565,6 +565,40 @@ func TestResponsesAdapterSendsBrokeredContinuationProofHeader(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-already-submitted")
+	result := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
+	payload, err := canonicalToolResultOutput(result)
+	if err != nil {
+		t.Fatalf("canonicalToolResultOutput: %v", err)
+	}
+	turn := &turnState{
+		request:           request,
+		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
+		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
+		bufferedResults:   map[string]harness.ToolCallResult{"call-1": result},
+		bufferedPayloads:  map[string]string{"call-1": payload},
+		submittedPayloads: map[string]string{"call-1": payload},
+	}
+	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{result})
+	if err != nil {
+		t.Fatalf("recordContinueResults: %v", err)
+	}
+	if toSubmit != nil {
+		t.Fatalf("toSubmit = %#v, want nil for already submitted duplicate", toSubmit)
+	}
+}
+
 func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{
 		scenario:           "function_call",
@@ -726,6 +760,33 @@ func TestResponsesAdapterPendingToolTimesOutWithoutContinuation(t *testing.T) {
 	failed := findFrame(turn.frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "approval_wait_exceeded" {
 		t.Fatalf("failed frame = %#v, want approval_wait_exceeded", failed)
+	}
+}
+
+func TestResponsesAdapterAlreadySubmittedPendingResultIsNoop(t *testing.T) {
+	server := newServer(config{maxApprovalWait: time.Minute}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-submitted-noop")
+	turn := &turnState{
+		request:           request,
+		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
+		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	result := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
+	payload, err := canonicalToolResultOutput(result)
+	if err != nil {
+		t.Fatalf("canonicalToolResultOutput: %v", err)
+	}
+	turn.submittedPayloads["call-1"] = payload
+
+	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{result})
+	if err != nil {
+		t.Fatalf("recordContinueResults: %v", err)
+	}
+	if len(toSubmit) != 0 {
+		t.Fatalf("toSubmit = %#v, want duplicate submitted result to be a no-op", toSubmit)
 	}
 }
 
@@ -994,7 +1055,7 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 		Input: "please read telemetry",
 	})
 
-	outputs, _, err := functionCallOutputs([]harness.ToolCallResult{{
+	outputs, err := functionCallOutputs([]harness.ToolCallResult{{
 		Version:          harness.ProtocolVersion,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
@@ -1313,7 +1374,7 @@ func TestCanonicalErrorAndDeclineOutputFixtures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			outputs, _, err := functionCallOutputs([]harness.ToolCallResult{tt.result})
+			outputs, err := functionCallOutputs([]harness.ToolCallResult{tt.result})
 			if err != nil {
 				t.Fatalf("functionCallOutputs: %v", err)
 			}
