@@ -63,6 +63,43 @@ while IFS= read -r -d '' script; do
   run bash -n "$script"
 done < <(find examples -type f -name '*.sh' -print0 | sort -z)
 
+expect_verifier_failure() {
+  local fixture="$1"
+  local expected="$2"
+  local label="$3"
+  local out_file err_file code
+  out_file="$(mktemp)"
+  err_file="$(mktemp)"
+  set +e
+  examples/fibey-custom-agent-demo/verify-foundry-responses.sh --json "$fixture" >"$out_file" 2>"$err_file"
+  code=$?
+  set -e
+  if [[ "$code" == "0" ]]; then
+    cat "$out_file" >&2
+    rm -f "$out_file" "$err_file"
+    echo "expected ${label} verifier fixture to fail" >&2
+    exit 1
+  fi
+  if ! grep -q "$expected" "$err_file"; then
+    cat "$err_file" >&2
+    rm -f "$out_file" "$err_file"
+    echo "${label} fixture failed for the wrong reason" >&2
+    exit 1
+  fi
+  rm -f "$out_file" "$err_file"
+}
+
+run examples/fibey-custom-agent-demo/verify-foundry-responses.sh \
+  --json examples/fibey-custom-agent-demo/testdata/foundry-responses-events-pass.json
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-missing-write-exec.json \
+  "missing write ToolCallStarted event after approval" \
+  "missing-write"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-duplicate-write.json \
+  "duplicate write execution starts for dispatch-work-order" \
+  "duplicate-write"
+
 if [[ "$run_full" == "1" ]]; then
   run make test
 fi

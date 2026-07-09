@@ -77,6 +77,7 @@ uv run --extra dev pytest -q \
 | Large hosted output and platform failures are safe | `TestResponsesLargeOutputFails` and `TestResponsesInitialPlatformErrorDoesNotRetainTurn`. |
 | No secrets or endpoint URLs in golden fixtures | `TestResponsesGoldenFixturesDoNotContainEndpointsOrSecrets`. |
 | Existing Orka broker approval/idempotency/write ledger behavior | `go test ./internal/controller -run 'Test.*(AgentRuntime|Harness|Brokered|Runtime)'`, especially brokered write approval, decline, replay, and unresolved-ledger tests in `internal/controller/harness_wrapper_test.go`. |
+| Fibey live evidence verifier behavior | `examples/harness/foundry-responses/validate.sh` runs `verify-foundry-responses.sh` against pass/fail fixtures under `examples/fibey-custom-agent-demo/testdata/`. |
 | Kubernetes smoke skeleton is credentials-free | `examples/harness/foundry-responses/kubernetes.example.yaml` uses `REDACTED` placeholders and a read-only advertised class by default. |
 
 ## Live gates that cannot be satisfied by local fixtures

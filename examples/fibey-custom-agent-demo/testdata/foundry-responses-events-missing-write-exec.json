@@ -1,0 +1,8 @@
+{
+  "events": [
+    {"eventType": "ToolCallRequested", "toolName": "check-network-telemetry"},
+    {"eventType": "ToolCallRequested", "toolName": "dispatch-work-order"},
+    {"eventType": "ApprovalRequested", "toolName": "dispatch-work-order"},
+    {"eventType": "AgentRuntimeCompleted"}
+  ]
+}

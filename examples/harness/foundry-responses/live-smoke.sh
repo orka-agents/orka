@@ -124,6 +124,49 @@ require_nonempty_name() {
     fail "$label must be a Kubernetes DNS label, got '$value'"
 }
 
+url_authority() {
+  local value="$1"
+  local rest="${value#*://}"
+  rest="${rest%%#*}"
+  rest="${rest%%\?*}"
+  printf '%s' "${rest%%/*}"
+}
+
+responses_endpoint_is_safe() {
+  local value="$1"
+  local rest authority after path query pair key val
+  [[ -z "$value" ]] && return 0
+  is_https_or_loopback_http "$value" || return 1
+  [[ "$value" != *#* ]] || return 1
+  authority="$(url_authority "$value")"
+  [[ -n "$authority" && "$authority" != *@* ]] || return 1
+  rest="${value#*://}"
+  after="${rest#"$authority"}"
+  path="${after%%\?*}"
+  [[ "${path%/}" == */responses ]] || return 1
+  if [[ "$after" == *\?* ]]; then
+    query="${after#*\?}"
+    [[ -n "$query" ]] || return 1
+    IFS='&' read -r -a pairs <<<"$query"
+    for pair in "${pairs[@]}"; do
+      [[ "$pair" == *=* ]] || return 1
+      key="${pair%%=*}"
+      val="${pair#*=}"
+      [[ "$key" == "api-version" && -n "$val" ]] || return 1
+    done
+  fi
+}
+
+project_endpoint_is_safe() {
+  local value="$1"
+  local authority
+  [[ -z "$value" ]] && return 0
+  is_https_or_loopback_http "$value" || return 1
+  [[ "$value" != *#* && "$value" != *\?* ]] || return 1
+  authority="$(url_authority "$value")"
+  [[ -n "$authority" && "$authority" != *@* ]]
+}
+
 indent_block() {
   sed 's/^/    /'
 }
@@ -136,8 +179,8 @@ preflight() {
     [[ -n "$project_endpoint" && -n "$agent_name" ]] || \
       fail "set ORKA_FOUNDRY_RESPONSES_ENDPOINT or PROJECT_ENDPOINT plus AGENT_NAME"
   fi
-  is_https_or_loopback_http "$endpoint" || fail "ORKA_FOUNDRY_RESPONSES_ENDPOINT must be https (or loopback http for tests)"
-  is_https_or_loopback_http "$project_endpoint" || fail "ORKA_FOUNDRY_RESPONSES_PROJECT_ENDPOINT must be https (or loopback http for tests)"
+  responses_endpoint_is_safe "$endpoint" || fail "ORKA_FOUNDRY_RESPONSES_ENDPOINT must be a safe /responses URL (https, or loopback http for tests; only api-version query allowed)"
+  project_endpoint_is_safe "$project_endpoint" || fail "ORKA_FOUNDRY_RESPONSES_PROJECT_ENDPOINT must be https (or loopback http for tests) without userinfo, query, or fragment"
 
   if [[ -n "$api_key" && -n "$auth_bearer" ]]; then
     fail "set exactly one of ORKA_FOUNDRY_RESPONSES_API_KEY or ORKA_FOUNDRY_RESPONSES_AUTH_BEARER"

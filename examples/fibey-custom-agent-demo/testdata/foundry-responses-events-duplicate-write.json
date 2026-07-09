@@ -1,0 +1,18 @@
+{
+  "events": [
+    {"eventType": "ToolCallRequested", "toolName": "check-network-telemetry"},
+    {"eventType": "ToolCallRequested", "toolName": "dispatch-work-order"},
+    {"eventType": "ApprovalRequested", "toolName": "dispatch-work-order"},
+    {
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "content": {"idempotencyKey": "dispatch-1"}
+    },
+    {
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "content": {"idempotencyKey": "dispatch-2"}
+    },
+    {"eventType": "AgentRuntimeCompleted"}
+  ]
+}
