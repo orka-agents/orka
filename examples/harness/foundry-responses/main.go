@@ -825,6 +825,7 @@ func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionC
 				Type:   "function_call_output",
 				CallID: result.ToolCallID,
 				Output: payload,
+				Status: "completed",
 			},
 		)
 	}
