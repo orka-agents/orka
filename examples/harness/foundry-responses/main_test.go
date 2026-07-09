@@ -751,6 +751,155 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	}
 }
 
+func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
+	server := newServer(
+		config{
+			runtimeName:         "test",
+			adapterBearer:       "adapter-auth-value",
+			endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+			foundryAuth:         "foundry-auth-value",
+			requestTimeout:      time.Second,
+			stateRetention:      time.Minute,
+			maxApprovalWait:     time.Minute,
+			brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+		},
+		&http.Client{Timeout: time.Second},
+	)
+	request := responsesStartTurnRequest("agentkit-brokered-fixture")
+	request.ToolExecutionMode = harness.ToolExecutionModeBrokered
+	request.Input.Tools = []harness.ToolDefinition{{
+		Name:          "conformance_read",
+		Description:   "Synthetic AgentKit brokered fixture tool",
+		BrokeredClass: harness.BrokeredToolClassRead,
+		Parameters:    json.RawMessage(`{"type":"object","properties":{"probe":{"type":"boolean"}}}`),
+	}}
+	turn := &turnState{
+		request:           request,
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	var functionCall responsesResponse
+	decodeFixtureInto(
+		t,
+		"testdata/agentkit-foundry-brokered/function_call_response.json",
+		&functionCall,
+	)
+	server.handleResponsesResponse(turn, functionCall)
+	requested := findFrame(turn.frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want tool request from AgentKit fixture", turn.frames)
+	}
+	if requested.ToolName != "conformance_read" || requested.ToolCallID != "call_caresp_test_1" {
+		t.Fatalf("tool request = %#v, want AgentKit fixture call", requested)
+	}
+	assertJSONFileEqual(t, "testdata/agentkit-foundry-brokered/initial_request.json", responsesRequest{
+		Input: "please read telemetry",
+	})
+
+	outputs, _, err := functionCallOutputs([]harness.ToolCallResult{{
+		Version:          harness.ProtocolVersion,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		ToolCallID:       "call_caresp_test_1",
+		IdempotencyKey:   harness.ToolRequestIdempotencyKey(request.RuntimeSessionID, request.TurnID, "call_caresp_test_1"),
+		Approved:         true,
+		Output:           json.RawMessage(`{"success":true}`),
+	}})
+	if err != nil {
+		t.Fatalf("functionCallOutputs: %v", err)
+	}
+	assertJSONFileEqual(t, "testdata/agentkit-foundry-brokered/continuation_request.json", responsesRequest{
+		PreviousResponseID: "caresp_test",
+		Input:              outputs,
+	})
+
+	finalTurn := &turnState{
+		request:           responsesStartTurnRequest("agentkit-final-fixture"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	var finalMessage responsesResponse
+	decodeFixtureInto(t, "testdata/agentkit-foundry-brokered/final_message_response.json", &finalMessage)
+	server.handleResponsesResponse(finalTurn, finalMessage)
+	completed := findFrame(finalTurn.frames, harness.FrameTurnCompleted)
+	want := `Brokered tool conformance_read completed with output: {"success":true}`
+	if completed == nil || completed.Completed.Result != want {
+		t.Fatalf("completed frame = %#v, want %q", completed, want)
+	}
+}
+
+func TestResponsesAgentKitErrorPayloadFixturesMatchCanonicalEncoding(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  harness.ToolCallResult
+		fixture string
+	}{
+		{
+			name: "approval declined",
+			result: baseToolResult("call-agentkit-1", false, nil, &harness.ErrorInfo{
+				Code: "approval_declined", Message: "Human declined dispatch-work-order",
+			}),
+			fixture: "testdata/agentkit-foundry-brokered/approval_declined_payload.json",
+		},
+		{
+			name: "policy rejection",
+			result: baseToolResult("call-agentkit-2", false, nil, &harness.ErrorInfo{
+				Code: "tool_policy_rejected", Message: "writes are disabled",
+			}),
+			fixture: "testdata/agentkit-foundry-brokered/tool_policy_rejection_payload.json",
+		},
+		{
+			name: "execution failure",
+			result: baseToolResult("call-agentkit-3", true, nil, &harness.ErrorInfo{
+				Code: "tool_execution_failed", Message: "downstream timed out",
+			}),
+			fixture: "testdata/agentkit-foundry-brokered/tool_execution_failure_payload.json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := canonicalToolResultOutput(tt.result)
+			if err != nil {
+				t.Fatalf("canonicalToolResultOutput: %v", err)
+			}
+			assertJSONFileEqual(t, tt.fixture, json.RawMessage(payload))
+		})
+	}
+}
+
+func TestResponsesGoldenFixturesDoNotContainEndpointsOrSecrets(t *testing.T) {
+	for _, root := range []string{"testdata/golden", "testdata/agentkit-foundry-brokered"} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatalf("ReadDir(%s): %v", root, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			path := root + "/" + entry.Name()
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			text := strings.ToLower(string(data))
+			for _, forbidden := range []string{"http://", "https://", "authorization", "api_key", "api-key", "bearer "} {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf("fixture %s contains forbidden %q", path, forbidden)
+				}
+			}
+		}
+	}
+}
+
 func TestResponsesPreservesNumericJSONTokens(t *testing.T) {
 	args, err := normalizeResponsesToolArguments(json.RawMessage(`{"id":9007199254740993}`))
 	if err != nil {

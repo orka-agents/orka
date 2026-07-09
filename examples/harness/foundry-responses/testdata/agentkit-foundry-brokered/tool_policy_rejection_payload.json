@@ -1,0 +1,7 @@
+{
+  "approved": false,
+  "error": {
+    "code": "tool_policy_rejected",
+    "message": "writes are disabled"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "approved": false,
+  "error": {
+    "code": "approval_declined",
+    "message": "Human declined dispatch-work-order"
+  }
+}
