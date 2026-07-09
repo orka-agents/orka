@@ -443,6 +443,89 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	}
 }
 
+func TestResponsesRepeatedSubmittedFunctionCallFailsTurn(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-repeated-call")
+	turn := &turnState{
+		request:           request,
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{"call-1": `{"approved":true}`},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID: "resp-repeat",
+		Output: []responsesOutput{{
+			Type:      "function_call",
+			CallID:    "call-1",
+			Name:      "support-ticket-lookup",
+			Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+		}},
+	})
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_repeated_function_call" {
+		t.Fatalf("failed frame = %#v, want foundry_repeated_function_call", failed)
+	}
+}
+
+func TestResponsesMixedRepeatedFunctionCallFailsTurn(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-mixed-repeated-call")
+	turn := &turnState{
+		request:           request,
+		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
+		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID: "resp-repeat",
+		Output: []responsesOutput{
+			{
+				Type:      "function_call",
+				CallID:    "call-2",
+				Name:      "support-ticket-lookup",
+				Arguments: json.RawMessage(`{"incident":"inc-2"}`),
+			},
+			{
+				Type:      "function_call",
+				CallID:    "call-1",
+				Name:      "support-ticket-lookup",
+				Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+			},
+		},
+	})
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_repeated_function_call" {
+		t.Fatalf("failed frame = %#v, want foundry_repeated_function_call", failed)
+	}
+	if _, exists := turn.pendingTools["call-2"]; exists {
+		t.Fatal("new call was accepted after repeated pending call")
+	}
+}
+
 func TestResponsesAdapterPendingToolTimesOutWithoutContinuation(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",
@@ -720,6 +803,45 @@ func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	failed := findFrame(turn.frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "foundry_failed" {
 		t.Fatalf("failed frame = %#v, want foundry_failed", failed)
+	}
+}
+
+func TestResponsesFailureStatusWithFunctionCallFailsBeforeToolRequest(t *testing.T) {
+	server := newServer(config{
+		runtimeName:         "test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		maxApprovalWait:     time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           brokeredReadRequest("foundry-failed-function-call"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-failed",
+		Status: "incomplete",
+		Output: []responsesOutput{{
+			Type:      "function_call",
+			CallID:    "call-1",
+			Name:      "support-ticket-lookup",
+			Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+		}},
+	})
+	if hasFrameType(turn.frames, harness.FrameToolCallRequested) {
+		t.Fatalf("frames = %#v, failed response should not request a tool", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_incomplete" {
+		t.Fatalf("failed frame = %#v, want foundry_incomplete", failed)
 	}
 }
 

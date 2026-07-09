@@ -535,6 +535,10 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 		)
 		return
 	}
+	if isFailureStatus(response.Status) {
+		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
+		return
+	}
 	calls, err := s.extractFunctionCalls(turn.request, response.Output)
 	if err != nil {
 		s.appendFailedLocked(turn, "foundry_function_call_invalid", err.Error())
@@ -549,14 +553,36 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 			)
 			return
 		}
-		now := time.Now().UTC()
+		seenInResponse := map[string]struct{}{}
 		for _, call := range calls {
+			if _, seen := seenInResponse[call.callID]; seen {
+				s.appendFailedLocked(
+					turn,
+					"foundry_repeated_function_call",
+					"hosted response repeated a function call id",
+				)
+				return
+			}
+			seenInResponse[call.callID] = struct{}{}
 			if _, submitted := turn.submittedPayloads[call.callID]; submitted {
-				continue
+				s.appendFailedLocked(
+					turn,
+					"foundry_repeated_function_call",
+					"hosted response repeated an already-submitted function call",
+				)
+				return
 			}
 			if _, pending := turn.pendingTools[call.callID]; pending {
-				continue
+				s.appendFailedLocked(
+					turn,
+					"foundry_repeated_function_call",
+					"hosted response repeated an already-pending function call",
+				)
+				return
 			}
+		}
+		now := time.Now().UTC()
+		for _, call := range calls {
 			turn.pendingTools[call.callID] = call.name
 			turn.pendingSince[call.callID] = now
 			s.schedulePendingToolTimeoutLocked(turn, call.callID)
@@ -571,10 +597,6 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 				},
 			)
 		}
-		return
-	}
-	if isFailureStatus(response.Status) {
-		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
 		return
 	}
 	result := responsesMessageText(response.Output)
