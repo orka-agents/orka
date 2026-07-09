@@ -107,6 +107,18 @@ The adapter captures Foundry session identifiers from the hosted response body (
 docker build -t ghcr.io/orka-agents/orka/foundry-responses-harness-adapter:latest -f examples/harness/foundry-responses/Dockerfile .
 ```
 
+
+## Kubernetes smoke skeleton
+
+`kubernetes.example.yaml` contains a credentials-free Deployment, Service, Secret placeholders, and matching `AgentRuntime` facade for a read-profile hosted Responses smoke. Replace the `REDACTED` values through your secret-management flow, set the hosted Responses endpoint or project/agent-name pair, and keep `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` narrowed to classes whose static AgentKit schemas passed conformance.
+
+```bash
+kubectl apply -f examples/harness/foundry-responses/kubernetes.example.yaml
+kubectl wait --for=condition=Ready agentruntime/sample-foundry-responses-runtime --timeout=60s
+```
+
+For write-profile smoke, first prove the hosted AgentKit deployment has a static write schema, then add `write` to both the adapter env and the `AgentRuntime.spec.capabilities.brokeredToolClasses`. Orka still performs approval and idempotent write execution; the hosted endpoint receives only `function_call_output` continuations.
+
 ## Tests
 
 ```bash
