@@ -642,6 +642,13 @@ func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	}
 }
 
+func TestSanitizeEndpointDoesNotReturnRawMalformedURL(t *testing.T) {
+	raw := "http://[::1" + "?unsafe=do-not-log"
+	if got := sanitizeEndpoint(raw); got == raw || strings.Contains(got, "do-not-log") {
+		t.Fatalf("sanitizeEndpoint(%q) = %q, want redacted placeholder", raw, got)
+	}
+}
+
 func TestResponsesFunctionCallWithoutResponseIDFailsBeforeToolRequest(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",

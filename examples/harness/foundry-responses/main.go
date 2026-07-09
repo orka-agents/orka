@@ -1275,7 +1275,7 @@ func sanitizeEndpoint(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return raw
+		return "[invalid endpoint]"
 	}
 	u.User = nil
 	q := u.Query()

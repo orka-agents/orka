@@ -70,7 +70,7 @@ Hosted AgentKit function call:
 {"type":"function_call","call_id":"call_1","name":"check-network-telemetry","arguments":"{\"site\":\"quincy-north\"}"}
 ```
 
-Adapter emits `ToolCallRequested` with the exact `call_id`, function name, and compact JSON object arguments.
+Adapter emits `ToolCallRequested` with the exact `call_id`, function name, and compact JSON object arguments. If a hosted response returns multiple `function_call` items, the adapter emits one `ToolCallRequested` frame per call and waits until Orka returns every pending result before continuing.
 
 Orka continuation:
 
@@ -78,7 +78,7 @@ Orka continuation:
 {"type":"function_call_output","call_id":"call_1","output":"{\"approved\":true,\"output\":{\"success\":true}}","status":"completed"}
 ```
 
-The hosted continuation request includes `previous_response_id` and the `function_call_output` item.
+The hosted continuation request includes `previous_response_id`, `agent_session_id` when a Foundry session is known, and one or more `function_call_output` items. Raw REST calls include the hosted-agent feature header required by Foundry hosted-agent endpoints.
 
 ## Output and error encoding
 
@@ -98,7 +98,7 @@ This MVP stores turn state in memory. That is intentionally fail-safe:
 - if the adapter restarts while a tool approval is pending, `/continue` returns `turn not found` and does not call Foundry, so the adapter itself does not duplicate a side effect;
 - Orka's broker/idempotency ledger remains the source of truth for actual write execution.
 
-The adapter captures Foundry session headers such as `x-agent-session-id` and reuses them for later calls with the same Orka `runtimeSessionID`. Session/auth headers are stored only in memory and are not logged.
+The adapter captures Foundry session identifiers from the hosted response body (`agent_session_id`) and compatibility headers such as `x-agent-session-id`, then reuses the session in the `agent_session_id` request field for later calls with the same Orka `runtimeSessionID`. Session/auth values are stored only in memory and are not logged.
 
 ## Local build
 
