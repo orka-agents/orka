@@ -102,11 +102,19 @@ func TestResponsesAdapterBrokeredReadContinuationAndGoldenFixtures(t *testing.T)
 	assertJSONFileEqual(t, "testdata/golden/01_initial_hosted_request.json", foundry.requestBody(0))
 
 	var frames []harness.HarnessEventFrame
-	if err := client.StreamFrames(context.Background(), request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+	var continueRequest harness.ContinueTurnRequest
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer streamCancel()
+	if err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
 		frames = append(frames, frame)
-		return nil
+		if frame.Type != harness.FrameToolCallRequested {
+			return nil
+		}
+		continueRequest = goldenContinueRequest(request, frame.ToolCallID, json.RawMessage(`{"success":true}`))
+		_, err := client.ContinueTurn(context.Background(), continueRequest)
+		return err
 	}); err != nil {
-		t.Fatalf("StreamFrames before continue: %v", err)
+		t.Fatalf("StreamFrames through continue: %v", err)
 	}
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
@@ -117,27 +125,10 @@ func TestResponsesAdapterBrokeredReadContinuationAndGoldenFixtures(t *testing.T)
 	}
 	assertJSONFileEqual(t, "testdata/golden/03_tool_call_requested_frame.json", scrubFrameForGolden(*requested))
 
-	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
 	assertJSONFileEqual(t, "testdata/golden/04_orka_continue_request.json", continueRequest)
-	if _, err := client.ContinueTurn(context.Background(), continueRequest); err != nil {
-		t.Fatalf("ContinueTurn: %v", err)
-	}
 	assertJSONFileEqual(t, "testdata/golden/05_hosted_continuation_request.json", foundry.requestBody(1))
 	if got := foundry.requestHeader(1).Get("x-agent-session-id"); got != fakeSessionID {
 		t.Fatalf("continuation x-agent-session-id = %q, want session-1", got)
-	}
-
-	frames = nil
-	if err := client.StreamFrames(
-		context.Background(),
-		request.TurnID,
-		requested.Seq,
-		func(frame harness.HarnessEventFrame) error {
-			frames = append(frames, frame)
-			return nil
-		},
-	); err != nil {
-		t.Fatalf("StreamFrames after continue: %v", err)
 	}
 	if !hasFrameType(frames, harness.FrameToolResultReceived) || !hasFrameType(frames, harness.FrameTurnCompleted) {
 		t.Fatalf("frames = %#v, want tool result and completion", frames)
@@ -190,7 +181,7 @@ func TestResponsesAdapterContinuationUsesTurnSessionAfterSessionMapCleanup(t *te
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want tool request", frames)
@@ -247,6 +238,65 @@ func TestResponsesAdapterDuplicateStartDuringInitializationRejected(t *testing.T
 	}
 }
 
+func TestResponsesAdapterInitialPostSurvivesControlDisconnect(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	var postCount atomic.Int32
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		postCount.Add(1)
+		select {
+		case <-received:
+		default:
+			close(received)
+		}
+		select {
+		case <-release:
+			writeJSON(w, finalResponsesMessage())
+		case <-r.Context().Done():
+			return
+		}
+	}))
+	t.Cleanup(foundry.Close)
+	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter, adapterServer := newTestResponsesAdapterWithServer(t, endpoint, nil)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-control-disconnect")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startErr := make(chan error, 1)
+	go func() {
+		_, err := client.StartTurn(ctx, request)
+		startErr <- err
+	}()
+	<-received
+	cancel()
+	if err := <-startErr; err == nil {
+		t.Fatal("StartTurn after control disconnect error = nil, want client cancellation")
+	}
+	close(release)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		adapterServer.mu.Lock()
+		turn := adapterServer.turns[request.TurnID]
+		completed := turn != nil && turn.completed && !turn.initializing
+		adapterServer.mu.Unlock()
+		if completed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("adapter did not retain and complete the initial hosted response after control disconnect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("idempotent StartTurn retry: %v", err)
+	}
+	if got := postCount.Load(); got != 1 {
+		t.Fatalf("hosted post count = %d, want 1 after control disconnect and retry", got)
+	}
+}
+
 func TestResponsesAdapterReadyEndpointReflectsConfigReadiness(t *testing.T) {
 	unready := httptest.NewServer(newServer(config{
 		runtimeName:    "foundry-responses-test",
@@ -273,6 +323,19 @@ func TestResponsesAdapterReadyEndpointReflectsConfigReadiness(t *testing.T) {
 	defer readyResp.Body.Close() //nolint:errcheck
 	if readyResp.StatusCode != http.StatusOK {
 		t.Fatalf("ready status = %d, want %d", readyResp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestResponsesAdapterHTTPServerHasBoundedReadTimeouts(t *testing.T) {
+	httpServer := newAdapterHTTPServer(":0", http.NewServeMux())
+	if got := httpServer.ReadHeaderTimeout; got != defaultReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %v, want %v", got, defaultReadHeaderTimeout)
+	}
+	if got := httpServer.ReadTimeout; got != defaultReadTimeout {
+		t.Fatalf("ReadTimeout = %v, want %v", got, defaultReadTimeout)
+	}
+	if got := httpServer.IdleTimeout; got != defaultIdleTimeout {
+		t.Fatalf("IdleTimeout = %v, want %v", got, defaultIdleTimeout)
 	}
 }
 
@@ -364,7 +427,7 @@ func TestResponsesAdapterWriteParksUntilDeclinedApprovalContinue(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want write tool request", frames)
@@ -411,7 +474,7 @@ func TestResponsesAdapterWriteParksUntilDeclinedApprovalContinue(t *testing.T) {
 	if got := item["output"]; got != wantOutput {
 		t.Fatalf("declined output = %#v, want %s", got, wantOutput)
 	}
-	frames = streamAllFrames(t, client, request.TurnID)
+	frames = streamCurrentFrames(t, client, request.TurnID)
 	toolResult := findFrame(frames, harness.FrameToolResultReceived)
 	if toolResult == nil || toolResult.Error == nil || toolResult.Error.Code != "approval_declined" {
 		t.Fatalf("tool result frame = %#v, want approval_declined", toolResult)
@@ -434,7 +497,7 @@ func TestResponsesAdapterRejectsUnknownToolBeforeOrkaExecution(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	if hasFrameType(frames, harness.FrameToolCallRequested) {
 		t.Fatalf("frames = %#v, should not request Orka execution for an unknown tool", frames)
 	}
@@ -460,7 +523,7 @@ func TestResponsesAdapterRejectsMalformedArguments(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	if hasFrameType(frames, harness.FrameToolCallRequested) {
 		t.Fatalf("frames = %#v, should not request Orka execution for malformed arguments", frames)
 	}
@@ -483,7 +546,7 @@ func TestResponsesAdapterMultipleFunctionCallsBufferedAndContinued(t *testing.T)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requests := findFrames(frames, harness.FrameToolCallRequested)
 	if len(requests) != 2 {
 		t.Fatalf("tool request frames = %#v, want 2", requests)
@@ -512,7 +575,7 @@ func TestResponsesAdapterMultipleFunctionCallsBufferedAndContinued(t *testing.T)
 	if got := continuation["agent_session_id"]; got != fakeSessionID {
 		t.Fatalf("agent_session_id = %#v, want %q", got, fakeSessionID)
 	}
-	frames = streamAllFrames(t, client, request.TurnID)
+	frames = streamCurrentFrames(t, client, request.TurnID)
 	if !hasFrameType(frames, harness.FrameToolResultReceived) || !hasFrameType(frames, harness.FrameTurnCompleted) {
 		t.Fatalf("frames = %#v, want tool results and completion", frames)
 	}
@@ -531,7 +594,7 @@ func TestResponsesAdapterDuplicateContinueIsIdempotentAndConflictsReject(t *test
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want tool request", frames)
@@ -552,7 +615,7 @@ func TestResponsesAdapterDuplicateContinueIsIdempotentAndConflictsReject(t *test
 	}
 }
 
-func TestResponsesAdapterSendsBrokeredContinuationProofHeader(t *testing.T) {
+func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{
 		scenario:      "function_call",
 		toolName:      "support-ticket-lookup",
@@ -577,7 +640,7 @@ func TestResponsesAdapterSendsBrokeredContinuationProofHeader(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want tool request", frames)
@@ -589,8 +652,14 @@ func TestResponsesAdapterSendsBrokeredContinuationProofHeader(t *testing.T) {
 	if got := foundry.requestHeader(1).Get("X-AgentKit-Brokered-Continuation-Proof"); got != "proof-for-test" {
 		t.Fatalf("continuation proof header = %q, want proof-for-test", got)
 	}
+	if got := requestMap(t, foundry.requestBody(1))["brokered_continuation_proof"]; got != "proof-for-test" {
+		t.Fatalf("continuation proof body = %#v, want proof-for-test", got)
+	}
 	if got := foundry.requestHeader(0).Get("X-AgentKit-Brokered-Continuation-Proof"); got != "" {
 		t.Fatalf("initial proof header = %q, want empty", got)
+	}
+	if _, ok := requestMap(t, foundry.requestBody(0))["brokered_continuation_proof"]; ok {
+		t.Fatal("initial request included brokered continuation proof body")
 	}
 }
 
@@ -671,7 +740,7 @@ func TestResponsesAdapterContinuesToolExecutionFailurePayload(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want tool request", frames)
@@ -708,7 +777,7 @@ func TestResponsesAdapterContinuesToolExecutionFailurePayload(t *testing.T) {
 	if got := item["output"]; got != wantOutput {
 		t.Fatalf("failure output = %#v, want %s", got, wantOutput)
 	}
-	frames = streamAllFrames(t, client, request.TurnID)
+	frames = streamCurrentFrames(t, client, request.TurnID)
 	toolResult := findFrame(frames, harness.FrameToolResultReceived)
 	if toolResult == nil || toolResult.Error == nil || toolResult.Error.Code != "tool_execution_failed" {
 		t.Fatalf("tool result frame = %#v, want tool_execution_failed", toolResult)
@@ -735,7 +804,7 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want tool request", frames)
@@ -753,7 +822,7 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	if foundry.postCount.Load() != 2 {
 		t.Fatalf("hosted post count after duplicate = %d, want no second continuation", foundry.postCount.Load())
 	}
-	frames = streamAllFrames(t, client, request.TurnID)
+	frames = streamCurrentFrames(t, client, request.TurnID)
 	failed := findFrame(frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "foundry_continuation_unknown" {
 		t.Fatalf("failed frame = %#v, want fail-closed continuation failure", failed)
@@ -979,7 +1048,7 @@ func TestResponsesAdapterStateLossContinueFailsSafely(t *testing.T) {
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamAllFrames(t, client, request.TurnID)
+	frames := streamCurrentFrames(t, client, request.TurnID)
 	requested := findFrame(frames, harness.FrameToolCallRequested)
 	if requested == nil {
 		t.Fatalf("frames = %#v, want tool request", frames)
@@ -1879,17 +1948,20 @@ func baseToolResult(
 	}
 }
 
-func streamAllFrames(
+func streamCurrentFrames(
 	t *testing.T,
 	client *harness.Client,
 	turnID harness.HarnessTurnID,
 ) []harness.HarnessEventFrame {
 	t.Helper()
 	var frames []harness.HarnessEventFrame
-	if err := client.StreamFrames(context.Background(), turnID, 0, func(frame harness.HarnessEventFrame) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := client.StreamFrames(ctx, turnID, 0, func(frame harness.HarnessEventFrame) error {
 		frames = append(frames, frame)
 		return nil
-	}); err != nil {
+	})
+	if err != nil && ctx.Err() == nil {
 		t.Fatalf("StreamFrames: %v", err)
 	}
 	return frames

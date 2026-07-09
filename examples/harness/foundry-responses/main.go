@@ -24,14 +24,17 @@ import (
 )
 
 const (
-	defaultAddr            = ":8090"
-	defaultAPIVersion      = "v1"
-	defaultRequestTimeout  = 20 * time.Second
-	defaultStateRetention  = 10 * time.Minute
-	defaultMaxApprovalWait = 30 * time.Minute
-	maxFoundryOutputBytes  = 1 << 20
-	maxFoundryBodyBytes    = 4 << 20
-	readinessPath          = "/v1/ready"
+	defaultAddr              = ":8090"
+	defaultAPIVersion        = "v1"
+	defaultRequestTimeout    = 20 * time.Second
+	defaultStateRetention    = 10 * time.Minute
+	defaultMaxApprovalWait   = 30 * time.Minute
+	defaultReadHeaderTimeout = 5 * time.Second
+	defaultReadTimeout       = 30 * time.Second
+	defaultIdleTimeout       = 60 * time.Second
+	maxFoundryOutputBytes    = 1 << 20
+	maxFoundryBodyBytes      = 4 << 20
+	readinessPath            = "/v1/ready"
 
 	envAddr                = "ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR"
 	envRuntimeName         = "ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME"
@@ -94,6 +97,7 @@ type turnState struct {
 	submittedPayloads map[string]string
 	frames            []harness.HarnessEventFrame
 	completed         bool
+	frameUpdates      chan struct{}
 	continueMu        sync.Mutex
 }
 
@@ -101,6 +105,14 @@ type responsesRequest struct {
 	Input              any    `json:"input"`
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	AgentSessionID     string `json:"agent_session_id,omitempty"`
+	// BrokeredContinuationProof carries the continuation proof in the request
+	// BODY in addition to the X-AgentKit-Brokered-Continuation-Proof header.
+	// Some hosted-agent gateways (e.g. Microsoft Foundry) strip custom request
+	// headers before forwarding to the container, which would reject the
+	// function_call_output continuation; the body survives, so a
+	// gateway-tolerant runtime can recover the proof from here. Only set on
+	// continuation requests (PreviousResponseID present).
+	BrokeredContinuationProof string `json:"brokered_continuation_proof,omitempty"`
 }
 
 type responsesFunctionCallOutput struct {
@@ -153,8 +165,18 @@ func main() {
 		cfg.runtimeName,
 		sanitizeEndpoint(cfg.endpoint),
 	)
-	if err := http.ListenAndServe(cfg.addr, s.handler()); err != nil {
+	if err := newAdapterHTTPServer(cfg.addr, s.handler()).ListenAndServe(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func newAdapterHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       defaultReadTimeout,
+		IdleTimeout:       defaultIdleTimeout,
 	}
 }
 
@@ -339,12 +361,13 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
+		frameUpdates:      make(chan struct{}),
 	}
 	s.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
 	s.turns[req.TurnID] = turn
 	s.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.requestTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.requestTimeout)
 	defer cancel()
 	var response responsesResponse
 	initialRequest := responsesRequest{Input: req.Input.Prompt}
@@ -404,17 +427,39 @@ func (s *server) turn(w http.ResponseWriter, r *http.Request) {
 func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turnState) {
 	afterSeq := parseAfterSeq(r.URL.Query().Get("afterSeq"))
 	w.Header().Set("Content-Type", "text/event-stream")
-	s.mu.Lock()
-	frames := append([]harness.HarnessEventFrame(nil), turn.frames...)
-	completed := turn.completed
-	s.mu.Unlock()
-	for _, frame := range frames {
-		if frame.Seq > afterSeq {
-			_ = harness.WriteSSEFrame(w, frame)
-		}
+	w.WriteHeader(http.StatusOK)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
 	}
-	if completed {
-		_ = harness.WriteSSEDone(w)
+	nextSeq := afterSeq
+	for {
+		s.mu.Lock()
+		frames := append([]harness.HarnessEventFrame(nil), turn.frames...)
+		completed := turn.completed
+		updates := turn.frameUpdates
+		if updates == nil {
+			updates = make(chan struct{})
+			turn.frameUpdates = updates
+		}
+		s.mu.Unlock()
+		for _, frame := range frames {
+			if frame.Seq <= nextSeq {
+				continue
+			}
+			if err := harness.WriteSSEFrame(w, frame); err != nil {
+				return
+			}
+			nextSeq = frame.Seq
+		}
+		if completed {
+			_ = harness.WriteSSEDone(w)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-updates:
+		}
 	}
 }
 
@@ -473,7 +518,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.requestTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.cfg.requestTimeout)
 	defer cancel()
 	var response responsesResponse
 	continuation := responsesRequest{
@@ -915,6 +960,12 @@ func (s *server) postResponses(
 	if body.AgentSessionID == "" && sessionID != "" {
 		body.AgentSessionID = sessionID
 	}
+	// Carry the continuation proof in the body as well as the header, so it
+	// survives hosted-agent gateways (e.g. Foundry) that strip custom request
+	// headers before forwarding to the runtime container. Only on continuations.
+	if body.PreviousResponseID != "" && s.cfg.continuationProof != "" {
+		body.BrokeredContinuationProof = s.cfg.continuationProof
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -1300,6 +1351,10 @@ func (s *server) appendFrameLocked(
 		mutate(&frame)
 	}
 	turn.frames = append(turn.frames, frame)
+	if turn.frameUpdates != nil {
+		close(turn.frameUpdates)
+	}
+	turn.frameUpdates = make(chan struct{})
 }
 
 func (s *server) authorized(w http.ResponseWriter, r *http.Request) bool {
