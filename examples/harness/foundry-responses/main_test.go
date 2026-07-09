@@ -975,6 +975,57 @@ func TestResponsesPreservesNumericJSONTokens(t *testing.T) {
 	}
 }
 
+func TestResponsesLargeOutputFails(t *testing.T) {
+	server := newServer(config{
+		runtimeName:     "test",
+		adapterBearer:   "adapter-auth-value",
+		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:     "foundry-auth-value",
+		requestTimeout:  time.Second,
+		stateRetention:  time.Minute,
+		maxApprovalWait: time.Minute,
+	}, &http.Client{Timeout: time.Second})
+	turn := &turnState{
+		request:           responsesStartTurnRequest("foundry-large-output"),
+		pendingTools:      map[string]string{},
+		pendingSince:      map[string]time.Time{},
+		bufferedResults:   map[string]harness.ToolCallResult{},
+		bufferedPayloads:  map[string]string{},
+		submittedPayloads: map[string]string{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID: "resp-large",
+		Output: []responsesOutput{{
+			Type:    "message",
+			Content: strings.Repeat("x", maxFoundryOutputBytes+1),
+		}},
+	})
+	if hasFrameType(turn.frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, oversized response should not complete", turn.frames)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_output_too_large" {
+		t.Fatalf("failed frame = %#v, want foundry_output_too_large", failed)
+	}
+}
+
+func TestResponsesInitialPlatformErrorDoesNotRetainTurn(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "platform_error"})
+	adapter, server := newTestResponsesAdapterWithServer(t, foundry.endpoint(), nil)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-platform-error")
+
+	if _, err := client.StartTurn(context.Background(), request); err == nil {
+		t.Fatal("StartTurn succeeded, want platform error")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if _, exists := server.turns[request.TurnID]; exists {
+		t.Fatalf("turn %q retained after failed initial hosted response", request.TurnID)
+	}
+}
+
 func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	server := newServer(config{
 		runtimeName:     "test",
