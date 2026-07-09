@@ -52,6 +52,30 @@ func TestResponsesAdapterObservedTurnCompletes(t *testing.T) {
 	assertJSONFileEqual(t, "testdata/golden/01_initial_hosted_request.json", foundry.requestBody(0))
 }
 
+func TestResponsesAdapterDoesNotFollowCredentialedRedirects(t *testing.T) {
+	redirectTargetHit := atomic.Bool{}
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirectTargetHit.Store(true)
+	}))
+	t.Cleanup(redirectTarget.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL+"/capture", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	endpoint := redirector.URL +
+		"/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter := newTestResponsesAdapter(t, endpoint, nil)
+	client := newHarnessClient(t, adapter)
+	if _, err := client.StartTurn(context.Background(), responsesStartTurnRequest("foundry-redirect")); err == nil {
+		t.Fatalf("StartTurn followed redirect and succeeded, want rejection")
+	}
+	if redirectTargetHit.Load() {
+		t.Fatal("redirect target was called; credentialed Foundry request followed an unvalidated redirect")
+	}
+}
+
 func TestResponsesAdapterBrokeredReadContinuationAndGoldenFixtures(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
 	adapter := newTestResponsesAdapter(
@@ -150,6 +174,38 @@ func TestResponsesAdapterRuntimeSessionHeaderReuse(t *testing.T) {
 	}
 	if got := foundry.requestHeader(2).Get("x-agent-session-id"); got != "" {
 		t.Fatalf("new runtimeSessionID header = %q, want empty", got)
+	}
+}
+
+func TestResponsesAdapterContinuationUsesTurnSessionAfterSessionMapCleanup(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
+	adapter, server := newTestResponsesAdapterWithServer(
+		t,
+		foundry.endpoint(),
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-session-cleanup")
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamAllFrames(t, client, request.TurnID)
+	requested := findFrame(frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want tool request", frames)
+	}
+
+	server.mu.Lock()
+	delete(server.runtimeSessions, request.RuntimeSessionID)
+	server.mu.Unlock()
+
+	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
+	if _, err := client.ContinueTurn(context.Background(), continueRequest); err != nil {
+		t.Fatalf("ContinueTurn after runtime session cleanup: %v", err)
+	}
+	if got := requestMap(t, foundry.requestBody(1))["agent_session_id"]; got != fakeSessionID {
+		t.Fatalf("agent_session_id after runtime session cleanup = %#v, want %q", got, fakeSessionID)
 	}
 }
 
@@ -1239,6 +1295,16 @@ func finalResponsesMessage() map[string]any {
 
 func newTestResponsesAdapter(t *testing.T, endpoint string, classes []harness.BrokeredToolClass) *httptest.Server {
 	t.Helper()
+	adapter, _ := newTestResponsesAdapterWithServer(t, endpoint, classes)
+	return adapter
+}
+
+func newTestResponsesAdapterWithServer(
+	t *testing.T,
+	endpoint string,
+	classes []harness.BrokeredToolClass,
+) (*httptest.Server, *server) {
+	t.Helper()
 	s := newServer(config{
 		addr:                ":0",
 		runtimeName:         "foundry-responses-test",
@@ -1253,7 +1319,7 @@ func newTestResponsesAdapter(t *testing.T, endpoint string, classes []harness.Br
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(s.handler())
 	t.Cleanup(adapter.Close)
-	return adapter
+	return adapter, s
 }
 
 func newHarnessClient(t *testing.T, adapter *httptest.Server) *harness.Client {

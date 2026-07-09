@@ -186,9 +186,15 @@ func newServer(cfg config, client *http.Client) *server {
 	if client == nil {
 		client = &http.Client{Timeout: cfg.requestTimeout}
 	}
+	clientCopy := *client
+	if clientCopy.CheckRedirect == nil {
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
 	return &server{
 		cfg:             cfg,
-		client:          client,
+		client:          &clientCopy,
 		turns:           map[harness.HarnessTurnID]*turnState{},
 		runtimeSessions: map[harness.RuntimeSessionID]foundrySession{},
 	}
@@ -436,6 +442,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 	}
 	s.mu.Lock()
 	previousResponseID := turn.responseID
+	foundrySessionID := turn.foundrySessionID
 	s.mu.Unlock()
 	if strings.TrimSpace(previousResponseID) == "" {
 		harness.WriteError(w, http.StatusConflict, "cannot continue before Foundry response id is known")
@@ -446,6 +453,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 	var response responsesResponse
 	continuation := responsesRequest{
 		PreviousResponseID: previousResponseID,
+		AgentSessionID:     foundrySessionID,
 		Input:              outputs,
 	}
 	s.markSubmittedPayloads(turn, payloadByCall)
@@ -850,8 +858,9 @@ func (s *server) postResponses(
 	s.mu.Lock()
 	session := s.runtimeSessions[runtimeSessionID]
 	s.mu.Unlock()
-	if body.AgentSessionID == "" && session.ID != "" {
-		body.AgentSessionID = session.ID
+	sessionID := firstNonBlank(body.AgentSessionID, session.ID)
+	if body.AgentSessionID == "" && sessionID != "" {
+		body.AgentSessionID = sessionID
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -873,17 +882,18 @@ func (s *server) postResponses(
 	if body.PreviousResponseID != "" && s.cfg.continuationProof != "" {
 		req.Header.Set("X-AgentKit-Brokered-Continuation-Proof", s.cfg.continuationProof)
 	}
-	if session.ID != "" {
-		req.Header.Set("x-agent-session-id", session.ID)
+	if sessionID != "" {
+		req.Header.Set("x-agent-session-id", sessionID)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	sessionID := firstNonBlank(
+	sessionID = firstNonBlank(
 		resp.Header.Get("x-agent-session-id"),
 		resp.Header.Get("x-ms-agent-session-id"),
+		sessionID,
 	)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -1185,13 +1195,27 @@ func (s *server) scheduleTurnCleanupLocked(turn *turnState) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		delete(s.turns, turnID)
+		activeSessions := s.activeRuntimeSessionsLocked()
 		cutoff := time.Now().UTC().Add(-retention)
 		for sessionID, session := range s.runtimeSessions {
+			if activeSessions[sessionID] {
+				continue
+			}
 			if session.LastSeen.Before(cutoff) {
 				delete(s.runtimeSessions, sessionID)
 			}
 		}
 	})
+}
+
+func (s *server) activeRuntimeSessionsLocked() map[harness.RuntimeSessionID]bool {
+	active := map[harness.RuntimeSessionID]bool{}
+	for _, turn := range s.turns {
+		if turn != nil && !turn.completed {
+			active[turn.request.RuntimeSessionID] = true
+		}
+	}
+	return active
 }
 
 func (s *server) appendFrameLocked(
