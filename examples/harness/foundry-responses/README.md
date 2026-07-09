@@ -125,6 +125,12 @@ For write-profile smoke, first prove the hosted AgentKit deployment has a static
 go test ./examples/harness/foundry-responses
 ```
 
+For the full deterministic local validation bundle, including the focused Orka harness/controller suites and optional sibling AgentKit fixture tests when available:
+
+```bash
+examples/harness/foundry-responses/validate.sh
+```
+
 The tests use a fake hosted Responses server and golden fixtures for initial requests, function calls, `ToolCallRequested`, continuations, final messages, error encoding, and buffered multiple-call behavior.
 
 See [`VALIDATION.md`](VALIDATION.md) for the brokered-plan evidence matrix, local commands, and remaining live Foundry/Fibey gates.

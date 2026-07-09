@@ -6,7 +6,13 @@ endpoints, credentials, tokens, or Foundry project identifiers.
 
 ## Local deterministic validation
 
-Run from the Orka repository root:
+Run the bundled deterministic validator from the Orka repository root:
+
+```bash
+examples/harness/foundry-responses/validate.sh
+```
+
+Or run the component commands manually:
 
 ```bash
 go test ./examples/harness/foundry-responses -count=1
@@ -20,7 +26,8 @@ go test \
 
 go test ./internal/controller -run 'Test.*(AgentRuntime|Harness|Brokered|Runtime)'
 
-bash -n examples/**/*.sh
+find examples -type f -name '*.sh' -print0 | sort -z | \
+  xargs -0 -n1 bash -n
 ```
 
 Full non-e2e validation:
