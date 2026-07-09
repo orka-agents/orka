@@ -247,6 +247,35 @@ func TestResponsesAdapterDuplicateStartDuringInitializationRejected(t *testing.T
 	}
 }
 
+func TestResponsesAdapterReadyEndpointReflectsConfigReadiness(t *testing.T) {
+	unready := httptest.NewServer(newServer(config{
+		runtimeName:    "foundry-responses-test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "https://example.com/agents/a/endpoint/protocols/openai/responses?api-version=v1",
+		requestTimeout: time.Second,
+	}, &http.Client{Timeout: time.Second}).handler())
+	t.Cleanup(unready.Close)
+	resp, err := http.Get(unready.URL + readinessPath) //nolint:gosec,noctx // local test server
+	if err != nil {
+		t.Fatalf("GET unready: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("unready status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
+	ready := newTestResponsesAdapter(t, foundry.endpoint(), nil)
+	readyResp, err := http.Get(ready.URL + readinessPath) //nolint:gosec,noctx // local test server
+	if err != nil {
+		t.Fatalf("GET ready: %v", err)
+	}
+	defer readyResp.Body.Close() //nolint:errcheck
+	if readyResp.StatusCode != http.StatusOK {
+		t.Fatalf("ready status = %d, want %d", readyResp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestResponsesAdapterPassesObservedConformanceByDefault(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
 	adapter := newTestResponsesAdapter(t, foundry.endpoint(), nil)
@@ -1115,7 +1144,7 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 		Input: "please read telemetry",
 	})
 
-	outputs, _, err := functionCallOutputs([]harness.ToolCallResult{{
+	outputs, err := functionCallOutputs([]harness.ToolCallResult{{
 		Version:          harness.ProtocolVersion,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
@@ -1434,7 +1463,7 @@ func TestCanonicalErrorAndDeclineOutputFixtures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			outputs, _, err := functionCallOutputs([]harness.ToolCallResult{tt.result})
+			outputs, err := functionCallOutputs([]harness.ToolCallResult{tt.result})
 			if err != nil {
 				t.Fatalf("functionCallOutputs: %v", err)
 			}

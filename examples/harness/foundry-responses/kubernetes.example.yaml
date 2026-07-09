@@ -76,7 +76,7 @@ spec:
           containerPort: 8090
         readinessProbe:
           httpGet:
-            path: /v1/health
+            path: /v1/ready
             port: http
           periodSeconds: 5
 ---

@@ -45,7 +45,7 @@ The hosted Responses endpoint must:
 - end in `/responses`;
 - not include username/password, fragments, or query parameters other than `api-version`.
 
-The adapter returns degraded health and rejects starts when the endpoint is unsafe.
+The adapter returns degraded health and rejects starts when the endpoint is unsafe. `GET /v1/health` always returns a harness health body; `GET /v1/ready` is a Kubernetes readiness helper that returns HTTP 503 until the same configuration is ready.
 
 ## Capability discipline
 
@@ -76,7 +76,7 @@ Adapter emits `ToolCallRequested` with the exact `call_id`, function name, and c
 Orka continuation:
 
 ```json
-{"type":"function_call_output","call_id":"call_1","output":"{\"approved\":true,\"output\":{\"success\":true}}","status":"completed"}
+{"type":"function_call_output","call_id":"call_1","output":"{\"approved\":true,\"output\":{\"success\":true}}"}
 ```
 
 The hosted continuation request includes `previous_response_id`, `agent_session_id` when a Foundry session is known, and one or more `function_call_output` items. Raw REST calls include the hosted-agent feature header required by Foundry hosted-agent endpoints.

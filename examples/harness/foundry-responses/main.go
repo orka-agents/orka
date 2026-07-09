@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,6 +31,7 @@ const (
 	defaultMaxApprovalWait = 30 * time.Minute
 	maxFoundryOutputBytes  = 1 << 20
 	maxFoundryBodyBytes    = 4 << 20
+	readinessPath          = "/v1/ready"
 
 	envAddr                = "ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR"
 	envRuntimeName         = "ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME"
@@ -204,6 +204,7 @@ func newServer(cfg config, client *http.Client) *server {
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(harness.HealthPath, s.health)
+	mux.HandleFunc(readinessPath, s.ready)
 	mux.HandleFunc(harness.CapabilitiesPath, s.capabilities)
 	mux.HandleFunc(harness.TurnsPath, s.startTurn)
 	mux.HandleFunc(harness.TurnsPath+"/", s.turn)
@@ -240,6 +241,20 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		Message:   msg,
 		Metadata:  map[string]string{"backend": "foundry-responses"},
 	})
+}
+
+func (s *server) ready(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	_, endpointErr := s.responsesEndpoint()
+	ready := s.cfg.configError == "" && s.cfg.adapterBearer != "" && endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
+	if !ready {
+		harness.WriteError(w, http.StatusServiceUnavailable, "adapter is not ready")
+		return
+	}
+	harness.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
@@ -435,6 +450,14 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		)
 		return
 	}
+	s.mu.Lock()
+	previousResponseID := turn.responseID
+	foundrySessionID := turn.foundrySessionID
+	s.mu.Unlock()
+	if strings.TrimSpace(previousResponseID) == "" {
+		harness.WriteError(w, http.StatusConflict, "cannot continue before Foundry response id is known")
+		return
+	}
 
 	resultsToSubmit, err := s.recordContinueResults(turn, req.ToolResults)
 	if err != nil {
@@ -445,17 +468,9 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		harness.WriteJSON(w, http.StatusAccepted, continueResponse(req, "continue accepted"))
 		return
 	}
-	outputs, payloadByCall, err := functionCallOutputs(resultsToSubmit)
+	outputs, err := functionCallOutputs(resultsToSubmit)
 	if err != nil {
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	s.mu.Lock()
-	previousResponseID := turn.responseID
-	foundrySessionID := turn.foundrySessionID
-	s.mu.Unlock()
-	if strings.TrimSpace(previousResponseID) == "" {
-		harness.WriteError(w, http.StatusConflict, "cannot continue before Foundry response id is known")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.requestTimeout)
@@ -466,7 +481,6 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		AgentSessionID:     foundrySessionID,
 		Input:              outputs,
 	}
-	s.markSubmittedPayloads(turn, payloadByCall)
 	if err := s.postResponses(ctx, req.RuntimeSessionID, continuation, &response); err != nil {
 		s.mu.Lock()
 		s.appendFailedLocked(
@@ -768,17 +782,12 @@ func (s *server) recordContinueResults(
 			continue
 		}
 		toSubmit = append(toSubmit, turn.bufferedResults[id])
+		turn.submittedPayloads[id] = turn.bufferedPayloads[id]
 	}
 	if len(toSubmit) == 0 {
 		return nil, nil
 	}
 	return toSubmit, nil
-}
-
-func (s *server) markSubmittedPayloads(turn *turnState, payloadByCall map[string]string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	maps.Copy(turn.submittedPayloads, payloadByCall)
 }
 
 func (s *server) ensureTerminalContinueIsDuplicate(turn *turnState, results []harness.ToolCallResult) error {
@@ -803,13 +812,12 @@ func (s *server) ensureTerminalContinueIsDuplicate(turn *turnState, results []ha
 	return nil
 }
 
-func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionCallOutput, map[string]string, error) {
+func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionCallOutput, error) {
 	outputs := make([]responsesFunctionCallOutput, 0, len(results))
-	payloadByCall := map[string]string{}
 	for _, result := range results {
 		payload, err := canonicalToolResultOutput(result)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		outputs = append(
 			outputs,
@@ -817,12 +825,10 @@ func functionCallOutputs(results []harness.ToolCallResult) ([]responsesFunctionC
 				Type:   "function_call_output",
 				CallID: result.ToolCallID,
 				Output: payload,
-				Status: "completed",
 			},
 		)
-		payloadByCall[result.ToolCallID] = payload
 	}
-	return outputs, payloadByCall, nil
+	return outputs, nil
 }
 
 func canonicalToolResultOutput(result harness.ToolCallResult) (string, error) {
