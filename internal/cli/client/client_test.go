@@ -10,16 +10,24 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const (
-	testAgentName = "agent1"
-	testModelName = "gpt-4"
+	testAgentName       = "agent1"
+	testModelName       = "gpt-4"
+	testSuccessName     = "success"
+	testErrorName       = "error"
+	testChatStreamName  = "chat SSE"
+	testEventStreamName = "event SSE"
 )
 
 // helper to create a test server that records requests and returns a fixed response.
@@ -37,10 +45,214 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_DoesNotAssumeDefaultTransportType(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unused")
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	c := New("http://localhost:8080", "")
+	if c.HTTPClient == nil || c.HTTPClient.Transport == nil {
+		t.Fatal("New() did not configure an HTTP transport")
+	}
+}
+
+func TestNew_ConfiguresTransportSafetyWithoutOverallTimeout(t *testing.T) {
+	c := New("http://localhost:8080", "")
+	if c.HTTPClient.Timeout != 0 {
+		t.Fatalf("HTTPClient.Timeout = %s, want no overall timeout", c.HTTPClient.Timeout)
+	}
+
+	transport, ok := c.HTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("HTTPClient.Transport = %T, want *http.Transport", c.HTTPClient.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("transport DialContext is nil")
+	}
+	if transport.TLSHandshakeTimeout <= 0 {
+		t.Fatalf("TLSHandshakeTimeout = %s, want positive timeout", transport.TLSHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout != defaultResponseHeaderTimeout {
+		t.Fatalf(
+			"ResponseHeaderTimeout = %s, want %s",
+			transport.ResponseHeaderTimeout,
+			defaultResponseHeaderTimeout,
+		)
+	}
+	if transport.IdleConnTimeout <= 0 {
+		t.Fatalf("IdleConnTimeout = %s, want positive timeout", transport.IdleConnTimeout)
+	}
+}
+
 func TestNewWithNamespace(t *testing.T) {
 	c := NewWithNamespace("http://localhost:8080", "tok", "ns1")
 	if c.Namespace != "ns1" {
 		t.Errorf("Namespace = %q, want %q", c.Namespace, "ns1")
+	}
+}
+
+func TestClient_NonStreamingResponseHeaderStallIsBounded(t *testing.T) {
+	const responseHeaderTimeout = 25 * time.Millisecond
+
+	requestStarted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := newClient(srv.URL, "", "", responseHeaderTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.HealthCheck(ctx)
+		done <- err
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("health request did not start")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("HealthCheck() error = nil, want response-header timeout")
+		}
+		var timeoutErr interface{ Timeout() bool }
+		if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() {
+			t.Fatalf("HealthCheck() error = %v, want timeout error", err)
+		}
+	case <-time.After(10 * responseHeaderTimeout):
+		cancel()
+		<-done
+		t.Fatalf("HealthCheck() did not return within response-header timeout %s", responseHeaderTimeout)
+	}
+}
+
+func TestClient_BoundsIgnoredResponseDrain(t *testing.T) {
+	const responseBodyBytes = 1 << 20
+
+	tests := []struct {
+		name                 string
+		statusCode           int
+		maxExpectedReadBytes int
+		wantErr              bool
+	}{
+		{
+			name:                 testSuccessName,
+			statusCode:           http.StatusNoContent,
+			maxExpectedReadBytes: 64 << 10,
+		},
+		{
+			name:                 testErrorName,
+			statusCode:           http.StatusInternalServerError,
+			maxExpectedReadBytes: 128 << 10,
+			wantErr:              true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", responseBodyBytes))}
+			c := New("http://orka.test", "")
+			c.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.statusCode,
+					Header:     make(http.Header),
+					Body:       body,
+				}, nil
+			})}
+
+			err := c.DeleteTask(t.Context(), "task", GetOptions{})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("DeleteTask() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !body.closed {
+				t.Fatal("response body was not closed")
+			}
+			if body.bytesRead == 0 {
+				t.Fatal("response body was not drained")
+			}
+			if body.bytesRead > tt.maxExpectedReadBytes {
+				t.Fatalf("response handling read %d bytes, want at most %d", body.bytesRead, tt.maxExpectedReadBytes)
+			}
+		})
+	}
+}
+
+func TestClient_ResponseDrainHasTimeBound(t *testing.T) {
+	for _, statusCode := range []int{http.StatusNoContent, http.StatusInternalServerError} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			body := newBlockingReadCloser()
+			c := New("http://orka.test", "")
+			c.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				go func() {
+					<-req.Context().Done()
+					_ = body.Close()
+				}()
+				return &http.Response{
+					StatusCode: statusCode,
+					Header:     make(http.Header),
+					Body:       body,
+				}, nil
+			})}
+
+			done := make(chan error, 1)
+			go func() {
+				done <- c.DeleteTask(t.Context(), "task", GetOptions{})
+			}()
+
+			select {
+			case <-body.readStarted:
+			case <-time.After(time.Second):
+				t.Fatal("response drain did not start")
+			}
+
+			select {
+			case err := <-done:
+				if statusCode < 400 && err != nil {
+					t.Fatalf("DeleteTask() error = %v", err)
+				}
+				if statusCode >= 400 && err == nil {
+					t.Fatal("DeleteTask() error = nil, want status error")
+				}
+			case <-time.After(500 * time.Millisecond):
+				_ = body.Close()
+				<-done
+				t.Fatal("response drain did not return within a bounded interval")
+			}
+		})
+	}
+}
+
+func TestClient_BoundsNonStreamingErrorResponseBody(t *testing.T) {
+	const responseBodyBytes = 1 << 20
+
+	body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", responseBodyBytes))}
+	c := New("http://orka.test", "")
+	c.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})}
+
+	if _, err := c.HealthCheck(t.Context()); err == nil {
+		t.Fatal("HealthCheck() error = nil, want status error")
+	}
+	if !body.closed {
+		t.Fatal("response body was not closed")
+	}
+	maxExpectedReadBytes := int(maxErrorResponseBodyBytes + maxResponseBodyDrainBytes)
+	if body.bytesRead == 0 || body.bytesRead > maxExpectedReadBytes {
+		t.Fatalf("response handling read %d bytes, want 1..%d", body.bytesRead, maxExpectedReadBytes)
 	}
 }
 
@@ -776,6 +988,207 @@ func TestStreamChat(t *testing.T) {
 	}
 }
 
+func TestClient_StreamErrorCancelsDerivedContext(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: testChatStreamName,
+			call: func(ctx context.Context, c *Client) error {
+				_, _, err := c.StreamChat(ctx, ChatRequest{Message: "hi"})
+				return err
+			},
+		},
+		{
+			name: testEventStreamName,
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.Stream(ctx, "/api/v1/events", nil)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestDone := make(chan struct{})
+			c := New("http://orka.test", "")
+			c.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				go func() {
+					<-req.Context().Done()
+					close(requestDone)
+				}()
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("error")),
+				}, nil
+			})}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := tt.call(ctx, c); err == nil {
+				t.Fatal("stream call error = nil, want status error")
+			}
+
+			select {
+			case <-requestDone:
+			case <-time.After(250 * time.Millisecond):
+				cancel()
+				<-requestDone
+				t.Fatal("stream error did not cancel its derived request context")
+			}
+		})
+	}
+}
+
+func TestClient_StreamErrorBodyReadHasTimeBound(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: testChatStreamName,
+			call: func(ctx context.Context, c *Client) error {
+				_, _, err := c.StreamChat(ctx, ChatRequest{Message: "hi"})
+				return err
+			},
+		},
+		{
+			name: testEventStreamName,
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.Stream(ctx, "/api/v1/events", nil)
+				return err
+			},
+		},
+		{
+			name: "task logs",
+			call: func(ctx context.Context, c *Client) error {
+				return c.StreamTaskLogs(ctx, "task", StreamLogsOptions{})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := newBlockingReadCloser()
+			c := New("http://orka.test", "")
+			c.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				go func() {
+					<-req.Context().Done()
+					_ = body.Close()
+				}()
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     make(http.Header),
+					Body:       body,
+				}, nil
+			})}
+
+			done := make(chan error, 1)
+			go func() { done <- tt.call(t.Context(), c) }()
+
+			select {
+			case <-body.readStarted:
+			case <-time.After(time.Second):
+				t.Fatal("stream error body read did not start")
+			}
+
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("stream call error = nil, want status error")
+				}
+			case <-time.After(500 * time.Millisecond):
+				_ = body.Close()
+				<-done
+				t.Fatal("stream error body read did not return within a bounded interval")
+			}
+		})
+	}
+}
+
+func TestClient_LongStreamsRemainUsablePastResponseHeaderTimeout(t *testing.T) {
+	const (
+		responseHeaderTimeout = 100 * time.Millisecond
+		bodyDelay             = 250 * time.Millisecond
+	)
+
+	tests := []struct {
+		name         string
+		responseBody string
+		want         string
+		readStream   func(context.Context, *Client) (string, error)
+	}{
+		{
+			name:         "chat SSE",
+			responseBody: "event: message\ndata: {\"content\":\"still streaming\"}\n\n",
+			want:         `{"content":"still streaming"}`,
+			readStream: func(ctx context.Context, c *Client) (string, error) {
+				reader, resp, err := c.StreamChat(ctx, ChatRequest{Message: "hi"})
+				if err != nil {
+					return "", err
+				}
+				defer resp.Body.Close() //nolint:errcheck
+				event, ok := reader.Next()
+				if !ok {
+					if err := reader.Err(); err != nil {
+						return "", fmt.Errorf("read delayed event: %w", err)
+					}
+					return "", errors.New("stream ended before delayed event")
+				}
+				return event.Data, nil
+			},
+		},
+		{
+			name:         "event SSE",
+			responseBody: "data: delayed event\n\n",
+			want:         "data: delayed event\n\n",
+			readStream: func(ctx context.Context, c *Client) (string, error) {
+				body, err := c.Stream(ctx, "/api/v1/events", nil)
+				if err != nil {
+					return "", err
+				}
+				defer body.Close() //nolint:errcheck
+				data, err := io.ReadAll(body)
+				return string(data), err
+			},
+		},
+		{
+			name:         "task logs",
+			responseBody: "data: delayed log\n",
+			want:         "delayed log\n",
+			readStream: func(ctx context.Context, c *Client) (string, error) {
+				var output bytes.Buffer
+				err := c.StreamTaskLogs(ctx, "task", StreamLogsOptions{Writer: &output})
+				return output.String(), err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				time.Sleep(bodyDelay)
+				fmt.Fprint(w, tt.responseBody) //nolint:errcheck
+			}))
+			defer srv.Close()
+
+			c := newClient(srv.URL, "", "", responseHeaderTimeout)
+			got, err := tt.readStream(t.Context(), c)
+			if err != nil {
+				t.Fatalf("stream error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("stream output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStreamChat_NamespaceFromClient(t *testing.T) {
 	var capturedBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1148,4 +1561,52 @@ func TestDoJSONAndTxnToken(t *testing.T) {
 	if gotNamespace != "team-a" {
 		t.Fatalf("namespace query = %q, want team-a", gotNamespace)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type trackingReadCloser struct {
+	reader    io.Reader
+	bytesRead int
+	closed    bool
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+type blockingReadCloser struct {
+	readStarted chan struct{}
+	closed      chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readStarted) })
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closed) })
+	return nil
 }

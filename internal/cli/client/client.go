@@ -13,12 +13,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orka-agents/orka/internal/labels"
+)
+
+const (
+	defaultResponseHeaderTimeout = 30 * time.Second
+	maxErrorResponseBodyBytes    = 64 << 10
+	maxResponseBodyDrainBytes    = 64 << 10
+	responseBodyDrainTimeout     = 100 * time.Millisecond
 )
 
 // Client is an HTTP client for the Orka API.
@@ -32,20 +41,45 @@ type Client struct {
 
 // New creates a new Orka API client.
 func New(baseURL, token string) *Client {
-	return &Client{
-		BaseURL:    baseURL,
-		Token:      token,
-		HTTPClient: http.DefaultClient,
-	}
+	return newClient(baseURL, token, "", defaultResponseHeaderTimeout)
 }
 
 // NewWithNamespace creates a new Orka API client with a default namespace.
 func NewWithNamespace(baseURL, token, namespace string) *Client {
+	return newClient(baseURL, token, namespace, defaultResponseHeaderTimeout)
+}
+
+func newClient(baseURL, token, namespace string, responseHeaderTimeout time.Duration) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		Token:      token,
 		Namespace:  namespace,
-		HTTPClient: http.DefaultClient,
+		HTTPClient: newHTTPClient(responseHeaderTimeout),
+	}
+}
+
+// newHTTPClient bounds connection setup and response headers without an overall
+// client timeout, so SSE and log bodies can remain open for their full lifetime.
+func newHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
+	transport := cloneDefaultHTTPTransport()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: transport}
+}
+
+func cloneDefaultHTTPTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		return transport.Clone()
+	}
+
+	const defaultDialTimeout = 30 * time.Second
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: defaultDialTimeout, KeepAlive: defaultDialTimeout}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
 	}
 }
 
@@ -143,8 +177,10 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 		return nil, nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/chat", bytes.NewReader(body))
+	streamCtx, cancel := context.WithCancel(ctx)
+	httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.BaseURL+"/api/v1/chat", bytes.NewReader(body))
 	if err != nil {
+		cancel()
 		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -158,20 +194,21 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
+		cancel()
 		return nil, nil, fmt.Errorf("send request: %w", err)
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		_ = resp.Body.Close()
+		drainAndCloseResponseBody(resp.Body, cancel)
 		return nil, nil, fmt.Errorf("authentication failed (HTTP 401): try 'orka login' or provide --token")
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+		respBody := readErrorAndCloseResponseBody(resp.Body, cancel)
 		return nil, nil, fmt.Errorf("server error (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
+	resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}
 	return NewSSEReader(resp.Body), resp, nil
 }
 
@@ -208,11 +245,14 @@ func (c *Client) newRequest(ctx context.Context, method, reqURL string, body io.
 }
 
 func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) ([]byte, http.Header, error) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	req, err := c.newRequest(ctx, method, reqURL, reader)
+	req, err := c.newRequest(requestCtx, method, reqURL, reader)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -224,17 +264,74 @@ func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("request failed: %w", err)
 	}
+	if resp.StatusCode >= 400 {
+		respBody := readErrorAndCloseResponseBody(resp.Body, cancel)
+		return nil, resp.Header, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read response: %w", err)
 	}
-
-	if resp.StatusCode >= 400 {
-		return nil, resp.Header, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
 	return respBody, resp.Header, nil
+}
+
+func (c *Client) doNoResponse(ctx context.Context, method, reqURL string) error {
+	requestCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := c.newRequest(requestCtx, method, reqURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		body := readErrorAndCloseResponseBody(resp.Body, cancel)
+		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	drainAndCloseResponseBody(resp.Body, cancel)
+	return nil
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	r.cancel()
+	return r.ReadCloser.Close()
+}
+
+func readErrorAndCloseResponseBody(body io.ReadCloser, cancel context.CancelFunc) []byte {
+	return readDrainAndCloseResponseBody(body, maxErrorResponseBodyBytes, cancel)
+}
+
+func drainAndCloseResponseBody(body io.ReadCloser, cancel context.CancelFunc) {
+	_ = readDrainAndCloseResponseBody(body, 0, cancel)
+}
+
+func readDrainAndCloseResponseBody(body io.ReadCloser, readLimit int64, cancel context.CancelFunc) []byte {
+	if body == nil {
+		return nil
+	}
+
+	timer := time.AfterFunc(responseBodyDrainTimeout, cancel)
+
+	var data []byte
+	if readLimit > 0 {
+		data, _ = io.ReadAll(io.LimitReader(body, readLimit))
+	}
+	_, _ = io.CopyN(io.Discard, body, maxResponseBodyDrainBytes)
+	timer.Stop()
+	cancel()
+	_ = body.Close()
+	return data
 }
 
 func (c *Client) resourceURL(path string, query map[string]string) (string, error) {
@@ -286,20 +383,22 @@ func (c *Client) Stream(ctx context.Context, path string, query map[string]strin
 	if err != nil {
 		return nil, err
 	}
-	req, err := c.newRequest(ctx, http.MethodGet, reqURL, nil)
+	streamCtx, cancel := context.WithCancel(ctx)
+	req, err := c.newRequest(streamCtx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+		body := readErrorAndCloseResponseBody(resp.Body, cancel)
 		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-	return resp.Body, nil
+	return &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}, nil
 }
 
 // GetRaw gets a raw response body and content type.
@@ -590,28 +689,7 @@ func (c *Client) DeleteTask(ctx context.Context, name string, opts GetOptions) e
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	if c.TxnToken != "" {
-		req.Header.Set("Txn-Token", c.TxnToken)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-	return nil
+	return c.doNoResponse(ctx, http.MethodDelete, u.String())
 }
 
 // DeleteAgent deletes an agent by name.
@@ -626,28 +704,7 @@ func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) 
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	if c.TxnToken != "" {
-		req.Header.Set("Txn-Token", c.TxnToken)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-	return nil
+	return c.doNoResponse(ctx, http.MethodDelete, u.String())
 }
 
 // SkillSummary is a lightweight representation of a skill for list display.
@@ -734,35 +791,16 @@ func (c *Client) DeleteSkill(ctx context.Context, name string, opts GetOptions) 
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	if c.TxnToken != "" {
-		req.Header.Set("Txn-Token", c.TxnToken)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-	return nil
+	return c.doNoResponse(ctx, http.MethodDelete, u.String())
 }
 
 // CreateSkill creates a new skill via the API.
 func (c *Client) CreateSkill(ctx context.Context, body []byte) (*SkillDetail, error) {
 	u := c.BaseURL + "/api/v1/skills"
+	requestCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -778,11 +816,15 @@ func (c *Client) CreateSkill(ctx context.Context, body []byte) (*SkillDetail, er
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
+	if resp.StatusCode >= 400 {
+		respBody := readErrorAndCloseResponseBody(resp.Body, cancel)
+		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var detail SkillDetail
@@ -835,7 +877,10 @@ func (c *Client) StreamTaskLogs(ctx context.Context, name string, opts StreamLog
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -851,12 +896,12 @@ func (c *Client) StreamTaskLogs(ctx context.Context, name string, opts StreamLog
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body := readErrorAndCloseResponseBody(resp.Body, cancel)
 		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
 	}
+	defer resp.Body.Close() //nolint:errcheck
 
 	w := opts.Writer
 	if w == nil {
@@ -941,6 +986,9 @@ func (c *Client) DownloadArtifact(
 	taskName, filename string,
 	opts GetOptions,
 ) ([]byte, string, error) {
+	requestCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(taskName) + "/artifacts/" + url.PathEscape(filename))
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid base URL: %w", err)
@@ -951,7 +999,7 @@ func (c *Client) DownloadArtifact(
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -966,15 +1014,15 @@ func (c *Client) DownloadArtifact(
 	if err != nil {
 		return nil, "", fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
 	if resp.StatusCode == http.StatusNotFound {
+		drainAndCloseResponseBody(resp.Body, cancel)
 		return nil, "", fmt.Errorf("artifact %q not found for task %q", filename, taskName)
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body := readErrorAndCloseResponseBody(resp.Body, cancel)
 		return nil, "", fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(body))
 	}
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

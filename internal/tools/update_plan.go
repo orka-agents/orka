@@ -12,18 +12,59 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
+const (
+	updatePlanRequestTimeout         = 10 * time.Second
+	updatePlanResponseHeaderTimeout  = 10 * time.Second
+	updatePlanResponseBodyDrainLimit = 64 << 10
+	updatePlanResponseDrainTimeout   = 100 * time.Millisecond
+)
+
 // UpdatePlanTool allows the LLM to update the autonomous plan state.
-type UpdatePlanTool struct{}
+type UpdatePlanTool struct {
+	client         *http.Client
+	requestTimeout time.Duration
+}
 
 // NewUpdatePlanTool creates a new UpdatePlanTool.
 func NewUpdatePlanTool() *UpdatePlanTool {
-	return &UpdatePlanTool{}
+	return &UpdatePlanTool{
+		client:         newUpdatePlanHTTPClient(updatePlanResponseHeaderTimeout),
+		requestTimeout: updatePlanRequestTimeout,
+	}
+}
+
+// newUpdatePlanHTTPClient preserves the standard dial, TLS, and idle-connection
+// safeguards while adding a bounded wait for controller response headers.
+func newUpdatePlanHTTPClient(responseHeaderTimeout time.Duration) *http.Client {
+	transport := cloneDefaultUpdatePlanTransport()
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: transport}
+}
+
+func cloneDefaultUpdatePlanTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		return transport.Clone()
+	}
+
+	const defaultDialTimeout = 30 * time.Second
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: defaultDialTimeout, KeepAlive: defaultDialTimeout}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
 }
 
 // Name returns the tool name.
@@ -107,8 +148,15 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", fmt.Errorf("failed to marshal plan: %w", err)
 	}
 
+	requestTimeout := t.requestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = updatePlanRequestTimeout
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
 	url := fmt.Sprintf("%s/internal/v1/plans/%s/%s", controllerURL, taskNamespace, taskName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -117,11 +165,15 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 		req.Header.Set("Authorization", "Bearer "+saToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := t.client
+	if client == nil {
+		client = newUpdatePlanHTTPClient(updatePlanResponseHeaderTimeout)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to save plan: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer drainAndCloseUpdatePlanResponse(resp.Body, cancel)
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("failed to save plan: HTTP %d", resp.StatusCode)
@@ -134,4 +186,16 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 	result += ")"
 
 	return result, nil
+}
+
+func drainAndCloseUpdatePlanResponse(body io.ReadCloser, cancel context.CancelFunc) {
+	if body == nil {
+		return
+	}
+
+	timer := time.AfterFunc(updatePlanResponseDrainTimeout, cancel)
+	_, _ = io.CopyN(io.Discard, body, updatePlanResponseBodyDrainLimit)
+	timer.Stop()
+	cancel()
+	_ = body.Close()
 }
