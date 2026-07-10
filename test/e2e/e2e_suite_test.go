@@ -52,6 +52,9 @@ var (
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind.
 func TestE2E(t *testing.T) {
+	if err := utils.ConfigureAndValidateE2EKindTarget(); err != nil {
+		t.Fatalf("unsafe e2e cluster target: %v", err)
+	}
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting orka e2e test suite\n")
 	RunSpecs(t, "e2e suite")
