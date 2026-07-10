@@ -15,7 +15,6 @@ import (
 	"os"
 	"path"
 	"reflect"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
@@ -896,7 +896,6 @@ type aiConfig struct {
 	systemPrompt    string
 	baseURL         string
 	azureAPIVersion string
-	tools           []string
 }
 
 // resolveAIConfig merges AI configuration from provider, agent, and task (in priority order).
@@ -926,11 +925,6 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 		if agent.Spec.SystemPrompt != nil {
 			cfg.systemPrompt = agent.Spec.SystemPrompt.Inline
 		}
-		for _, t := range agent.Spec.Tools {
-			if t.Enabled == nil || *t.Enabled {
-				cfg.tools = append(cfg.tools, t.Name)
-			}
-		}
 	}
 
 	// Override with task values if present (highest priority)
@@ -946,9 +940,6 @@ func resolveAIConfig(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provide
 		}
 		if task.Spec.AI.SystemPrompt != "" {
 			cfg.systemPrompt = task.Spec.AI.SystemPrompt
-		}
-		if len(task.Spec.AI.Tools) > 0 {
-			cfg.tools = append(cfg.tools, task.Spec.AI.Tools...)
 		}
 	}
 
@@ -1013,57 +1004,12 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		AzureAPIVersion: cfg.azureAPIVersion,
 	}.EnvVars()...)
 
-	disableCoordinationToolInjection := task.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue
-
-	// Auto-inject coordination tools when coordination is enabled, unless the
-	// task deliberately supplies a narrower explicit tool set.
-	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled && !disableCoordinationToolInjection {
-		for _, ct := range []string{
-			"delegate_task",
-			"wait_for_tasks",
-			"create_container_task",
-			"cancel_task",
-			"send_message",
-			"check_messages",
-			"recall_memory",
-			"remember",
-			"propose_memory",
-			"search_transcript",
-			"create_pull_request",
-			"list_pull_requests",
-			"check_pr_review_marker",
-			"check_pull_request_ci",
-			"merge_pull_request",
-			"auto_merge_pull_request",
-			"review_pull_request",
-			"post_review_comment",
-			"create_agent",
-			"delete_agent",
-			"update_plan",
-		} {
-			if !slices.Contains(cfg.tools, ct) {
-				cfg.tools = append(cfg.tools, ct)
-			}
-		}
-		if agent.Spec.Coordination.Autonomous && !slices.Contains(cfg.tools, "request_approval") {
-			cfg.tools = append(cfg.tools, "request_approval")
-		}
+	effectiveTools := aitools.Resolve(task, agent)
+	if len(effectiveTools) > 0 {
+		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(effectiveTools, ","))
 	}
 
-	// Auto-inject messaging tools for child tasks (tasks delegated by a coordinator)
-	// so they can communicate with sibling tasks via send_message/check_messages
-	_, isChildTask := task.Labels[labels.LabelParentTask]
-	if isChildTask && !disableCoordinationToolInjection {
-		for _, ct := range []string{"send_message", "check_messages"} {
-			if !slices.Contains(cfg.tools, ct) {
-				cfg.tools = append(cfg.tools, ct)
-			}
-		}
-	}
-
-	if len(cfg.tools) > 0 {
-		envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
-	}
+	isChildTask := labels.ParentTaskName(task.Labels, task.Annotations) != ""
 
 	if agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled {
 		envVars = b.addCoordinationEnvVars(envVars, task, agent)

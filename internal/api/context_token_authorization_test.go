@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -571,11 +572,12 @@ func testTaskCreateAuthorizationContext() contextTokenTaskCreateAuthorizationCon
 func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjection(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
 		},
 	}
 	req := CreateTaskRequest{
 		Type:        corev1alpha1.TaskTypeAI,
+		Metadata:    MetadataRequest{Labels: map[string]string{labels.LabelParentTask: "parent-task"}},
 		Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
 		AI: &corev1alpha1.AISpec{
 			Tools: []string{"list_pull_requests", "check_pr_review_marker"},
@@ -590,6 +592,9 @@ func TestContextTokenTaskCreateEffectiveAIToolsSkipsDisabledCoordinationInjectio
 	require.Contains(t, got, "propose_memory")
 	require.Contains(t, got, "search_transcript")
 	require.NotContains(t, got, "delegate_task")
+	require.NotContains(t, got, "send_message")
+	require.NotContains(t, got, "check_messages")
+	require.NotContains(t, got, "request_approval")
 	require.NotContains(t, got, "merge_pull_request")
 	require.NotContains(t, got, "auto_merge_pull_request")
 }
@@ -607,6 +612,50 @@ func TestContextTokenTaskCreateEffectiveAIToolsIncludesPRReviewCoordinationTools
 	got := contextTokenTaskCreateEffectiveAITools(req, agent)
 	require.Contains(t, got, "list_pull_requests")
 	require.Contains(t, got, "check_pr_review_marker")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesAutonomousApproval(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(CreateTaskRequest{Type: corev1alpha1.TaskTypeAI}, agent)
+	require.Contains(t, got, "request_approval")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsIncludesChildMessaging(t *testing.T) {
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+	}
+
+	got := contextTokenTaskCreateEffectiveAITools(req, nil)
+	require.Contains(t, got, "send_message")
+	require.Contains(t, got, "check_messages")
+}
+
+func TestContextTokenTaskCreateEffectiveAIToolsMatchesSharedResolver(t *testing.T) {
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Tools:        []corev1alpha1.ToolReference{{Name: "agent_tool"}},
+		Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+	}}
+	req := CreateTaskRequest{
+		Type: corev1alpha1.TaskTypeAI,
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		AI: &corev1alpha1.AISpec{Tools: []string{"task_tool"}},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Labels: req.Metadata.Labels},
+		Spec:       corev1alpha1.TaskSpec{Type: req.Type, AI: req.AI},
+	}
+
+	require.Equal(t, aitools.Resolve(task, agent), contextTokenTaskCreateEffectiveAITools(req, agent))
 }
 
 func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t *testing.T) {
