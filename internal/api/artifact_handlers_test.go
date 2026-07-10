@@ -49,7 +49,7 @@ func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fib
 // ---------- Internal: UploadArtifact ----------
 
 func TestUploadArtifact(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+	h, app, ss := setupTestInternalHandlers(t)
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
 
 	t.Run("success", func(t *testing.T) {
@@ -349,14 +349,12 @@ func TestUploadArtifactRejectsFuturePlannedHarnessWrapperUpload(t *testing.T) {
 }
 
 func TestUploadArtifactTooLarge(t *testing.T) {
-	h, _, _ := setupTestInternalHandlers()
+	h, _, _ := setupTestInternalHandlers(t)
 	// Use a custom app with a large enough body limit so the handler's own
 	// size check is exercised rather than Fiber's built-in limit.
 	app := fiber.New(fiber.Config{BodyLimit: 20 << 20})
 	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-		})
+		c.Locals(UserInfoContextKey, testInternalWorkerUser("my-task"))
 		return c.Next()
 	})
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
@@ -373,7 +371,7 @@ func TestUploadArtifactTooLarge(t *testing.T) {
 }
 
 func TestUploadArtifactEmptyBody(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, app, _ := setupTestInternalHandlers(t)
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
 
 	req := httptest.NewRequest(http.MethodPost,
@@ -387,7 +385,7 @@ func TestUploadArtifactEmptyBody(t *testing.T) {
 }
 
 func TestUploadArtifactMissingParams(t *testing.T) {
-	h, _, _ := setupTestInternalHandlers()
+	h, _, _ := setupTestInternalHandlers(t)
 
 	tests := []struct {
 		name string
@@ -420,17 +418,9 @@ func TestUploadArtifactMissingParams(t *testing.T) {
 }
 
 func TestUploadArtifactStoreNotEnabled(t *testing.T) {
-	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
-	h := NewInternalHandlers(ss, ss, ss, ss, nil) // nil artifact store
+	baseHandlers, app, ss := setupTestInternalHandlers(t)
+	h := NewInternalHandlers(ss, ss, ss, ss, nil, InternalHandlersConfig{Client: baseHandlers.k8sClient}) // nil artifact store
 
-	app := fiber.New()
-	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-		})
-		return c.Next()
-	})
 	app.Post("/internal/v1/artifacts/:namespace/:taskName/:filename", h.UploadArtifact)
 
 	req := httptest.NewRequest(http.MethodPost,

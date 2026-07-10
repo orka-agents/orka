@@ -38,28 +38,82 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {
-	db, _ := sqlite.NewDB(":memory:")
+func setupTestInternalHandlers(t *testing.T) (*InternalHandlers, *fiber.App, *sqlite.Store) {
+	t.Helper()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
 	ss := sqlite.NewStore(db, ":memory:")
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	require.NoError(t, batchv1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fixtures := []struct {
+		name        string
+		parent      string
+		sessionName string
+	}{
+		{name: "my-task", parent: "coordinator", sessionName: "my-session"},
+		{name: "empty-plan-task", parent: "coordinator"},
+		{name: "worker-a", parent: "coordinator"},
+		{name: "worker-b", parent: "coordinator"},
+		{name: "worker-c", parent: "coordinator"},
+		{name: "reader", parent: "coord"},
+		{name: "prior-task", parent: "coordinator", sessionName: "prior"},
+		{name: "current-task", parent: "coordinator", sessionName: "current"},
+		{name: "empty-session-task", parent: "coordinator", sessionName: "empty-session"},
+	}
+	objects := make([]client.Object, 0, 2+3*len(fixtures))
+	objects = append(
+		objects,
+		internalCallerAuthTaskObject("coordinator", "coordinator-uid", "", "", ""),
+		internalCallerAuthTaskObject("coord", "coord-uid", "", "", ""),
+	)
+	for _, fixture := range fixtures {
+		task := internalCallerAuthTaskObject(
+			fixture.name,
+			fixture.name+"-uid",
+			fixture.name+"-job",
+			fixture.parent,
+			fixture.sessionName,
+		)
+		job := internalCallerAuthJob(task, fixture.name+"-job", fixture.name+"-job-uid")
+		pod := internalCallerAuthPod(task, fixture.name+"-pod", fixture.name+"-pod-uid", job)
+		objects = append(objects, task, job, pod)
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+		Client:              k8sClient,
 		MemoryStore:         ss,
 		MemoryProposalStore: ss,
 	})
-	app := fiber.New()
+	return h, testInternalAppForTask("my-task"), ss
+}
 
-	// Inject a default UserInfo so verifyCallerNamespace passes
+func testInternalAppForTask(taskName string) *fiber.App {
+	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
-		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-		})
+		c.Locals(UserInfoContextKey, testInternalWorkerUser(taskName))
 		return c.Next()
 	})
+	return app
+}
 
-	return h, app, ss
+func testInternalWorkerUser(taskName string) *UserInfo {
+	return &UserInfo{
+		Username:  "system:serviceaccount:default:worker",
+		Namespace: "default",
+		AuthType:  AuthTypeTokenReview,
+		Extra: map[string]authenticationv1.ExtraValue{
+			"authentication.kubernetes.io/pod-name": {taskName + "-pod"},
+			"authentication.kubernetes.io/pod-uid":  {taskName + "-pod-uid"},
+		},
+	}
 }
 
 func TestSubmitPlan(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, app, _ := setupTestInternalHandlers(t)
 	app.Post("/internal/v1/plans/:namespace/:taskName", h.SubmitPlan)
 
 	t.Run("success", func(t *testing.T) {
@@ -103,7 +157,7 @@ func TestSubmitPlan(t *testing.T) {
 }
 
 func TestGetPlan(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+	h, app, ss := setupTestInternalHandlers(t)
 	app.Get("/internal/v1/plans/:namespace/:taskName", h.GetPlan)
 
 	// Pre-save a plan
@@ -131,15 +185,18 @@ func TestGetPlan(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/nonexistent", nil)
-		resp, err := app.Test(req)
+		emptyPlanApp := testInternalAppForTask("empty-plan-task")
+		emptyPlanApp.Get("/internal/v1/plans/:namespace/:taskName", h.GetPlan)
+		req := httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/empty-plan-task", nil)
+		resp, err := emptyPlanApp.Test(req)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusNotFound, resp.StatusCode)
 	})
 }
 
 func TestSendMessage(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, _, _ := setupTestInternalHandlers(t)
+	app := testInternalAppForTask("worker-a")
 	app.Post("/internal/v1/messages/:namespace", h.SendMessage)
 
 	t.Run("success", func(t *testing.T) {
@@ -184,8 +241,7 @@ func TestSendMessage(t *testing.T) {
 }
 
 func TestGetMessages(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
-	app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
+	h, _, ss := setupTestInternalHandlers(t)
 
 	// Pre-send a message
 	err := ss.SendMessage(context.Background(), &store.Message{
@@ -198,6 +254,8 @@ func TestGetMessages(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("has messages", func(t *testing.T) {
+		app := testInternalAppForTask("worker-b")
+		app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/worker-b?parentTask=coordinator&markRead=false", nil)
 		resp, err := app.Test(req)
 		require.NoError(t, err)
@@ -210,6 +268,8 @@ func TestGetMessages(t *testing.T) {
 	})
 
 	t.Run("no messages", func(t *testing.T) {
+		app := testInternalAppForTask("worker-c")
+		app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/worker-c?parentTask=coordinator", nil)
 		resp, err := app.Test(req)
 		require.NoError(t, err)
@@ -221,6 +281,8 @@ func TestGetMessages(t *testing.T) {
 	})
 
 	t.Run("missing parentTask", func(t *testing.T) {
+		app := testInternalAppForTask("worker-b")
+		app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
 		req := httptest.NewRequest(http.MethodGet, "/internal/v1/messages/default/worker-b", nil)
 		resp, err := app.Test(req)
 		require.NoError(t, err)
@@ -257,6 +319,8 @@ func TestGetMessages(t *testing.T) {
 	})
 
 	t.Run("markRead defaults to true", func(t *testing.T) {
+		app := testInternalAppForTask("reader")
+		app.Get("/internal/v1/messages/:namespace/:taskName", h.GetMessages)
 		// Send a fresh message for this sub-test
 		err := ss.SendMessage(context.Background(), &store.Message{
 			Namespace: "default", FromTask: "sender", ToTask: "reader",
@@ -286,7 +350,7 @@ func TestGetMessages(t *testing.T) {
 }
 
 func TestSubmitResult(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, app, _ := setupTestInternalHandlers(t)
 	app.Post("/internal/v1/results/:namespace/:taskName", h.SubmitResult)
 
 	t.Run("success", func(t *testing.T) {
@@ -330,7 +394,9 @@ func TestSubmitResult(t *testing.T) {
 		app2 := fiber.New()
 		app2.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{
-				Username: "system:serviceaccount:other-ns:worker",
+				Username:  "system:serviceaccount:other-ns:worker",
+				Namespace: "other-ns",
+				AuthType:  AuthTypeTokenReview,
 			})
 			return c.Next()
 		})
@@ -424,8 +490,9 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
@@ -490,8 +557,9 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	appOldWorker := fiber.New()
 	appOldWorker.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"my-task-old-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"old-pod-uid"},
@@ -525,8 +593,9 @@ func TestUpdateExecutionWorkspaceStatus(t *testing.T) {
 	appForbidden := fiber.New()
 	appForbidden.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"other-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"other-pod-uid"},
@@ -684,8 +753,9 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{
-			Username: "system:serviceaccount:default:worker",
-			AuthType: AuthTypeTokenReview,
+			Username:  "system:serviceaccount:default:worker",
+			Namespace: "default",
+			AuthType:  AuthTypeTokenReview,
 			Extra: map[string]authenticationv1.ExtraValue{
 				"authentication.kubernetes.io/pod-name": {"my-task-pod"},
 				"authentication.kubernetes.io/pod-uid":  {"pod-uid"},
@@ -719,7 +789,7 @@ func TestUpdateExecutionWorkspaceStatusBuildsFreshStatusOnConflictRetry(t *testi
 }
 
 func TestGetSessionTranscript(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+	h, app, ss := setupTestInternalHandlers(t)
 	app.Get("/internal/v1/sessions/:namespace/:name/transcript", h.GetSessionTranscript)
 
 	// Create a session and append messages
@@ -792,7 +862,7 @@ func TestGetSessionTranscript(t *testing.T) {
 }
 
 func TestSearchTranscript(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+	h, app, ss := setupTestInternalHandlers(t)
 	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
 
 	now := time.Now().UTC()
@@ -882,7 +952,7 @@ func TestSearchTranscript(t *testing.T) {
 }
 
 func TestVerifyCallerNamespace(t *testing.T) {
-	h, _, _ := setupTestInternalHandlers()
+	h, _, _ := setupTestInternalHandlers(t)
 
 	t.Run("no auth returns unauthorized", func(t *testing.T) {
 		app := fiber.New()
@@ -898,7 +968,7 @@ func TestVerifyCallerNamespace(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	})
 
-	t.Run("non-SA user passes through", func(t *testing.T) {
+	t.Run("non-SA user is denied", func(t *testing.T) {
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "admin"})
@@ -912,14 +982,16 @@ func TestVerifyCallerNamespace(t *testing.T) {
 
 		resp, err := app.Test(req)
 		require.NoError(t, err)
-		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	})
 
 	t.Run("cross-namespace SA denied", func(t *testing.T) {
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{
-				Username: "system:serviceaccount:kube-system:controller",
+				Username:  "system:serviceaccount:kube-system:controller",
+				Namespace: "kube-system",
+				AuthType:  AuthTypeTokenReview,
 			})
 			return c.Next()
 		})
@@ -937,14 +1009,10 @@ func TestVerifyCallerNamespace(t *testing.T) {
 }
 
 func TestSubmitPlanAdditional(t *testing.T) {
-	h, _, _ := setupTestInternalHandlers()
+	h, _, _ := setupTestInternalHandlers(t)
 
 	t.Run("invalid json body", func(t *testing.T) {
-		app := fiber.New()
-		app.Use(func(c fiber.Ctx) error {
-			c.Locals(UserInfoContextKey, &UserInfo{Username: "system:serviceaccount:default:worker"})
-			return c.Next()
-		})
+		app := testInternalAppForTask("my-task")
 		app.Post("/internal/v1/plans/:namespace/:taskName", h.SubmitPlan)
 
 		req := httptest.NewRequest(http.MethodPost, "/internal/v1/plans/default/my-task",
@@ -960,7 +1028,9 @@ func TestSubmitPlanAdditional(t *testing.T) {
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{
-				Username: "system:serviceaccount:other-ns:worker",
+				Username:  "system:serviceaccount:other-ns:worker",
+				Namespace: "other-ns",
+				AuthType:  AuthTypeTokenReview,
 			})
 			return c.Next()
 		})
@@ -978,7 +1048,7 @@ func TestSubmitPlanAdditional(t *testing.T) {
 }
 
 func TestSendMessageAdditional(t *testing.T) {
-	_, _, ss := setupTestInternalHandlers()
+	baseHandlers, _, ss := setupTestInternalHandlers(t)
 
 	t.Run("messaging not enabled", func(t *testing.T) {
 		hNoMsg := NewInternalHandlers(ss, ss, ss, nil, nil)
@@ -1003,6 +1073,7 @@ func TestSendMessageAdditional(t *testing.T) {
 
 	t.Run("missing namespace", func(t *testing.T) {
 		h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+			Client:              baseHandlers.k8sClient,
 			MemoryStore:         ss,
 			MemoryProposalStore: ss,
 		})
@@ -1028,13 +1099,16 @@ func TestSendMessageAdditional(t *testing.T) {
 
 	t.Run("cross-namespace denied", func(t *testing.T) {
 		h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
+			Client:              baseHandlers.k8sClient,
 			MemoryStore:         ss,
 			MemoryProposalStore: ss,
 		})
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{
-				Username: "system:serviceaccount:other-ns:worker",
+				Username:  "system:serviceaccount:other-ns:worker",
+				Namespace: "other-ns",
+				AuthType:  AuthTypeTokenReview,
 			})
 			return c.Next()
 		})
@@ -1054,7 +1128,7 @@ func TestSendMessageAdditional(t *testing.T) {
 }
 
 func TestInternalApplyMemoryProposal(t *testing.T) {
-	h, app, ss := setupTestInternalHandlers()
+	h, app, ss := setupTestInternalHandlers(t)
 	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
 
 	proposal := &store.MemoryProposal{
@@ -1095,7 +1169,7 @@ func TestInternalApplyMemoryProposal(t *testing.T) {
 }
 
 func TestInternalApplyMemoryProposalRejectsNamespaceMismatch(t *testing.T) {
-	h, app, _ := setupTestInternalHandlers()
+	h, app, _ := setupTestInternalHandlers(t)
 	app.Post("/internal/v1/memory-proposals/:namespace/:id/apply", h.ApplyMemoryProposal)
 
 	body, _ := json.Marshal(map[string]string{"namespace": "other"})
@@ -1107,7 +1181,7 @@ func TestInternalApplyMemoryProposalRejectsNamespaceMismatch(t *testing.T) {
 }
 
 func TestGetPlanAdditional(t *testing.T) {
-	h, _, _ := setupTestInternalHandlers()
+	h, _, _ := setupTestInternalHandlers(t)
 
 	t.Run("missing taskName", func(t *testing.T) {
 		app := fiber.New()
