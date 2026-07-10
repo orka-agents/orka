@@ -199,6 +199,158 @@ func TestUpdateAgentTool_Execute_VerifyUpdatedFields(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentTool_Execute_ModelObjectUpdatesAndPreservesUnspecifiedFields(t *testing.T) {
+	originalTemperature := 0.2
+	originalMaxTokens := int32(4096)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testMyAgentName,
+			Namespace: defaultNamespace,
+		},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{
+				Provider:    providerOpenAI,
+				Name:        testGPT4OModel,
+				Temperature: &originalTemperature,
+				MaxTokens:   &originalMaxTokens,
+			},
+		},
+	}
+
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{
+		"name":"my-agent",
+		"model":{"provider":"anthropic","name":"claude-sonnet-4-20250514","temperature":0.4}
+	}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var res ChatToolResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("Execute() result = %#v, want success", res)
+	}
+
+	updated := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, updated); err != nil {
+		t.Fatalf("failed to get updated agent: %v", err)
+	}
+	if updated.Spec.Model == nil {
+		t.Fatal("model is nil")
+	}
+	if updated.Spec.Model.Provider != "anthropic" {
+		t.Errorf("model.provider = %q, want anthropic", updated.Spec.Model.Provider)
+	}
+	if updated.Spec.Model.Name != "claude-sonnet-4-20250514" {
+		t.Errorf("model.name = %q, want claude-sonnet-4-20250514", updated.Spec.Model.Name)
+	}
+	if updated.Spec.Model.Temperature == nil || *updated.Spec.Model.Temperature != 0.4 {
+		t.Errorf("model.temperature = %v, want 0.4", updated.Spec.Model.Temperature)
+	}
+	if updated.Spec.Model.MaxTokens == nil || *updated.Spec.Model.MaxTokens != originalMaxTokens {
+		t.Errorf("model.maxTokens = %v, want preserved value %d", updated.Spec.Model.MaxTokens, originalMaxTokens)
+	}
+}
+
+func TestUpdateAgentTool_Execute_ModelObjectPreservesOmittedModelFields(t *testing.T) {
+	originalTemperature := 0.2
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+		Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+			Provider:    providerOpenAI,
+			Name:        testGPT4OModel,
+			Temperature: &originalTemperature,
+		}},
+	}
+
+	fc := newFakeClient(agent)
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+	result, err := (&UpdateAgentTool{}).Execute(ctx, json.RawMessage(`{"name":"my-agent","model":{"temperature":0}}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var res ChatToolResult
+	if err := json.Unmarshal([]byte(result), &res); err != nil {
+		t.Fatalf("failed to parse result: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("Execute() result = %#v, want success", res)
+	}
+
+	updated := &corev1alpha1.Agent{}
+	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, updated); err != nil {
+		t.Fatalf("failed to get updated agent: %v", err)
+	}
+	if updated.Spec.Model == nil {
+		t.Fatal("model is nil")
+	}
+	if updated.Spec.Model.Provider != providerOpenAI {
+		t.Errorf("model.provider = %q, want preserved value %q", updated.Spec.Model.Provider, providerOpenAI)
+	}
+	if updated.Spec.Model.Name != testGPT4OModel {
+		t.Errorf("model.name = %q, want preserved value %q", updated.Spec.Model.Name, testGPT4OModel)
+	}
+	if updated.Spec.Model.Temperature == nil || *updated.Spec.Model.Temperature != 0 {
+		t.Errorf("model.temperature = %v, want 0", updated.Spec.Model.Temperature)
+	}
+}
+
+func TestUpdateAgentTool_Execute_RejectsUnsupportedModelTypes(t *testing.T) {
+	tests := []struct {
+		name  string
+		model any
+	}{
+		{name: "model must be object or legacy string", model: []any{"openai", testGPT4OModel}},
+		{name: "provider must be string", model: map[string]any{"provider": true}},
+		{name: "name must be string", model: map[string]any{nameField: 42}},
+		{name: "temperature must be number", model: map[string]any{"temperature": "warm"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: testMyAgentName, Namespace: defaultNamespace},
+				Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{
+					Provider: providerOpenAI,
+					Name:     testGPT4OModel,
+				}},
+			}
+			fc := newFakeClient(agent)
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			args, err := json.Marshal(map[string]any{nameField: testMyAgentName, modelField: tt.model})
+			if err != nil {
+				t.Fatalf("failed to marshal args: %v", err)
+			}
+
+			result, err := (&UpdateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var res ChatToolResult
+			if err := json.Unmarshal([]byte(result), &res); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if res.Success {
+				t.Fatalf("Execute() result = %#v, want invalid_arguments", res)
+			}
+			if res.ErrorType != "invalid_arguments" {
+				t.Fatalf("errorType = %q, want invalid_arguments", res.ErrorType)
+			}
+
+			unchanged := &corev1alpha1.Agent{}
+			if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, unchanged); err != nil {
+				t.Fatalf("failed to get agent: %v", err)
+			}
+			if unchanged.Spec.Model == nil || unchanged.Spec.Model.Provider != providerOpenAI || unchanged.Spec.Model.Name != testGPT4OModel {
+				t.Fatalf("model changed after rejected input: %#v", unchanged.Spec.Model)
+			}
+		})
+	}
+}
+
 func TestUpdateAgentTool_Execute_MissingToolContext(t *testing.T) {
 	tool := &UpdateAgentTool{}
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"name":"x"}`))
