@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,294 @@ const (
 	testJobOwnerKind        = "Job"
 	testMissingJobName      = "nonexistent"
 	testRetryMissingJobName = "missing-job"
+	testTaskResource        = "tasks"
 )
+
+func retryTestTaskOwner(task *corev1alpha1.Task) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: corev1alpha1.GroupVersion.String(),
+		Kind:       retryTaskOwnerKind,
+		Name:       task.Name,
+		UID:        task.UID,
+		Controller: &controller,
+	}
+}
+
+func retryTestJob(task *corev1alpha1.Task, name string, uid types.UID) *batchv1.Job {
+	return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name:            name,
+		Namespace:       task.Namespace,
+		UID:             uid,
+		OwnerReferences: []metav1.OwnerReference{retryTestTaskOwner(task)},
+	}}
+}
+
+func TestHandlePending_DueRetryCleanupRequiresOriginalJobUIDAndTaskOwner(t *testing.T) {
+	tests := []struct {
+		name        string
+		reusedUID   types.UID
+		reusedOwner func(*corev1alpha1.Task) metav1.OwnerReference
+	}{
+		{
+			name:      "different job uid",
+			reusedUID: "replacement-job-uid",
+			reusedOwner: func(task *corev1alpha1.Task) metav1.OwnerReference {
+				return retryTestTaskOwner(task)
+			},
+		},
+		{
+			name:      "different task owner",
+			reusedUID: "original-job-uid",
+			reusedOwner: func(task *corev1alpha1.Task) metav1.OwnerReference {
+				other := task.DeepCopy()
+				other.Name = "other" + "-task"
+				other.UID = "other-task-uid"
+				return retryTestTaskOwner(other)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "retry-reused-job-" + strings.ReplaceAll(tt.name, " ", "-"),
+					Namespace:  defaultNS,
+					UID:        "retry-reused-task-uid",
+					Finalizers: []string{labels.TaskFinalizer},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:        corev1alpha1.TaskTypeContainer,
+					Image:       testBusyboxImage,
+					Command:     []string{testRetryGateCommand},
+					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:    corev1alpha1.TaskPhaseRunning,
+					JobName:  "retry-reused-source-job",
+					Attempts: 1,
+				},
+			}
+			originalJob := retryTestJob(task, task.Status.JobName, "original-job-uid")
+			r := newUnitReconciler(scheme, task, originalJob)
+
+			if _, err := r.retryTask(context.Background(), task); err != nil {
+				t.Fatalf("retryTask() error = %v", err)
+			}
+
+			nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+			pending := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), nn, pending); err != nil {
+				t.Fatalf("Get(Pending Task) error = %v", err)
+			}
+			if got := pending.Annotations[labels.AnnotationRetryJobUID]; got != string(originalJob.UID) {
+				t.Fatalf("retry job UID = %q, want %q", got, originalJob.UID)
+			}
+			pending.Annotations[labels.AnnotationRetryNotBefore] = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
+			if err := r.Update(context.Background(), pending); err != nil {
+				t.Fatalf("Update(due Task) error = %v", err)
+			}
+
+			reusedJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+				Name:            originalJob.Name,
+				Namespace:       originalJob.Namespace,
+				UID:             tt.reusedUID,
+				OwnerReferences: []metav1.OwnerReference{tt.reusedOwner(task)},
+			}}
+			if err := r.Create(context.Background(), reusedJob); err != nil {
+				t.Fatalf("Create(reused Job) error = %v", err)
+			}
+
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			preserved := &batchv1.Job{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: reusedJob.Name, Namespace: reusedJob.Namespace}, preserved); err != nil {
+				t.Fatalf("reused same-name Job was deleted: %v", err)
+			}
+			if preserved.UID != reusedJob.UID {
+				t.Fatalf("reused Job UID = %q, want %q", preserved.UID, reusedJob.UID)
+			}
+		})
+	}
+}
+
+func TestHandlePending_GateClearConflictPreservesNewerRetryGate(t *testing.T) {
+	scheme := newTestScheme()
+	oldGate := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	newGate := time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "retry-gate-newer-generation",
+			Namespace:  defaultNS,
+			UID:        "retry-gate-newer-generation-uid",
+			Finalizers: []string{labels.TaskFinalizer},
+			Annotations: map[string]string{
+				labels.AnnotationRetryNotBefore: oldGate,
+				labels.AnnotationRetryJobUID:    "",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeContainer,
+			Image:       testBusyboxImage,
+			Command:     []string{testRetryGateCommand},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
+	}
+	replacementJobName := buildTaskJobName(task)
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		Build()
+	injectedConflict := false
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1alpha1.Task); ok && !injectedConflict {
+				injectedConflict = true
+				latest := &corev1alpha1.Task{}
+				nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+				if err := c.Get(ctx, nn, latest); err != nil {
+					return err
+				}
+				latest.Annotations[labels.AnnotationRetryNotBefore] = newGate
+				latest.Annotations[labels.AnnotationRetryJobUID] = "newer-source-job-uid"
+				if err := c.Update(ctx, latest); err != nil {
+					return err
+				}
+				if err := c.Get(ctx, nn, latest); err != nil {
+					return err
+				}
+				latest.Status.Phase = corev1alpha1.TaskPhasePending
+				latest.Status.Attempts = 2
+				latest.Status.JobName = replacementJobName
+				if err := c.SubResource(testStatusSubresource).Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: testTaskResource},
+					obj.GetName(),
+					errors.New("injected newer retry gate"),
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+	nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !injectedConflict {
+		t.Fatal("retry gate clear did not reach the injected conflict")
+	}
+
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), nn, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhasePending || updated.Status.Attempts != 2 || updated.Status.JobName != replacementJobName {
+		t.Fatalf("status = %#v, want newer Pending retry generation unchanged", updated.Status)
+	}
+	if got := updated.Annotations[labels.AnnotationRetryNotBefore]; got != newGate {
+		t.Fatalf("retry-not-before = %q, want newer value %q", got, newGate)
+	}
+	if got := updated.Annotations[labels.AnnotationRetryJobUID]; got != "newer-source-job-uid" {
+		t.Fatalf("retry job UID = %q, want newer value", got)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: replacementJobName, Namespace: task.Namespace}, &batchv1.Job{}); err != nil {
+		t.Fatalf("newer retry Job was removed: %v", err)
+	}
+}
+
+func TestHandlePending_GateClearConflictDeletesUntrackedReplacement(t *testing.T) {
+	scheme := newTestScheme()
+	gate := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "retry-gate-untracked-replacement",
+			Namespace:  defaultNS,
+			UID:        "retry-gate-untracked-replacement-uid",
+			Finalizers: []string{labels.TaskFinalizer},
+			Annotations: map[string]string{
+				labels.AnnotationRetryNotBefore: gate,
+				labels.AnnotationRetryJobUID:    "",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeContainer,
+			Image:       testBusyboxImage,
+			Command:     []string{testRetryGateCommand},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
+	}
+	replacementJobName := buildTaskJobName(task)
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		Build()
+	injectedConflict := false
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1alpha1.Task); ok && !injectedConflict {
+				injectedConflict = true
+				nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+				latest := &corev1alpha1.Task{}
+				if err := c.Get(ctx, nn, latest); err != nil {
+					return err
+				}
+				latest.Spec.RetryPolicy = nil
+				if err := c.Update(ctx, latest); err != nil {
+					return err
+				}
+				if err := c.Get(ctx, nn, latest); err != nil {
+					return err
+				}
+				latest.Status.Phase = corev1alpha1.TaskPhaseRunning
+				latest.Status.JobName = "disallowed-source-job"
+				if err := c.SubResource(testStatusSubresource).Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: testTaskResource},
+					obj.GetName(),
+					errors.New("retry became disallowed"),
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+	nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if !injectedConflict {
+		t.Fatal("retry gate clear did not reach the injected conflict")
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: replacementJobName, Namespace: task.Namespace}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("replacement Job error = %v, want deleted after it became untracked", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), nn, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning || updated.Status.JobName != "disallowed-source-job" {
+		t.Fatalf("status = %#v, want concurrent disallowed state preserved", updated.Status)
+	}
+}
 
 func TestRetryTask_DeleteErrorPropagatesAndKeepsRunning(t *testing.T) {
 	scheme := newTestScheme()
@@ -522,6 +810,81 @@ func TestRetryTask_UsesAuthoritativeRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestRetryTask_ConflictRecomputesDeadlineFromLatestPolicy(t *testing.T) {
+	scheme := newTestScheme()
+	initialDelay := metav1.Duration{Duration: time.Second}
+	authoritativeDelay := metav1.Duration{Duration: 2 * time.Minute}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "retry-deadline-policy-conflict",
+			Namespace: defaultNS,
+			UID:       "retry-deadline-policy-conflict-uid",
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{
+				MaxRetries:   3,
+				InitialDelay: &initialDelay,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase:    corev1alpha1.TaskPhaseRunning,
+			JobName:  testRetryMissingJobName,
+			Attempts: 1,
+		},
+	}
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		Build()
+	injectedConflict := false
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1alpha1.Task); ok && !injectedConflict {
+				injectedConflict = true
+				latest := &corev1alpha1.Task{}
+				nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+				if err := c.Get(ctx, nn, latest); err != nil {
+					return err
+				}
+				latest.Spec.RetryPolicy.InitialDelay = &authoritativeDelay
+				if err := c.Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: testTaskResource},
+					obj.GetName(),
+					errors.New("retry policy changed"),
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+	startedAt := time.Now()
+
+	if _, err := r.retryTask(context.Background(), task); err != nil {
+		t.Fatalf("retryTask() error = %v", err)
+	}
+	if !injectedConflict {
+		t.Fatal("retry deadline update did not reach the injected conflict")
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	notBefore, err := time.Parse(time.RFC3339Nano, updated.Annotations[labels.AnnotationRetryNotBefore])
+	if err != nil {
+		t.Fatalf("retry-not-before parse error = %v", err)
+	}
+	if notBefore.Before(startedAt.Add(119 * time.Second)) {
+		t.Fatalf("retry-not-before = %s, want recomputed authoritative two-minute delay", notBefore)
+	}
+}
+
 func TestRetryTask_DoesNotRetryWhenAuthoritativePolicyRemoved(t *testing.T) {
 	scheme := newTestScheme()
 	latest := &corev1alpha1.Task{
@@ -631,6 +994,85 @@ func TestHandlePending_MalformedRetryNotBeforeRearmsBackoff(t *testing.T) {
 	}
 	if got := unchanged.Annotations[labels.AnnotationRetryNotBefore]; got != raw {
 		t.Fatalf("retry-not-before changed from %q to %q on immediate reconcile", raw, got)
+	}
+}
+
+func TestHandlePending_RepairConflictRecomputesDeadlineFromLatestPolicy(t *testing.T) {
+	scheme := newTestScheme()
+	initialDelay := metav1.Duration{Duration: time.Second}
+	authoritativeDelay := metav1.Duration{Duration: 2 * time.Minute}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "retry-repair-policy-conflict",
+			Namespace: defaultNS,
+			UID:       "retry-repair-policy-conflict-uid",
+			Annotations: map[string]string{
+				labels.AnnotationRetryNotBefore: "not-a-timestamp",
+				labels.AnnotationRetryJobUID:    "",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{
+				MaxRetries:   3,
+				InitialDelay: &initialDelay,
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
+	}
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		Build()
+	injectedConflict := false
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*corev1alpha1.Task); ok && !injectedConflict {
+				injectedConflict = true
+				latest := &corev1alpha1.Task{}
+				nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+				if err := c.Get(ctx, nn, latest); err != nil {
+					return err
+				}
+				latest.Spec.RetryPolicy.InitialDelay = &authoritativeDelay
+				if err := c.Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: testTaskResource},
+					obj.GetName(),
+					errors.New("retry policy changed"),
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	r := newUnitReconciler(scheme)
+	r.Client = fc
+	r.JobBuilder = NewJobBuilder(fc)
+	startedAt := time.Now()
+
+	result, handled, err := r.handleRetryNotBefore(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleRetryNotBefore() error = %v", err)
+	}
+	if !handled || result.RequeueAfter <= 0 {
+		t.Fatalf("handleRetryNotBefore() = (%#v, %t), want repaired wait", result, handled)
+	}
+	if !injectedConflict {
+		t.Fatal("retry deadline repair did not reach the injected conflict")
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	notBefore, err := time.Parse(time.RFC3339Nano, updated.Annotations[labels.AnnotationRetryNotBefore])
+	if err != nil {
+		t.Fatalf("retry-not-before parse error = %v", err)
+	}
+	if notBefore.Before(startedAt.Add(119 * time.Second)) {
+		t.Fatalf("retry-not-before = %s, want recomputed authoritative two-minute delay", notBefore)
 	}
 }
 
@@ -775,13 +1217,14 @@ func TestHandlePending_DoesNotStartWhenRetryPolicyWasRemoved(t *testing.T) {
 func TestHandlePending_DueRetryRechecksActiveOwnedPod(t *testing.T) {
 	scheme := newTestScheme()
 	jobName := "retry-due-active-job"
+	jobUID := types.UID("retry-due-active-job-uid")
 	controller := true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            jobName + "-pod",
 			Namespace:       defaultNS,
 			Labels:          map[string]string{batchv1.JobNameLabel: jobName},
-			OwnerReferences: []metav1.OwnerReference{{Kind: testJobOwnerKind, Name: jobName, Controller: &controller}},
+			OwnerReferences: []metav1.OwnerReference{{Kind: testJobOwnerKind, Name: jobName, UID: jobUID, Controller: &controller}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
@@ -793,6 +1236,7 @@ func TestHandlePending_DueRetryRechecksActiveOwnedPod(t *testing.T) {
 			Finalizers: []string{labels.TaskFinalizer},
 			Annotations: map[string]string{
 				labels.AnnotationRetryNotBefore: time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano),
+				labels.AnnotationRetryJobUID:    string(jobUID),
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -986,6 +1430,150 @@ func TestHandlePending_RetryNotBeforeUpdateErrorLeavesRecoverableJob(t *testing.
 	}
 }
 
+func TestHandlePending_AdoptsCreatedReplacementAfterRetryBecomesDisallowed(t *testing.T) {
+	tests := []struct {
+		name         string
+		mutatePolicy func(*corev1alpha1.Task)
+	}{
+		{
+			name: "policy removed",
+			mutatePolicy: func(task *corev1alpha1.Task) {
+				task.Spec.RetryPolicy = nil
+			},
+		},
+		{
+			name: "retry budget exhausted",
+			mutatePolicy: func(task *corev1alpha1.Task) {
+				task.Spec.RetryPolicy = &corev1alpha1.RetryPolicy{MaxRetries: 0}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "retry-adopt-disallowed-" + strings.ReplaceAll(tt.name, " ", "-"),
+					Namespace:  defaultNS,
+					UID:        "retry-adopt-disallowed-uid",
+					Finalizers: []string{labels.TaskFinalizer},
+					Annotations: map[string]string{
+						labels.AnnotationRetryNotBefore: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+						labels.AnnotationRetryJobUID:    "",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:        corev1alpha1.TaskTypeContainer,
+					Image:       testBusyboxImage,
+					Command:     []string{testRetryGateCommand},
+					RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 2},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
+			}
+			base := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.Task{}).
+				WithObjects(task).
+				Build()
+			updateErr := errors.New("injected retry gate persistence failure")
+			failUpdateOnce := true
+			fc := interceptor.NewClient(base, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*corev1alpha1.Task); ok && failUpdateOnce {
+						failUpdateOnce = false
+						return updateErr
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			r := newUnitReconciler(scheme)
+			r.Client = fc
+			r.JobBuilder = NewJobBuilder(fc)
+			nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); !errors.Is(err, updateErr) {
+				t.Fatalf("first Reconcile() error = %v, want %v", err, updateErr)
+			}
+			var jobs batchv1.JobList
+			if err := r.List(context.Background(), &jobs, client.InNamespace(task.Namespace)); err != nil {
+				t.Fatalf("List(Jobs) error = %v", err)
+			}
+			if len(jobs.Items) != 1 {
+				t.Fatalf("Jobs = %d, want one created replacement", len(jobs.Items))
+			}
+			replacementJob := jobs.Items[0].DeepCopy()
+
+			latest := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), nn, latest); err != nil {
+				t.Fatalf("Get(Task) error = %v", err)
+			}
+			tt.mutatePolicy(latest)
+			if err := r.Update(context.Background(), latest); err != nil {
+				t.Fatalf("Update(retry policy) error = %v", err)
+			}
+
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+				t.Fatalf("recovery Reconcile() error = %v", err)
+			}
+			recovered := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), nn, recovered); err != nil {
+				t.Fatalf("Get(recovered Task) error = %v", err)
+			}
+			if recovered.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+				recovered.Status.JobName != replacementJob.Name ||
+				recovered.Status.Attempts != 2 {
+				t.Fatalf("recovered status = %#v, want created replacement adopted", recovered.Status)
+			}
+			if _, exists := recovered.Annotations[labels.AnnotationRetryNotBefore]; exists {
+				t.Fatal("retry gate remained after adopting created replacement")
+			}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: replacementJob.Name, Namespace: replacementJob.Namespace}, &batchv1.Job{}); err != nil {
+				t.Fatalf("adopted replacement Job is missing: %v", err)
+			}
+		})
+	}
+}
+
+func TestHandlePending_AdoptsReplacementWithoutGateBeforeAdmissionChecks(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "retry-adopt-without-gate",
+			Namespace:  defaultNS,
+			UID:        "retry-adopt-without-gate-uid",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   testBusyboxImage,
+			Command: []string{testRetryGateCommand},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
+	}
+	replacementJob := retryTestJob(task, buildTaskJobName(task), "retry-adopt-without-gate-job-uid")
+	otherActiveTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-active-task", Namespace: defaultNS, UID: "other-active-task-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task, replacementJob, otherActiveTask)
+	r.MaxTasksPerNamespace = 1
+	nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), nn, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+		updated.Status.JobName != replacementJob.Name ||
+		updated.Status.Attempts != 2 {
+		t.Fatalf("status = %#v, want existing replacement adopted before namespace admission limit", updated.Status)
+	}
+}
+
 func TestHandlePending_RetryNotBeforeConflictIsRetried(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -1019,7 +1607,7 @@ func TestHandlePending_RetryNotBeforeConflictIsRetried(t *testing.T) {
 			if _, ok := obj.(*corev1alpha1.Task); ok {
 				updateCalls++
 				if updateCalls == 1 {
-					return apierrors.NewConflict(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "tasks"}, obj.GetName(), errors.New("injected conflict"))
+					return apierrors.NewConflict(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: testTaskResource}, obj.GetName(), errors.New("injected conflict"))
 				}
 			}
 			return c.Update(ctx, obj, opts...)
