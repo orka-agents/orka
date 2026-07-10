@@ -156,12 +156,57 @@ func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 		)
 	}
 
-	statusReq := httptest.NewRequest(http.MethodGet, "/v1/exec/"+started.ExecID, nil)
-	statusReq.Header.Set("Authorization", "Bearer secret")
-	statusResp := httptest.NewRecorder()
-	server.routes().ServeHTTP(statusResp, statusReq)
-	if statusResp.Code != http.StatusNotFound {
-		t.Fatalf("completed detached exec status after poll = %d, want %d", statusResp.Code, http.StatusNotFound)
+	for poll := 2; poll <= 3; poll++ {
+		statusReq := httptest.NewRequest(http.MethodGet, "/v1/exec/"+started.ExecID, nil)
+		statusReq.Header.Set("Authorization", "Bearer secret")
+		statusResp := httptest.NewRecorder()
+		server.routes().ServeHTTP(statusResp, statusReq)
+		if statusResp.Code != http.StatusOK {
+			t.Fatalf(
+				"completed detached exec status poll %d = %d, want %d: %s",
+				poll,
+				statusResp.Code,
+				http.StatusOK,
+				statusResp.Body.String(),
+			)
+		}
+		var repeated execResponse
+		if err := json.NewDecoder(statusResp.Body).Decode(&repeated); err != nil {
+			t.Fatalf("decode repeated status response: %v", err)
+		}
+		if repeated != got {
+			t.Fatalf("completed detached exec poll %d = %#v, want %#v", poll, repeated, got)
+		}
+	}
+}
+
+func TestCompletedExecutionRetainedUntilExpiry(t *testing.T) {
+	server := newWorkspaceAgentServer()
+	finishedAt := time.Now().UTC()
+	want := execResponse{
+		ExecID:     "completed-exec",
+		Stdout:     "done",
+		ExitCode:   0,
+		StartedAt:  finishedAt.Add(-time.Second),
+		FinishedAt: finishedAt,
+	}
+	server.storeExecution(want)
+
+	for read := 1; read <= 2; read++ {
+		got, ok := server.loadExecution(want.ExecID)
+		if !ok {
+			t.Fatalf("load %d missing completed execution before retention expires", read)
+		}
+		if got != want {
+			t.Fatalf("load %d = %#v, want %#v", read, got, want)
+		}
+	}
+
+	server.mu.Lock()
+	server.evictCompletedExecutionsLocked(finishedAt.Add(completedExecutionRetention))
+	server.mu.Unlock()
+	if got, ok := server.loadExecution(want.ExecID); ok {
+		t.Fatalf("expired completed execution still present: %#v", got)
 	}
 }
 
