@@ -32,7 +32,14 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-const queryTrue = "true"
+const (
+	queryTrue = "true"
+
+	defaultTaskLogStreamHeartbeatEvery = 15 * time.Second
+	taskLogStreamInitialBufferBytes    = 64 * 1024
+	taskLogStreamMaxLineBytes          = 1024 * 1024
+	taskLogStreamScannerBufferBytes    = taskLogStreamMaxLineBytes + 2
+)
 
 // Handlers contains all API handlers
 //
@@ -709,7 +716,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	follow := c.Query("follow") == queryTrue
 
 	if follow {
-		streamCtx, streamCancel := context.WithCancel(context.Background())
+		streamCtx, streamCancel := context.WithCancel(ctx)
 		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
 		if err != nil {
 			streamCancel()
@@ -719,18 +726,29 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		c.Set("Content-Type", "text/event-stream")
 		c.Set("Cache-Control", "no-cache")
 		c.Set("Connection", "keep-alive")
+		c.Set("X-Accel-Buffering", "no")
 
-		return c.SendStreamWriter(func(w *bufio.Writer) {
-			defer streamCancel()
-			defer func() { _ = stream.Close() }()
-			scanner := bufio.NewScanner(stream)
-			for scanner.Scan() {
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
-				if err := w.Flush(); err != nil {
-					return
-				}
+		heartbeatEvery := h.eventStreamHeartbeatEvery
+		if heartbeatEvery <= 0 {
+			heartbeatEvery = defaultTaskLogStreamHeartbeatEvery
+		}
+
+		streamNamespace := strings.Clone(namespace)
+		streamPodName := strings.Clone(podName)
+		streamErr := c.SendStreamWriter(func(w *bufio.Writer) {
+			defer func() {
+				streamCancel()
+				_ = stream.Close()
+			}()
+			if err := streamTaskLogsSSE(streamCtx, w, stream, heartbeatEvery); err != nil {
+				log.Error(err, "failed to read task log stream", "namespace", streamNamespace, "pod", streamPodName)
 			}
 		})
+		if streamErr != nil {
+			streamCancel()
+			_ = stream.Close()
+		}
+		return streamErr
 	}
 
 	// Non-follow mode: return the last N lines
@@ -754,6 +772,97 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"logs": string(logBytes),
 	})
+}
+
+type taskLogScanResult struct {
+	line string
+	err  error
+}
+
+func streamTaskLogsSSE(
+	ctx context.Context,
+	w *bufio.Writer,
+	stream io.Reader,
+	heartbeatEvery time.Duration,
+) error {
+	results := make(chan taskLogScanResult)
+	go func() {
+		defer close(results)
+		scanner := bufio.NewScanner(stream)
+		scanner.Buffer(make([]byte, taskLogStreamInitialBufferBytes), taskLogStreamScannerBufferBytes)
+		for scanner.Scan() {
+			if len(scanner.Bytes()) > taskLogStreamMaxLineBytes {
+				select {
+				case results <- taskLogScanResult{err: taskLogLineTooLongError()}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			select {
+			case results <- taskLogScanResult{line: scanner.Text()}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil && ctx.Err() == nil {
+			if errors.Is(err, bufio.ErrTooLong) {
+				err = taskLogLineTooLongError()
+			}
+			select {
+			case results <- taskLogScanResult{err: err}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(heartbeatEvery)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case result, ok := <-results:
+			if !ok {
+				return nil
+			}
+			if result.err != nil {
+				_ = writeTaskLogStreamErrorSSE(w, result.err)
+				return result.err
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", result.line); err != nil {
+				return nil
+			}
+			if err := w.Flush(); err != nil {
+				return nil
+			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return nil
+			}
+			if err := w.Flush(); err != nil {
+				return nil
+			}
+		}
+	}
+}
+
+func taskLogLineTooLongError() error {
+	return fmt.Errorf("task log line exceeds %d bytes", taskLogStreamMaxLineBytes)
+}
+
+func writeTaskLogStreamErrorSSE(w *bufio.Writer, streamErr error) error {
+	data, err := json.Marshal(struct {
+		Error string `json:"error"`
+	}{
+		Error: fmt.Sprintf("failed to read task logs: %v", streamErr),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", data); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 // GetTaskResult gets the result of a task
