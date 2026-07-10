@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -252,7 +253,9 @@ func (r *AgentReconciler) countActiveTasks(ctx context.Context, agent *corev1alp
 		task := &taskList.Items[i]
 		if task.Spec.AgentRef != nil && task.Spec.AgentRef.Name == agent.Name {
 			phase := task.Status.Phase
-			if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
+			if phase != corev1alpha1.TaskPhaseSucceeded &&
+				phase != corev1alpha1.TaskPhaseFailed &&
+				phase != corev1alpha1.TaskPhaseCancelled {
 				count++
 			}
 		}
@@ -263,42 +266,46 @@ func (r *AgentReconciler) countActiveTasks(ctx context.Context, agent *corev1alp
 // updateStatus updates the Agent's status with validation results and active task count.
 func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error) (ctrl.Result, error) {
 	now := metav1.Now()
-
-	agent.Status.ActiveTasks = activeTasks
-	agent.Status.Ready = validationErr == nil
-	if activeTasks > 0 {
-		agent.Status.LastUsed = &now
-	}
-
-	condition := metav1.Condition{
-		Type:               "Ready",
-		LastTransitionTime: now,
-		ObservedGeneration: agent.Generation,
-	}
-
-	if validationErr != nil {
-		condition.Status = metav1.ConditionFalse
-		condition.Reason = reasonValidationFailed
-		condition.Message = validationErr.Error()
-	} else {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = reasonValidationSucceeded
-		condition.Message = "Agent configuration is valid"
-	}
-
-	meta.SetStatusCondition(&agent.Status.Conditions, condition)
-
-	activeCount := activeTasks // capture for closure
-	lastUsed := agent.Status.LastUsed
+	generation := agent.Generation
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		if err := r.Get(ctx, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, agent); err != nil {
+		current := &corev1alpha1.Agent{}
+		if err := r.Get(ctx, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, current); err != nil {
 			return err
 		}
-		agent.Status.ActiveTasks = activeCount
-		agent.Status.Ready = validationErr == nil
-		agent.Status.LastUsed = lastUsed
-		meta.SetStatusCondition(&agent.Status.Conditions, condition)
-		return r.Status().Update(ctx, agent)
+
+		desired := current.Status.DeepCopy()
+		desired.ActiveTasks = activeTasks
+		desired.Ready = validationErr == nil
+		if current.Status.ActiveTasks != activeTasks || (activeTasks > 0 && current.Status.LastUsed == nil) {
+			desired.LastUsed = &now
+		}
+
+		condition := metav1.Condition{
+			Type:               "Ready",
+			LastTransitionTime: now,
+			ObservedGeneration: generation,
+		}
+		if validationErr != nil {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = reasonValidationFailed
+			condition.Message = validationErr.Error()
+		} else {
+			condition.Status = metav1.ConditionTrue
+			condition.Reason = reasonValidationSucceeded
+			condition.Message = "Agent configuration is valid"
+		}
+		meta.SetStatusCondition(&desired.Conditions, condition)
+
+		if apiequality.Semantic.DeepEqual(current.Status, *desired) {
+			agent.Status = *current.Status.DeepCopy()
+			return nil
+		}
+		current.Status = *desired
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		agent.Status = *current.Status.DeepCopy()
+		return nil
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -327,6 +334,11 @@ func (r *AgentReconciler) checkTTLExpiry(ctx context.Context, agent *corev1alpha
 		return ctrl.Result{}, false
 	}
 	if activeTasks > 0 {
+		return ctrl.Result{}, false
+	}
+	if agent.Status.ActiveTasks > 0 {
+		// The final task just became terminal. Let updateStatus persist the idle
+		// transition time before evaluating the TTL on the next reconcile.
 		return ctrl.Result{}, false
 	}
 
