@@ -215,10 +215,10 @@ func prepareWorkspace(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("stat workspace: %w", err)
 	}
-	if err := common.PrepareWorkspace(workspaceDir); err != nil {
+	if err := common.PrepareWorkspace(ctx, workspaceDir); err != nil {
 		return err
 	}
-	if err := common.PreparePullRequestReviewContext(workspaceDir, cfg); err != nil {
+	if err := common.PreparePullRequestReviewContext(ctx, workspaceDir, cfg); err != nil {
 		return err
 	}
 	return common.EnsureWorkspaceArtifactsLink(workspaceDir)

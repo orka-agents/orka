@@ -734,7 +734,7 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 
 	// Apply prior task diff if iterating
 	if !preparedWorkspace {
-		if err := PrepareWorkspace(workspaceDir); err != nil {
+		if err := PrepareWorkspace(ctx, workspaceDir); err != nil {
 			RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
 				WithEventSeverity(events.ExecutionEventSeverityError),
 				WithEventTaskName(cfg.TaskName),
@@ -743,7 +743,7 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 			)
 			return fmt.Errorf("workspace preparation failed: %w", err)
 		}
-		if err := PreparePullRequestReviewContext(workspaceDir, cfg); err != nil {
+		if err := PreparePullRequestReviewContext(ctx, workspaceDir, cfg); err != nil {
 			RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeWorkspacePreparationFailed,
 				WithEventSeverity(events.ExecutionEventSeverityError),
 				WithEventTaskName(cfg.TaskName),

@@ -8,7 +8,9 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,11 +27,13 @@ import (
 const requirePushBranchEnvVar = workerenv.RequirePushBranch
 
 const (
+	gitExecutable                     = "git"
 	gitOriginRemote                   = "origin"
 	pullRequestReviewContextDir       = ".git/orka"
 	pullRequestReviewDiffPath         = ".git/orka/pr-review.diff"
 	pullRequestReviewFilesPath        = ".git/orka/pr-review.files"
 	pullRequestReviewInstructionsPath = ".git/orka/pr-review.md"
+	workspaceGitWaitDelay             = time.Second
 )
 
 var (
@@ -42,7 +46,10 @@ var waitForRemoteBranchVisibility = waitForRemoteBranchVisibilityWithGit
 // PrepareWorkspace applies the diff from a prior task's result to the working
 // directory. It is called after git clone and before the LLM agent starts.
 // If ORKA_PRIOR_TASK is not set the function is a no-op.
-func PrepareWorkspace(workDir string) error {
+func PrepareWorkspace(ctx context.Context, workDir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	priorTask := os.Getenv(workerenv.PriorTask)
 	if priorTask == "" {
 		return nil
@@ -64,7 +71,7 @@ func PrepareWorkspace(workDir string) error {
 
 	// Fetch the prior task's result.
 	resultURL := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", controllerURL, priorTask, ns)
-	req, err := http.NewRequest(http.MethodGet, resultURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request for prior task result: %w", err)
 	}
@@ -75,12 +82,18 @@ func PrepareWorkspace(workDir string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("failed to fetch prior task result: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("prior task result HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -88,6 +101,9 @@ func PrepareWorkspace(workDir string) error {
 		Result string `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&resultResp); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("failed to decode prior task result: %w", err)
 	}
 
@@ -98,7 +114,10 @@ func PrepareWorkspace(workDir string) error {
 
 	// Warn if HEAD doesn't match the base SHA of the prior result.
 	if sr.BaseSHA != "" {
-		headOut, err := execGit(workDir, "rev-parse", "HEAD")
+		headOut, err := execWorkspaceGitContext(ctx, workDir, "rev-parse", "HEAD")
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err == nil {
 			headSHA := strings.TrimSpace(headOut)
 			if headSHA != sr.BaseSHA {
@@ -108,6 +127,9 @@ func PrepareWorkspace(workDir string) error {
 	}
 
 	// Write diff to a temp file.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	diffPath := filepath.Join(workDir, ".orka-prior.patch")
 	if err := os.WriteFile(diffPath, []byte(sr.Diff), 0o600); err != nil {
 		return fmt.Errorf("failed to write diff to temp file: %w", err)
@@ -115,17 +137,37 @@ func PrepareWorkspace(workDir string) error {
 	defer os.Remove(diffPath) //nolint:errcheck
 
 	// Dry-run check.
-	if out, err := execGit(workDir, "apply", "--check", diffPath); err != nil {
-		if _, reverseErr := execGit(workDir, "apply", "--reverse", "--check", diffPath); reverseErr == nil {
+	if out, err := execWorkspaceGitContext(ctx, workDir, "apply", "--check", diffPath); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		_, reverseErr := execWorkspaceGitContext(
+			ctx,
+			workDir,
+			"apply",
+			"--reverse",
+			"--check",
+			diffPath,
+		)
+		if reverseErr == nil {
 			fmt.Fprintf(os.Stderr, "prior task diff already present in workspace; skipping reapply\n")
 			return nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		return fmt.Errorf("git apply --check failed: %s: %w", out, err)
 	}
 
 	// Apply the diff.
-	if out, err := execGit(workDir, "apply", diffPath); err != nil {
+	if out, err := execWorkspaceGitContext(ctx, workDir, "apply", diffPath); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("git apply failed: %s: %w", out, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stderr, "successfully applied prior task diff from %s\n", priorTask)
@@ -134,47 +176,107 @@ func PrepareWorkspace(workDir string) error {
 
 // PreparePullRequestReviewContext writes safe, read-only PR diff context into
 // the workspace for reviewer agents that cannot run git commands themselves.
-func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
+func PreparePullRequestReviewContext(ctx context.Context, workDir string, cfg *AgentConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if cfg == nil || strings.TrimSpace(cfg.PRBaseBranch) == "" {
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
 		return nil
 	}
-	baseBranch, baseRepo, baseSHA, fetchSource, err := pullRequestReviewGitContext(cfg)
+	baseBranch, baseRepo, baseSHA, baseRef, err := preparePullRequestReviewBase(ctx, workDir, cfg)
 	if err != nil {
 		return err
 	}
+	return writePullRequestReviewContext(ctx, workDir, baseBranch, baseRepo, baseSHA, baseRef)
+}
+
+func preparePullRequestReviewBase(
+	ctx context.Context,
+	workDir string,
+	cfg *AgentConfig,
+) (baseBranch, baseRepo, baseSHA, baseRef string, err error) {
+	baseBranch, baseRepo, baseSHA, fetchSource, err := pullRequestReviewGitContext(cfg)
+	if err != nil {
+		return "", "", "", "", err
+	}
 	baseBranchRef := pullRequestReviewBaseBranchRef(fetchSource, baseBranch)
-	baseRef := baseSHA
-	if baseRef != "" {
-		_, fetchErr := execGit(workDir, "fetch", "--depth=1", fetchSource, baseRef)
-		if fetchErr != nil && !commitExists(workDir, baseRef) {
-			if branchErr := fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseBranchRef); branchErr != nil {
-				return fmt.Errorf(
-					"fetch PR base SHA %q failed: %w; fallback base branch fetch failed: %v",
-					shortGitSHA(baseRef),
-					fetchErr,
-					branchErr,
-				)
+	baseRef = baseSHA
+	if baseRef == "" {
+		if err := fetchPullRequestReviewBaseBranch(ctx, workDir, fetchSource, baseBranch, baseBranchRef); err != nil {
+			return "", "", "", "", err
+		}
+		return baseBranch, baseRepo, baseSHA, baseBranchRef, nil
+	}
+
+	_, fetchErr := execWorkspaceGitContext(
+		ctx,
+		workDir,
+		"fetch",
+		"--no-auto-maintenance",
+		"--depth=1",
+		fetchSource,
+		baseRef,
+	)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", "", "", "", ctxErr
+	}
+	if fetchErr != nil {
+		baseExists, existsErr := commitExistsContext(ctx, workDir, baseRef)
+		if existsErr != nil {
+			return "", "", "", "", existsErr
+		}
+		if baseExists {
+			fetchErr = nil
+		}
+	}
+	if fetchErr != nil {
+		branchErr := fetchPullRequestReviewBaseBranch(
+			ctx,
+			workDir,
+			fetchSource,
+			baseBranch,
+			baseBranchRef,
+		)
+		if branchErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", "", "", "", ctxErr
 			}
-			if !commitExists(workDir, baseRef) {
-				baseRef = baseBranchRef
-			}
+			return "", "", "", "", fmt.Errorf(
+				"fetch PR base SHA %q failed: %w; fallback base branch fetch failed: %w",
+				shortGitSHA(baseRef),
+				fetchErr,
+				branchErr,
+			)
 		}
-		if err := ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef); err != nil {
-			return err
+		baseExists, existsErr := commitExistsContext(ctx, workDir, baseRef)
+		if existsErr != nil {
+			return "", "", "", "", existsErr
 		}
-	} else {
-		baseRef = baseBranchRef
-		if err := fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef); err != nil {
-			return err
+		if !baseExists {
+			baseRef = baseBranchRef
 		}
+	}
+	if err := ensurePullRequestReviewMergeBase(ctx, workDir, fetchSource, baseBranch, baseRef); err != nil {
+		return "", "", "", "", err
+	}
+	return baseBranch, baseRepo, baseSHA, baseRef, nil
+}
+
+func writePullRequestReviewContext(
+	ctx context.Context,
+	workDir, baseBranch, baseRepo, baseSHA, baseRef string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Join(workDir, pullRequestReviewContextDir), 0o755); err != nil {
 		return fmt.Errorf("create pull request review context directory: %w", err)
 	}
-	diff, diffTruncated, err := execGitLimited(
+	diff, diffTruncated, err := execGitLimitedContext(
+		ctx,
 		workDir,
 		pullRequestReviewDiffLimitBytes,
 		"diff",
@@ -185,7 +287,8 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 	if err != nil {
 		return fmt.Errorf("generate pull request review diff: %w", err)
 	}
-	files, filesTruncated, err := execGitLimited(
+	files, filesTruncated, err := execGitLimitedContext(
+		ctx,
 		workDir,
 		pullRequestReviewListLimitBytes,
 		"diff",
@@ -195,13 +298,21 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 	if err != nil {
 		return fmt.Errorf("generate pull request review file list: %w", err)
 	}
-	stat, statTruncated, _ := execGitLimited(
+	stat, statTruncated, statErr := execGitLimitedContext(
+		ctx,
 		workDir,
 		pullRequestReviewListLimitBytes,
 		"diff",
 		"--stat",
 		baseRef+"...HEAD",
 	)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if statErr != nil {
+		stat = ""
+		statTruncated = false
+	}
 	if strings.TrimSpace(diff) == "" {
 		diff = "# No diff between " + baseRef + " and HEAD.\n"
 	}
@@ -211,22 +322,15 @@ func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
 	if filesTruncated {
 		files += fmt.Sprintf("\n# Orka truncated this file list at %d bytes.\n", pullRequestReviewListLimitBytes)
 	}
-	truncationNote := "None"
-	if diffTruncated || filesTruncated || statTruncated {
-		var notes []string
-		if diffTruncated {
-			notes = append(notes, fmt.Sprintf("diff truncated at %d bytes", pullRequestReviewDiffLimitBytes))
-		}
-		if filesTruncated {
-			notes = append(notes, fmt.Sprintf("file list truncated at %d bytes", pullRequestReviewListLimitBytes))
-		}
-		if statTruncated {
-			notes = append(notes, fmt.Sprintf("stat truncated at %d bytes", pullRequestReviewListLimitBytes))
-		}
-		truncationNote = strings.Join(notes, "\n")
+	truncationNote := pullRequestReviewTruncationNote(diffTruncated, filesTruncated, statTruncated)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(workDir, pullRequestReviewDiffPath), []byte(diff), 0o644); err != nil {
 		return fmt.Errorf("write pull request review diff: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(workDir, pullRequestReviewFilesPath), []byte(files), 0o644); err != nil {
 		return fmt.Errorf("write pull request review file list: %w", err)
@@ -258,10 +362,30 @@ Truncation: %s
 		strings.TrimSpace(stat),
 	)
 	instructionsPath := filepath.Join(workDir, pullRequestReviewInstructionsPath)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.WriteFile(instructionsPath, []byte(instructions), 0o644); err != nil {
 		return fmt.Errorf("write pull request review instructions: %w", err)
 	}
-	return nil
+	return ctx.Err()
+}
+
+func pullRequestReviewTruncationNote(diff, files, stat bool) string {
+	var notes []string
+	if diff {
+		notes = append(notes, fmt.Sprintf("diff truncated at %d bytes", pullRequestReviewDiffLimitBytes))
+	}
+	if files {
+		notes = append(notes, fmt.Sprintf("file list truncated at %d bytes", pullRequestReviewListLimitBytes))
+	}
+	if stat {
+		notes = append(notes, fmt.Sprintf("stat truncated at %d bytes", pullRequestReviewListLimitBytes))
+	}
+	if len(notes) == 0 {
+		return "None"
+	}
+	return strings.Join(notes, "\n")
 }
 
 func pullRequestReviewGitContext(cfg *AgentConfig) (baseBranch, baseRepo, baseSHA, fetchSource string, err error) {
@@ -294,7 +418,10 @@ func pullRequestReviewBaseBranchRef(fetchSource, baseBranch string) string {
 	return "refs/remotes/orka-base/" + baseBranch
 }
 
-func fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef string) error {
+func fetchPullRequestReviewBaseBranch(
+	ctx context.Context,
+	workDir, fetchSource, baseBranch, baseRef string,
+) error {
 	var err error
 	baseBranch, err = safeGitBranchName(baseBranch)
 	if err != nil {
@@ -305,13 +432,26 @@ func fetchPullRequestReviewBaseBranch(workDir, fetchSource, baseBranch, baseRef 
 		return fmt.Errorf("invalid PR base repo: %w", err)
 	}
 	refspec := "+refs/heads/" + baseBranch + ":" + baseRef
-	if _, err := execGit(workDir, "fetch", fetchSource, refspec); err != nil {
+	if _, err := execWorkspaceGitContext(
+		ctx,
+		workDir,
+		"fetch",
+		"--no-auto-maintenance",
+		fetchSource,
+		refspec,
+	); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("fetch PR base branch %q failed: %w", baseBranch, err)
 	}
 	return nil
 }
 
-func ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef string) error {
+func ensurePullRequestReviewMergeBase(
+	ctx context.Context,
+	workDir, fetchSource, baseBranch, baseRef string,
+) error {
 	var err error
 	fetchSource, err = safeGitRemote(fetchSource)
 	if err != nil {
@@ -321,15 +461,40 @@ func ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef 
 	if err != nil {
 		return fmt.Errorf("invalid PR base branch: %w", err)
 	}
-	if pullRequestReviewMergeBaseExists(workDir, baseRef) {
+	mergeBaseExists, err := pullRequestReviewMergeBaseExists(ctx, workDir, baseRef)
+	if err != nil {
+		return err
+	}
+	if mergeBaseExists {
 		return nil
 	}
 	for _, deepen := range []string{"64", "256", "1024"} {
-		_, err := execGit(workDir, "fetch", "--deepen="+deepen, fetchSource, baseRef)
-		if err != nil && !commitExists(workDir, baseRef) {
-			return fmt.Errorf("deepen PR base SHA %q failed: %w", shortGitSHA(baseRef), err)
+		_, fetchErr := execWorkspaceGitContext(
+			ctx,
+			workDir,
+			"fetch",
+			"--no-auto-maintenance",
+			"--deepen="+deepen,
+			fetchSource,
+			baseRef,
+		)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		if pullRequestReviewMergeBaseExists(workDir, baseRef) {
+		if fetchErr != nil {
+			baseExists, existsErr := commitExistsContext(ctx, workDir, baseRef)
+			if existsErr != nil {
+				return existsErr
+			}
+			if !baseExists {
+				return fmt.Errorf("deepen PR base SHA %q failed: %w", shortGitSHA(baseRef), fetchErr)
+			}
+		}
+		mergeBaseExists, err = pullRequestReviewMergeBaseExists(ctx, workDir, baseRef)
+		if err != nil {
+			return err
+		}
+		if mergeBaseExists {
 			return nil
 		}
 	}
@@ -339,18 +504,35 @@ func ensurePullRequestReviewMergeBase(workDir, fetchSource, baseBranch, baseRef 
 		baseBranchRef = "refs/remotes/orka-base/" + baseBranch
 	}
 	refspec := "+refs/heads/" + baseBranch + ":" + baseBranchRef
-	if _, err := execGit(workDir, "fetch", fetchSource, refspec); err != nil {
+	if _, err := execWorkspaceGitContext(
+		ctx,
+		workDir,
+		"fetch",
+		"--no-auto-maintenance",
+		fetchSource,
+		refspec,
+	); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("fetch PR base branch %q for merge base failed: %w", baseBranch, err)
 	}
-	if pullRequestReviewMergeBaseExists(workDir, baseRef) {
+	mergeBaseExists, err = pullRequestReviewMergeBaseExists(ctx, workDir, baseRef)
+	if err != nil {
+		return err
+	}
+	if mergeBaseExists {
 		return nil
 	}
 	return fmt.Errorf("resolve merge base between PR base %q and HEAD failed", shortGitSHA(baseRef))
 }
 
-func pullRequestReviewMergeBaseExists(workDir, baseRef string) bool {
-	_, err := execGit(workDir, "merge-base", baseRef, "HEAD")
-	return err == nil
+func pullRequestReviewMergeBaseExists(ctx context.Context, workDir, baseRef string) (bool, error) {
+	_, err := execWorkspaceGitContext(ctx, workDir, "merge-base", baseRef, "HEAD")
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	return err == nil, nil
 }
 
 // FinalizeResult builds a structured result from the agent output and any
@@ -606,14 +788,22 @@ func headContainsBaseSHA(workDir, baseSHA, baseRepo string) (bool, error) {
 }
 
 func commitExists(workDir, sha string) bool {
+	exists, _ := commitExistsContext(context.Background(), workDir, sha)
+	return exists
+}
+
+func commitExistsContext(ctx context.Context, workDir, sha string) (bool, error) {
 	if strings.TrimSpace(sha) == "" {
-		return false
+		return false, nil
 	}
 	if !isHexGitObjectID(sha) {
-		return false
+		return false, nil
 	}
-	_, err := execGit(workDir, "cat-file", "-e", sha+"^{commit}")
-	return err == nil
+	_, err := execWorkspaceGitContext(ctx, workDir, "cat-file", "-e", sha+"^{commit}")
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	return err == nil, nil
 }
 
 func shortGitSHA(sha string) string {
@@ -685,40 +875,85 @@ func resetReservedWorkspacePaths(workDir string) {
 
 // execGit runs a git command in the given directory and returns combined output.
 func execGit(dir string, args ...string) (string, error) {
-	cmd, err := newWorkspaceGitCommand(dir, args...)
-	if err != nil {
+	if err := validateGitInvocation(args); err != nil {
 		return "", err
 	}
+	cmd := exec.Command(gitExecutable)
+	cmd.Args = append([]string{gitExecutable}, gitSafeDirectoryArgs(dir, args...)...)
+	cmd.Dir = dir
+	cmd.SysProcAttr = gitCommandSysProcAttr()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
-func execGitLimited(dir string, limit int64, args ...string) (string, bool, error) {
+func execWorkspaceGitContext(ctx context.Context, dir string, args ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cmd, err := newWorkspaceGitCommand(ctx, dir, args...)
+	if err != nil {
+		return "", err
+	}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	runErr := runWorkspaceGitCommand(cmd)
+	cleanupWorkspaceGitDescendants(cmd)
+	return output.String(), normalizeWorkspaceGitCommandError(ctx, cmd, runErr)
+}
+
+func execGitLimitedContext(
+	ctx context.Context,
+	dir string,
+	limit int64,
+	args ...string,
+) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	var stdout limitedOutputBuffer
 	stdout.limit = limit
 	var stderr limitedOutputBuffer
 	stderr.limit = 64 * 1024
-	cmd, err := newWorkspaceGitCommand(dir, args...)
+	cmd, err := newWorkspaceGitCommand(ctx, dir, args...)
 	if err != nil {
 		return "", false, err
 	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), stdout.truncated, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	runErr := runWorkspaceGitCommand(cmd)
+	cleanupWorkspaceGitDescendants(cmd)
+	if err := normalizeWorkspaceGitCommandError(ctx, cmd, runErr); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			return stdout.String(), stdout.truncated, err
+		}
+		return stdout.String(), stdout.truncated, fmt.Errorf("%s: %w", message, err)
 	}
 	return stdout.String(), stdout.truncated, nil
 }
 
-func newWorkspaceGitCommand(dir string, args ...string) (*exec.Cmd, error) {
+func newWorkspaceGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
 	if err := validateGitInvocation(args); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("git")
-	cmd.Args = append([]string{"git"}, gitSafeDirectoryArgs(dir, args...)...)
+	cmd := exec.CommandContext(ctx, gitExecutable)
+	cmd.Args = append([]string{gitExecutable}, gitSafeDirectoryArgs(dir, args...)...)
 	cmd.Dir = dir
-	cmd.SysProcAttr = gitCommandSysProcAttr()
+	if err := configureWorkspaceGitCommand(cmd); err != nil {
+		return nil, err
+	}
 	return cmd, nil
+}
+
+func normalizeWorkspaceGitCommandError(ctx context.Context, cmd *exec.Cmd, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, exec.ErrWaitDelay) && cmd != nil && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		return nil
+	}
+	return err
 }
 
 func validateGitInvocation(args []string) error {
@@ -762,7 +997,7 @@ func safeGitRemote(remote string) (string, error) {
 		return "", fmt.Errorf("invalid git remote")
 	}
 	switch parsed.Scheme {
-	case "https", "ssh", "git", "file":
+	case "https", "ssh", gitExecutable, "file":
 		return remote, nil
 	default:
 		return "", fmt.Errorf("unsupported git remote scheme %q", parsed.Scheme)
