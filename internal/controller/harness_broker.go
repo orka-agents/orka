@@ -683,6 +683,16 @@ func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 	return unresolved || started, nil
 }
 
+type harnessBrokeredToolResultPayload struct {
+	Brokered         bool               `json:"brokered"`
+	IdempotencyKey   string             `json:"idempotencyKey"`
+	TargetArgsDigest string             `json:"targetArgsDigest,omitempty"`
+	Approved         *bool              `json:"approved,omitempty"`
+	ToolResultRef    string             `json:"toolResultRef,omitempty"`
+	ToolResult       json.RawMessage    `json:"toolResult,omitempty"`
+	ToolError        *harness.ErrorInfo `json:"toolError,omitempty"`
+}
+
 func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -693,17 +703,8 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
 		return harness.ToolCallResult{}, false, nil
 	}
-	type resultPayload struct {
-		Brokered         bool               `json:"brokered"`
-		IdempotencyKey   string             `json:"idempotencyKey"`
-		TargetArgsDigest string             `json:"targetArgsDigest,omitempty"`
-		Approved         *bool              `json:"approved,omitempty"`
-		ToolResultRef    string             `json:"toolResultRef,omitempty"`
-		ToolResult       json.RawMessage    `json:"toolResult,omitempty"`
-		ToolError        *harness.ErrorInfo `json:"toolError,omitempty"`
-	}
 	var selectedEvent store.ExecutionEvent
-	var selectedPayload resultPayload
+	var selectedPayload harnessBrokeredToolResultPayload
 	found := false
 	err := r.scanHarnessBrokeredToolEvents(
 		ctx,
@@ -713,7 +714,7 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 			if event.ToolCallID != frame.ToolCallID {
 				return true
 			}
-			var payload resultPayload
+			var payload harnessBrokeredToolResultPayload
 			if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
 				return true
 			}
@@ -735,9 +736,18 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 	if !found {
 		return harness.ToolCallResult{}, false, nil
 	}
+	return r.replayHarnessBrokeredToolResult(ctx, task, frame, idempotencyKey, argsDigest, selectedEvent, selectedPayload)
+}
 
-	event := selectedEvent
-	payload := selectedPayload
+func (r *TaskReconciler) replayHarnessBrokeredToolResult(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	frame harness.HarnessEventFrame,
+	idempotencyKey string,
+	argsDigest string,
+	event store.ExecutionEvent,
+	payload harnessBrokeredToolResultPayload,
+) (harness.ToolCallResult, bool, error) {
 	if event.ToolName != frame.ToolName {
 		result := harness.ToolCallResult{
 			Version:          harness.ProtocolVersion,

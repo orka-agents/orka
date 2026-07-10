@@ -148,8 +148,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 	deadline := time.Now().Add(timeout)
 	pollInterval := 5 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
 
 	results := make(map[string]*TaskResultInfo)
 	for _, taskName := range waitArgs.Tasks {
@@ -170,81 +168,16 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			var task corev1alpha1.Task
 			err := t.k8sClient.Get(ctx, types.NamespacedName{Name: taskName, Namespace: ns}, &task)
 			if err != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
+				if ctxErr := recordWaitForTasksGetError(ctx, results[taskName], err); ctxErr != nil {
 					return "", ctxErr
 				}
-				results[taskName].Phase = taskPhaseErrorString
-				results[taskName].Result = fmt.Sprintf("error: %v", err)
 				if !isPermanentWaitForTasksGetError(err) {
 					allTerminal = false
 				}
 				continue
 			}
-
-			phase := task.Status.Phase
-
-			// Don't overwrite a task already marked as Retried
-			if results[taskName].Phase != "Retried" {
-				results[taskName].Phase = string(phase)
-			}
-
-			if task.Spec.AgentRef != nil {
-				results[taskName].Agent = task.Spec.AgentRef.Name
-			}
-			if ws := taskWorkspace(&task); ws != nil {
-				results[taskName].WorkspaceRef = ws.Ref
-				results[taskName].WorkspaceBranch = ws.Branch
-			}
-
-			if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
+			if !updateWaitTaskResult(ctx, ns, taskName, &task, results[taskName]) {
 				allTerminal = false
-				continue
-			}
-
-			// Handle failed tasks — report failure details but do NOT auto-retry.
-			// Retry logic is handled by the coordinator LLM which can make informed
-			// decisions about whether and how to retry.
-			if phase == corev1alpha1.TaskPhaseFailed {
-				if task.Annotations[labels.AnnotationAutoRetry] == trueStr {
-					retryCount, maxRetries := getRetryInfo(&task)
-					results[taskName].FailureDetails = &FailureDetails{
-						Message:    task.Status.Message,
-						RetryCount: retryCount,
-						MaxRetries: maxRetries,
-					}
-				}
-			}
-
-			// Fetch result if available. Controller-side brokered coordination calls
-			// provide ResultStore through ToolContext; worker calls fall back to the
-			// internal HTTP result endpoint.
-			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, taskName)
-				if fetchErr == nil {
-					// Parse structured result and strip diff to avoid context bloat.
-					sr := common.ParseStructuredResult(resultStr)
-					summary := truncateWaitTaskSummary(sr.Summary)
-					results[taskName].Summary = summary
-					results[taskName].Verdict = sr.Verdict
-					results[taskName].Feedback = sr.Feedback
-					results[taskName].Files = sr.Files
-					results[taskName].Data = boundWaitTaskData(sr.Data)
-					results[taskName].Artifacts = sr.Artifacts
-					results[taskName].BaseSHA = sr.BaseSHA
-					results[taskName].HeadSHA = sr.HeadSHA
-					results[taskName].PushBranch = sr.PushBranch
-					// Set Result to summary only (never include raw diff).
-					results[taskName].Result = summary
-				} else {
-					results[taskName].Result = fmt.Sprintf("error reading result: %v", fetchErr)
-				}
-			} else if task.Status.Message != "" {
-				results[taskName].Result = task.Status.Message
-			}
-
-			// Add iteration label if present
-			if iterStr, ok := task.Labels[labels.LabelIteration]; ok {
-				results[taskName].Iteration = iterStr
 			}
 		}
 
@@ -284,6 +217,69 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+func recordWaitForTasksGetError(ctx context.Context, result *TaskResultInfo, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	result.Phase = taskPhaseErrorString
+	result.Result = fmt.Sprintf("error: %v", err)
+	return nil
+}
+
+func updateWaitTaskResult(ctx context.Context, namespace, taskName string, task *corev1alpha1.Task, result *TaskResultInfo) bool {
+	phase := task.Status.Phase
+	if result.Phase != "Retried" {
+		result.Phase = string(phase)
+	}
+	if task.Spec.AgentRef != nil {
+		result.Agent = task.Spec.AgentRef.Name
+	}
+	if ws := taskWorkspace(task); ws != nil {
+		result.WorkspaceRef = ws.Ref
+		result.WorkspaceBranch = ws.Branch
+	}
+	if phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed {
+		return false
+	}
+	if phase == corev1alpha1.TaskPhaseFailed && task.Annotations[labels.AnnotationAutoRetry] == trueStr {
+		retryCount, maxRetries := getRetryInfo(task)
+		result.FailureDetails = &FailureDetails{
+			Message:    task.Status.Message,
+			RetryCount: retryCount,
+			MaxRetries: maxRetries,
+		}
+	}
+	if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
+		populateWaitTaskResult(ctx, namespace, taskName, result)
+	} else if task.Status.Message != "" {
+		result.Result = task.Status.Message
+	}
+	if iterStr, ok := task.Labels[labels.LabelIteration]; ok {
+		result.Iteration = iterStr
+	}
+	return true
+}
+
+func populateWaitTaskResult(ctx context.Context, namespace, taskName string, result *TaskResultInfo) {
+	resultStr, err := fetchTaskResultForNamespace(ctx, namespace, taskName)
+	if err != nil {
+		result.Result = fmt.Sprintf("error reading result: %v", err)
+		return
+	}
+	sr := common.ParseStructuredResult(resultStr)
+	summary := truncateWaitTaskSummary(sr.Summary)
+	result.Summary = summary
+	result.Verdict = sr.Verdict
+	result.Feedback = sr.Feedback
+	result.Files = sr.Files
+	result.Data = boundWaitTaskData(sr.Data)
+	result.Artifacts = sr.Artifacts
+	result.BaseSHA = sr.BaseSHA
+	result.HeadSHA = sr.HeadSHA
+	result.PushBranch = sr.PushBranch
+	result.Result = summary
 }
 
 func isPermanentWaitForTasksGetError(err error) bool {

@@ -51,11 +51,11 @@ func TestWaitForTasksTool_Parameters(t *testing.T) {
 		t.Fatal("Parameters() returned nil")
 	}
 
-	var schema map[string]any
-	if err := json.Unmarshal(params, &schema); err != nil {
+	var paramsSchema map[string]any
+	if err := json.Unmarshal(params, &paramsSchema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
-	if schema[jsonSchemaTypeField] != typeObject {
+	if paramsSchema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
 }
