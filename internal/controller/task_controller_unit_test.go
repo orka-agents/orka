@@ -108,6 +108,62 @@ func (s failingGetSessionStore) GetSession(context.Context, string, string) (*st
 	return nil, s.err
 }
 
+// failOnceTaskCleanupStore injects one durable cleanup failure while delegating
+// every other call to an idempotent backing store.
+type failOnceTaskCleanupStore struct {
+	store.ResultStore
+	store.ArtifactStore
+	store.PlanStore
+	store.MessageStore
+
+	failOperation string
+	failErr       error
+	failed        bool
+}
+
+func (s *failOnceTaskCleanupStore) maybeFail(operation string) error {
+	if !s.failed && s.failOperation == operation {
+		s.failed = true
+		return s.failErr
+	}
+	return nil
+}
+
+func (s *failOnceTaskCleanupStore) DeleteResult(ctx context.Context, namespace, taskName string) error {
+	if err := s.maybeFail("result"); err != nil {
+		return err
+	}
+	return s.ResultStore.DeleteResult(ctx, namespace, taskName)
+}
+
+func (s *failOnceTaskCleanupStore) DeleteArtifacts(ctx context.Context, namespace, taskName string) error {
+	if err := s.maybeFail("artifacts"); err != nil {
+		return err
+	}
+	return s.ArtifactStore.DeleteArtifacts(ctx, namespace, taskName)
+}
+
+func (s *failOnceTaskCleanupStore) DeletePlan(ctx context.Context, namespace, taskName string) error {
+	if err := s.maybeFail("plan"); err != nil {
+		return err
+	}
+	return s.PlanStore.DeletePlan(ctx, namespace, taskName)
+}
+
+func (s *failOnceTaskCleanupStore) DeleteTaskMessages(ctx context.Context, namespace, taskName string) error {
+	if err := s.maybeFail("task messages"); err != nil {
+		return err
+	}
+	return s.MessageStore.DeleteTaskMessages(ctx, namespace, taskName)
+}
+
+func (s *failOnceTaskCleanupStore) DeleteParentMessages(ctx context.Context, namespace, taskName string) error {
+	if err := s.maybeFail("parent messages"); err != nil {
+		return err
+	}
+	return s.MessageStore.DeleteParentMessages(ctx, namespace, taskName)
+}
+
 type recordingTaskWorkspaceExecutor struct {
 	deleteReqs  []workspace.DeleteRequest
 	deleteErr   error
@@ -3074,6 +3130,86 @@ func TestHandleDeletion_WithResultRef(t *testing.T) {
 	}
 }
 
+func TestHandleDeletionDeletesUnadvertisedResult(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "del-unadvertised-result",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	if err := r.ResultStore.SaveResult(context.Background(), task.Namespace, task.Name, []byte("stale")); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+
+	if _, err := r.handleDeletion(context.Background(), task); err != nil {
+		t.Fatalf("handleDeletion() error = %v", err)
+	}
+	if _, err := r.ResultStore.GetResult(context.Background(), task.Namespace, task.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetResult() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestHandleDeletionRetainsFinalizerUntilDurableStoreCleanupSucceeds(t *testing.T) {
+	for _, operation := range []string{"result", "artifacts", "plan", "task messages", "parent messages"} {
+		t.Run(operation, func(t *testing.T) {
+			scheme := newTestScheme()
+			taskName := "del-fail-once-" + strings.ReplaceAll(operation, " ", "-")
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       taskName,
+					Namespace:  "default",
+					Finalizers: []string{labels.TaskFinalizer},
+				},
+			}
+			r := newUnitReconciler(scheme, task)
+			backing := r.ResultStore.(*sqlite.Store)
+			cleanupErr := errors.New("injected durable cleanup failure")
+			cleanupStore := &failOnceTaskCleanupStore{
+				ResultStore:   backing,
+				ArtifactStore: backing,
+				PlanStore:     backing,
+				MessageStore:  backing,
+				failOperation: operation,
+				failErr:       cleanupErr,
+			}
+			r.ResultStore = cleanupStore
+			r.ArtifactStore = cleanupStore
+			r.PlanStore = cleanupStore
+			r.MessageStore = cleanupStore
+			if err := backing.SaveResult(context.Background(), task.Namespace, task.Name, []byte("stale")); err != nil {
+				t.Fatalf("SaveResult() error = %v", err)
+			}
+
+			if _, err := r.handleDeletion(context.Background(), task); !errors.Is(err, cleanupErr) {
+				t.Fatalf("first handleDeletion() error = %v, want %v", err, cleanupErr)
+			}
+			var persisted corev1alpha1.Task
+			if err := r.Get(context.Background(), types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &persisted); err != nil {
+				t.Fatalf("Get task after failed cleanup: %v", err)
+			}
+			if !controllerutil.ContainsFinalizer(&persisted, labels.TaskFinalizer) {
+				t.Fatal("task finalizer removed after durable cleanup failure")
+			}
+
+			if _, err := r.handleDeletion(context.Background(), &persisted); err != nil {
+				t.Fatalf("second handleDeletion() error = %v", err)
+			}
+			if err := r.Get(context.Background(), types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &persisted); err != nil {
+				t.Fatalf("Get task after successful retry: %v", err)
+			}
+			if controllerutil.ContainsFinalizer(&persisted, labels.TaskFinalizer) {
+				t.Fatal("task finalizer retained after durable cleanup retry succeeded")
+			}
+			if _, err := backing.GetResult(context.Background(), task.Namespace, task.Name); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("GetResult() error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 func TestHandleDeletionDeletesExecutionEvents(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -4779,6 +4915,142 @@ func TestHandleScheduled_WithTimeZone(t *testing.T) {
 	}
 	if result.RequeueAfter <= 0 {
 		t.Error("expected positive RequeueAfter")
+	}
+}
+
+func TestHandleScheduledSkippedOccurrencesAdvanceCursorOnEachReconcile(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		deadline    int64
+		activeChild bool
+	}{
+		{name: "missed deadline", deadline: 1},
+		{name: "forbid concurrent", deadline: 600, activeChild: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			initialCursor := time.Now().UTC().Truncate(time.Minute).Add(-3 * time.Minute)
+			lastSchedule := metav1.NewTime(initialCursor)
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "sched-skip-" + strings.ReplaceAll(tc.name, " ", "-"),
+					Namespace:         "default",
+					CreationTimestamp: metav1.NewTime(initialCursor.Add(-time.Hour)),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Schedule:                "* * * * *",
+					ConcurrencyPolicy:       corev1alpha1.ForbidConcurrent,
+					StartingDeadlineSeconds: &tc.deadline,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:            corev1alpha1.TaskPhaseScheduled,
+					LastScheduleTime: &lastSchedule,
+				},
+			}
+			objects := []client.Object{task}
+			if tc.activeChild {
+				objects = append(objects, &corev1alpha1.Task{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      task.Name + "-active",
+						Namespace: task.Namespace,
+						Labels: map[string]string{
+							labels.LabelParentTask: labels.SelectorValue(task.Name),
+						},
+					},
+					Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+				})
+			}
+			r := newUnitReconciler(scheme, objects...)
+			key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+
+			for reconcileNumber := 1; reconcileNumber <= 2; reconcileNumber++ {
+				result, err := r.handleScheduled(context.Background(), task)
+				if err != nil {
+					t.Fatalf("handleScheduled() reconcile %d error = %v", reconcileNumber, err)
+				}
+				if result.RequeueAfter <= 0 {
+					t.Fatalf("handleScheduled() reconcile %d RequeueAfter = %v, want positive", reconcileNumber, result.RequeueAfter)
+				}
+				if err := r.Get(context.Background(), key, task); err != nil {
+					t.Fatalf("Get task after reconcile %d: %v", reconcileNumber, err)
+				}
+				wantCursor := initialCursor.Add(time.Duration(reconcileNumber) * time.Minute)
+				if task.Status.LastScheduleTime == nil || !task.Status.LastScheduleTime.Time.Equal(wantCursor) {
+					t.Fatalf("LastScheduleTime after reconcile %d = %v, want %s", reconcileNumber, task.Status.LastScheduleTime, wantCursor.Format(time.RFC3339))
+				}
+			}
+		})
+	}
+}
+
+func TestHandleScheduledSkippedOccurrencePropagatesStatusUpdateError(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		deadline    int64
+		activeChild bool
+	}{
+		{name: "missed deadline", deadline: 1},
+		{name: "forbid concurrent", deadline: 600, activeChild: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			initialCursor := time.Now().UTC().Truncate(time.Minute).Add(-3 * time.Minute)
+			lastSchedule := metav1.NewTime(initialCursor)
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "sched-status-error-" + strings.ReplaceAll(tc.name, " ", "-"),
+					Namespace:         "default",
+					CreationTimestamp: metav1.NewTime(initialCursor.Add(-time.Hour)),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Schedule:                "* * * * *",
+					ConcurrencyPolicy:       corev1alpha1.ForbidConcurrent,
+					StartingDeadlineSeconds: &tc.deadline,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:            corev1alpha1.TaskPhaseScheduled,
+					LastScheduleTime: &lastSchedule,
+				},
+			}
+			objects := []client.Object{task}
+			if tc.activeChild {
+				objects = append(objects, &corev1alpha1.Task{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      task.Name + "-active",
+						Namespace: task.Namespace,
+						Labels: map[string]string{
+							labels.LabelParentTask: labels.SelectorValue(task.Name),
+						},
+					},
+					Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+				})
+			}
+			base := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.Task{}).
+				WithObjects(objects...).
+				Build()
+			statusErr := errors.New("injected status update failure")
+			fc := interceptor.NewClient(base, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					if subResourceName == "status" {
+						return statusErr
+					}
+					return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+				},
+			})
+			r := &TaskReconciler{
+				Client:   fc,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(10),
+			}
+
+			if _, err := r.handleScheduled(context.Background(), task); !errors.Is(err, statusErr) {
+				t.Fatalf("handleScheduled() error = %v, want %v", err, statusErr)
+			}
+		})
 	}
 }
 

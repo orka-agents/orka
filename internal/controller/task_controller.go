@@ -442,11 +442,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		// Clean up result data from store
-		if task.Status.ResultRef != nil && task.Status.ResultRef.Available && r.ResultStore != nil {
+		var storeCleanupErrs []error
+
+		// Result deletion is idempotent and must not depend on status advertisement:
+		// a result may have been persisted immediately before the status write failed.
+		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
-				// Continue with finalizer removal anyway
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting result from store: %w", err))
 			}
 		}
 
@@ -454,6 +457,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.ArtifactStore != nil {
 			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete artifacts", "task", task.Name)
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting artifacts: %w", err))
 			}
 		}
 
@@ -461,7 +465,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.PlanStore != nil {
 			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete plan state", "task", task.Name)
-				// Continue with finalizer removal anyway
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting plan state: %w", err))
 			}
 		}
 
@@ -469,11 +473,17 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.MessageStore != nil {
 			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete task messages", "task", task.Name)
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting task messages: %w", err))
 			}
 			// If this is a coordinator, clean up all children's messages
 			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete parent messages", "task", task.Name)
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting parent messages: %w", err))
 			}
+		}
+
+		if err := errors.Join(storeCleanupErrs...); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		// Clean up execution timeline events before allowing a future task with the
@@ -3058,13 +3068,18 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if now.Sub(scheduledTime) > time.Duration(deadlineSeconds)*time.Second {
 		log.Info("Missed schedule beyond deadline, skipping", "scheduledTime", scheduledTime, "deadline", deadlineSeconds)
 		r.Recorder.Eventf(task, "Warning", "MissedSchedule", "Missed scheduled run at %s (deadline %ds exceeded)", scheduledTime.Format(time.RFC3339), deadlineSeconds)
-		// Advance to next schedule time
+		// Consume this occurrence so a later reconcile cannot select it again.
 		next := sched.Next(now)
+		lastSchedule := metav1.NewTime(scheduledTime)
 		nextSchedule := metav1.NewTime(next)
+		lastScheduleCopy := lastSchedule
 		nextScheduleCopy := nextSchedule
-		_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+			t.Status.LastScheduleTime = &lastScheduleCopy
 			t.Status.NextScheduleTime = &nextScheduleCopy
-		})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 	}
 
@@ -3081,11 +3096,16 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 				childList.Items[i].Status.Phase == corev1alpha1.TaskPhaseRunning {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
+				lastSchedule := metav1.NewTime(scheduledTime)
 				nextSchedule := metav1.NewTime(next)
+				lastScheduleCopy := lastSchedule
 				nextScheduleCopy := nextSchedule
-				_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+					t.Status.LastScheduleTime = &lastScheduleCopy
 					t.Status.NextScheduleTime = &nextScheduleCopy
-				})
+				}); err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 			}
 		}
