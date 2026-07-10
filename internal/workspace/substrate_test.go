@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -693,6 +694,359 @@ func TestSubstrateBootstrapHandoffUploadUsesMintedSessionIdentity(t *testing.T) 
 	}
 	if !execAuthorized {
 		t.Fatal("Exec() did not use minted session JWT")
+	}
+}
+
+func TestSubstrateConcurrentHandoffTokensStayActorScoped(t *testing.T) {
+	const actorDNSSuffix = "actors.test"
+	actorIDs := []string{"actor-1", "actor-2"}
+
+	var tokenMu sync.Mutex
+	uploadedTokens := make(map[string]string, len(actorIDs))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actorID := strings.TrimSuffix(r.Host, "."+actorDNSSuffix)
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+				t.Errorf("upload Authorization = %q, want bootstrap bearer", got)
+			}
+			var req substrateUploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode upload request: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(req.Files) != 1 {
+				t.Errorf("upload files len = %d, want 1", len(req.Files))
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			wantToken := actorID + "-session-jwt"
+			gotToken := string(req.Files[0].Data)
+			if gotToken != wantToken {
+				t.Errorf("uploaded handoff token for %s = %q, want %q", actorID, gotToken, wantToken)
+			}
+			tokenMu.Lock()
+			uploadedTokens[actorID] = gotToken
+			tokenMu.Unlock()
+			_ = json.NewEncoder(w).Encode(substrateUploadResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
+			tokenMu.Lock()
+			wantToken := uploadedTokens[actorID]
+			tokenMu.Unlock()
+			if got := r.Header.Get("Authorization"); got != "Bearer "+wantToken {
+				http.Error(w, "wrong actor token", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExitCode: 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ready := make(chan struct{})
+	var mintMu sync.Mutex
+	mintCalls := 0
+	identity := substrateSessionIdentityClientFunc(func(
+		ctx context.Context,
+		req substrateMintJWTRequest,
+		_ string,
+	) (string, error) {
+		mintMu.Lock()
+		mintCalls++
+		if mintCalls == len(actorIDs) {
+			close(ready)
+		}
+		mintMu.Unlock()
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return req.SessionID + "-session-jwt", nil
+	})
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:              server.Client(),
+		routerURL:               server.URL,
+		actorDNSSuffix:          actorDNSSuffix,
+		bootstrapToken:          "bootstrap-token",
+		sessionIdentity:         identity,
+		sessionIdentityToken:    "worker-sa-token",
+		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
+		sessionIdentityAppID:    substrateDefaultIdentityAppID,
+		sessionIdentityUserID:   substrateDefaultIdentityUserID,
+	}
+
+	errs := make(chan error, len(actorIDs))
+	var uploads sync.WaitGroup
+	for _, actorID := range actorIDs {
+		uploads.Go(func() {
+			_, err := executor.Upload(t.Context(), UploadRequest{
+				Ref:              WorkspaceRef{ID: actorID},
+				BootstrapHandoff: true,
+				Artifacts: []UploadArtifact{{
+					Path: substrateHandoffTokenUploadPath,
+					Data: []byte(substrateTestToken),
+					Mode: 0o600,
+				}},
+				Timeout: time.Second,
+			})
+			errs <- err
+		})
+	}
+	uploads.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Upload() error = %v", err)
+		}
+	}
+
+	for _, actorID := range actorIDs {
+		if _, err := executor.Exec(t.Context(), ExecRequest{
+			Ref:     WorkspaceRef{ID: actorID},
+			Command: []string{"true"},
+			Timeout: time.Second,
+		}); err != nil {
+			t.Fatalf("Exec(%s) error = %v", actorID, err)
+		}
+	}
+}
+
+func TestSubstrateConcurrentSameActorRekeysStayInSync(t *testing.T) {
+	const (
+		actorID   = "actor-1"
+		firstJWT  = "session-jwt-1"
+		secondJWT = "session-jwt-2"
+	)
+	firstApplied := make(chan struct{})
+	var appliedOnce sync.Once
+	var stateMu sync.Mutex
+	activeToken := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+				t.Errorf("upload Authorization = %q, want bootstrap bearer", got)
+			}
+			var req substrateUploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Files) != 1 {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			uploadedToken := string(req.Files[0].Data)
+			stateMu.Lock()
+			activeToken = uploadedToken
+			stateMu.Unlock()
+			if uploadedToken == firstJWT {
+				appliedOnce.Do(func() { close(firstApplied) })
+				time.Sleep(100 * time.Millisecond)
+			}
+			_ = json.NewEncoder(w).Encode(substrateUploadResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
+			stateMu.Lock()
+			wantToken := activeToken
+			stateMu.Unlock()
+			if got := r.Header.Get("Authorization"); got != "Bearer "+wantToken {
+				http.Error(w, "stale local token", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExitCode: 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mintedTokens := []string{firstJWT, secondJWT}
+	var mintMu sync.Mutex
+	mintCall := 0
+	identity := substrateSessionIdentityClientFunc(func(
+		_ context.Context,
+		_ substrateMintJWTRequest,
+		_ string,
+	) (string, error) {
+		mintMu.Lock()
+		defer mintMu.Unlock()
+		token := mintedTokens[mintCall]
+		mintCall++
+		return token, nil
+	})
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:              server.Client(),
+		routerURL:               server.URL,
+		actorDNSSuffix:          "actors.test",
+		bootstrapToken:          "bootstrap-token",
+		sessionIdentity:         identity,
+		sessionIdentityToken:    "worker-sa-token",
+		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
+		sessionIdentityAppID:    substrateDefaultIdentityAppID,
+		sessionIdentityUserID:   substrateDefaultIdentityUserID,
+	}
+	upload := func() error {
+		_, err := executor.Upload(t.Context(), UploadRequest{
+			Ref:              WorkspaceRef{ID: actorID},
+			BootstrapHandoff: true,
+			Artifacts: []UploadArtifact{{
+				Path: substrateHandoffTokenUploadPath,
+				Data: []byte(substrateTestToken),
+				Mode: 0o600,
+			}},
+			Timeout: time.Second,
+		})
+		return err
+	}
+
+	firstErr := make(chan error, 1)
+	go func() { firstErr <- upload() }()
+	<-firstApplied
+	secondErr := make(chan error, 1)
+	go func() { secondErr <- upload() }()
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first Upload() error = %v", err)
+	}
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second Upload() error = %v", err)
+	}
+
+	var localToken string
+	if err := executor.withActorHandoffToken(t.Context(), actorID, func(token string) error {
+		localToken = token
+		return nil
+	}); err != nil {
+		t.Fatalf("read local actor token: %v", err)
+	}
+	stateMu.Lock()
+	remoteToken := activeToken
+	stateMu.Unlock()
+	if localToken != remoteToken || localToken != secondJWT {
+		t.Fatalf("actor tokens local=%q remote=%q, want %q", localToken, remoteToken, secondJWT)
+	}
+	if _, err := executor.Exec(t.Context(), ExecRequest{
+		Ref:     WorkspaceRef{ID: actorID},
+		Command: []string{"true"},
+		Timeout: time.Second,
+	}); err != nil {
+		t.Fatalf("Exec() after concurrent rekeys error = %v", err)
+	}
+}
+
+func TestSubstrateFailedHandoffRekeyPreservesActorToken(t *testing.T) {
+	const (
+		actorID       = "actor-1"
+		previousToken = "session-jwt-1"
+		mintedToken   = "session-jwt-2"
+	)
+
+	var stateMu sync.Mutex
+	uploadCalls := 0
+	activeToken := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == substrateTestFilesPath:
+			if got := r.Header.Get("Authorization"); got != substrateTestBootstrapBearer {
+				t.Errorf("upload Authorization = %q, want bootstrap bearer", got)
+			}
+			var req substrateUploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Files) != 1 {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			stateMu.Lock()
+			uploadCalls++
+			call := uploadCalls
+			if call == 1 {
+				activeToken = string(req.Files[0].Data)
+			}
+			stateMu.Unlock()
+			if call == 2 {
+				http.Error(w, "rekey failed", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(substrateUploadResponse{})
+		case r.Method == http.MethodPost && r.URL.Path == substrateTestExecPath:
+			stateMu.Lock()
+			wantToken := activeToken
+			stateMu.Unlock()
+			if got := r.Header.Get("Authorization"); got != "Bearer "+wantToken {
+				http.Error(w, "stale local token", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(substrateExecResponse{ExitCode: 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mintedTokens := []string{previousToken, mintedToken}
+	var mintMu sync.Mutex
+	mintCall := 0
+	identity := substrateSessionIdentityClientFunc(func(
+		_ context.Context,
+		_ substrateMintJWTRequest,
+		_ string,
+	) (string, error) {
+		mintMu.Lock()
+		defer mintMu.Unlock()
+		token := mintedTokens[mintCall]
+		mintCall++
+		return token, nil
+	})
+	executor := &SubstrateWorkspaceExecutor{
+		httpClient:              server.Client(),
+		routerURL:               server.URL,
+		actorDNSSuffix:          "actors.test",
+		bootstrapToken:          "bootstrap-token",
+		sessionIdentity:         identity,
+		sessionIdentityToken:    "worker-sa-token",
+		sessionIdentityAudience: []string{substrateDefaultIdentityAudience},
+		sessionIdentityAppID:    substrateDefaultIdentityAppID,
+		sessionIdentityUserID:   substrateDefaultIdentityUserID,
+	}
+	upload := func() error {
+		_, err := executor.Upload(t.Context(), UploadRequest{
+			Ref:              WorkspaceRef{ID: actorID},
+			BootstrapHandoff: true,
+			Artifacts: []UploadArtifact{{
+				Path: substrateHandoffTokenUploadPath,
+				Data: []byte(substrateTestToken),
+				Mode: 0o600,
+			}},
+			Timeout: time.Second,
+		})
+		return err
+	}
+
+	if err := upload(); err != nil {
+		t.Fatalf("initial Upload() error = %v", err)
+	}
+	if err := upload(); err == nil {
+		t.Fatal("rekey Upload() error = nil, want daemon failure")
+	}
+	var localToken string
+	if err := executor.withActorHandoffToken(t.Context(), actorID, func(token string) error {
+		localToken = token
+		return nil
+	}); err != nil {
+		t.Fatalf("read local actor token: %v", err)
+	}
+	if localToken != previousToken {
+		t.Fatalf("local actor token = %q, want last-known-good %q", localToken, previousToken)
+	}
+	stateMu.Lock()
+	remoteToken := activeToken
+	stateMu.Unlock()
+	if remoteToken != previousToken {
+		t.Fatalf("daemon actor token = %q, want unchanged %q", remoteToken, previousToken)
+	}
+	if _, err := executor.Exec(t.Context(), ExecRequest{
+		Ref:     WorkspaceRef{ID: actorID},
+		Command: []string{"true"},
+		Timeout: time.Second,
+	}); err != nil {
+		t.Fatalf("Exec() after failed rekey error = %v", err)
 	}
 }
 
@@ -1584,6 +1938,20 @@ type recordingSubstrateSessionIdentityClient struct {
 	bearerToken string
 	jwt         string
 	err         error
+}
+
+type substrateSessionIdentityClientFunc func(
+	context.Context,
+	substrateMintJWTRequest,
+	string,
+) (string, error)
+
+func (f substrateSessionIdentityClientFunc) MintJWT(
+	ctx context.Context,
+	req substrateMintJWTRequest,
+	bearerToken string,
+) (string, error) {
+	return f(ctx, req, bearerToken)
 }
 
 func (c *recordingSubstrateSessionIdentityClient) MintJWT(

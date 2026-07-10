@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
@@ -188,6 +189,8 @@ type SubstrateWorkspaceExecutor struct {
 	routerURL               string
 	actorDNSSuffix          string
 	handoffToken            string
+	handoffStatesMu         sync.Mutex
+	handoffStates           map[string]*substrateHandoffState
 	bootstrapToken          string
 	sessionIdentityToken    string
 	sessionIdentityAudience []string
@@ -195,6 +198,39 @@ type SubstrateWorkspaceExecutor struct {
 	sessionIdentityUserID   string
 	sessionIdentityRequired bool
 	now                     func() time.Time
+}
+
+type substrateHandoffState struct {
+	gate      chan struct{}
+	authValue string
+}
+
+func newSubstrateHandoffState(authValue string) *substrateHandoffState {
+	state := &substrateHandoffState{
+		gate:      make(chan struct{}, 1),
+		authValue: authValue,
+	}
+	state.gate <- struct{}{}
+	return state
+}
+
+func (s *substrateHandoffState) acquire(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.gate:
+		return nil
+	}
+}
+
+func (s *substrateHandoffState) release() {
+	s.gate <- struct{}{}
 }
 
 var _ WorkspaceExecutor = (*SubstrateWorkspaceExecutor)(nil)
@@ -407,7 +443,10 @@ func (e *SubstrateWorkspaceExecutor) WaitReady(ctx context.Context, req WaitRead
 					ResumeLatency: resumeLatency,
 				}, nil
 			}
-			if err := e.workspaceDaemonError(e.workspaceDaemonClient().Health(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken))); err == nil {
+			daemonErr := e.withActorHandoffToken(ctx, actorID, func(authToken string) error {
+				return e.workspaceDaemonClient().Health(ctx, e.workspaceDaemonActorRequest(actorID, authToken))
+			})
+			if err := e.workspaceDaemonError(daemonErr); err == nil {
 				readyAt := e.now()
 				resumeLatency := max(readyAt.Sub(resumeStartedAt), 0)
 				placement, density := e.substrateTelemetry(ctx, actor)
@@ -468,7 +507,12 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 		MaxOutputBytes: req.MaxOutputBytes,
 		Detach:         true,
 	}
-	resp, err := e.workspaceDaemonClient().Exec(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), body)
+	var resp *daemonprotocol.ExecResponse
+	err := e.withActorHandoffToken(ctx, actorID, func(authToken string) error {
+		var requestErr error
+		resp, requestErr = e.workspaceDaemonClient().Exec(ctx, e.workspaceDaemonActorRequest(actorID, authToken), body)
+		return requestErr
+	})
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, contextError("exec", ctxErr)
@@ -505,7 +549,12 @@ func (e *SubstrateWorkspaceExecutor) Exec(ctx context.Context, req ExecRequest) 
 func (e *SubstrateWorkspaceExecutor) pollExec(ctx context.Context, actorID, execID string) (*daemonprotocol.ExecResponse, error) {
 	backoff := substrateExecInitialPollInterval
 	for {
-		resp, err := e.workspaceDaemonClient().ExecStatus(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), execID)
+		var resp *daemonprotocol.ExecResponse
+		err := e.withActorHandoffToken(ctx, actorID, func(authToken string) error {
+			var requestErr error
+			resp, requestErr = e.workspaceDaemonClient().ExecStatus(ctx, e.workspaceDaemonActorRequest(actorID, authToken), execID)
+			return requestErr
+		})
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, contextError("exec", ctxErr)
@@ -546,25 +595,44 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 			ModTime: artifact.ModTime,
 		})
 	}
-	authToken := e.handoffToken
+	var resp *daemonprotocol.UploadResponse
 	if req.BootstrapHandoff {
+		handoffState := e.actorHandoffState(actorID)
+		if err := handoffState.acquire(ctx); err != nil {
+			return nil, contextError("upload", err)
+		}
+		defer handoffState.release()
+
 		bootstrapToken, err := e.requireBootstrapToken("upload")
 		if err != nil {
 			return nil, err
 		}
-		authToken = bootstrapToken
 		mintedToken, err := e.mintSessionIdentityHandoffToken(ctx, req.Ref)
 		if err != nil {
 			return nil, err
 		}
 		if mintedToken != "" {
-			e.handoffToken = mintedToken
 			replaceSubstrateHandoffUploadToken(files, mintedToken)
 		}
-	}
-	resp, err := e.workspaceDaemonClient().Upload(ctx, e.workspaceDaemonActorRequest(actorID, authToken), daemonprotocol.UploadRequest{Files: files})
-	if err != nil {
-		return nil, e.workspaceDaemonError(err)
+		resp, err = e.workspaceDaemonClient().Upload(ctx, e.workspaceDaemonActorRequest(actorID, bootstrapToken), daemonprotocol.UploadRequest{Files: files})
+		if err != nil {
+			return nil, e.workspaceDaemonError(err)
+		}
+		if mintedToken != "" {
+			handoffState.authValue = mintedToken
+		}
+	} else {
+		err := e.withActorHandoffToken(ctx, actorID, func(authToken string) error {
+			var requestErr error
+			resp, requestErr = e.workspaceDaemonClient().Upload(ctx, e.workspaceDaemonActorRequest(actorID, authToken), daemonprotocol.UploadRequest{Files: files})
+			return requestErr
+		})
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, contextError("upload", ctxErr)
+			}
+			return nil, e.workspaceDaemonError(err)
+		}
 	}
 	return &UploadResult{Ref: req.Ref, Artifacts: daemonArtifactsToWorkspace(resp.Artifacts)}, nil
 }
@@ -654,8 +722,16 @@ func (e *SubstrateWorkspaceExecutor) Download(ctx context.Context, req DownloadR
 	if actorID == "" {
 		return nil, NewError("download", ErrorKindInvalidArgument, "actor id is required", false, nil)
 	}
-	resp, err := e.workspaceDaemonClient().Download(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), daemonprotocol.DownloadRequest{Paths: req.Paths})
+	var resp *daemonprotocol.DownloadResponse
+	err := e.withActorHandoffToken(ctx, actorID, func(authToken string) error {
+		var requestErr error
+		resp, requestErr = e.workspaceDaemonClient().Download(ctx, e.workspaceDaemonActorRequest(actorID, authToken), daemonprotocol.DownloadRequest{Paths: req.Paths})
+		return requestErr
+	})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, contextError("download", ctxErr)
+		}
 		return nil, e.workspaceDaemonError(err)
 	}
 	return &DownloadResult{Ref: req.Ref, Artifacts: daemonDownloadedArtifactsToWorkspace(resp.Artifacts)}, nil
@@ -953,36 +1029,67 @@ func substrateDensity(workers []substrateWorker, actors []substrateActor) Densit
 }
 
 func (e *SubstrateWorkspaceExecutor) scrubDaemon(ctx context.Context, actorID string) error {
-	return e.workspaceDaemonError(e.workspaceDaemonClient().Scrub(ctx, e.workspaceDaemonActorRequest(actorID, e.handoffToken), daemonprotocol.ScrubRequest{Paths: defaultSubstrateScrubPaths()}))
+	return e.workspaceDaemonError(e.withActorHandoffToken(ctx, actorID, func(authToken string) error {
+		return e.workspaceDaemonClient().Scrub(ctx, e.workspaceDaemonActorRequest(actorID, authToken), daemonprotocol.ScrubRequest{Paths: defaultSubstrateScrubPaths()})
+	}))
 }
 
 func (e *SubstrateWorkspaceExecutor) restoreHandoffToken(ctx context.Context, actorID string) error {
-	if strings.TrimSpace(e.handoffToken) == "" {
+	restoreCtx := context.Background()
+	if ctx != nil {
+		restoreCtx = context.WithoutCancel(ctx)
+	}
+	restoreCtx, cancel := context.WithTimeout(restoreCtx, 10*time.Second)
+	defer cancel()
+
+	handoffState := e.actorHandoffState(actorID)
+	if err := handoffState.acquire(restoreCtx); err != nil {
+		return contextError("restore handoff token", err)
+	}
+	defer handoffState.release()
+	handoffToken := handoffState.authValue
+	if strings.TrimSpace(handoffToken) == "" {
 		return nil
 	}
 	bootstrapToken, err := e.requireBootstrapToken("restore handoff token")
 	if err != nil {
 		return err
 	}
-	restoreCtx := ctx
-	if restoreCtx == nil || restoreCtx.Err() != nil {
-		restoreCtx = context.Background()
-	}
-	restoreCtx, cancel := context.WithTimeout(restoreCtx, 10*time.Second)
-	defer cancel()
-
 	err = e.workspaceDaemonClient().UploadNoResponse(
 		restoreCtx,
 		e.workspaceDaemonActorRequest(actorID, bootstrapToken),
 		daemonprotocol.UploadRequest{
 			Files: []daemonprotocol.UploadFile{{
 				Path: substrateHandoffTokenUploadPath,
-				Data: []byte(e.handoffToken),
+				Data: []byte(handoffToken),
 				Mode: 0o600,
 			}},
 		},
 	)
 	return e.workspaceDaemonError(err)
+}
+
+func (e *SubstrateWorkspaceExecutor) actorHandoffState(actorID string) *substrateHandoffState {
+	e.handoffStatesMu.Lock()
+	defer e.handoffStatesMu.Unlock()
+	if e.handoffStates == nil {
+		e.handoffStates = make(map[string]*substrateHandoffState)
+	}
+	state := e.handoffStates[actorID]
+	if state == nil {
+		state = newSubstrateHandoffState(e.handoffToken)
+		e.handoffStates[actorID] = state
+	}
+	return state
+}
+
+func (e *SubstrateWorkspaceExecutor) withActorHandoffToken(ctx context.Context, actorID string, fn func(string) error) error {
+	state := e.actorHandoffState(actorID)
+	if err := state.acquire(ctx); err != nil {
+		return err
+	}
+	defer state.release()
+	return fn(state.authValue)
 }
 
 func (e *SubstrateWorkspaceExecutor) workspaceDaemonClient() daemonprotocol.Client {
