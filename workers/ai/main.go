@@ -968,23 +968,9 @@ func executeAgentLoopWithEvents(
 
 		resp, err := provider.Complete(stepCtx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
-			tokenEstimate := 0
-			for _, m := range messages {
-				tokenEstimate += len(m.Content) / 4
-			}
-			beforeCount := len(messages)
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
-			req.Messages = messages
-			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
-				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-				common.WithEventSummary("model context truncated after provider context limit error"),
-				common.WithEventContent(eventContent(map[string]any{
-					"iteration":          iteration + 1,
-					"messageCountBefore": beforeCount,
-					"messageCountAfter":  len(messages),
-				})),
+			resp, messages, err = retryCompletionAfterContextOverflow(
+				stepCtx, provider, req, err, eventRecorder, iteration,
 			)
-			resp, err = provider.Complete(stepCtx, req)
 		}
 		if err != nil {
 			errType := aiWorkerErrorType(err)
@@ -1169,6 +1155,44 @@ func executeAgentLoopWithEvents(
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+func retryCompletionAfterContextOverflow(
+	ctx context.Context,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	overflowErr error,
+	eventRecorder common.EventRecorder,
+	iteration int,
+) (*llm.CompletionResponse, []llm.Message, error) {
+	beforeSize, err := llm.EstimateCompletionRequestSize(req)
+	if err != nil {
+		return nil, req.Messages, overflowErr
+	}
+	retryReq, err := llm.TruncateCompletionRequest(req, beforeSize.EstimatedTokens/2)
+	if err != nil {
+		return nil, req.Messages, overflowErr
+	}
+	afterSize, err := llm.EstimateCompletionRequestSize(retryReq)
+	if err != nil || afterSize.SerializedBytes >= beforeSize.SerializedBytes {
+		return nil, req.Messages, overflowErr
+	}
+
+	common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
+		common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+		common.WithEventSummary("model context truncated after provider context limit error"),
+		common.WithEventContent(eventContent(map[string]any{
+			"iteration":             iteration + 1,
+			"messageCountBefore":    len(req.Messages),
+			"messageCountAfter":     len(retryReq.Messages),
+			"requestBytesBefore":    beforeSize.SerializedBytes,
+			"requestBytesAfter":     afterSize.SerializedBytes,
+			"estimatedTokensBefore": beforeSize.EstimatedTokens,
+			"estimatedTokensAfter":  afterSize.EstimatedTokens,
+		})),
+	)
+	resp, retryErr := provider.Complete(ctx, retryReq)
+	return resp, retryReq.Messages, retryErr
 }
 
 func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {
