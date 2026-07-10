@@ -23,11 +23,19 @@ import (
 
 const (
 	testAgentName       = "agent1"
+	testAgentOne        = "agent-1"
 	testModelName       = "gpt-4"
 	testSuccessName     = "success"
 	testErrorName       = "error"
 	testChatStreamName  = "chat SSE"
 	testEventStreamName = "event SSE"
+	testContinueKey     = "continue"
+	testCursorA         = "cursor-a"
+	testItemsKey        = "items"
+	testMetadataKey     = "metadata"
+	testNameKey         = "name"
+	testNextContinue    = "next"
+	testTaskOne         = "task-1"
 )
 
 // helper to create a test server that records requests and returns a fixed response.
@@ -581,6 +589,80 @@ func TestListTasksPageReturnsPaginationMetadata(t *testing.T) {
 	}
 }
 
+func TestListAllTasksReturnsAllPagesAndForwardsOpaqueContinuation(t *testing.T) {
+	const continuation = "task-cursor+/=? segment"
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("limit"); got != "2" {
+			t.Errorf("limit query = %q, want 2", got)
+		}
+		switch requests {
+		case 1:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey: []TaskDetail{
+					{testMetadataKey: map[string]any{testNameKey: testTaskOne}},
+					{testMetadataKey: map[string]any{testNameKey: "task-2"}},
+				},
+				testMetadataKey: map[string]any{testContinueKey: continuation},
+			})
+		case 2:
+			if got := r.URL.Query().Get(testContinueKey); got != continuation {
+				t.Errorf("continue query = %q, want %q", got, continuation)
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey: []TaskDetail{
+					{testMetadataKey: map[string]any{testNameKey: "task-3"}},
+				},
+				testMetadataKey: map[string]any{},
+			})
+		default:
+			t.Errorf("unexpected request %d", requests)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	tasks, err := c.ListAllTasks(context.Background(), ListTasksOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ListAllTasks() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if len(tasks) != 3 || tasks[2].Name != "task-3" {
+		t.Fatalf("tasks = %#v, want three tasks through task-3", tasks)
+	}
+}
+
+func TestListTasksRemainsSinglePage(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			testItemsKey: []TaskDetail{
+				{testMetadataKey: map[string]any{testNameKey: testTaskOne}},
+			},
+			testMetadataKey: map[string]any{testContinueKey: testNextContinue},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	tasks, err := c.ListTasks(context.Background(), ListTasksOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListTasks() error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one page", requests)
+	}
+	if len(tasks) != 1 || tasks[0].Name != testTaskOne {
+		t.Fatalf("tasks = %#v, want first page only", tasks)
+	}
+}
+
 func TestGetTask(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -822,6 +904,287 @@ func TestListAgents(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestListAgentsEmptyResultIsAnEmptySlice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			testItemsKey:    []AgentDetail{},
+			testMetadataKey: map[string]any{},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{})
+	if err != nil {
+		t.Fatalf("ListAgents() error = %v", err)
+	}
+	if agents == nil {
+		t.Fatal("ListAgents() returned nil, want an empty slice")
+	}
+	if len(agents) != 0 {
+		t.Fatalf("len(agents) = %d, want 0", len(agents))
+	}
+}
+
+func TestListAgentsReturnsAllPagesAndForwardsOpaqueContinuation(t *testing.T) {
+	const continuation = "agent-cursor+/=? segment"
+
+	firstPage := make([]AgentDetail, 100)
+	for i := range firstPage {
+		firstPage[i] = AgentDetail{
+			testMetadataKey: map[string]any{testNameKey: fmt.Sprintf("agent-%03d", i+1)},
+		}
+	}
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch requests {
+		case 1:
+			if got := r.URL.Query().Get(testContinueKey); got != "" {
+				t.Errorf("first continue query = %q, want empty", got)
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey: firstPage,
+				testMetadataKey: map[string]any{
+					testContinueKey: continuation,
+				},
+			})
+		case 2:
+			if got := r.URL.Query().Get(testContinueKey); got != continuation {
+				t.Errorf("second continue query = %q, want %q", got, continuation)
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey: []AgentDetail{
+					{testMetadataKey: map[string]any{testNameKey: "agent-101"}},
+				},
+				testMetadataKey: map[string]any{},
+			})
+		default:
+			t.Errorf("unexpected request %d", requests)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{Namespace: "ns1"})
+	if err != nil {
+		t.Fatalf("ListAgents() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if len(agents) != 101 {
+		t.Fatalf("len(agents) = %d, want 101", len(agents))
+	}
+	if got := agents[100].Name; got != "agent-101" {
+		t.Fatalf("agents[100].Name = %q, want agent-101", got)
+	}
+}
+
+func TestListAgentsStopsOnContinuationCycleWithPartialResults(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var next string
+		switch requests {
+		case 1:
+			next = testCursorA
+		case 2:
+			if got := r.URL.Query().Get(testContinueKey); got != testCursorA {
+				t.Errorf("second continue query = %q, want cursor-a", got)
+			}
+			next = "cursor-b"
+		case 3:
+			if got := r.URL.Query().Get(testContinueKey); got != "cursor-b" {
+				t.Errorf("third continue query = %q, want cursor-b", got)
+			}
+			next = testCursorA
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			testItemsKey: []AgentDetail{
+				{testMetadataKey: map[string]any{testNameKey: fmt.Sprintf("agent-%d", requests)}},
+			},
+			testMetadataKey: map[string]any{testContinueKey: next},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{})
+	if err == nil {
+		t.Fatal("ListAgents() error = nil, want continuation cycle error")
+	}
+	if !strings.Contains(err.Error(), "continuation cycle") {
+		t.Fatalf("ListAgents() error = %q, want continuation cycle", err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+	if len(agents) != 3 {
+		t.Fatalf("len(agents) = %d, want 3 partial results", len(agents))
+	}
+}
+
+func TestListAgentsStopsWhenContinuationDoesNotAdvance(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 2 && r.URL.Query().Get(testContinueKey) != "stuck" {
+			t.Errorf("continue query = %q, want stuck", r.URL.Query().Get(testContinueKey))
+		}
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			testItemsKey: []AgentDetail{
+				{testMetadataKey: map[string]any{testNameKey: fmt.Sprintf("agent-%d", requests)}},
+			},
+			testMetadataKey: map[string]any{testContinueKey: "stuck"},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "did not advance") {
+		t.Fatalf("ListAgents() error = %v, want non-progress error", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("len(agents) = %d, want 2 partial results", len(agents))
+	}
+}
+
+func TestListAgentsErrorsWhenMetadataClaimsUnreachableRemainingItems(t *testing.T) {
+	remaining := int64(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(agentListResponse{ //nolint:errcheck
+			Items: []AgentDetail{
+				{testMetadataKey: map[string]any{testNameKey: testAgentOne}},
+			},
+			Metadata: struct {
+				Continue           string `json:"continue,omitempty"`
+				RemainingItemCount *int64 `json:"remainingItemCount,omitempty"`
+			}{
+				RemainingItemCount: &remaining,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "remaining items") {
+		t.Fatalf("ListAgents() error = %v, want unreachable remaining items error", err)
+	}
+	if len(agents) != 1 || agents[0].Name != testAgentOne {
+		t.Fatalf("agents = %#v, want first-page partial result", agents)
+	}
+}
+
+func TestListAgentsStopsAtPaginationPageLimitWithPartialResults(t *testing.T) {
+	const maxRequests = maxAutoPaginationPages
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests > maxRequests {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			testItemsKey: []AgentDetail{
+				{testMetadataKey: map[string]any{testNameKey: fmt.Sprintf("agent-%d", requests)}},
+			},
+			testMetadataKey: map[string]any{
+				testContinueKey: fmt.Sprintf("cursor-%d", requests),
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{})
+	if err == nil {
+		t.Fatal("ListAgents() error = nil, want page limit error")
+	}
+	if !strings.Contains(err.Error(), "page limit") {
+		t.Fatalf("ListAgents() error = %q, want page limit", err)
+	}
+	if requests != maxRequests {
+		t.Fatalf("requests = %d, want %d", requests, maxRequests)
+	}
+	if len(agents) != maxRequests {
+		t.Fatalf("len(agents) = %d, want %d partial results", len(agents), maxRequests)
+	}
+}
+
+func TestListAgentsReturnsPartialResultsWhenLaterPageFails(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey: []AgentDetail{
+					{testMetadataKey: map[string]any{testNameKey: testAgentOne}},
+				},
+				testMetadataKey: map[string]any{testContinueKey: testNextContinue},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "later page failed") //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	agents, err := c.ListAgents(context.Background(), ListOptions{})
+	if err == nil {
+		t.Fatal("ListAgents() error = nil, want later-page error")
+	}
+	if !strings.Contains(err.Error(), "after 1 items") {
+		t.Fatalf("ListAgents() error = %q, want partial result count", err)
+	}
+	if len(agents) != 1 || agents[0].Name != testAgentOne {
+		t.Fatalf("agents = %#v, want one partial result", agents)
+	}
+}
+
+func TestListAgentsHonorsContextCancellationBetweenPages(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var requests int
+	c := New("http://orka.test", "")
+	c.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		body := `{"items":[{"metadata":{"name":"agent-1"}}],"metadata":{"continue":"next"}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: &cancelOnCloseReadCloser{
+				ReadCloser: io.NopCloser(strings.NewReader(body)),
+				cancel:     cancel,
+			},
+		}, nil
+	})}
+
+	agents, err := c.ListAgents(ctx, ListOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListAgents() error = %v, want context canceled", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if len(agents) != 1 || agents[0].Name != testAgentOne {
+		t.Fatalf("agents = %#v, want first-page partial result", agents)
 	}
 }
 

@@ -37,7 +37,7 @@ func newAgentListCmd() *cobra.Command {
 		Short: "List agents",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
-			agents, err := c.ListAgents(context.Background(), client.ListOptions{
+			agents, err := c.ListAgents(cmd.Context(), client.ListOptions{
 				Namespace: c.Namespace,
 			})
 			if err != nil {

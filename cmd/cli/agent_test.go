@@ -3,13 +3,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
-const agentsAPIPath = "/api/v1/agents"
+const (
+	agentContinueKey  = "continue"
+	agentNextContinue = "next"
+	agentsAPIPath     = "/api/v1/agents"
+)
 
 func TestNewAgentCmd(t *testing.T) {
 	cmd := newAgentCmd()
@@ -110,6 +118,57 @@ func TestNewAgentListCmd_Execute(t *testing.T) {
 	}
 }
 
+func TestNewAgentListCmd_ListsThe101stAgent(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch requests {
+		case 1:
+			items := make([]map[string]any, 100)
+			for i := range items {
+				items[i] = map[string]any{
+					"metadata": map[string]any{"name": fmt.Sprintf("agent-%03d", i+1)},
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items":    items,
+				"metadata": map[string]any{agentContinueKey: agentNextContinue},
+			})
+		case 2:
+			if got := r.URL.Query().Get(agentContinueKey); got != agentNextContinue {
+				t.Errorf("continue query = %q, want %s", got, agentNextContinue)
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{"metadata": map[string]any{"name": "agent-101"}},
+				},
+				"metadata": map[string]any{},
+			})
+		default:
+			t.Errorf("unexpected request %d", requests)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "list", "--server", srv.URL})
+
+	stdout, err := captureOutput(t, root.Execute)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if !strings.Contains(stdout, "agent-101") {
+		t.Fatalf("stdout = %q, want agent-101", stdout)
+	}
+}
+
 func TestNewAgentListCmd_Empty(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -124,6 +183,32 @@ func TestNewAgentListCmd_Empty(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestNewAgentListCmd_HonorsCommandContextCancellation(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	root := newRootCmd()
+	root.SetArgs([]string{"agent", "list", "--server", srv.URL})
+
+	err := root.ExecuteContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ExecuteContext() error = %v, want context canceled", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 

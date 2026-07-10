@@ -28,6 +28,7 @@ const (
 	maxErrorResponseBodyBytes    = 64 << 10
 	maxResponseBodyDrainBytes    = 64 << 10
 	responseBodyDrainTimeout     = 100 * time.Millisecond
+	maxAutoPaginationPages       = 1000
 )
 
 // Client is an HTTP client for the Orka API.
@@ -88,6 +89,87 @@ type ListOptions struct {
 	Namespace string
 }
 
+type listPage[T any] struct {
+	Items              []T
+	Continue           string
+	RemainingItemCount *int64
+}
+
+func collectAllPages[T any](
+	ctx context.Context,
+	resource string,
+	initialContinuation string,
+	fetch func(context.Context, string) (*listPage[T], error),
+) ([]T, error) {
+	items := make([]T, 0)
+	continuation := initialContinuation
+	seenContinuations := make(map[string]struct{})
+	if continuation != "" {
+		seenContinuations[continuation] = struct{}{}
+	}
+
+	for pageNumber := 1; pageNumber <= maxAutoPaginationPages; pageNumber++ {
+		if err := ctx.Err(); err != nil {
+			return items, fmt.Errorf(
+				"listing %s stopped after %d items before page %d: %w",
+				resource,
+				len(items),
+				pageNumber,
+				err,
+			)
+		}
+
+		page, err := fetch(ctx, continuation)
+		if err != nil {
+			return items, fmt.Errorf(
+				"listing %s stopped after %d items on page %d: %w",
+				resource,
+				len(items),
+				pageNumber,
+				err,
+			)
+		}
+		items = append(items, page.Items...)
+		if page.Continue == "" {
+			if page.RemainingItemCount != nil && *page.RemainingItemCount > 0 {
+				return items, fmt.Errorf(
+					"listing %s stopped after %d items: pagination ended with %d remaining items but no continuation",
+					resource,
+					len(items),
+					*page.RemainingItemCount,
+				)
+			}
+			return items, nil
+		}
+		if page.Continue == continuation {
+			return items, fmt.Errorf(
+				"listing %s stopped after %d items: continuation did not advance",
+				resource,
+				len(items),
+			)
+		}
+		if _, seen := seenContinuations[page.Continue]; seen {
+			return items, fmt.Errorf(
+				"listing %s stopped after %d items: continuation cycle detected",
+				resource,
+				len(items),
+			)
+		}
+		if pageNumber == maxAutoPaginationPages {
+			return items, fmt.Errorf(
+				"listing %s stopped after %d items: pagination page limit (%d) reached",
+				resource,
+				len(items),
+				maxAutoPaginationPages,
+			)
+		}
+		seenContinuations[page.Continue] = struct{}{}
+		continuation = page.Continue
+	}
+
+	return items, fmt.Errorf("listing %s stopped: pagination terminated unexpectedly", resource)
+}
+
 // GetOptions contains options for get operations.
 type GetOptions struct {
 	Namespace string
@@ -115,6 +197,12 @@ type agentListResponse struct {
 
 // ListAgents returns all agents from the API.
 func (c *Client) ListAgents(ctx context.Context, opts ListOptions) ([]AgentSummary, error) {
+	return collectAllPages(ctx, "agents", "", func(ctx context.Context, continuation string) (*listPage[AgentSummary], error) {
+		return c.listAgentsPage(ctx, opts, continuation)
+	})
+}
+
+func (c *Client) listAgentsPage(ctx context.Context, opts ListOptions, continuation string) (*listPage[AgentSummary], error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/agents")
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
@@ -122,6 +210,9 @@ func (c *Client) ListAgents(ctx context.Context, opts ListOptions) ([]AgentSumma
 	q := u.Query()
 	if opts.Namespace != "" {
 		q.Set("namespace", opts.Namespace)
+	}
+	if continuation != "" {
+		q.Set("continue", continuation)
 	}
 	u.RawQuery = q.Encode()
 
@@ -139,7 +230,11 @@ func (c *Client) ListAgents(ctx context.Context, opts ListOptions) ([]AgentSumma
 	for _, item := range resp.Items {
 		summaries = append(summaries, extractAgentSummary(item))
 	}
-	return summaries, nil
+	return &listPage[AgentSummary]{
+		Items:              summaries,
+		Continue:           resp.Metadata.Continue,
+		RemainingItemCount: resp.Metadata.RemainingItemCount,
+	}, nil
 }
 
 // GetAgent returns full details for a single agent.
@@ -610,6 +705,28 @@ func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSu
 		return nil, err
 	}
 	return result.Items, nil
+}
+
+// ListAllTasks returns every task from the requested starting point by following pagination metadata.
+func (c *Client) ListAllTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSummary, error) {
+	initialContinuation := opts.Continue
+	opts.Continue = ""
+	return collectAllPages(ctx, "tasks", initialContinuation, func(
+		ctx context.Context,
+		continuation string,
+	) (*listPage[TaskSummary], error) {
+		pageOpts := opts
+		pageOpts.Continue = continuation
+		page, err := c.ListTasksPage(ctx, pageOpts)
+		if err != nil {
+			return nil, err
+		}
+		return &listPage[TaskSummary]{
+			Items:              page.Items,
+			Continue:           page.Continue,
+			RemainingItemCount: page.RemainingItemCount,
+		}, nil
+	})
 }
 
 // ListTasksPage returns one task page from the API, including pagination metadata.
