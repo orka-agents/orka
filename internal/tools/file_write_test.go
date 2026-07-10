@@ -144,6 +144,237 @@ func TestFileWriteTool_Execute_CreateDirs(t *testing.T) {
 	}
 }
 
+func TestFileWriteTool_Execute_NestedWriteAndAppend(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &FileWriteTool{
+		workDir:      tmpDir,
+		maxFileSize:  1024 * 1024,
+		allowedPaths: []string{tmpDir},
+	}
+
+	writeResultJSON, err := tool.Execute(context.Background(), json.RawMessage(
+		`{"path":"nested/dir/file.txt","content":"first","mode":"write"}`,
+	))
+	if err != nil {
+		t.Fatalf("write Execute() error = %v", err)
+	}
+
+	var writeResult FileWriteResult
+	if err := json.Unmarshal([]byte(writeResultJSON), &writeResult); err != nil {
+		t.Fatalf("failed to unmarshal write result: %v", err)
+	}
+	if writeResult != (FileWriteResult{
+		Path:    "nested/dir/file.txt",
+		Size:    len("first"),
+		Mode:    modeWrite,
+		Created: true,
+	}) {
+		t.Errorf("write result = %+v, want nested write result", writeResult)
+	}
+
+	appendResultJSON, err := tool.Execute(context.Background(), json.RawMessage(
+		`{"path":"nested/dir/file.txt","content":" second","mode":"append"}`,
+	))
+	if err != nil {
+		t.Fatalf("append Execute() error = %v", err)
+	}
+
+	var appendResult FileWriteResult
+	if err := json.Unmarshal([]byte(appendResultJSON), &appendResult); err != nil {
+		t.Fatalf("failed to unmarshal append result: %v", err)
+	}
+	if appendResult != (FileWriteResult{
+		Path:    "nested/dir/file.txt",
+		Size:    len(" second"),
+		Mode:    modeAppend,
+		Created: false,
+	}) {
+		t.Errorf("append result = %+v, want nested append result", appendResult)
+	}
+
+	content, err := os.ReadFile(filepath.Join(tmpDir, "nested", "dir", "file.txt"))
+	if err != nil {
+		t.Fatalf("failed to read nested file: %v", err)
+	}
+	if got, want := string(content), "first second"; got != want {
+		t.Errorf("nested file content = %q, want %q", got, want)
+	}
+}
+
+func TestFileWriteTool_Execute_CreateDirsFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := &FileWriteTool{
+		workDir:      tmpDir,
+		maxFileSize:  1024 * 1024,
+		allowedPaths: []string{tmpDir},
+	}
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(
+		`{"path":"missing/parent/file.txt","content":"blocked","create_dirs":false}`,
+	))
+	if err == nil {
+		t.Fatal("Execute() expected error when create_dirs=false and parent is missing")
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "missing")); !os.IsNotExist(statErr) {
+		t.Errorf("missing parent was created with create_dirs=false; stat error = %v", statErr)
+	}
+
+	existingDir := filepath.Join(tmpDir, "existing")
+	if err := os.Mkdir(existingDir, 0755); err != nil {
+		t.Fatalf("failed to create existing parent: %v", err)
+	}
+	_, err = tool.Execute(context.Background(), json.RawMessage(
+		`{"path":"existing/file.txt","content":"allowed","create_dirs":false}`,
+	))
+	if err != nil {
+		t.Fatalf("Execute() with existing parent and create_dirs=false error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(existingDir, "file.txt"))
+	if err != nil {
+		t.Fatalf("failed to read file under existing parent: %v", err)
+	}
+	if got, want := string(content), "allowed"; got != want {
+		t.Errorf("file content = %q, want %q", got, want)
+	}
+}
+
+func TestFileWriteTool_Execute_DeniesRootEscapes(t *testing.T) {
+	t.Run("sibling prefix", func(t *testing.T) {
+		parentDir := t.TempDir()
+		allowedDir := filepath.Join(parentDir, "allowed")
+		siblingDir := filepath.Join(parentDir, "allowed-sibling")
+		if err := os.Mkdir(allowedDir, 0755); err != nil {
+			t.Fatalf("failed to create allowed directory: %v", err)
+		}
+		if err := os.Mkdir(siblingDir, 0755); err != nil {
+			t.Fatalf("failed to create sibling directory: %v", err)
+		}
+
+		tool := &FileWriteTool{
+			workDir:      allowedDir,
+			maxFileSize:  1024 * 1024,
+			allowedPaths: []string{allowedDir},
+		}
+		escapedPath := filepath.Join(siblingDir, "escaped.txt")
+		args, err := json.Marshal(FileWriteArgs{
+			Path:    escapedPath,
+			Content: "escaped",
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal arguments: %v", err)
+		}
+
+		if _, err := tool.Execute(context.Background(), args); err == nil {
+			t.Error("Execute() expected error for lexical sibling-prefix path")
+		}
+		if _, err := os.Stat(escapedPath); !os.IsNotExist(err) {
+			t.Errorf("sibling-prefix escape created a file outside the root; stat error = %v", err)
+		}
+	})
+
+	t.Run("parent symlink", func(t *testing.T) {
+		allowedDir := t.TempDir()
+		outsideDir := t.TempDir()
+		linkPath := filepath.Join(allowedDir, "outside")
+		linkTarget, err := filepath.Rel(filepath.Dir(linkPath), outsideDir)
+		if err != nil {
+			t.Fatalf("failed to build relative symlink target: %v", err)
+		}
+		if err := os.Symlink(linkTarget, linkPath); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		tool := &FileWriteTool{
+			workDir:      allowedDir,
+			maxFileSize:  1024 * 1024,
+			allowedPaths: []string{allowedDir},
+		}
+		escapedPath := filepath.Join(outsideDir, "escaped.txt")
+		args := json.RawMessage(
+			`{"path":"outside/escaped.txt","content":"escaped","create_dirs":false}`,
+		)
+
+		if _, err := tool.Execute(context.Background(), args); err == nil {
+			t.Error("Execute() expected error for parent symlink escaping the root")
+		}
+		if _, err := os.Stat(escapedPath); !os.IsNotExist(err) {
+			t.Errorf("parent symlink escape created a file outside the root; stat error = %v", err)
+		}
+	})
+
+	t.Run("final symlink write", func(t *testing.T) {
+		allowedDir := t.TempDir()
+		outsideDir := t.TempDir()
+		outsidePath := filepath.Join(outsideDir, "outside.txt")
+		if err := os.WriteFile(outsidePath, []byte("original"), 0644); err != nil {
+			t.Fatalf("failed to create outside file: %v", err)
+		}
+		linkPath := filepath.Join(allowedDir, "link.txt")
+		linkTarget, err := filepath.Rel(filepath.Dir(linkPath), outsidePath)
+		if err != nil {
+			t.Fatalf("failed to build relative symlink target: %v", err)
+		}
+		if err := os.Symlink(linkTarget, linkPath); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		tool := &FileWriteTool{
+			workDir:      allowedDir,
+			maxFileSize:  1024 * 1024,
+			allowedPaths: []string{allowedDir},
+		}
+		args := json.RawMessage(`{"path":"link.txt","content":"overwritten"}`)
+
+		if _, err := tool.Execute(context.Background(), args); err == nil {
+			t.Error("Execute() expected error for final symlink escaping the root")
+		}
+		content, err := os.ReadFile(outsidePath)
+		if err != nil {
+			t.Fatalf("failed to read outside file: %v", err)
+		}
+		if got, want := string(content), "original"; got != want {
+			t.Errorf("outside file content = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("final symlink append", func(t *testing.T) {
+		allowedDir := t.TempDir()
+		outsideDir := t.TempDir()
+		outsidePath := filepath.Join(outsideDir, "outside.txt")
+		if err := os.WriteFile(outsidePath, []byte("original"), 0644); err != nil {
+			t.Fatalf("failed to create outside file: %v", err)
+		}
+		linkPath := filepath.Join(allowedDir, "link.txt")
+		linkTarget, err := filepath.Rel(filepath.Dir(linkPath), outsidePath)
+		if err != nil {
+			t.Fatalf("failed to build relative symlink target: %v", err)
+		}
+		if err := os.Symlink(linkTarget, linkPath); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		tool := &FileWriteTool{
+			workDir:      allowedDir,
+			maxFileSize:  1024 * 1024,
+			allowedPaths: []string{allowedDir},
+		}
+		args := json.RawMessage(
+			`{"path":"link.txt","content":" appended","mode":"append"}`,
+		)
+
+		if _, err := tool.Execute(context.Background(), args); err == nil {
+			t.Error("Execute() expected error when appending through final symlink outside the root")
+		}
+		content, err := os.ReadFile(outsidePath)
+		if err != nil {
+			t.Fatalf("failed to read outside file: %v", err)
+		}
+		if got, want := string(content), "original"; got != want {
+			t.Errorf("outside file content = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestFileWriteTool_Execute_PathTraversal(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := &FileWriteTool{

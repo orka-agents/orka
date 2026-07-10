@@ -135,48 +135,57 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("content size %d exceeds maximum %d bytes", len(writeArgs.Content), t.maxFileSize)
 	}
 
-	// Resolve the path
+	// Resolve the path and select the allowed directory that will anchor all
+	// filesystem operations. The lexical check chooses a root; os.Root enforces
+	// containment while following path components, including under concurrent
+	// symlink changes.
 	filePath := writeArgs.Path
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(t.workDir, filePath)
 	}
-
-	// Clean the path and reject traversal
 	filePath = filepath.Clean(filePath)
-	if strings.Contains(filePath, "..") {
-		return "", fmt.Errorf("path traversal not allowed")
-	}
 
-	if !t.isPathAllowed(filePath) {
+	rootPath, relativePath, ok := t.allowedRoot(filePath)
+	if !ok {
 		return "", fmt.Errorf("access denied: path outside allowed directories")
 	}
 
-	// Check if file already exists
-	_, statErr := os.Stat(filePath)
+	// Configured allowed paths are trusted, provisioned roots. OpenRoot pins the
+	// selected root for this operation so descendant lookups cannot escape it.
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open allowed directory: %w", err)
+	}
+	defer root.Close() //nolint:errcheck
+
+	// Check if file already exists using the same anchored root used for writing.
+	_, statErr := root.Stat(relativePath)
 	created := os.IsNotExist(statErr)
 
-	// Create parent directories if needed
+	// Create parent directories if needed.
 	if createDirs {
-		dir := filepath.Dir(filePath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		dir := filepath.Dir(relativePath)
+		if err := root.MkdirAll(dir, 0755); err != nil {
 			return "", fmt.Errorf("failed to create directories: %w", err)
 		}
 	}
 
-	// Write or append
-	var err error
+	flags := os.O_CREATE | os.O_WRONLY
 	if writeArgs.Mode == modeAppend {
-		f, openErr := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if openErr != nil {
-			return "", fmt.Errorf("failed to open file: %w", openErr)
-		}
-		_, err = f.WriteString(writeArgs.Content)
-		f.Close() //nolint:errcheck
+		flags |= os.O_APPEND
 	} else {
-		err = os.WriteFile(filePath, []byte(writeArgs.Content), 0644)
+		flags |= os.O_TRUNC
 	}
 
+	f, err := root.OpenFile(relativePath, flags, 0644)
 	if err != nil {
+		return "", fmt.Errorf("failed to open file: %w", err)
+	}
+	if _, err := f.WriteString(writeArgs.Content); err != nil {
+		f.Close() //nolint:errcheck
+		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -195,14 +204,22 @@ func (t *FileWriteTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	return string(output), nil
 }
 
-// isPathAllowed checks if the path is within allowed directories
-func (t *FileWriteTool) isPathAllowed(path string) bool {
+// allowedRoot returns the allowed directory containing path and path relative
+// to that directory. filepath.Rel enforces component boundaries, unlike a raw
+// string-prefix check which also matches lexical siblings.
+func (t *FileWriteTool) allowedRoot(path string) (rootPath, relativePath string, ok bool) {
 	for _, allowedPath := range t.allowedPaths {
-		if strings.HasPrefix(path, allowedPath) {
-			return true
+		rootPath = filepath.Clean(allowedPath)
+		relativePath, err := filepath.Rel(rootPath, path)
+		if err != nil || filepath.IsAbs(relativePath) {
+			continue
 		}
+		if relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return rootPath, relativePath, true
 	}
-	return false
+	return "", "", false
 }
 
 // Ensure FileWriteTool implements Tool
