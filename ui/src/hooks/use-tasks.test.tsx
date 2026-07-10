@@ -32,11 +32,223 @@ beforeEach(() => {
   useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
 })
 
+function makeTask(
+  name: string,
+  namespace = 'default',
+  uid: string | null = `uid-${namespace}-${name}`,
+) {
+  return {
+    metadata: { name, namespace, ...(uid ? { uid } : {}) },
+    spec: { type: 'container' as const },
+    status: { phase: 'Running' as const },
+  }
+}
+
 describe('useTaskList', () => {
   it('returns task list from API', async () => {
     const { result } = renderHook(() => useTaskList(), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     expect(result.current.data).toEqual({ items: [], metadata: {} })
+  })
+
+  it('stops when a continuation cursor does not advance', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('continue')
+        seen.push(cursor)
+        if (!cursor) {
+          return HttpResponse.json({
+            items: [makeTask('task-1')],
+            metadata: { continue: 'same-cursor' },
+          })
+        }
+        return HttpResponse.json({
+          items: [makeTask('task-2')],
+          metadata: { continue: 'same-cursor' },
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useTaskList('25', false), {
+      wrapper: createWrapper(),
+    })
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true))
+    expect(result.current.data?.items.map((task) => task.metadata.name)).toEqual([
+      'task-1',
+    ])
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+
+    await waitFor(() => expect(seen).toEqual([null, 'same-cursor']))
+    await waitFor(() =>
+      expect(result.current.data?.items.map((task) => task.metadata.name)).toEqual([
+        'task-1',
+        'task-2',
+      ]),
+    )
+    expect(result.current.hasNextPage).toBe(false)
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+    expect(seen).toEqual([null, 'same-cursor'])
+  })
+
+  it('stops before following a continuation cursor cycle', async () => {
+    const seen: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('continue')
+        seen.push(cursor)
+        if (!cursor) {
+          return HttpResponse.json({
+            items: [makeTask('task-1')],
+            metadata: { continue: 'cursor-a' },
+          })
+        }
+        if (cursor === 'cursor-a') {
+          return HttpResponse.json({
+            items: [makeTask('task-2')],
+            metadata: { continue: 'cursor-b' },
+          })
+        }
+        expect(cursor).toBe('cursor-b')
+        return HttpResponse.json({
+          items: [makeTask('task-3')],
+          metadata: { continue: 'cursor-a' },
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useTaskList('25', false), {
+      wrapper: createWrapper(),
+    })
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true))
+    expect(result.current.data?.items).toHaveLength(1)
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(2))
+    expect(result.current.hasNextPage).toBe(true)
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(3))
+    expect(result.current.hasNextPage).toBe(false)
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+    expect(seen).toEqual([null, 'cursor-a', 'cursor-b'])
+  })
+
+  it('deduplicates overlapping task rows across pages', async () => {
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('continue')
+        if (!cursor) {
+          return HttpResponse.json({
+            items: [
+              makeTask('task-by-uid', 'default', 'shared-uid'),
+              makeTask('task-by-name', 'default', null),
+            ],
+            metadata: { continue: 'page-2' },
+          })
+        }
+        return HttpResponse.json({
+          items: [
+            makeTask('task-by-uid', 'default', 'shared-uid'),
+            makeTask('task-by-name', 'default', null),
+            makeTask('task-3'),
+          ],
+          metadata: {},
+        })
+      }),
+    )
+
+    const { result } = renderHook(() => useTaskList('25', false), {
+      wrapper: createWrapper(),
+    })
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true))
+    expect(result.current.data?.items).toHaveLength(2)
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+
+    await waitFor(() =>
+      expect(result.current.data?.items.map((task) => task.metadata.name)).toEqual([
+        'task-by-uid',
+        'task-by-name',
+        'task-3',
+      ]),
+    )
+  })
+
+  it('resets pagination when the namespace or page-size filter changes', async () => {
+    const requests: Array<{
+      namespace: string | null
+      limit: string | null
+      cursor: string | null
+    }> = []
+    server.use(
+      http.get('/api/v1/tasks', ({ request }) => {
+        const url = new URL(request.url)
+        const namespace = url.searchParams.get('namespace')
+        const limit = url.searchParams.get('limit')
+        const cursor = url.searchParams.get('continue')
+        requests.push({ namespace, limit, cursor })
+        return HttpResponse.json({
+          items: [
+            makeTask(
+              `${namespace}-${limit}-${cursor ?? 'first'}`,
+              namespace ?? 'default',
+            ),
+          ],
+          metadata: cursor ? {} : { continue: 'next-page' },
+        })
+      }),
+    )
+
+    const { result, rerender } = renderHook(
+      ({ limit }) => useTaskList(limit, false),
+      { initialProps: { limit: '25' }, wrapper: createWrapper() },
+    )
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true))
+    expect(result.current.data?.items).toHaveLength(1)
+
+    await act(async () => {
+      await result.current.fetchNextPage()
+    })
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(2))
+
+    act(() => {
+      useUIStore.setState({ namespace: 'production' })
+    })
+    await waitFor(() =>
+      expect(result.current.data?.items[0]?.metadata.name).toBe(
+        'production-25-first',
+      ),
+    )
+
+    rerender({ limit: '50' })
+    await waitFor(() =>
+      expect(result.current.data?.items[0]?.metadata.name).toBe(
+        'production-50-first',
+      ),
+    )
+
+    expect(requests).toEqual([
+      { namespace: 'default', limit: '25', cursor: null },
+      { namespace: 'default', limit: '25', cursor: 'next-page' },
+      { namespace: 'production', limit: '25', cursor: null },
+      { namespace: 'production', limit: '50', cursor: null },
+    ])
   })
 })
 
