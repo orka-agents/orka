@@ -46,7 +46,14 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@set -e; \
+	tmp_dir="$$(mktemp -d config/crd/bases.XXXXXX)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config="$$tmp_dir"; \
+	rm -rf config/crd/bases; \
+	mv "$$tmp_dir" config/crd/bases; \
+	trap - EXIT
+	./scripts/helm-chart.sh sync
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

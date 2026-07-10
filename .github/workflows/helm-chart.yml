@@ -5,11 +5,27 @@ on:
     branches:
       - main
     paths:
+      - "api/**"
       - "charts/orka/**"
+      - "cmd/main.go"
+      - "config/crd/bases/**"
+      - "config/rbac/role.yaml"
+      - "go.mod"
+      - "internal/controller/*_controller.go"
+      - "Makefile"
+      - "scripts/helm-chart.sh"
       - ".github/workflows/helm-chart.yml"
   pull_request:
     paths:
+      - "api/**"
       - "charts/orka/**"
+      - "cmd/main.go"
+      - "config/crd/bases/**"
+      - "config/rbac/role.yaml"
+      - "go.mod"
+      - "internal/controller/*_controller.go"
+      - "Makefile"
+      - "scripts/helm-chart.sh"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:
 
@@ -32,8 +48,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
       - name: Show Helm version
         run: helm version
+
+      - name: Verify generated chart inputs
+        run: |
+          make manifests
+          if [[ -n "$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac/role.yaml charts/orka/crds)" ]]; then
+            echo "Generated CRDs or their Helm chart mirror are stale." >&2
+            git status --short --untracked-files=all -- config/crd/bases config/rbac/role.yaml charts/orka/crds
+            exit 1
+          fi
+
+      - name: Check chart reliability invariants
+        run: scripts/helm-chart.sh check
 
       - name: Lint chart
         run: helm lint charts/orka
