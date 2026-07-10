@@ -550,6 +550,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if result, handled, err := r.handleRetryNotBefore(ctx, task); err != nil || handled {
+		return result, err
+	}
+
 	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
 		log.Error(err, "failed to clear durable approval decision nudge")
 		return ctrl.Result{}, err
@@ -1161,7 +1165,11 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	log := logf.FromContext(ctx)
 
 	latest := &corev1alpha1.Task{}
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !canStartTaskJob(latest.Status.Phase) {
@@ -1169,6 +1177,14 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	retryGatePresent := false
+	if _, exists := latest.Annotations[labels.AnnotationRetryNotBefore]; exists {
+		if result, handled, err := r.handleRetryNotBefore(ctx, latest); err != nil || handled {
+			return result, err
+		}
+		retryGatePresent = true
+	}
+	*task = *latest.DeepCopy()
 
 	// Ensure worker ServiceAccount and RBAC exist in the task namespace
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
@@ -1263,6 +1279,14 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	} else {
 		task.Status.JobName = job.Name
 	}
+	jobName := task.Status.JobName
+	if retryGatePresent {
+		if err := r.clearRetryNotBefore(ctx, task); err != nil {
+			log.Error(err, "failed to clear retry backoff after Job creation")
+			return ctrl.Result{}, err
+		}
+		task.Status.JobName = jobName
+	}
 
 	// Update status to Running
 	now := metav1.Now()
@@ -1277,7 +1301,6 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	attempts := task.Status.Attempts
-	jobName := task.Status.JobName
 	transitionedToRunning := false
 	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		transitionedToRunning = false
@@ -1703,12 +1726,26 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 					return result, err
 				}
 			}
-			if r.isWithinJobCreationVisibilityGracePeriod(task) {
+			if strings.TrimSpace(task.Annotations[labels.AnnotationRetryNotBefore]) == "" && r.isWithinJobCreationVisibilityGracePeriod(task) {
 				log.Info("job not found shortly after creation, waiting for cache visibility",
 					"job", task.Status.JobName,
 					"startTime", task.Status.StartTime,
 				)
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			if r.APIReader != nil {
+				authoritativeJob := &batchv1.Job{}
+				authoritativeErr := r.APIReader.Get(ctx, types.NamespacedName{
+					Name:      task.Status.JobName,
+					Namespace: task.Namespace,
+				}, authoritativeJob)
+				if authoritativeErr == nil {
+					log.Info("job missing from cache but present in API, waiting for cache visibility", "job", task.Status.JobName)
+					return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+				}
+				if !apierrors.IsNotFound(authoritativeErr) {
+					return ctrl.Result{}, authoritativeErr
+				}
 			}
 			if r.shouldRetry(task) {
 				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
@@ -2316,26 +2353,293 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 	return task.Status.Attempts <= task.Spec.RetryPolicy.MaxRetries
 }
 
-// retryTask creates a new Job for a retry attempt
+func (r *TaskReconciler) handleRetryNotBefore(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if task == nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	now := time.Now()
+	var (
+		current           *corev1alpha1.Task
+		notBefore         time.Time
+		repairedNotBefore time.Time
+		waiting           bool
+		handled           bool
+		retryDisallowed   bool
+	)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		waiting = false
+		handled = false
+		retryDisallowed = false
+		if latest.Status.Phase != corev1alpha1.TaskPhasePending {
+			handled = true
+			return nil
+		}
+
+		rawValue, exists := latest.Annotations[labels.AnnotationRetryNotBefore]
+		if !exists {
+			waiting = false
+			return nil
+		}
+		raw := strings.TrimSpace(rawValue)
+		if !r.shouldRetry(latest) {
+			latest.Status.Phase = corev1alpha1.TaskPhaseRunning
+			if err := r.Status().Update(ctx, latest); err != nil {
+				return err
+			}
+			current = latest
+			handled = true
+			retryDisallowed = true
+			return nil
+		}
+
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || parsed.IsZero() {
+			if repairedNotBefore.IsZero() {
+				repairedNotBefore = now.Add(r.calculateRetryDelay(latest)).UTC()
+			}
+			parsed = repairedNotBefore
+			if repairedNotBefore.After(now) {
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations[labels.AnnotationRetryNotBefore] = repairedNotBefore.Format(time.RFC3339Nano)
+				if err := r.Update(ctx, latest); err != nil {
+					return err
+				}
+				current = latest
+				notBefore = repairedNotBefore
+				waiting = true
+				return nil
+			}
+		}
+
+		if parsed.After(time.Now()) {
+			notBefore = parsed
+			waiting = true
+			return nil
+		}
+		if latest.Status.JobName != "" {
+			waitingForJob, err := r.cleanupRetryTaskJob(ctx, latest, latest.Status.JobName, false)
+			if err != nil {
+				return err
+			}
+			if waitingForJob {
+				notBefore = time.Now().Add(2 * time.Second)
+				waiting = true
+				return nil
+			}
+			latest.Status.JobName = ""
+			if err := r.Status().Update(ctx, latest); err != nil {
+				return err
+			}
+			current = latest
+		}
+
+		current = latest
+		waiting = false
+		return nil
+	})
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	if retryDisallowed {
+		return ctrl.Result{RequeueAfter: time.Second}, true, nil
+	}
+	if handled {
+		return ctrl.Result{}, true, nil
+	}
+	if !waiting {
+		return ctrl.Result{}, false, nil
+	}
+	return ctrl.Result{RequeueAfter: retryRequeueAfter(notBefore)}, true, nil
+}
+
+func (r *TaskReconciler) ensureRetryNotBefore(ctx context.Context, task *corev1alpha1.Task) (time.Time, error) {
+	expectedUID := task.UID
+	expectedJobName := task.Status.JobName
+	expectedAttempts := task.Status.Attempts
+	var (
+		current   *corev1alpha1.Task
+		notBefore time.Time
+		proposed  time.Time
+	)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		if latest.UID != expectedUID ||
+			latest.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			latest.Status.JobName != expectedJobName ||
+			latest.Status.Attempts != expectedAttempts {
+			return nil
+		}
+		if !r.shouldRetry(latest) {
+			return nil
+		}
+
+		if raw := strings.TrimSpace(latest.Annotations[labels.AnnotationRetryNotBefore]); raw != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil && !parsed.IsZero() &&
+				(latest.Status.StartTime == nil || parsed.After(latest.Status.StartTime.Time)) {
+				notBefore = parsed
+				return nil
+			}
+		}
+
+		if latest.Annotations == nil {
+			latest.Annotations = map[string]string{}
+		}
+		if proposed.IsZero() {
+			proposed = time.Now().Add(r.calculateRetryDelay(latest)).UTC()
+		}
+		latest.Annotations[labels.AnnotationRetryNotBefore] = proposed.Format(time.RFC3339Nano)
+		if err := r.Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		notBefore = proposed
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return notBefore, nil
+}
+
+func (r *TaskReconciler) clearRetryNotBefore(ctx context.Context, task *corev1alpha1.Task) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		if _, exists := latest.Annotations[labels.AnnotationRetryNotBefore]; !exists {
+			return nil
+		}
+		delete(latest.Annotations, labels.AnnotationRetryNotBefore)
+		if err := r.Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return nil
+}
+
+func retryRequeueAfter(notBefore time.Time) time.Duration {
+	delay := time.Until(notBefore)
+	if delay <= 0 {
+		return time.Millisecond
+	}
+	return delay
+}
+
+func (r *TaskReconciler) resetTaskForRetry(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	expectedUID := task.UID
+	expectedJobName := task.Status.JobName
+	expectedAttempts := task.Status.Attempts
+	transitioned := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		transitioned = false
+		if latest.UID != expectedUID ||
+			latest.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			latest.Status.JobName != expectedJobName ||
+			latest.Status.Attempts != expectedAttempts ||
+			!r.shouldRetry(latest) ||
+			strings.TrimSpace(latest.Annotations[labels.AnnotationRetryNotBefore]) == "" {
+			return nil
+		}
+		latest.Status.Phase = corev1alpha1.TaskPhasePending
+		latest.Status.Message = ""
+		latest.Status.CompletionTime = nil
+		latest.Status.ResultRef = nil
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		transitioned = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return transitioned, nil
+}
+
+// retryTask durably schedules a new Job for a retry attempt.
 func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Calculate backoff delay
-	delay := r.calculateRetryDelay(task)
-	oldJobName := task.Status.JobName
 	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// The gate must exist before deleting the old Job or moving the Task to
+	// Pending because both writes can immediately enqueue another reconcile.
+	notBefore, err := r.ensureRetryNotBefore(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to persist retry backoff")
+		return ctrl.Result{}, err
+	}
+	if notBefore.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	oldJobName := task.Status.JobName
+	waitingForJob, err := r.cleanupRetryTaskJob(ctx, task, oldJobName, holdsPoolActor)
+	if err != nil {
+		log.Error(err, "failed to delete old Job for retry")
+		return ctrl.Result{}, err
+	}
+	if waitingForJob {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 	if holdsPoolActor {
-		waitingForJob, err := r.cleanupRetryTaskJob(ctx, task, oldJobName)
-		if err != nil {
-			log.Error(err, "failed to delete old Job for pooled retry")
-			return ctrl.Result{}, err
-		}
-		if waitingForJob {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
 		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to release substrate pool actor leases for retry")
@@ -2346,64 +2650,83 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 		}
 	}
 
-	// Reset to pending for retry before deleting the old Job so a transient
-	// NotFound from asynchronous Job deletion does not fail the task.
-	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-		t.Status.Phase = corev1alpha1.TaskPhasePending
-		t.Status.JobName = ""
-		t.Status.Message = ""
-		t.Status.CompletionTime = nil
-		t.Status.ResultRef = nil
-	}); err != nil {
+	transitionedToPending, err := r.resetTaskForRetry(ctx, task)
+	if err != nil {
 		log.Error(err, "failed to update status for retry")
 		return ctrl.Result{}, err
 	}
-
-	// Delete the old Job after clearing the running status.
-	if oldJobName != "" && !holdsPoolActor {
-		job := &batchv1.Job{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      oldJobName,
-			Namespace: task.Namespace,
-		}, job)
-		if err == nil {
-			propagationPolicy := metav1.DeletePropagationBackground
-			if err := r.Delete(ctx, job, &client.DeleteOptions{
-				PropagationPolicy: &propagationPolicy,
-			}); err != nil && !apierrors.IsNotFound(err) {
-				log.Error(err, "failed to delete old Job for retry")
-			}
+	if !transitionedToPending {
+		if task.Status.Phase == corev1alpha1.TaskPhaseRunning {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
+		return ctrl.Result{}, nil
 	}
 
-	return ctrl.Result{RequeueAfter: delay}, nil
+	return ctrl.Result{RequeueAfter: retryRequeueAfter(notBefore)}, nil
 }
 
-func (r *TaskReconciler) cleanupRetryTaskJob(ctx context.Context, task *corev1alpha1.Task, jobName string) (bool, error) {
+func (r *TaskReconciler) cleanupRetryTaskJob(ctx context.Context, task *corev1alpha1.Task, jobName string, holdsPoolActor bool) (bool, error) {
 	if jobName == "" {
 		return false, nil
 	}
 
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	job := &batchv1.Job{}
-	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
+	err := reader.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job)
+	if err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("getting retry task Job %q: %w", jobName, err)
 	}
+	jobWasMissing := apierrors.IsNotFound(err)
+	if err == nil {
+		propagationPolicy := metav1.DeletePropagationForeground
+		if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("deleting retry task Job %q: %w", jobName, err)
+		}
+		if holdsPoolActor {
+			return true, nil
+		}
+		if err := reader.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, &batchv1.Job{}); err == nil {
+			return true, nil
+		} else if apierrors.IsNotFound(err) {
+			jobWasMissing = true
+		} else {
+			return false, fmt.Errorf("confirming deletion of retry task Job %q: %w", jobName, err)
+		}
+	}
+	if jobWasMissing {
+		activePodsRemain, err := retryTaskActivePodsRemain(ctx, reader, task.Namespace, jobName)
+		if err != nil {
+			return false, err
+		}
+		if activePodsRemain {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
-	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
-	if err != nil {
-		return false, err
+func retryTaskActivePodsRemain(ctx context.Context, reader client.Reader, namespace, jobName string) (bool, error) {
+	for _, jobNameLabel := range []string{batchv1.JobNameLabel, "job-name"} {
+		var pods corev1.PodList
+		if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+			return false, fmt.Errorf("listing Pods for missing retry task Job %q: %w", jobName, err)
+		}
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			for _, owner := range pod.OwnerReferences {
+				if owner.Kind == "Job" && owner.Name == jobName && owner.Controller != nil && *owner.Controller {
+					return true, nil
+				}
+			}
+		}
 	}
-	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
-		propagationPolicy = metav1.DeletePropagationForeground
-	}
-	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("deleting retry task Job %q: %w", jobName, err)
-	}
-	return holdsPoolActor, nil
+	return false, nil
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff

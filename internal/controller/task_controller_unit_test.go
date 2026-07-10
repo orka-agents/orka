@@ -3860,8 +3860,8 @@ func TestHandleRunning_JobNotFoundWithRetryPolicy(t *testing.T) {
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected phase Pending after scheduling retry, got %s", task.Status.Phase)
 	}
-	if task.Status.JobName != "" {
-		t.Errorf("expected JobName to be cleared for retry, got %q", task.Status.JobName)
+	if task.Status.JobName != "missing-job" {
+		t.Errorf("expected old JobName to be retained through backoff, got %q", task.Status.JobName)
 	}
 }
 
@@ -4536,8 +4536,8 @@ func TestRetryTask(t *testing.T) {
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected Pending, got %s", task.Status.Phase)
 	}
-	if task.Status.JobName != "" {
-		t.Error("expected JobName to be cleared")
+	if task.Status.JobName != job.Name {
+		t.Fatalf("JobName = %q, want old Job retained through backoff", task.Status.JobName)
 	}
 }
 
@@ -4545,10 +4545,13 @@ func TestRetryTask_NoExistingJob(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "retry-nojob", Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAI,
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 1},
+		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:   corev1alpha1.TaskPhaseRunning,
-			JobName: "nonexistent",
+			JobName: testMissingJobName,
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -4648,8 +4651,8 @@ func TestRetryTask_PooledLeaseDeletesActorBeforeReset(t *testing.T) {
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("phase = %s, want Pending after pooled retry cleanup", task.Status.Phase)
 	}
-	if task.Status.JobName != "" {
-		t.Fatalf("JobName = %q, want cleared after pooled retry cleanup", task.Status.JobName)
+	if task.Status.JobName != "missing-job" {
+		t.Fatalf("JobName = %q, want old Job retained through backoff", task.Status.JobName)
 	}
 	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
 		t.Fatalf("delete requests = %#v, want %s cleanup before retry reset", executor.deleteReqs, testSubstrateActorID)
@@ -6218,8 +6221,8 @@ func TestReconcile_RunningPhase_JobNotFoundWithRetryPolicy(t *testing.T) {
 	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("expected phase Pending after retry scheduling, got %s", updated.Status.Phase)
 	}
-	if updated.Status.JobName != "" {
-		t.Fatalf("expected JobName to be cleared after retry scheduling, got %q", updated.Status.JobName)
+	if updated.Status.JobName != "nonexistent-job" {
+		t.Fatalf("expected old JobName to be retained through backoff, got %q", updated.Status.JobName)
 	}
 }
 

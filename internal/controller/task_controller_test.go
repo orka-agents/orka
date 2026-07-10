@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,12 +24,20 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+)
+
+const (
+	retryFixtureCommand       = "false"
+	retryFixtureContainerName = "worker"
+	retryFixtureImage         = "alpine:latest"
 )
 
 // newReconciler creates a TaskReconciler with all dependencies for testing.
@@ -48,6 +57,136 @@ func newReconciler() *TaskReconciler {
 		ResultStore:     ss,
 		PlanStore:       ss,
 	}
+}
+
+func startTaskControllerManager(testCtx context.Context) func() {
+	GinkgoHelper()
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 k8sClient.Scheme(),
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		Controller:             config.Controller{SkipNameValidation: new(true)},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	r := newReconciler()
+	r.Client = mgr.GetClient()
+	r.APIReader = mgr.GetAPIReader()
+	r.Scheme = mgr.GetScheme()
+	r.JobBuilder = NewJobBuilder(mgr.GetClient())
+	Expect(r.SetupWithManager(mgr)).To(Succeed())
+
+	managerCtx, cancel := context.WithCancel(testCtx)
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.Start(managerCtx)
+	}()
+	Expect(mgr.GetCache().WaitForCacheSync(managerCtx)).To(BeTrue())
+
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			cancel()
+			Eventually(done, 10*time.Second).Should(Receive(BeNil()))
+		})
+	}
+}
+
+func createFailedRetryTaskFixture(
+	testCtx context.Context,
+	taskName string,
+	attempts int32,
+	retryPolicy *corev1alpha1.RetryPolicy,
+) (types.NamespacedName, string) {
+	GinkgoHelper()
+
+	ns := defaultNS
+	nn := types.NamespacedName{Name: taskName, Namespace: ns}
+	oldJobName := taskName + "-old"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       taskName,
+			Namespace:  ns,
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeContainer,
+			Image:       retryFixtureImage,
+			Command:     []string{retryFixtureCommand},
+			RetryPolicy: retryPolicy,
+		},
+	}
+	Expect(k8sClient.Create(testCtx, task)).To(Succeed())
+	task.Status = corev1alpha1.TaskStatus{
+		Phase:    corev1alpha1.TaskPhaseRunning,
+		JobName:  oldJobName,
+		Attempts: attempts,
+	}
+	Expect(k8sClient.Status().Update(testCtx, task)).To(Succeed())
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      oldJobName,
+			Namespace: ns,
+			Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue(taskName),
+			},
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{Name: retryFixtureContainerName, Image: retryFixtureImage},
+					},
+				},
+			},
+		},
+	}
+	Expect(controllerutil.SetControllerReference(task, job, k8sClient.Scheme())).To(Succeed())
+	Expect(k8sClient.Create(testCtx, job)).To(Succeed())
+	job.Status.Failed = 1
+	Expect(k8sClient.Status().Update(testCtx, job)).To(Succeed())
+
+	return nn, oldJobName
+}
+
+func cleanupTaskAndJobs(testCtx context.Context, nn types.NamespacedName) {
+	cleanupTask(testCtx, nn)
+	var jobs batchv1.JobList
+	if err := k8sClient.List(testCtx, &jobs, client.InNamespace(nn.Namespace), client.MatchingLabels{
+		labels.LabelTask: labels.SelectorValue(nn.Name),
+	}); err != nil {
+		return
+	}
+	for i := range jobs.Items {
+		_ = k8sClient.Delete(testCtx, &jobs.Items[i])
+	}
+}
+
+func completeForegroundJobDeletion(testCtx context.Context, nn types.NamespacedName) {
+	GinkgoHelper()
+
+	Eventually(func() error {
+		job := &batchv1.Job{}
+		if err := k8sClient.Get(testCtx, nn, job); err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if job.DeletionTimestamp.IsZero() {
+			return fmt.Errorf("Job %s/%s is not deleting", nn.Namespace, nn.Name)
+		}
+		job.Finalizers = nil
+		return k8sClient.Update(testCtx, job)
+	}, 5*time.Second, 50*time.Millisecond).Should(Succeed())
+
+	Eventually(func() bool {
+		err := k8sClient.Get(testCtx, nn, &batchv1.Job{})
+		return errors.IsNotFound(err)
+	}, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 }
 
 // cleanupTask removes the task and waits for deletion.
@@ -693,7 +832,7 @@ var _ = Describe("Task Controller", func() {
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
-			Expect(task.Status.JobName).To(BeEmpty())
+			Expect(task.Status.JobName).To(Equal("nonexistent-job"))
 		})
 
 		It("should fail task on timeout", func() {
@@ -1091,6 +1230,7 @@ var _ = Describe("Task Controller", func() {
 			// Simulate Job failure
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
+			oldJobName := job.Name
 			job.Status.Failed = 1
 			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 
@@ -1098,10 +1238,160 @@ var _ = Describe("Task Controller", func() {
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			completeForegroundJobDeletion(ctx, types.NamespacedName{Name: oldJobName, Namespace: ns})
+			result, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 			// Task should be back to Pending for retry
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+			Expect(task.Status.JobName).To(Equal(oldJobName))
+		})
+	})
+
+	Context("retry backoff watch durability", func() {
+		It("should honor the initial delay despite immediate Task and old Job deletion watches", func() {
+			ctx := context.Background()
+			taskName := "test-retry-watch-backoff"
+			initialDelay := metav1.Duration{Duration: 4 * time.Second}
+			nn, oldJobName := createFailedRetryTaskFixture(ctx, taskName, 1, &corev1alpha1.RetryPolicy{
+				MaxRetries:   3,
+				InitialDelay: &initialDelay,
+			})
+			defer cleanupTaskAndJobs(ctx, nn)
+
+			managerStartedAt := time.Now()
+			stopManager := startTaskControllerManager(ctx)
+			defer stopManager()
+			completeForegroundJobDeletion(ctx, types.NamespacedName{Name: oldJobName, Namespace: nn.Namespace})
+
+			var retryNotBefore time.Time
+			Eventually(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+				raw := observed.Annotations[labels.AnnotationRetryNotBefore]
+				g.Expect(raw).NotTo(BeEmpty())
+				parsed, err := time.Parse(time.RFC3339Nano, raw)
+				g.Expect(err).NotTo(HaveOccurred())
+				retryNotBefore = parsed
+			}, 5*time.Second, 50*time.Millisecond).Should(Succeed())
+			Expect(retryNotBefore).To(BeTemporally(">=", managerStartedAt.Add(initialDelay.Duration-time.Second)))
+
+			Consistently(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+				var jobs batchv1.JobList
+				g.Expect(k8sClient.List(ctx, &jobs, client.InNamespace(nn.Namespace), client.MatchingLabels{
+					labels.LabelTask: labels.SelectorValue(taskName),
+				})).To(Succeed())
+				for i := range jobs.Items {
+					g.Expect(jobs.Items[i].Name).To(Equal(oldJobName))
+				}
+			}, time.Second, 50*time.Millisecond).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+				g.Expect(observed.Status.Attempts).To(Equal(int32(2)))
+				g.Expect(observed.Status.JobName).NotTo(BeEmpty())
+				g.Expect(observed.Status.JobName).NotTo(Equal(oldJobName))
+				g.Expect(observed.Annotations).NotTo(HaveKey(labels.AnnotationRetryNotBefore))
+			}, time.Until(retryNotBefore)+5*time.Second, 50*time.Millisecond).Should(Succeed())
+		})
+
+		It("should persist the exponential delay for later attempts", func() {
+			ctx := context.Background()
+			taskName := "test-retry-watch-exponential"
+			initialDelay := metav1.Duration{Duration: 2 * time.Second}
+			nn, oldJobName := createFailedRetryTaskFixture(ctx, taskName, 2, &corev1alpha1.RetryPolicy{
+				MaxRetries:        4,
+				InitialDelay:      &initialDelay,
+				BackoffMultiplier: 2,
+			})
+			defer cleanupTaskAndJobs(ctx, nn)
+
+			managerStartedAt := time.Now()
+			stopManager := startTaskControllerManager(ctx)
+			defer stopManager()
+			completeForegroundJobDeletion(ctx, types.NamespacedName{Name: oldJobName, Namespace: nn.Namespace})
+
+			var retryNotBefore time.Time
+			Eventually(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+				g.Expect(observed.Status.JobName).To(Equal(oldJobName))
+				raw := observed.Annotations[labels.AnnotationRetryNotBefore]
+				g.Expect(raw).NotTo(BeEmpty())
+				parsed, err := time.Parse(time.RFC3339Nano, raw)
+				g.Expect(err).NotTo(HaveOccurred())
+				retryNotBefore = parsed
+			}, 5*time.Second, 50*time.Millisecond).Should(Succeed())
+			Expect(retryNotBefore).To(BeTemporally(">=", managerStartedAt.Add(3*time.Second)))
+
+			Consistently(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+				g.Expect(observed.Status.JobName).To(Equal(oldJobName))
+			}, time.Second, 50*time.Millisecond).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+				g.Expect(observed.Status.Attempts).To(Equal(int32(3)))
+				g.Expect(observed.Status.JobName).NotTo(Equal(oldJobName))
+			}, time.Until(retryNotBefore)+5*time.Second, 50*time.Millisecond).Should(Succeed())
+		})
+
+		It("should retain the original not-before time across a controller restart", func() {
+			ctx := context.Background()
+			taskName := "test-retry-watch-restart"
+			initialDelay := metav1.Duration{Duration: 6 * time.Second}
+			nn, oldJobName := createFailedRetryTaskFixture(ctx, taskName, 1, &corev1alpha1.RetryPolicy{
+				MaxRetries:   3,
+				InitialDelay: &initialDelay,
+			})
+			defer cleanupTaskAndJobs(ctx, nn)
+
+			stopFirstManager := startTaskControllerManager(ctx)
+			defer stopFirstManager()
+			completeForegroundJobDeletion(ctx, types.NamespacedName{Name: oldJobName, Namespace: nn.Namespace})
+			var retryNotBefore time.Time
+			Eventually(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+				parsed, err := time.Parse(time.RFC3339Nano, observed.Annotations[labels.AnnotationRetryNotBefore])
+				g.Expect(err).NotTo(HaveOccurred())
+				retryNotBefore = parsed
+			}, 5*time.Second, 50*time.Millisecond).Should(Succeed())
+			stopFirstManager()
+			Expect(time.Until(retryNotBefore)).To(BeNumerically(">", 2*time.Second))
+
+			stopSecondManager := startTaskControllerManager(ctx)
+			defer stopSecondManager()
+			Consistently(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
+				g.Expect(observed.Status.JobName).To(Equal(oldJobName))
+				g.Expect(observed.Annotations[labels.AnnotationRetryNotBefore]).To(Equal(retryNotBefore.Format(time.RFC3339Nano)))
+			}, time.Second, 50*time.Millisecond).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				observed := &corev1alpha1.Task{}
+				g.Expect(k8sClient.Get(ctx, nn, observed)).To(Succeed())
+				g.Expect(observed.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
+				g.Expect(observed.Status.Attempts).To(Equal(int32(2)))
+				g.Expect(observed.Status.JobName).NotTo(Equal(oldJobName))
+				g.Expect(observed.Annotations).NotTo(HaveKey(labels.AnnotationRetryNotBefore))
+			}, time.Until(retryNotBefore)+5*time.Second, 50*time.Millisecond).Should(Succeed())
 		})
 	})
 
