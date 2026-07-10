@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -861,11 +862,76 @@ func TestExecuteAgentLoop_CompletionError(t *testing.T) {
 	}
 }
 
+func TestUploadAIArtifacts_ReturnsCancellationDuringFailureEvent(t *testing.T) {
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("create artifacts dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "evidence.txt"), []byte("evidence"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	t.Setenv("ORKA_ARTIFACTS_DIR", artifactDir)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "artifact-failure-task")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err := uploadAIArtifacts(ctx, cancelAIEventRecorder{cancel: cancel}, "artifact-failure-task")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("uploadAIArtifacts() error = %v, want context canceled", err)
+	}
+}
+
+type cancelAIEventRecorder struct {
+	cancel context.CancelFunc
+}
+
+func (r cancelAIEventRecorder) Record(context.Context, string, ...common.EventOption) {
+	r.cancel()
+}
+
+func TestWriteResult_CancelsInFlightRequest(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer close(releaseRequest)
+
+	t.Setenv(workerenv.ResultEndpoint, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- writeResult(ctx, "test result") }()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for result request")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("writeResult() error = %v, want context canceled", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("writeResult() did not stop after cancellation")
+	}
+}
+
 func TestWriteResult_NoEndpoint(t *testing.T) {
 	t.Setenv("ORKA_RESULT_ENDPOINT", "")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
 
-	err := writeResult("test result")
+	err := writeResult(context.Background(), "test result")
 	if err == nil {
 		t.Fatal("expected error without result endpoint")
 	}
@@ -879,7 +945,7 @@ func TestWriteResult_Success(t *testing.T) {
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := writeResult("test result")
+	err := writeResult(context.Background(), "test result")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

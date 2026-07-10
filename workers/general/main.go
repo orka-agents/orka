@@ -123,8 +123,11 @@ func run() (err error) {
 	output := stdout.String() + stderr.String()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if submitErr := submitResult(workDir, output); submitErr == nil {
-				recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
+			if submitErr := submitResult(ctx, workDir, output); submitErr == nil {
+				recordGeneralResultSubmitted(ctx, eventRecorder, taskName, len(output))
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
 			}
 			recordGeneralWorkerFailed(
 				eventRecorder,
@@ -136,18 +139,23 @@ func run() (err error) {
 		return err
 	}
 
-	if err := submitResult(workDir, output); err != nil {
+	if err := submitResult(ctx, workDir, output); err != nil {
 		return err
 	}
-	recordGeneralResultSubmitted(eventRecorder, taskName, len(output))
+	recordGeneralResultSubmitted(ctx, eventRecorder, taskName, len(output))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
 		taskNamespace, taskName, transactionLogFields)
 	return nil
 }
 
-func recordGeneralResultSubmitted(recorder common.EventRecorder, taskName string, resultLength int) {
-	common.RecordEventWithTimeout(recorder, "ResultSubmitted", 0,
+func recordGeneralResultSubmitted(
+	ctx context.Context, recorder common.EventRecorder, taskName string, resultLength int,
+) {
+	common.RecordEvent(ctx, recorder, "ResultSubmitted",
 		common.WithEventTaskName(taskName),
 		common.WithEventSummary("General worker submitted result"),
 		common.WithEventContent(generalEventContent(map[string]any{"resultLength": resultLength})),
@@ -231,7 +239,7 @@ func workspaceRoot() string {
 	return workspaceDir
 }
 
-func submitResult(workDir, output string) error {
+func submitResult(ctx context.Context, workDir, output string) error {
 	if os.Getenv(workerenv.ResultEndpoint) == "" && os.Getenv(workerenv.ControllerURL) == "" {
 		return nil
 	}
@@ -243,10 +251,10 @@ func submitResult(workDir, output string) error {
 	if err != nil {
 		return err
 	}
-	if err := common.SubmitResult(resultBytes); err != nil {
+	if err := common.SubmitResultContext(ctx, resultBytes); err != nil {
 		return err
 	}
-	return common.UploadArtifacts()
+	return common.UploadArtifactsContext(ctx)
 }
 
 func runSecurityMapper(ctx context.Context) error {
@@ -292,7 +300,7 @@ func runSecurityMapper(ctx context.Context) error {
 	}
 	output := fmt.Sprintf("security mapper wrote %d review slices\n", len(slices))
 	fmt.Print(output)
-	return submitResult(workDir, output)
+	return submitResult(ctx, workDir, output)
 }
 
 func changedFilesForSecurityScan(

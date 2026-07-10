@@ -8,8 +8,10 @@ package common
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,9 +36,22 @@ const (
 var resultStdoutMarkerPath = agentSandboxResultMarkerExecPath
 
 // SubmitResult sends the task result to the controller via HTTP POST.
+// It preserves the legacy background-context behavior for callers that do not
+// have a worker lifecycle context.
+func SubmitResult(result []byte) error {
+	return SubmitResultContext(context.Background(), result)
+}
+
+// SubmitResultContext sends the task result to the controller via HTTP POST.
 // It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
 // Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s) on failure.
-func SubmitResult(result []byte) error {
+func SubmitResultContext(ctx context.Context, result []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
 		marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
 		fileData := marker + "\n"
@@ -56,22 +71,76 @@ func SubmitResult(result []byte) error {
 	}
 
 	saToken := workerServiceAccountToken()
+	return doPostWithRetryContext(
+		ctx, "result submission", endpoint, result, saToken, "application/octet-stream", 30*time.Second,
+	)
+}
+
+type retryWaitFunc func(context.Context, time.Duration) error
+
+func doPostWithRetryContext(
+	ctx context.Context,
+	operation string,
+	endpoint string,
+	data []byte,
+	saToken, contentType string,
+	timeout time.Duration,
+) error {
+	return doPostWithRetry(
+		ctx, operation, endpoint, data, saToken, contentType, timeout, waitForRetry,
+	)
+}
+
+func doPostWithRetry(
+	ctx context.Context,
+	operation string,
+	endpoint string,
+	data []byte,
+	saToken, contentType string,
+	timeout time.Duration,
+	wait retryWaitFunc,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s canceled: %w", operation, err)
+	}
 
 	var lastErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
 			backoff := time.Duration(1<<uint(attempt)) * time.Second
-			time.Sleep(backoff)
+			if err := wait(ctx, backoff); err != nil {
+				return fmt.Errorf("%s canceled: %w", operation, err)
+			}
 		}
 
-		lastErr = doPost(endpoint, result, saToken)
+		lastErr = doPostOnceWithContentTypeContext(ctx, endpoint, data, saToken, contentType, timeout)
 		if lastErr == nil {
 			return nil
 		}
-		fmt.Fprintf(os.Stderr, "result submission attempt %d/%d failed: %v\n", attempt+1, maxRetries, lastErr)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("%s canceled: %w", operation, err)
+		}
+		if !isRetryableDeliveryError(lastErr) {
+			return fmt.Errorf("%s failed: %w", operation, lastErr)
+		}
+		fmt.Fprintf(os.Stderr, "%s attempt %d/%d failed: %v\n", operation, attempt+1, maxRetries, lastErr)
 	}
 
-	return fmt.Errorf("all %d result submission attempts failed: %w", maxRetries, lastErr)
+	return fmt.Errorf("all %d %s attempts failed: %w", maxRetries, operation, lastErr)
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func resultEndpoint() (string, error) {
@@ -119,14 +188,25 @@ func workerServiceAccountToken() string {
 	return strings.TrimSpace(os.Getenv(workerenv.ServiceAccountToken))
 }
 
-func doPost(endpoint string, data []byte, saToken string) error {
-	return doPostOnceWithContentType(endpoint, data, saToken, "application/octet-stream", 30*time.Second)
+func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentType string, timeout time.Duration) error {
+	return doPostOnceWithContentTypeContext(
+		context.Background(), endpoint, data, saToken, contentType, timeout,
+	)
 }
 
-func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentType string, timeout time.Duration) error {
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+func doPostOnceWithContentTypeContext(
+	ctx context.Context,
+	endpoint string,
+	data []byte,
+	saToken, contentType string,
+	timeout time.Duration,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return permanentDeliveryError(fmt.Errorf("failed to create request: %w", err))
 	}
 	req.Header.Set("Content-Type", contentType)
 	if saToken != "" {
@@ -136,7 +216,10 @@ func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentTyp
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return retryableDeliveryError(fmt.Errorf("HTTP request failed: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -145,7 +228,51 @@ func doPostOnceWithContentType(endpoint string, data []byte, saToken, contentTyp
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	statusErr := fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	if isRetryableHTTPStatus(resp.StatusCode) {
+		return retryableDeliveryError(statusErr)
+	}
+	return permanentDeliveryError(statusErr)
+}
+
+type deliveryError struct {
+	err       error
+	retryable bool
+}
+
+func (e *deliveryError) Error() string {
+	return e.err.Error()
+}
+
+func (e *deliveryError) Unwrap() error {
+	return e.err
+}
+
+func retryableDeliveryError(err error) error {
+	return &deliveryError{err: err, retryable: true}
+}
+
+func permanentDeliveryError(err error) error {
+	return &deliveryError{err: err}
+}
+
+func isRetryableDeliveryError(err error) bool {
+	var deliveryErr *deliveryError
+	return errors.As(err, &deliveryErr) && deliveryErr.retryable
+}
+
+func isRetryableHTTPStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 // StructuredResult is an optional structured envelope for task results.

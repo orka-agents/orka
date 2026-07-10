@@ -813,24 +813,24 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 			fmt.Fprintf(os.Stderr, "failed to finalize error result: %v\n", finalizeErr)
 			resultBytes = []byte(errorOutput)
 		}
-		if submitErr := SubmitResult(resultBytes); submitErr != nil {
+		if submitErr := SubmitResultContext(ctx, resultBytes); submitErr != nil {
 			fmt.Fprintf(os.Stderr, "failed to submit error result: %v\n", submitErr)
 		} else {
-			RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeResultSubmitted, 0,
+			RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
 				WithEventTaskName(cfg.TaskName),
 				WithEventAgentName(name),
 				WithEventSummary("agent worker submitted partial result"),
 				WithEventContent(agentRuntimeEventContent(map[string]any{"resultBytes": len(resultBytes)})),
 			)
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%s execution canceled: %w", name, ctxErr)
+		}
 		if restoreErr := RestoreSecurityReviewContextArtifact(cfg); restoreErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to restore security review context artifact: %v\n", restoreErr)
 		}
-		if artifactErr := UploadArtifacts(); artifactErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", artifactErr)
-			recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, false, artifactErr)
-		} else {
-			recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, true, nil)
+		if artifactErr := uploadAgentArtifacts(ctx, eventRecorder, name, cfg.TaskName); artifactErr != nil {
+			return fmt.Errorf("%s execution canceled: %w", name, artifactErr)
 		}
 		return fmt.Errorf("%s execution failed: %w", name, err)
 	}
@@ -841,11 +841,8 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 		WithEventContent(agentRuntimeEventContent(map[string]any{"resultChars": len([]rune(result))})),
 	)
 
-	// Build structured result with diff if workspace has changes
-	if result == "" {
-		fmt.Fprintf(os.Stderr, "warning: %s executor returned empty result\n", name)
-		result = fmt.Sprintf("%s completed without a final message", name)
-	}
+	// Build structured result with diff if workspace has changes.
+	result = ensureAgentResult(name, result)
 	resultDir := ""
 	if cfg.GitRepo != "" {
 		resultDir = workspaceDir
@@ -854,7 +851,7 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if err != nil {
 		return fmt.Errorf("failed to finalize result: %w", err)
 	}
-	if err := SubmitResult(resultBytes); err != nil {
+	if err := SubmitResultContext(ctx, resultBytes); err != nil {
 		return fmt.Errorf("failed to submit result: %w", err)
 	}
 	RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
@@ -866,16 +863,21 @@ func RunAgent(name, workspaceDir string, defaultMaxTurns int, executor AgentExec
 	if err := RestoreSecurityReviewContextArtifact(cfg); err != nil {
 		return fmt.Errorf("failed to restore security review context artifact: %w", err)
 	}
-	if err := UploadArtifacts(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
-		recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, false, err)
-	} else {
-		recordAgentArtifactUploadEvent(eventRecorder, name, cfg.TaskName, true, nil)
+	if err := uploadAgentArtifacts(ctx, eventRecorder, name, cfg.TaskName); err != nil {
+		return fmt.Errorf("artifact upload canceled: %w", err)
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n",
 		cfg.TaskNamespace, cfg.TaskName, workerenv.TransactionLogFields(cfg.TransactionID, cfg.TransactionProfile))
 	return nil
+}
+
+func ensureAgentResult(agentName, result string) string {
+	if result != "" {
+		return result
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s executor returned empty result\n", agentName)
+	return fmt.Sprintf("%s completed without a final message", agentName)
 }
 
 func agentRuntimeEventContent(values map[string]any) json.RawMessage {
@@ -886,7 +888,25 @@ func agentRuntimeEventContent(values map[string]any) json.RawMessage {
 	return json.RawMessage(data)
 }
 
-func recordAgentArtifactUploadEvent(recorder EventRecorder, agentName, taskName string, success bool, err error) {
+func uploadAgentArtifacts(
+	ctx context.Context, recorder EventRecorder, agentName, taskName string,
+) error {
+	err := UploadArtifactsContext(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		recordAgentArtifactUploadEvent(ctx, recorder, agentName, taskName, false, err)
+		return ctx.Err()
+	}
+	recordAgentArtifactUploadEvent(ctx, recorder, agentName, taskName, true, nil)
+	return ctx.Err()
+}
+
+func recordAgentArtifactUploadEvent(
+	ctx context.Context, recorder EventRecorder, agentName, taskName string, success bool, err error,
+) {
 	eventType := events.ExecutionEventTypeArtifactUploadCompleted
 	severity := events.ExecutionEventSeverityInfo
 	summary := "agent worker artifact upload completed"
@@ -899,7 +919,7 @@ func recordAgentArtifactUploadEvent(recorder EventRecorder, agentName, taskName 
 			content["error"] = err.Error()
 		}
 	}
-	RecordEventWithTimeout(recorder, eventType, 0,
+	RecordEvent(ctx, recorder, eventType,
 		WithEventSeverity(severity),
 		WithEventTaskName(taskName),
 		WithEventAgentName(agentName),
