@@ -70,10 +70,6 @@ TARGET_CONTEXT="replace-with-context"
   }
   trap cleanup_work_dir EXIT
 
-  helm status orka \
-    --namespace orka-system \
-    --kube-context "$TARGET_CONTEXT"
-
   helm package charts/orka --destination "$WORK_DIR"
   TARGET_CHARTS=("$WORK_DIR"/orka-*.tgz)
   test "${#TARGET_CHARTS[@]}" -eq 1

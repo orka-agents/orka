@@ -80,10 +80,6 @@ upgrade when any check, migration, wait, or verification fails:
   }
   trap cleanup_work_dir EXIT
 
-  helm status "$RELEASE" \
-    --namespace "$NAMESPACE" \
-    --kube-context "$TARGET_CONTEXT"
-
   helm package charts/orka --destination "$WORK_DIR"
   TARGET_CHARTS=("$WORK_DIR"/orka-*.tgz)
   test "${#TARGET_CHARTS[@]}" -eq 1
@@ -133,10 +129,6 @@ pinned chart once and use the same local archive for migration and upgrade:
     exit "$status"
   }
   trap cleanup_work_dir EXIT
-
-  helm status "$RELEASE" \
-    --namespace "$NAMESPACE" \
-    --kube-context "$TARGET_CONTEXT"
 
   helm pull "$CHART_REF" \
     --version "$TARGET_VERSION" \
