@@ -318,6 +318,39 @@ func TestValidateContextToken_Kontxt(t *testing.T) {
 	}
 }
 
+func TestNewAuthMiddleware_ContextTokenRepeatedInvalidSignatureReusesJWKS(t *testing.T) {
+	provider := newCacheTestOIDCProvider(t)
+	snapshot := provider.snapshot()
+	cfg := testContextTokenConfig(t, snapshot, "")
+	cfg.Profiles[0].JWKSURL = ""
+	token := tamperJWTSignature(t, issueTestContextToken(t, snapshot, nil, nil))
+
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(nil, AuthConfig{ContextTokens: cfg}))
+	app.Get("/test", func(ctx fiber.Ctx) error {
+		return ctx.SendStatus(http.StatusOK)
+	})
+
+	for i := range 8 {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set(KontxtHeaderName, token)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("request %d status = %d, want %d", i, resp.StatusCode, http.StatusUnauthorized)
+		}
+	}
+
+	if got := provider.jwksHits.Load(); got != 1 {
+		t.Fatalf("JWKS fetches = %d, want 1 for repeated invalid context tokens", got)
+	}
+	if got := provider.discoveryHits.Load(); got != 1 {
+		t.Fatalf("OIDC discovery fetches = %d, want 1 for repeated invalid context tokens", got)
+	}
+}
+
 func TestValidateContextToken_KontxtAuthorizationClaimCompatibility(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	profile := testContextTokenConfig(t, provider, "").Profiles[0]

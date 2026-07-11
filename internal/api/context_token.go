@@ -267,6 +267,10 @@ func extractTokenFromHeaderValue(value string, header TokenHeaderConfig) (string
 }
 
 func validateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*ContextToken, error) {
+	return validateContextTokenWithVerifier(ctx, token, profile, processJWTVerifier)
+}
+
+func validateContextTokenWithVerifier(ctx context.Context, token string, profile ContextTokenProfileConfig, verifier *jwtVerifier) (*ContextToken, error) {
 	if profile.Name == "" {
 		return nil, errors.New("missing context-token profile name")
 	}
@@ -288,19 +292,10 @@ func validateContextToken(ctx context.Context, token string, profile ContextToke
 		return nil, fmt.Errorf("invalid JWT type %q", parsed.Header.Type)
 	}
 
-	jwksURL := profile.JWKSURL
-	if jwksURL == "" {
-		discovered, err := discoverOIDCJWKSURL(ctx, profile.Issuer)
-		if err != nil {
-			return nil, err
-		}
-		jwksURL = discovered
-	}
-
-	verified, err := verifyParsedJWT(ctx, parsed, jwtVerificationConfig{
+	verified, err := verifier.verifyParsedJWTWithDiscovery(ctx, parsed, jwtVerificationConfig{
 		Issuer:         profile.Issuer,
 		Audience:       profile.Audience,
-		JWKSURL:        jwksURL,
+		JWKSURL:        profile.JWKSURL,
 		RequiredClaims: profile.RequiredClaims,
 	})
 	if err != nil {
