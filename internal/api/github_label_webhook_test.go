@@ -179,7 +179,7 @@ func TestGitHubWebhook_PullRequestUpdateBranchUsesHeadBranch(t *testing.T) {
 	if ws.PRBaseBranch != githubWebhookTestDefaultBranch {
 		t.Errorf("prBaseBranch = %q, want main", ws.PRBaseBranch)
 	}
-	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.AllowEmptyPushBranch); got != "true" {
+	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.AllowEmptyPushBranch); got != queryTrue {
 		t.Errorf("%s = %q, want true", workerenv.AllowEmptyPushBranch, got)
 	}
 	if got := githubWebhookTaskEnvValue(task.Spec.Env, workerenv.PRBaseRepo); got != githubWebhookTestVekilCloneURL {
