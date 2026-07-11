@@ -438,85 +438,7 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 		ns = defaultNamespace
 	}
 
-	// Try cached port-forward first, but only for the same resolved cluster.
-	clusterID := ""
-	var clusterIDErr error
-	cacheLockHeld := false
-	if server == "" {
-		if releaseCacheLock, err := acquirePortForwardCacheLock(portForwardCacheLockWait); err == nil {
-			cacheLockHeld = true
-			defer releaseCacheLock()
-		}
-		clusterID, clusterIDErr = clusterFingerprint(kubeconfigPath, ns)
-		if cacheLockHeld {
-			if cached := loadPortForwardCache(); cached != nil {
-				if clusterIDErr != nil || cached.ClusterFingerprint != clusterID {
-					removePortForwardCacheFile()
-				} else if cachedPortForwardReady(cached) {
-					server = fmt.Sprintf("http://localhost:%d", cached.Port)
-					fmt.Fprintf(os.Stderr, "Connected to %s in %s (cached port %d)\n",
-						cached.Service, cached.Namespace, cached.Port)
-				} else {
-					removePortForwardCacheFile()
-				}
-			}
-		}
-	}
-
-	// Auto-discover server via K8s service discovery + port-forward
-	if server == "" {
-		kubeconfigFlag := kubeconfigPath
-		// Show connecting indicator if stderr is a terminal
-		stderrIsTTY := false
-		if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-			stderrIsTTY = true
-		}
-		if stderrIsTTY {
-			fmt.Fprint(os.Stderr, "⠋ Connecting to cluster…")
-		}
-		if svcNS, svcName := discoverService(kubeconfigFlag, ns); svcName != "" {
-			localPort, pid, processFingerprint, cleanup, err := startPortForward(kubeconfigFlag, svcNS, svcName)
-			if err == nil {
-				cleanup = sync.OnceFunc(cleanup)
-				// Register cleanup for interrupt
-				go func() {
-					c := make(chan os.Signal, 1)
-					signal.Notify(c, os.Interrupt)
-					<-c
-					cleanup()
-				}()
-				server = fmt.Sprintf("http://localhost:%d", localPort)
-				if cacheLockHeld && clusterIDErr == nil && processFingerprint != "" {
-					err := savePortForwardCache(&portForwardCache{
-						Port:               localPort,
-						PID:                pid,
-						Service:            svcName,
-						Namespace:          svcNS,
-						ClusterFingerprint: clusterID,
-						ProcessFingerprint: processFingerprint,
-					})
-					if err != nil {
-						registerCommandCleanup(cleanup)
-					}
-				} else {
-					registerCommandCleanup(cleanup)
-				}
-				if stderrIsTTY {
-					fmt.Fprint(os.Stderr, "\r\033[2K")
-				}
-				fmt.Fprintf(os.Stderr, "Connected to %s in %s (port %d)\n",
-					svcName, svcNS, localPort)
-			} else if stderrIsTTY {
-				fmt.Fprint(os.Stderr, "\r\033[2K")
-			}
-		} else if stderrIsTTY {
-			fmt.Fprint(os.Stderr, "\r\033[2K")
-		}
-	}
-
-	if server == "" {
-		server = defaultServer
-	}
+	server = resolveClientServer(server, kubeconfigPath, ns)
 
 	c := client.NewWithNamespace(server, token, ns)
 	if txnToken == "" && txnTokenFile != "" {
@@ -528,6 +450,124 @@ func newClientFromCmd(cmd *cobra.Command) *client.Client {
 	}
 	c.TxnToken = strings.TrimSpace(txnToken)
 	return c
+}
+
+type portForwardCacheContext struct {
+	lockHeld                bool
+	clusterFingerprint      string
+	clusterFingerprintValid bool
+}
+
+func resolveClientServer(configuredServer, kubeconfigPath, namespace string) string {
+	if configuredServer != "" {
+		return configuredServer
+	}
+
+	releaseCacheLock, lockErr := acquirePortForwardCacheLock(portForwardCacheLockWait)
+	cacheContext := portForwardCacheContext{lockHeld: lockErr == nil}
+	if cacheContext.lockHeld {
+		defer releaseCacheLock()
+	}
+	clusterID, clusterIDErr := clusterFingerprint(kubeconfigPath, namespace)
+	cacheContext.clusterFingerprint = clusterID
+	cacheContext.clusterFingerprintValid = clusterIDErr == nil
+
+	if server := cachedClientServer(cacheContext); server != "" {
+		return server
+	}
+	if server := discoverClientServer(kubeconfigPath, namespace, cacheContext); server != "" {
+		return server
+	}
+	return defaultServer
+}
+
+func cachedClientServer(cacheContext portForwardCacheContext) string {
+	if !cacheContext.lockHeld {
+		return ""
+	}
+	cached := loadPortForwardCache()
+	if cached == nil {
+		return ""
+	}
+	if !cacheContext.clusterFingerprintValid ||
+		cached.ClusterFingerprint != cacheContext.clusterFingerprint ||
+		!cachedPortForwardReady(cached) {
+		removePortForwardCacheFile()
+		return ""
+	}
+
+	fmt.Fprintf(os.Stderr, "Connected to %s in %s (cached port %d)\n",
+		cached.Service, cached.Namespace, cached.Port)
+	return fmt.Sprintf("http://localhost:%d", cached.Port)
+}
+
+func discoverClientServer(
+	kubeconfigPath, namespace string,
+	cacheContext portForwardCacheContext,
+) string {
+	clearConnectingIndicator := showConnectingIndicator()
+	defer clearConnectingIndicator()
+
+	serviceNamespace, serviceName := discoverService(kubeconfigPath, namespace)
+	if serviceName == "" {
+		return ""
+	}
+
+	localPort, pid, processFingerprint, cleanup, err := startPortForward(
+		kubeconfigPath,
+		serviceNamespace,
+		serviceName,
+	)
+	if err != nil {
+		return ""
+	}
+	cleanup = sync.OnceFunc(cleanup)
+	registerInterruptCleanup(cleanup)
+	if !cacheContext.persist(portForwardCache{
+		Port:               localPort,
+		PID:                pid,
+		Service:            serviceName,
+		Namespace:          serviceNamespace,
+		ClusterFingerprint: cacheContext.clusterFingerprint,
+		ProcessFingerprint: processFingerprint,
+	}) {
+		registerCommandCleanup(cleanup)
+	}
+
+	clearConnectingIndicator()
+	fmt.Fprintf(os.Stderr, "Connected to %s in %s (port %d)\n",
+		serviceName, serviceNamespace, localPort)
+	return fmt.Sprintf("http://localhost:%d", localPort)
+}
+
+// persist stores only a lock-protected, cluster-bound, process-verifiable port forward.
+func (cacheContext portForwardCacheContext) persist(cache portForwardCache) bool {
+	if !cacheContext.lockHeld ||
+		!cacheContext.clusterFingerprintValid ||
+		cache.ProcessFingerprint == "" {
+		return false
+	}
+	return savePortForwardCache(&cache) == nil
+}
+
+func showConnectingIndicator() func() {
+	if !isTTYCheck(os.Stderr) {
+		return func() {}
+	}
+
+	fmt.Fprint(os.Stderr, "⠋ Connecting to cluster…")
+	return sync.OnceFunc(func() {
+		fmt.Fprint(os.Stderr, "\r\033[2K")
+	})
+}
+
+func registerInterruptCleanup(cleanup func()) {
+	go func() {
+		interrupt := make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt)
+		<-interrupt
+		cleanup()
+	}()
 }
 
 func registerCommandCleanup(cleanup func()) {

@@ -247,6 +247,98 @@ func TestLoadPortForwardCacheExpired(t *testing.T) {
 	}
 }
 
+func TestPortForwardCacheContextPersistSafety(t *testing.T) {
+	clusterFingerprint := strings.Repeat("a", sha256.Size*2)
+	processFingerprint := strings.Repeat("b", sha256.Size*2)
+	tests := []struct {
+		name               string
+		cacheContext       portForwardCacheContext
+		processFingerprint string
+		blockCachePath     bool
+		wantPersisted      bool
+	}{
+		{
+			name: "cache lock not held",
+			cacheContext: portForwardCacheContext{
+				clusterFingerprint:      clusterFingerprint,
+				clusterFingerprintValid: true,
+			},
+			processFingerprint: processFingerprint,
+		},
+		{
+			name: "cluster fingerprint invalid",
+			cacheContext: portForwardCacheContext{
+				lockHeld:           true,
+				clusterFingerprint: clusterFingerprint,
+			},
+			processFingerprint: processFingerprint,
+		},
+		{
+			name: "process fingerprint missing",
+			cacheContext: portForwardCacheContext{
+				lockHeld:                true,
+				clusterFingerprint:      clusterFingerprint,
+				clusterFingerprintValid: true,
+			},
+		},
+		{
+			name: "cache write fails",
+			cacheContext: portForwardCacheContext{
+				lockHeld:                true,
+				clusterFingerprint:      clusterFingerprint,
+				clusterFingerprintValid: true,
+			},
+			processFingerprint: processFingerprint,
+			blockCachePath:     true,
+		},
+		{
+			name: "safe cache entry",
+			cacheContext: portForwardCacheContext{
+				lockHeld:                true,
+				clusterFingerprint:      clusterFingerprint,
+				clusterFingerprintValid: true,
+			},
+			processFingerprint: processFingerprint,
+			wantPersisted:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+			if tt.blockCachePath {
+				cachePath := filepath.Join(homeDir, configDir, cacheFile)
+				if err := os.MkdirAll(cachePath, 0o700); err != nil {
+					t.Fatalf("create invalid cache destination: %v", err)
+				}
+			}
+
+			persisted := tt.cacheContext.persist(portForwardCache{
+				Port:               12345,
+				PID:                os.Getpid(),
+				Service:            testOrkaServiceName,
+				Namespace:          defaultNamespace,
+				ClusterFingerprint: clusterFingerprint,
+				ProcessFingerprint: tt.processFingerprint,
+			})
+			if persisted != tt.wantPersisted {
+				t.Fatalf("persist() = %v, want %v", persisted, tt.wantPersisted)
+			}
+			if tt.wantPersisted {
+				cached := loadPortForwardCache()
+				if cached == nil {
+					t.Fatal("persisted cache entry was not readable")
+				}
+				if cached.ClusterFingerprint != clusterFingerprint ||
+					cached.ProcessFingerprint != processFingerprint {
+					t.Fatalf("persisted cache fingerprints = %+v", cached)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadPortForwardCacheMissing(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -970,18 +1062,73 @@ func TestNewClientFromCmd_FallbackDefaultServer(t *testing.T) {
 	t.Setenv("HOME", tmp)
 
 	root := newRootCmd()
-	root.SetArgs([]string{testTokenFlag, testTokenValue, testNamespaceFlag, "ns"})
+	root.SetArgs([]string{
+		testTokenFlag, testTokenValue,
+		testNamespaceFlag, "ns",
+		testKubeconfigFlag, filepath.Join(tmp, "missing-kubeconfig"),
+	})
 	root.RunE = func(cmd *cobra.Command, _ []string) error {
 		c := newClientFromCmd(cmd)
-		// Without kubeconfig or K8s cluster, server should fall back to default
 		if c.BaseURL != defaultServer {
-			t.Logf("BaseURL = %q (may not be default if kubeconfig exists)", c.BaseURL)
+			t.Errorf("BaseURL = %q, want %q", c.BaseURL, defaultServer)
 		}
 		return nil
 	}
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
+	}
+}
+
+func TestResolveClientServerPreservesConfiguredServerAndCache(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	cachePath := filepath.Join(homeDir, configDir, cacheFile)
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatalf("create cache directory: %v", err)
+	}
+	cacheContents := []byte("not-json")
+	if err := os.WriteFile(cachePath, cacheContents, 0o600); err != nil {
+		t.Fatalf("write sentinel cache: %v", err)
+	}
+
+	got := resolveClientServer(testHTTPServer9090, filepath.Join(homeDir, "missing"), defaultNamespace)
+	if got != testHTTPServer9090 {
+		t.Fatalf("resolveClientServer() = %q, want %q", got, testHTTPServer9090)
+	}
+	persistedContents, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("configured server inspected or removed cache: %v", err)
+	}
+	if string(persistedContents) != string(cacheContents) {
+		t.Fatalf("configured server changed cache to %q", persistedContents)
+	}
+}
+
+func TestResolveClientServerFallsBackWhenPortForwardCannotStart(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", t.TempDir())
+
+	clusterAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sharedServiceCheckPath {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer clusterAPI.Close()
+
+	kubeconfigPath := writePortForwardKubeconfig(
+		t,
+		testSharedContext,
+		testSharedCluster,
+		clusterAPI.URL,
+		testSharedNamespace,
+	)
+	got := resolveClientServer("", kubeconfigPath, testSharedNamespace)
+	if got != defaultServer {
+		t.Fatalf("resolveClientServer() = %q, want %q", got, defaultServer)
 	}
 }
 
@@ -1031,6 +1178,75 @@ func TestNewClientFromCmd_WithKubeconfig(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
+}
+
+func TestCachedClientServerRequiresLockAndVerifiedProcess(t *testing.T) {
+	if runtime.GOOS == testWindowsGOOS {
+		t.Skip("port-forward process verification is unavailable on Windows")
+	}
+
+	clusterFingerprint := strings.Repeat("c", sha256.Size*2)
+	processIdentity, err := portForwardProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("portForwardProcessIdentity() error: %v", err)
+	}
+	cache := portForwardCache{
+		Port:               12345,
+		PID:                os.Getpid(),
+		Service:            testOrkaServiceName,
+		Namespace:          defaultNamespace,
+		ClusterFingerprint: clusterFingerprint,
+		ProcessFingerprint: portForwardProcessIdentityFingerprint(processIdentity),
+	}
+
+	t.Run("cache lock not held", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		savePortForwardCacheForTest(t, &cache)
+
+		got := cachedClientServer(portForwardCacheContext{
+			clusterFingerprint:      clusterFingerprint,
+			clusterFingerprintValid: true,
+		})
+		if got != "" {
+			t.Fatalf("cachedClientServer() = %q, want empty", got)
+		}
+		if _, err := os.Stat(filepath.Join(homeDir, configDir, cacheFile)); err != nil {
+			t.Fatalf("unlocked cache was inspected or removed: %v", err)
+		}
+	})
+
+	t.Run("cluster fingerprint unavailable", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		savePortForwardCacheForTest(t, &cache)
+
+		got := cachedClientServer(portForwardCacheContext{lockHeld: true})
+		if got != "" {
+			t.Fatalf("cachedClientServer() = %q, want empty", got)
+		}
+		if _, err := os.Stat(filepath.Join(homeDir, configDir, cacheFile)); !os.IsNotExist(err) {
+			t.Fatalf("cache with unresolved cluster identity was not removed: %v", err)
+		}
+	})
+
+	t.Run("process is not a matching port-forward", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		savePortForwardCacheForTest(t, &cache)
+
+		got := cachedClientServer(portForwardCacheContext{
+			lockHeld:                true,
+			clusterFingerprint:      clusterFingerprint,
+			clusterFingerprintValid: true,
+		})
+		if got != "" {
+			t.Fatalf("cachedClientServer() = %q, want empty", got)
+		}
+		if _, err := os.Stat(filepath.Join(homeDir, configDir, cacheFile)); !os.IsNotExist(err) {
+			t.Fatalf("unverified process cache was not removed: %v", err)
+		}
+	})
 }
 
 func TestNewClientFromCmd_CachedPortForward(t *testing.T) {

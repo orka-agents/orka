@@ -19,7 +19,9 @@ import (
 const (
 	statusContinueKey  = "continue"
 	statusError        = "error"
+	statusHealthPath   = "/healthz"
 	statusNextContinue = "next"
+	statusReadyPath    = "/readyz"
 	statusTaskOne      = "task-1"
 	tasksAPIPath       = "/api/v1/tasks"
 )
@@ -38,13 +40,13 @@ func TestNewStatusCmd_Structure(t *testing.T) {
 func statusServer(healthy, ready bool, tasks []client.TaskSummary, agents []client.AgentSummary) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz":
+		case statusHealthPath:
 			status := "ok"
 			if !healthy {
 				status = statusError
 			}
 			json.NewEncoder(w).Encode(map[string]any{"status": status}) //nolint:errcheck
-		case "/readyz":
+		case statusReadyPath:
 			status := "ok"
 			if !ready {
 				status = statusError
@@ -109,7 +111,7 @@ func TestNewStatusCmdCountsAllTaskAndAgentPages(t *testing.T) {
 	var taskRequests, agentRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/readyz":
+		case statusHealthPath, statusReadyPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case tasksAPIPath:
 			taskRequests++
@@ -265,7 +267,7 @@ func TestNewStatusCmd_PropagatesCancellationDuringPagination(t *testing.T) {
 	var agentRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/readyz":
+		case statusHealthPath, statusReadyPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case tasksAPIPath:
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -306,9 +308,9 @@ func TestNewStatusCmd_TaskErrors(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz":
+		case statusHealthPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
-		case "/readyz":
+		case statusReadyPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case tasksAPIPath:
 			w.WriteHeader(http.StatusInternalServerError)
@@ -340,7 +342,7 @@ func TestNewStatusCmdReportsPartialInventoryErrorInsteadOfUndercount(t *testing.
 	var agentRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/healthz", "/readyz":
+		case statusHealthPath, statusReadyPath:
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case tasksAPIPath:
 			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
