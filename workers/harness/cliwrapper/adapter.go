@@ -61,6 +61,7 @@ type CommandSpec struct {
 	Path       string
 	Args       []string
 	Env        []string
+	UnsetEnv   []string // Removed after inherited and explicit Env entries are merged.
 	Dir        string
 	Stdin      []byte
 	ResultFile string

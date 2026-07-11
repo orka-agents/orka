@@ -11,11 +11,26 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-const envCommandRunnerStdoutHelper = "ORKA_CLIWRAPPER_STDOUT_HELPER"
+const (
+	envCommandRunnerStdoutHelper = "ORKA_CLIWRAPPER_STDOUT_HELPER"
+	envCommandRunnerEnvHelper    = "ORKA_CLIWRAPPER_ENV_HELPER"
+	envCommandRunnerDrop         = "ORKA_CLIWRAPPER_DROP"
+	envCommandRunnerKeepParent   = "ORKA_CLIWRAPPER_KEEP_PARENT"
+	envCommandRunnerKeepSpec     = "ORKA_CLIWRAPPER_KEEP_SPEC"
+)
 
 func TestMain(m *testing.M) {
 	if os.Getenv(envCommandRunnerStdoutHelper) == "1" {
 		_, _ = os.Stdout.Write([]byte("abcdefgh"))
+		return
+	}
+	if os.Getenv(envCommandRunnerEnvHelper) == "1" {
+		if _, exists := os.LookupEnv(envCommandRunnerDrop); exists {
+			os.Exit(41)
+		}
+		_, _ = os.Stdout.Write([]byte(
+			os.Getenv(envCommandRunnerKeepParent) + "|" + os.Getenv(envCommandRunnerKeepSpec),
+		))
 		return
 	}
 	os.Exit(m.Run())
@@ -62,6 +77,27 @@ func TestCommandRunnerPreservesFullStdoutWhenLogPreviewTruncates(t *testing.T) {
 	}
 	if got := result.ExactStdout(); got != "abcdefgh" {
 		t.Fatalf("ExactStdout = %q, want full stdout", got)
+	}
+}
+
+func TestCommandRunnerUnsetsEnvAfterMerge(t *testing.T) {
+	t.Setenv(envCommandRunnerDrop, "inherited-value")
+	t.Setenv(envCommandRunnerKeepParent, "parent-value")
+	runner := CommandRunner{StdoutLimitBytes: 64, StderrLimitBytes: 64, CancelGrace: 10 * time.Millisecond}
+	result, err := runner.Run(context.Background(), &CommandSpec{
+		Path: os.Args[0],
+		Env: []string{
+			envCommandRunnerEnvHelper + "=1",
+			envCommandRunnerDrop + "=spec-value",
+			envCommandRunnerKeepSpec + "=spec-value",
+		},
+		UnsetEnv: []string{envCommandRunnerDrop},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := result.ExactStdout(); got != "parent-value|spec-value" {
+		t.Fatalf("ExactStdout = %q, want preserved inherited and spec env", got)
 	}
 }
 

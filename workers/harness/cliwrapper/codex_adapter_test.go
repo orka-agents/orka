@@ -130,6 +130,178 @@ printf 'progress for %s' "$prompt"
 	}
 }
 
+func TestCodexAdapterRunsLargePromptThroughStdinWithoutPromptEnv(t *testing.T) {
+	dir := t.TempDir()
+	stdinCapture := filepath.Join(dir, "codex-stdin.txt")
+	envCapture := filepath.Join(dir, "codex-prompt-env.txt")
+	fakeCodex := filepath.Join(dir, "codex-large-prompt.sh")
+	if err := os.WriteFile(fakeCodex, []byte(`#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+if [ "${ORKA_PROMPT+x}" = "x" ]; then
+  printf 'set' > "$CODEX_PROMPT_ENV_CAPTURE"
+  exit 64
+fi
+printf 'unset' > "$CODEX_PROMPT_ENV_CAPTURE"
+if [ "${CODEX_INHERITED_ENV:-}" != "inherited-value" ]; then exit 65; fi
+if [ "${CODEX_SPEC_ENV:-}" != "spec-value" ]; then exit 66; fi
+cat > "$CODEX_STDIN_CAPTURE"
+printf 'large prompt received' > "$out"
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.Prompt, "inherited-parent-value")
+	t.Setenv("CODEX_INHERITED_ENV", "inherited-value")
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Runtime = RuntimeCodex
+	cfg.WorkDir = dir
+	cfg.CommandEnv = []string{
+		"CODEX_STDIN_CAPTURE=" + stdinCapture,
+		"CODEX_PROMPT_ENV_CAPTURE=" + envCapture,
+		"CODEX_SPEC_ENV=spec-value",
+	}
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	largePrompt := "begin\n" + strings.Repeat("0123456789abcdef", 10*1024) + "\nend"
+	if len(largePrompt) <= 128*1024 {
+		t.Fatalf("large prompt length = %d, want more than 128 KiB", len(largePrompt))
+	}
+	request := validWrapperStartTurnRequest()
+	request.Input.Prompt = largePrompt
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if last.Completed.Result != "large prompt received" {
+		t.Fatalf("completed result = %q, want fake codex result", last.Completed.Result)
+	}
+	capturedStdin, err := os.ReadFile(stdinCapture)
+	if err != nil {
+		t.Fatalf("read fake Codex stdin capture: %v", err)
+	}
+	if got := string(capturedStdin); got != largePrompt {
+		t.Fatalf("fake Codex stdin length = %d, want exact %d-byte prompt", len(got), len(largePrompt))
+	}
+	capturedEnv, err := os.ReadFile(envCapture)
+	if err != nil {
+		t.Fatalf("read fake Codex prompt env capture: %v", err)
+	}
+	if got := string(capturedEnv); got != "unset" {
+		t.Fatalf("fake Codex ORKA_PROMPT state = %q, want unset", got)
+	}
+}
+
+func TestCodexAdapterSecurityArtifactFollowUpUsesStdinWithoutPromptEnv(t *testing.T) {
+	dir := t.TempDir()
+	invocationMarker := filepath.Join(dir, "codex-invoked")
+	followUpStdinCapture := filepath.Join(dir, "codex-follow-up-stdin.txt")
+	followUpEnvCapture := filepath.Join(dir, "codex-follow-up-prompt-env.txt")
+	fakeCodex := filepath.Join(dir, "codex-security-follow-up.sh")
+	if err := os.WriteFile(fakeCodex, []byte(`#!/bin/sh
+set -eu
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+if [ -e "$CODEX_INVOCATION_MARKER" ]; then
+  if [ "${ORKA_PROMPT+x}" = "x" ]; then
+    printf 'set' > "$CODEX_FOLLOW_UP_ENV_CAPTURE"
+    exit 64
+  fi
+  printf 'unset' > "$CODEX_FOLLOW_UP_ENV_CAPTURE"
+  cat > "$CODEX_FOLLOW_UP_STDIN_CAPTURE"
+  mkdir -p "$ORKA_ARTIFACTS_DIR"
+  printf '# threat model\n' > "$ORKA_ARTIFACTS_DIR/security-threat-model.md"
+  printf 'SECURITY_ARTIFACTS_WRITTEN' > "$out"
+else
+  if [ "${ORKA_PROMPT+x}" = "x" ]; then
+    printf 'initial-set' > "$CODEX_FOLLOW_UP_ENV_CAPTURE"
+    exit 63
+  fi
+  : > "$CODEX_INVOCATION_MARKER"
+  cat > /dev/null
+  : > "$out"
+fi
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.Prompt, "inherited-parent-value")
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Runtime = RuntimeCodex
+	cfg.WorkDir = dir
+	cfg.CommandEnv = []string{
+		"CODEX_INVOCATION_MARKER=" + invocationMarker,
+		"CODEX_FOLLOW_UP_STDIN_CAPTURE=" + followUpStdinCapture,
+		"CODEX_FOLLOW_UP_ENV_CAPTURE=" + followUpEnvCapture,
+	}
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: fakeCodex, WorkDir: dir})
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Input.Prompt = "REQUIRED_SECURITY_ARTIFACTS: security-threat-model.md\nreview the repository"
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if !strings.Contains(last.Completed.Result, "SECURITY_ARTIFACTS_WRITTEN") {
+		t.Fatalf("completed result = %q, want follow-up result", last.Completed.Result)
+	}
+	expectedFollowUp := strings.Join([]string{
+		"Before responding, finish the task by writing the missing required security artifacts.",
+		"Write them under .orka-artifacts/.",
+		"Missing files:",
+		"- .orka-artifacts/security-threat-model.md",
+		"Do not inspect more repository files unless absolutely necessary.",
+		"Reuse the analysis already completed in this run.",
+		"Use shell redirection or heredocs so the files are definitely persisted on disk.",
+		"security-threat-model.md must be non-empty markdown grounded in the repository.",
+		"After writing the files, reply with only: SECURITY_ARTIFACTS_WRITTEN",
+		"",
+	}, "\n")
+	capturedFollowUp, err := os.ReadFile(followUpStdinCapture)
+	if err != nil {
+		t.Fatalf("read fake Codex follow-up stdin capture: %v", err)
+	}
+	if got := string(capturedFollowUp); got != expectedFollowUp {
+		t.Fatalf("fake Codex follow-up stdin = %q, want %q", got, expectedFollowUp)
+	}
+	capturedEnv, err := os.ReadFile(followUpEnvCapture)
+	if err != nil {
+		t.Fatalf("read fake Codex follow-up prompt env capture: %v", err)
+	}
+	if got := string(capturedEnv); got != "unset" {
+		t.Fatalf("fake Codex follow-up ORKA_PROMPT state = %q, want unset", got)
+	}
+}
+
 func TestCodexAdapterFailurePath(t *testing.T) {
 	dir := t.TempDir()
 	fakeCodex := filepath.Join(dir, "codex-fail.sh")
