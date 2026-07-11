@@ -32,9 +32,9 @@ const (
 	testRetryGateCommand    = "true"
 	testStatusSubresource   = "status"
 	testCurrentJobName      = "current-job"
-	testJobOwnerKind        = "Job"
 	testMissingJobName      = "nonexistent"
 	testRetryMissingJobName = "missing-job"
+	testNonexistentJobName  = "nonexistent-job"
 	testTaskResource        = "tasks"
 )
 
@@ -461,7 +461,7 @@ func TestRetryTask_ForegroundDeleteRescansActiveOwnedPod(t *testing.T) {
 			Name:            jobName + "-pod",
 			Namespace:       defaultNS,
 			Labels:          map[string]string{batchv1.JobNameLabel: jobName},
-			OwnerReferences: []metav1.OwnerReference{{Kind: testJobOwnerKind, Name: jobName, Controller: &controller}},
+			OwnerReferences: []metav1.OwnerReference{{Kind: jobOwnerKind, Name: jobName, Controller: &controller}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
@@ -515,7 +515,7 @@ func TestRetryTask_MissingJobWaitsForActiveOwnedPod(t *testing.T) {
 			Labels: map[string]string{
 				batchv1.JobNameLabel: jobName,
 			},
-			OwnerReferences: []metav1.OwnerReference{{Kind: testJobOwnerKind, Name: jobName, Controller: &controller}},
+			OwnerReferences: []metav1.OwnerReference{{Kind: jobOwnerKind, Name: jobName, Controller: &controller}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
@@ -577,7 +577,7 @@ func TestRetryTask_MissingJobIgnoresUnownedAndTerminalPods(t *testing.T) {
 			Name:            jobName + "-terminal",
 			Namespace:       defaultNS,
 			Labels:          map[string]string{batchv1.JobNameLabel: jobName},
-			OwnerReferences: []metav1.OwnerReference{{Kind: testJobOwnerKind, Name: jobName, Controller: &controller}},
+			OwnerReferences: []metav1.OwnerReference{{Kind: jobOwnerKind, Name: jobName, Controller: &controller}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
@@ -1224,7 +1224,7 @@ func TestHandlePending_DueRetryRechecksActiveOwnedPod(t *testing.T) {
 			Name:            jobName + "-pod",
 			Namespace:       defaultNS,
 			Labels:          map[string]string{batchv1.JobNameLabel: jobName},
-			OwnerReferences: []metav1.OwnerReference{{Kind: testJobOwnerKind, Name: jobName, UID: jobUID, Controller: &controller}},
+			OwnerReferences: []metav1.OwnerReference{{Kind: jobOwnerKind, Name: jobName, UID: jobUID, Controller: &controller}},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}

@@ -782,7 +782,7 @@ var _ = Describe("Task Controller", func() {
 			// exclude normal cache propagation delay after Job creation.
 			started := metav1.NewTime(time.Now().Add(-2 * jobCreationVisibilityGracePeriod))
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
-			task.Status.JobName = "nonexistent-job"
+			task.Status.JobName = testNonexistentJobName
 			task.Status.StartTime = &started
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
@@ -821,7 +821,7 @@ var _ = Describe("Task Controller", func() {
 
 			started := metav1.NewTime(time.Now().Add(-2 * jobCreationVisibilityGracePeriod))
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
-			task.Status.JobName = "nonexistent-job"
+			task.Status.JobName = testNonexistentJobName
 			task.Status.StartTime = &started
 			task.Status.Attempts = 1
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
@@ -832,7 +832,7 @@ var _ = Describe("Task Controller", func() {
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
-			Expect(task.Status.JobName).To(Equal("nonexistent-job"))
+			Expect(task.Status.JobName).To(Equal(testNonexistentJobName))
 		})
 
 		It("should fail task on timeout", func() {

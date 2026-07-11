@@ -89,6 +89,7 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
+	jobOwnerKind                    = "Job"
 	retryTaskOwnerKind              = "Task"
 	legacyJobNameLabel              = "job-name"
 )
@@ -1166,42 +1167,75 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
+	retryGate, result, proceed, err := r.prepareTaskJobCreation(ctx, task)
+	if err != nil || !proceed {
+		return result, err
+	}
 
-	latest := &corev1alpha1.Task{}
+	job, reservedPoolActor, result, proceed, err := r.buildTaskJobForCreation(ctx, task, agent, provider)
+	if err != nil || !proceed {
+		return result, err
+	}
+
+	job, jobCreated, result, proceed, err := r.createOrAdoptTaskJob(ctx, task, job, reservedPoolActor)
+	if err != nil || !proceed {
+		return result, err
+	}
+
+	return r.persistTaskJobCreation(ctx, task, retryGate, job, jobCreated, reservedPoolActor)
+}
+
+func (r *TaskReconciler) prepareTaskJobCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (*retryGateExpectation, ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
 	reader := r.APIReader
 	if reader == nil {
 		reader = r.Client
 	}
+
+	latest := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
-		return ctrl.Result{}, err
+		return nil, ctrl.Result{}, false, err
 	}
 	if !canStartTaskJob(latest.Status.Phase) {
 		task.Status = latest.Status
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
-		return ctrl.Result{}, nil
+		return nil, ctrl.Result{}, false, nil
 	}
+
 	var retryGate *retryGateExpectation
 	if _, exists := latest.Annotations[labels.AnnotationRetryNotBefore]; exists {
 		if result, handled, err := r.handleRetryNotBefore(ctx, latest); err != nil || handled {
-			return result, err
+			return nil, result, false, err
 		}
 		expected, exists := retryGateExpectationFromTask(latest)
 		if !exists {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
+			return nil, ctrl.Result{RequeueAfter: time.Second}, false, nil
 		}
 		retryGate = &expected
 	}
 	*task = *latest.DeepCopy()
+	return retryGate, ctrl.Result{}, true, nil
+}
 
-	// Ensure worker ServiceAccount and RBAC exist in the task namespace
+func (r *TaskReconciler) buildTaskJobForCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	provider *corev1alpha1.Provider,
+) (*batchv1.Job, bool, ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+
+	// Worker RBAC reconciliation is best-effort because existing RBAC may still
+	// be sufficient for the Job to run.
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
 		if r.Recorder != nil {
 			r.Recorder.Eventf(task, corev1.EventTypeWarning, workerRBACReconcileFailedReason,
 				"failed to ensure worker RBAC in namespace %q: %v", task.Namespace, err)
 		}
-		// Non-fatal: continue with job creation, it may still work
 	}
 
 	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
@@ -1209,23 +1243,25 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Error(err, "failed to resolve execution workspace")
 		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
 			log.Error(statusErr, "failed to update execution workspace validation status")
-			return ctrl.Result{}, statusErr
+			return nil, false, ctrl.Result{}, false, statusErr
 		}
-		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+		return nil, false, result, false, failErr
 	}
+
 	reservedPoolActor := false
 	if workspaceRequest != nil && workspaceRequest.PoolName != "" {
 		reserved, err := r.reserveSubstratePoolActor(ctx, task, workspaceRequest)
 		if err != nil {
 			log.Error(err, "failed to reserve substrate pool actor")
-			return ctrl.Result{}, err
+			return nil, false, ctrl.Result{}, false, err
 		}
 		if !reserved {
 			log.Info("all substrate pool actors are busy",
 				"pool", workspaceRequest.PoolName,
 				"poolNamespace", workspaceRequest.PoolNamespace,
 			)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return nil, false, ctrl.Result{RequeueAfter: 5 * time.Second}, false, nil
 		}
 		reservedPoolActor = true
 	}
@@ -1235,75 +1271,104 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to derive resolved approvals")
-			if reservedPoolActor {
-				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-					return ctrl.Result{}, releaseErr
-				}
+			if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+				return nil, false, ctrl.Result{}, false, releaseErr
 			}
-			return ctrl.Result{}, err
+			return nil, false, ctrl.Result{}, false, err
 		}
 	}
 
-	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
 		ExecutionWorkspace:    workspaceRequest,
 		ResolvedApprovalsJSON: resolvedApprovalsJSON,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
-		if reservedPoolActor {
-			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-				return ctrl.Result{}, releaseErr
-			}
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
 		}
-		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
+		return nil, false, result, false, failErr
 	}
 
-	// Set owner reference
 	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
 		log.Error(err, "failed to set owner reference")
-		if reservedPoolActor {
-			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-				return ctrl.Result{}, releaseErr
-			}
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
 		}
-		return ctrl.Result{}, err
+		return nil, false, ctrl.Result{}, false, err
 	}
 
-	// Create the Job
-	jobCreated := false
-	if err := r.Create(ctx, job); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			existing := &batchv1.Job{}
-			if getErr := reader.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); getErr != nil {
-				return ctrl.Result{}, getErr
-			}
-			if !retryJobControlledByTask(existing, task) {
-				if reservedPoolActor {
-					if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-						return ctrl.Result{}, releaseErr
-					}
-				}
-				return ctrl.Result{}, fmt.Errorf("existing Job %s/%s is not controlled by Task %s/%s", existing.Namespace, existing.Name, task.Namespace, task.Name)
-			}
-			if !existing.DeletionTimestamp.IsZero() {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			job = existing
-			task.Status.JobName = existing.Name
-		} else {
-			log.Error(err, "failed to create Job")
-			if reservedPoolActor {
-				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-					return ctrl.Result{}, releaseErr
-				}
-			}
-			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
-		}
-	} else {
-		jobCreated = true
-		task.Status.JobName = job.Name
+	return job, reservedPoolActor, ctrl.Result{}, true, nil
+}
+
+func (r *TaskReconciler) releaseTaskJobPoolActorReservation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	reservedPoolActor bool,
+) error {
+	if !reservedPoolActor {
+		return nil
 	}
+	return r.releaseSubstratePoolActorLeases(ctx, task)
+}
+
+func (r *TaskReconciler) createOrAdoptTaskJob(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	job *batchv1.Job,
+	reservedPoolActor bool,
+) (*batchv1.Job, bool, ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+	if err := r.Create(ctx, job); err == nil {
+		task.Status.JobName = job.Name
+		return job, true, ctrl.Result{}, true, nil
+	} else if !apierrors.IsAlreadyExists(err) {
+		log.Error(err, "failed to create Job")
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
+		}
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
+		return nil, false, result, false, failErr
+	}
+
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	existing := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); err != nil {
+		return nil, false, ctrl.Result{}, false, err
+	}
+	if !retryJobControlledByTask(existing, task) {
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
+		}
+		return nil, false, ctrl.Result{}, false, fmt.Errorf(
+			"existing Job %s/%s is not controlled by Task %s/%s",
+			existing.Namespace,
+			existing.Name,
+			task.Namespace,
+			task.Name,
+		)
+	}
+	if !existing.DeletionTimestamp.IsZero() {
+		return nil, false, ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	}
+
+	task.Status.JobName = existing.Name
+	return existing, false, ctrl.Result{}, true, nil
+}
+
+func (r *TaskReconciler) persistTaskJobCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retryGate *retryGateExpectation,
+	job *batchv1.Job,
+	jobCreated bool,
+	reservedPoolActor bool,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 	jobName := task.Status.JobName
 	if retryGate != nil {
 		cleared, err := r.clearRetryNotBefore(ctx, task, *retryGate)
@@ -1320,46 +1385,21 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		task.Status.JobName = jobName
 	}
 
-	// Update status to Running
 	now := metav1.Now()
 	task.Status.Phase = corev1alpha1.TaskPhaseRunning
 	task.Status.StartTime = &now
 	task.Status.Attempts++
 
-	if s := trace.SpanFromContext(ctx); s.IsRecording() {
-		s.AddEvent("phase.transition", trace.WithAttributes(
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.AddEvent("phase.transition", trace.WithAttributes(
 			attribute.String("task.phase", string(corev1alpha1.TaskPhaseRunning)),
 		))
 	}
 
-	attempts := task.Status.Attempts
-	transitionedToRunning := false
-	var statusErr error
-	if retryGate != nil {
-		transitionedToRunning, statusErr = r.updateRetryTaskRunningStatus(ctx, task, *retryGate, jobName, attempts, now)
-	} else {
-		statusErr = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-			transitionedToRunning = false
-			if !canStartTaskJob(t.Status.Phase) {
-				return
-			}
-			t.Status.Phase = corev1alpha1.TaskPhaseRunning
-			t.Status.StartTime = &now
-			t.Status.Attempts = attempts
-			t.Status.JobName = jobName
-			meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeJobCreated,
-				Status:             metav1.ConditionTrue,
-				LastTransitionTime: now,
-				Reason:             "JobCreated",
-				Message:            fmt.Sprintf("Job %s created", job.Name),
-			})
-			transitionedToRunning = true
-		})
-	}
-	if statusErr != nil {
-		log.Error(statusErr, "failed to update status")
-		return ctrl.Result{}, statusErr
+	transitionedToRunning, err := r.updateTaskJobRunningStatus(ctx, task, retryGate, job, jobName, task.Status.Attempts, now)
+	if err != nil {
+		log.Error(err, "failed to update status")
+		return ctrl.Result{}, err
 	}
 	if retryGate != nil && !transitionedToRunning {
 		if cleanupErr := r.deleteUntrackedRetryReplacement(ctx, task, *retryGate, job); cleanupErr != nil {
@@ -1373,23 +1413,62 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if transitionedToRunning {
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskJobCreated,
-			execevents.ExecutionEventSeverityInfo,
-			fmt.Sprintf("Job %s created", jobName),
-		)
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskStarted,
-			execevents.ExecutionEventSeverityInfo,
-			fmt.Sprintf("Task started with Job %s", jobName),
-		)
+		r.recordTaskJobStartedEvents(ctx, task, jobName)
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func (r *TaskReconciler) updateTaskJobRunningStatus(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retryGate *retryGateExpectation,
+	job *batchv1.Job,
+	jobName string,
+	attempts int32,
+	now metav1.Time,
+) (bool, error) {
+	if retryGate != nil {
+		return r.updateRetryTaskRunningStatus(ctx, task, *retryGate, jobName, attempts, now)
+	}
+
+	transitionedToRunning := false
+	err := r.updateStatusWithRetry(ctx, task, func(latest *corev1alpha1.Task) {
+		transitionedToRunning = false
+		if !canStartTaskJob(latest.Status.Phase) {
+			return
+		}
+		latest.Status.Phase = corev1alpha1.TaskPhaseRunning
+		latest.Status.StartTime = &now
+		latest.Status.Attempts = attempts
+		latest.Status.JobName = jobName
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeJobCreated,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: now,
+			Reason:             "JobCreated",
+			Message:            fmt.Sprintf("Job %s created", job.Name),
+		})
+		transitionedToRunning = true
+	})
+	return transitionedToRunning, err
+}
+
+func (r *TaskReconciler) recordTaskJobStartedEvents(ctx context.Context, task *corev1alpha1.Task, jobName string) {
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskJobCreated,
+		execevents.ExecutionEventSeverityInfo,
+		fmt.Sprintf("Job %s created", jobName),
+	)
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskStarted,
+		execevents.ExecutionEventSeverityInfo,
+		fmt.Sprintf("Task started with Job %s", jobName),
+	)
 }
 
 func (r *TaskReconciler) reserveSubstratePoolActor(
@@ -2096,7 +2175,7 @@ func podBelongsToJob(pod *corev1.Pod, jobName string) bool {
 		}
 	}
 	for _, owner := range pod.OwnerReferences {
-		if owner.Kind == "Job" {
+		if owner.Kind == jobOwnerKind {
 			hasJobIdentity = true
 			if owner.Name == jobName {
 				return true
@@ -3011,7 +3090,7 @@ func retryTaskPodJobUID(ctx context.Context, reader client.Reader, namespace, ta
 				continue
 			}
 			for _, owner := range pod.OwnerReferences {
-				if owner.Kind == "Job" && owner.Name == jobName && owner.UID != "" && owner.Controller != nil && *owner.Controller {
+				if owner.Kind == jobOwnerKind && owner.Name == jobName && owner.UID != "" && owner.Controller != nil && *owner.Controller {
 					jobUIDs[owner.UID] = struct{}{}
 				}
 			}
@@ -3181,7 +3260,7 @@ func retryTaskActivePodsRemain(
 			}
 			for _, owner := range pod.OwnerReferences {
 				uidMatches := owner.UID == expectedJobUID || (allowLegacyNameMatch && owner.UID == "")
-				if owner.Kind == "Job" && owner.Name == jobName && uidMatches && owner.Controller != nil && *owner.Controller {
+				if owner.Kind == jobOwnerKind && owner.Name == jobName && uidMatches && owner.Controller != nil && *owner.Controller {
 					return true, nil
 				}
 			}

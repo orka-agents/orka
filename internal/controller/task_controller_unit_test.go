@@ -3362,7 +3362,7 @@ func TestHandleDeletionPreservesPoolLeaseAfterCleanupFailure(t *testing.T) {
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Status: corev1alpha1.TaskStatus{
-			JobName: "missing-job",
+			JobName: testRetryMissingJobName,
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
 				Reason: corev1alpha1.ExecutionWorkspaceReasonCleanupFailed,
@@ -3411,7 +3411,7 @@ func TestHandleDeletionReleasesPoolLeaseAfterWorkspaceCleanup(t *testing.T) {
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Status: corev1alpha1.TaskStatus{
-			JobName: "missing-job",
+			JobName: testRetryMissingJobName,
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 				Phase:  corev1alpha1.ExecutionWorkspacePhaseDeleted,
 				Reason: corev1alpha1.ExecutionWorkspaceReasonDeleted,
@@ -3822,7 +3822,7 @@ func TestHandleRunning_JobNotFound(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{
 			Phase:   corev1alpha1.TaskPhaseRunning,
-			JobName: "missing-job",
+			JobName: testRetryMissingJobName,
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -3845,7 +3845,7 @@ func TestHandleRunning_JobNotFoundWithRetryPolicy(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "missing-job",
+			JobName:  testRetryMissingJobName,
 			Attempts: 1,
 		},
 	}
@@ -3860,7 +3860,7 @@ func TestHandleRunning_JobNotFoundWithRetryPolicy(t *testing.T) {
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected phase Pending after scheduling retry, got %s", task.Status.Phase)
 	}
-	if task.Status.JobName != "missing-job" {
+	if task.Status.JobName != testRetryMissingJobName {
 		t.Errorf("expected old JobName to be retained through backoff, got %q", task.Status.JobName)
 	}
 }
@@ -4626,7 +4626,7 @@ func TestRetryTask_PooledLeaseDeletesActorBeforeReset(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "missing-job",
+			JobName:  testRetryMissingJobName,
 			Attempts: 1,
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
@@ -4651,7 +4651,7 @@ func TestRetryTask_PooledLeaseDeletesActorBeforeReset(t *testing.T) {
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("phase = %s, want Pending after pooled retry cleanup", task.Status.Phase)
 	}
-	if task.Status.JobName != "missing-job" {
+	if task.Status.JobName != testRetryMissingJobName {
 		t.Fatalf("JobName = %q, want old Job retained through backoff", task.Status.JobName)
 	}
 	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
@@ -4675,7 +4675,7 @@ func TestRetryTask_PooledLeasePreservedWhenActorCleanupFails(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "missing-job",
+			JobName:  testRetryMissingJobName,
 			Attempts: 1,
 			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
 				Phase:  corev1alpha1.ExecutionWorkspacePhaseFailed,
@@ -4700,7 +4700,7 @@ func TestRetryTask_PooledLeasePreservedWhenActorCleanupFails(t *testing.T) {
 	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
 		t.Fatalf("phase = %s, want Running until pooled retry cleanup succeeds", task.Status.Phase)
 	}
-	if task.Status.JobName != "missing-job" {
+	if task.Status.JobName != testRetryMissingJobName {
 		t.Fatalf("JobName = %q, want old JobName preserved until pooled retry cleanup succeeds", task.Status.JobName)
 	}
 	if len(executor.deleteReqs) != 1 || executor.deleteReqs[0].Ref.ID != testSubstrateActorID {
@@ -6174,7 +6174,7 @@ func TestReconcile_RunningPhase_JobNotFound(t *testing.T) {
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 		Status: corev1alpha1.TaskStatus{
 			Phase:   corev1alpha1.TaskPhaseRunning,
-			JobName: "nonexistent-job",
+			JobName: testNonexistentJobName,
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -6200,7 +6200,7 @@ func TestReconcile_RunningPhase_JobNotFoundWithRetryPolicy(t *testing.T) {
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:    corev1alpha1.TaskPhaseRunning,
-			JobName:  "nonexistent-job",
+			JobName:  testNonexistentJobName,
 			Attempts: 1,
 		},
 	}
@@ -6221,7 +6221,7 @@ func TestReconcile_RunningPhase_JobNotFoundWithRetryPolicy(t *testing.T) {
 	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("expected phase Pending after retry scheduling, got %s", updated.Status.Phase)
 	}
-	if updated.Status.JobName != "nonexistent-job" {
+	if updated.Status.JobName != testNonexistentJobName {
 		t.Fatalf("expected old JobName to be retained through backoff, got %q", updated.Status.JobName)
 	}
 }
