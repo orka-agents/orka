@@ -100,11 +100,12 @@ func TestNewStatusCmd_HealthyServer(t *testing.T) {
 	}
 }
 
-func TestNewStatusCmdCountsAllTaskAndAgentPages(t *testing.T) {
+func TestNewStatusCmdCountsSelectedNamespaceAcrossAllTaskAndAgentPages(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
 	const (
+		selectedNamespace = "pagination-live"
 		taskContinuation  = "task-cursor+/=? segment"
 		agentContinuation = "agent-cursor+/=? segment"
 	)
@@ -115,6 +116,10 @@ func TestNewStatusCmdCountsAllTaskAndAgentPages(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"status": "ok"}) //nolint:errcheck
 		case tasksAPIPath:
 			taskRequests++
+			if got := r.URL.Query().Get("namespace"); got != selectedNamespace {
+				json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+				return
+			}
 			if got := r.URL.Query().Get("limit"); got != "100" {
 				t.Errorf("task limit query = %q, want 100", got)
 			}
@@ -150,6 +155,10 @@ func TestNewStatusCmdCountsAllTaskAndAgentPages(t *testing.T) {
 			}
 		case agentsAPIPath:
 			agentRequests++
+			if got := r.URL.Query().Get("namespace"); got != selectedNamespace {
+				json.NewEncoder(w).Encode(map[string]any{"items": []any{}}) //nolint:errcheck
+				return
+			}
 			switch agentRequests {
 			case 1:
 				items := make([]map[string]any, 100)
@@ -183,7 +192,7 @@ func TestNewStatusCmdCountsAllTaskAndAgentPages(t *testing.T) {
 	defer srv.Close()
 
 	root := newRootCmd()
-	root.SetArgs([]string{"status", "--server", srv.URL})
+	root.SetArgs([]string{"status", "--server", srv.URL, "--namespace", selectedNamespace})
 
 	stdout, err := captureOutput(t, root.Execute)
 	if err != nil {

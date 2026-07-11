@@ -59,7 +59,7 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Println()
 
-			tasks, err := c.ListAllTasks(ctx, client.ListTasksOptions{Limit: 100})
+			tasks, err := c.ListAllTasks(ctx, client.ListTasksOptions{Namespace: c.Namespace, Limit: 100})
 			if err != nil {
 				if contextErr := ctx.Err(); contextErr != nil {
 					return contextErr
@@ -99,7 +99,7 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Println()
 
-			agents, err := c.ListAgents(ctx, client.ListOptions{})
+			agents, err := c.ListAgents(ctx, client.ListOptions{Namespace: c.Namespace})
 			if err != nil {
 				if contextErr := ctx.Err(); contextErr != nil {
 					return contextErr
