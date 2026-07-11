@@ -148,7 +148,7 @@ func TestInternalTaskSessionAndMessageAuthorization(t *testing.T) { //nolint:goc
 	harnessTask := internalCallerAuthTaskObject("harness-task", "harness-task-uid", "", "coordinator-a", "harness-session")
 	harnessTask.Spec.Type = corev1alpha1.TaskTypeAgent
 	harnessTask.Status.Phase = corev1alpha1.TaskPhaseRunning
-	harnessTask.Annotations[harnessWrapperStartedAnnotation] = "true"
+	harnessTask.Annotations[harnessWrapperStartedAnnotation] = queryTrue
 	harnessTask.Annotations[harnessWrapperTurnIDAnnotation] = "turn-1"
 	harnessTask.Annotations[harnessWrapperRuntimeAnnotation] = "runtime-1"
 	deletingHarnessTask := harnessTask.DeepCopy()
