@@ -62,15 +62,19 @@ const (
 	harnessWrapperRuntimeRefAnno              = "orka.ai/harness-wrapper-runtime-ref"
 	harnessWrapperContractAnno                = "orka.ai/harness-wrapper-contract-version"
 	harnessWrapperOutputFetchRetriesAnno      = "orka.ai/harness-wrapper-output-fetch-retries"
-	harnessWrapperCancelDependencyRetriesAnno = "orka.ai/harness-wrapper-cancel-dependency-retries"
+	harnessWrapperCancelDependencyRetriesAnno = "orka.ai/harness-wrapper-cancel-dependency-retries" // Deprecated: folded into harnessWrapperCancellationAnno.
+	harnessWrapperCancellationAnno            = "orka.ai/harness-wrapper-cancellation"
 	harnessWrapperAuthRetriesAnno             = "orka.ai/harness-wrapper-auth-retries"
 	harnessWrapperMaxOutputFetchRetries       = 3
-	harnessWrapperMaxCancelDependencyRetries  = 3
 	harnessWrapperMaxAuthRetries              = 3
 	harnessWrapperSkillsFilesMeta             = "skillsFiles"
 	harnessWrapperStreamPollTimeout           = 2 * time.Second
+	harnessWrapperCancelInitialBackoff        = time.Second
+	harnessWrapperCancelMaxBackoff            = 30 * time.Second
 	harnessWrapperNoTimeoutDuration           = time.Hour * 24 * 365 * 100
 	harnessWrapperRuntimeGeneric              = "generic"
+	harnessWrapperOutcomeUnknown              = "outcome_unknown"
+	harnessWrapperOutcomeUnknownMessage       = "harness wrapper turn " + harnessWrapperOutcomeUnknown + ": runtime reported completion without durable frames; automatic retry suppressed"
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -88,6 +92,14 @@ func taskHasPlannedHarnessWrapperTurn(task *corev1alpha1.Task) bool {
 	return strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) != "" &&
 		strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]) != "" &&
 		strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]) != ""
+}
+
+func harnessWrapperTurnOutcomeUnknown(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	turnID := strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])
+	return turnID != "" && strings.TrimSpace(task.Annotations[labels.AnnotationHarnessTurnOutcomeUnknown]) == turnID
 }
 
 func harnessWrapperEndpoint() string {
@@ -119,6 +131,23 @@ type harnessRuntimeTarget struct {
 	BrokeredToolClasses    []corev1alpha1.AgentRuntimeBrokeredToolClass
 	SupportsContinuation   bool
 }
+
+type harnessWrapperCancellationState struct {
+	TurnID   string `json:"turnID"`
+	Status   string `json:"status"`
+	Reason   string `json:"reason,omitempty"`
+	Attempts int    `json:"attempts,omitempty"`
+	RetryAt  string `json:"retryAt,omitempty"`
+}
+
+type harnessWrapperCancelOutcome string
+
+const (
+	harnessWrapperCancelPending      harnessWrapperCancelOutcome = "pending"
+	harnessWrapperCancelAcknowledged harnessWrapperCancelOutcome = "acknowledged"
+	harnessWrapperCancelMissing      harnessWrapperCancelOutcome = "missing"
+	harnessWrapperCancelNotNeeded    harnessWrapperCancelOutcome = "not_needed"
+)
 
 type agentRuntimeDependencyNotReadyError struct {
 	message string
@@ -409,6 +438,9 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 		}
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
+	if harnessWrapperTurnOutcomeUnknown(task) {
+		return r.failTask(ctx, task, harnessWrapperOutcomeUnknownMessage)
+	}
 
 	if r.ExecutionEventStore == nil {
 		return r.failTask(ctx, task, "execution event store is required for harness wrapper mode")
@@ -527,8 +559,18 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 					// Treat a duplicate turn ID as idempotent recovery after the wrapper
 					// accepted the planned turn before Running status was persisted.
 				case strings.Contains(message, "turn already completed"):
-					// The wrapper already ran this turn to completion and evicted it; its
-					// tombstone rejects re-acceptance. Recover instead of re-executing.
+					// A completed-turn tombstone proves this deterministic turn already ran.
+					// With no durable frames, its terminal result is unknowable. Persist a
+					// turn-bound fence before terminalizing so a controller restart cannot
+					// issue StartTurn again or advance to a new automatic retry attempt.
+					marked, markErr := r.patchHarnessWrapperTurnOutcomeUnknown(ctx, task, request.TurnID)
+					if markErr != nil {
+						return ctrl.Result{}, markErr
+					}
+					if !marked {
+						return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+					}
+					return r.failTask(ctx, task, harnessWrapperOutcomeUnknownMessage)
 				case strings.Contains(message, "maximum concurrent turns"):
 					if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
 						return ctrl.Result{}, clearErr
@@ -581,8 +623,12 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 	}
 	if !transitionedToRunning {
 		if turnAccepted {
-			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task left pending before running transition"); cancelErr != nil {
+			cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task left pending before running transition")
+			if cancelErr != nil {
 				return ctrl.Result{}, cancelErr
+			}
+			if !cancelled {
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
 			}
 		}
 		return ctrl.Result{}, nil
@@ -628,6 +674,9 @@ func (r *TaskReconciler) harnessWrapperTurnJournal(ctx context.Context, task *co
 //nolint:gocyclo // Handles stream polling, event mapping, and terminal task classification in one reconcile step.
 func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	if harnessWrapperTurnOutcomeUnknown(task) {
+		return r.failTask(ctx, task, harnessWrapperOutcomeUnknownMessage)
+	}
 	target, targetErr := r.resolveHarnessRuntimeTarget(ctx, task, nil)
 	if targetErr != nil {
 		if isAgentRuntimeDependencyNotReady(targetErr) {
@@ -942,39 +991,165 @@ func (r *TaskReconciler) waitForHarnessWrapperAuthRetry(ctx context.Context, tas
 	return true, nil
 }
 
-func harnessWrapperCancelDependencyRetries(task *corev1alpha1.Task) int {
+func harnessWrapperCancellation(task *corev1alpha1.Task) (harnessWrapperCancellationState, bool) {
 	if task == nil || task.Annotations == nil {
-		return 0
+		return harnessWrapperCancellationState{}, false
 	}
-	retries, err := strconv.Atoi(strings.TrimSpace(task.Annotations[harnessWrapperCancelDependencyRetriesAnno]))
-	if err != nil || retries < 0 {
-		return 0
+	raw := strings.TrimSpace(task.Annotations[harnessWrapperCancellationAnno])
+	if raw == "" {
+		return harnessWrapperCancellationState{}, false
 	}
-	return retries
+	var state harnessWrapperCancellationState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return harnessWrapperCancellationState{}, false
+	}
+	state.TurnID = strings.TrimSpace(state.TurnID)
+	state.Status = strings.TrimSpace(state.Status)
+	state.Reason = strings.TrimSpace(state.Reason)
+	state.RetryAt = strings.TrimSpace(state.RetryAt)
+	return state, state.TurnID != "" && state.Status != ""
 }
 
-func (r *TaskReconciler) patchHarnessWrapperCancelDependencyRetries(
+func taskHasHarnessWrapperCancellationState(task *corev1alpha1.Task) bool {
+	return task != nil && task.Annotations != nil && strings.TrimSpace(task.Annotations[harnessWrapperCancellationAnno]) != ""
+}
+
+func (r *TaskReconciler) patchHarnessWrapperCancellation(
 	ctx context.Context,
 	task *corev1alpha1.Task,
-	retries int,
+	state harnessWrapperCancellationState,
 ) error {
-	patch := ctrlclient.MergeFrom(task.DeepCopy())
-	if task.Annotations == nil {
-		task.Annotations = map[string]string{}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
 	}
-	task.Annotations[harnessWrapperCancelDependencyRetriesAnno] = strconv.Itoa(retries)
-	return r.Patch(ctx, task, patch)
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return err
+	}
+	latestTurnID := strings.TrimSpace(latest.Annotations[harnessWrapperTurnIDAnnotation])
+	if latestTurnID == "" || latestTurnID != strings.TrimSpace(state.TurnID) ||
+		!harnessWrapperTurnAnnotationsMatchTaskAttempt(latest, harnessWrapperCurrentAttempt(latest)) {
+		latest.DeepCopyInto(task)
+		return fmt.Errorf("harness cancellation turn changed while persisting state")
+	}
+	if existing, ok := harnessWrapperCancellation(latest); ok &&
+		existing.TurnID == state.TurnID && harnessWrapperCancellationFinished(existing) && !harnessWrapperCancellationFinished(state) {
+		latest.DeepCopyInto(task)
+		return nil
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	patch := ctrlclient.MergeFromWithOptions(latest.DeepCopy(), ctrlclient.MergeFromWithOptimisticLock{})
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations[harnessWrapperCancellationAnno] = string(encoded)
+	delete(latest.Annotations, harnessWrapperCancelDependencyRetriesAnno)
+	if err := r.Patch(ctx, latest, patch); err != nil {
+		return err
+	}
+	latest.DeepCopyInto(task)
+	return nil
 }
 
-func (r *TaskReconciler) waitForHarnessCancelDependency(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	retries := harnessWrapperCancelDependencyRetries(task)
-	if retries >= harnessWrapperMaxCancelDependencyRetries {
-		return false, nil
+func harnessWrapperCancellationFinished(state harnessWrapperCancellationState) bool {
+	return state.Status == string(harnessWrapperCancelAcknowledged) || state.Status == string(harnessWrapperCancelMissing)
+}
+
+func harnessWrapperCancelRetryDelay(attempts int) time.Duration {
+	if attempts <= 1 {
+		return harnessWrapperCancelInitialBackoff
 	}
-	if err := r.patchHarnessWrapperCancelDependencyRetries(ctx, task, retries+1); err != nil {
-		return false, err
+	delay := harnessWrapperCancelInitialBackoff
+	for range attempts - 1 {
+		if delay >= harnessWrapperCancelMaxBackoff/2 {
+			return harnessWrapperCancelMaxBackoff
+		}
+		delay *= 2
 	}
-	return true, nil
+	if delay > harnessWrapperCancelMaxBackoff {
+		return harnessWrapperCancelMaxBackoff
+	}
+	return delay
+}
+
+func harnessWrapperCancellationRetryAfter(state harnessWrapperCancellationState, now time.Time) time.Duration {
+	if state.RetryAt == "" {
+		return 0
+	}
+	retryAt, err := time.Parse(time.RFC3339Nano, state.RetryAt)
+	if err != nil || !retryAt.After(now) {
+		return 0
+	}
+	return min(retryAt.Sub(now), harnessWrapperCancelMaxBackoff)
+}
+
+func (r *TaskReconciler) ensureHarnessWrapperTurnCancelled(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	reason string,
+) (bool, time.Duration, error) {
+	if task == nil {
+		return true, 0, nil
+	}
+	if harnessWrapperTurnOutcomeUnknown(task) {
+		return true, 0, nil
+	}
+	state, stateValid := harnessWrapperCancellation(task)
+	if !taskHasPlannedHarnessWrapperTurn(task) {
+		if taskHasHarnessWrapperCancellationState(task) {
+			return false, 0, fmt.Errorf("harness cancellation state exists but turn identity is missing")
+		}
+		return true, 0, nil
+	}
+	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
+		return false, 0, fmt.Errorf("harness cancellation turn identity does not match task")
+	}
+
+	turnID := strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])
+	if !stateValid || state.TurnID != turnID {
+		state = harnessWrapperCancellationState{
+			TurnID: turnID,
+			Status: string(harnessWrapperCancelPending),
+			Reason: strings.TrimSpace(reason),
+		}
+		// The durable owner must exist before issuing the external cancellation.
+		if err := r.patchHarnessWrapperCancellation(ctx, task, state); err != nil {
+			return false, 0, err
+		}
+	}
+	if harnessWrapperCancellationFinished(state) {
+		return true, 0, nil
+	}
+	state.Status = string(harnessWrapperCancelPending)
+	if state.Reason == "" {
+		state.Reason = strings.TrimSpace(reason)
+	}
+	if retryAfter := harnessWrapperCancellationRetryAfter(state, time.Now()); retryAfter > 0 {
+		return false, retryAfter, nil
+	}
+
+	outcome, err := r.cancelHarnessWrapperTurnOnce(ctx, task, state.Reason)
+	if err != nil {
+		if state.Attempts < 1_000_000 {
+			state.Attempts++
+		}
+		retryAfter := harnessWrapperCancelRetryDelay(state.Attempts)
+		state.RetryAt = time.Now().UTC().Add(retryAfter).Format(time.RFC3339Nano)
+		if patchErr := r.patchHarnessWrapperCancellation(ctx, task, state); patchErr != nil {
+			return false, 0, errors.Join(err, patchErr)
+		}
+		return false, retryAfter, nil
+	}
+	state.Status = string(outcome)
+	state.RetryAt = ""
+	if err := r.patchHarnessWrapperCancellation(ctx, task, state); err != nil {
+		return false, 0, err
+	}
+	return true, 0, nil
 }
 
 func harnessWrapperOutputFetchRetries(task *corev1alpha1.Task) int {
@@ -1016,6 +1191,9 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	delete(task.Annotations, harnessWrapperCancellationAnno)
+	delete(task.Annotations, harnessWrapperCancelDependencyRetriesAnno)
+	delete(task.Annotations, labels.AnnotationHarnessTurnOutcomeUnknown)
 	if runtimeRefName := strings.TrimSpace(request.Metadata["runtimeRef"]); runtimeRefName != "" {
 		task.Annotations[harnessWrapperRuntimeRefAnno] = runtimeRefName
 	} else {
@@ -1041,6 +1219,40 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	}
 	task.Annotations[harnessWrapperMetadataAnno] = string(metadata)
 	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) patchHarnessWrapperTurnOutcomeUnknown(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	turnID harness.HarnessTurnID,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return false, err
+	}
+	if latest.Status.Phase != corev1alpha1.TaskPhasePending {
+		latest.DeepCopyInto(task)
+		return false, nil
+	}
+	if strings.TrimSpace(latest.Annotations[harnessWrapperTurnIDAnnotation]) != strings.TrimSpace(string(turnID)) ||
+		!harnessWrapperTurnAnnotationsMatchTaskAttempt(latest, harnessWrapperCurrentAttempt(latest)) {
+		latest.DeepCopyInto(task)
+		return false, nil
+	}
+	patch := ctrlclient.MergeFromWithOptions(latest.DeepCopy(), ctrlclient.MergeFromWithOptimisticLock{})
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations[labels.AnnotationHarnessTurnOutcomeUnknown] = strings.TrimSpace(string(turnID))
+	if err := r.Patch(ctx, latest, patch); err != nil {
+		return false, err
+	}
+	latest.DeepCopyInto(task)
+	return true, nil
 }
 
 func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *corev1alpha1.Task) error {
@@ -1441,6 +1653,8 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		clearDeprecatedHarnessRuntimeAnnotations(task.Annotations)
 		delete(task.Annotations, harnessWrapperOutputFetchRetriesAnno)
 		delete(task.Annotations, harnessWrapperCancelDependencyRetriesAnno)
+		delete(task.Annotations, harnessWrapperCancellationAnno)
+		delete(task.Annotations, labels.AnnotationHarnessTurnOutcomeUnknown)
 		delete(task.Annotations, harnessWrapperAuthRetriesAnno)
 	}
 	if err := r.Patch(ctx, task, patch); err != nil {
@@ -1488,20 +1702,35 @@ func harnessWrapperStreamErrorIsBrokeredPause(err error) bool {
 	return strings.Contains(err.Error(), "continue brokered tool call") || errors.Is(err, errHarnessBrokeredApprovalPending)
 }
 
-func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *corev1alpha1.Task, reason string) error {
+func harnessWrapperCancelErrorIsMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) && (clientErr.StatusCode == 404 || clientErr.StatusCode == 410) {
+		return true
+	}
+	return harnessWrapperStreamErrorIsMissingTurn(err)
+}
+
+func (r *TaskReconciler) cancelHarnessWrapperTurnOnce(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	reason string,
+) (harnessWrapperCancelOutcome, error) {
 	if !taskHasPlannedHarnessWrapperTurn(task) {
-		return nil
+		return harnessWrapperCancelNotNeeded, nil
 	}
 	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
-		return nil
+		return harnessWrapperCancelNotNeeded, nil
 	}
 	target, err := r.resolveHarnessRuntimeTarget(ctx, task, nil)
 	if err != nil {
-		return err
+		return harnessWrapperCancelPending, err
 	}
 	client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
 	if err != nil {
-		return err
+		return harnessWrapperCancelPending, err
 	}
 	_, err = client.CancelTurn(ctx, harness.CancelTurnRequest{
 		Version:          harness.ProtocolVersion,
@@ -1513,9 +1742,17 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 		CorrelationID:    strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Reason:           reason,
 	})
-	if err != nil && harnessWrapperStreamErrorIsMissingTurn(err) {
-		return nil
+	if err != nil {
+		if harnessWrapperCancelErrorIsMissing(err) {
+			return harnessWrapperCancelMissing, nil
+		}
+		return harnessWrapperCancelPending, err
 	}
+	return harnessWrapperCancelAcknowledged, nil
+}
+
+func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *corev1alpha1.Task, reason string) error {
+	_, err := r.cancelHarnessWrapperTurnOnce(ctx, task, reason)
 	return err
 }
 

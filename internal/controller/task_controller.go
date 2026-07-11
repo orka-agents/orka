@@ -444,6 +444,16 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task deleted")
+		if cancelErr != nil {
+			log.Error(cancelErr, "failed to persist or request deleted harness runtime turn cancellation")
+			return ctrl.Result{}, cancelErr
+		}
+		if !cancelled {
+			log.Info("waiting to cancel deleted harness runtime turn", "retryAfter", retryAfter)
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
+		}
+
 		var storeCleanupErrs []error
 
 		// Result deletion is idempotent and must not depend on status advertisement:
@@ -495,18 +505,6 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to delete execution events", "task", task.Name)
 				return ctrl.Result{}, err
 			}
-		}
-
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
 		}
 
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
@@ -1671,16 +1669,14 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
-				if isAgentRuntimeDependencyNotReady(cancelErr) {
-					if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-						return ctrl.Result{}, waitErr
-					} else if shouldWait {
-						log.Info("waiting to cancel timed-out harness runtime turn", "error", cancelErr)
-						return ctrl.Result{RequeueAfter: time.Second}, nil
-					}
-				}
-				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
+			cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task timed out")
+			if cancelErr != nil {
+				log.Error(cancelErr, "failed to persist or request timed-out harness runtime turn cancellation")
+				return ctrl.Result{}, cancelErr
+			}
+			if !cancelled {
+				log.Info("waiting to cancel timed-out harness runtime turn", "retryAfter", retryAfter)
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
 			}
 			return r.failTask(ctx, task, "task timed out")
 		}
@@ -2138,17 +2134,15 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
-	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel harness runtime turn for cancelled task", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
+	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled || taskHasHarnessWrapperCancellationState(task) {
+		cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task cancelled")
+		if cancelErr != nil {
+			log.Error(cancelErr, "failed to persist or request terminal harness runtime turn cancellation")
+			return ctrl.Result{}, cancelErr
+		}
+		if !cancelled {
+			log.Info("waiting to cancel harness runtime turn for terminal task", "retryAfter", retryAfter)
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
 		}
 	}
 

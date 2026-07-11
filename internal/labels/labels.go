@@ -69,6 +69,7 @@ const (
 	AnnotationRetryCount                    = "orka.ai/retry-count"
 	AnnotationRetryNotBefore                = "orka.ai/retry-not-before"
 	AnnotationRetryJobUID                   = "orka.ai/retry-job-uid"
+	AnnotationHarnessTurnOutcomeUnknown     = "orka.ai/harness-turn-outcome-unknown"
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
