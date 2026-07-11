@@ -79,8 +79,10 @@ func migrate(db *sql.DB) error {
 			namespace     TEXT NOT NULL,
 			name          TEXT NOT NULL,
 			session_type  TEXT NOT NULL DEFAULT 'task',
-			active_task   TEXT NOT NULL DEFAULT '',
-			message_count INTEGER NOT NULL DEFAULT 0,
+			active_task         TEXT NOT NULL DEFAULT '',
+			chat_turn_id        TEXT NOT NULL DEFAULT '',
+			chat_turn_expires_at TIMESTAMP,
+			message_count       INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -575,6 +577,12 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
+		{Name: "chat_turn_id", Definition: "chat_turn_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "chat_turn_expires_at", Definition: "chat_turn_expires_at TIMESTAMP"},
+	}); err != nil {
+		return err
+	}
 	if err := ensureSQLiteColumns(db, "execution_events", []sqliteColumnMigration{
 		{Name: "session_seq", Definition: "session_seq INTEGER NOT NULL DEFAULT 0"},
 	}); err != nil {

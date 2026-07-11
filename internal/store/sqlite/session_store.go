@@ -11,6 +11,11 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+var (
+	_ store.SessionStore         = (*Store)(nil)
+	_ store.SessionTurnCommitter = (*Store)(nil)
+)
+
 // CreateSession inserts a new session record.
 func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord) error {
 	_, err := s.db.ExecContext(ctx,
@@ -113,7 +118,8 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName strin
 		return store.ErrNotFound
 	}
 
-	// Try to acquire lock
+	// Chat reservations and task locks are separate domains: tasks created by a
+	// chat turn must still be able to run while that turn waits for them.
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE sessions SET active_task = ? WHERE namespace = ? AND name = ? AND active_task = ''`,
 		taskName, namespace, name,
@@ -130,6 +136,68 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName strin
 		return fmt.Errorf("session %s/%s is already locked", namespace, name)
 	}
 	return nil
+}
+
+// AcquireChatTurn creates the chat session when needed and atomically reserves
+// it for one turn. Stale chat reservations may be reclaimed, but task locks are
+// never stolen.
+func (s *Store) AcquireChatTurn(ctx context.Context, session *store.SessionRecord, turnID string, expiresAt time.Time) error {
+	if session == nil {
+		return store.ValidationErrorf("session is required")
+	}
+	if session.Namespace == "" || session.Name == "" || turnID == "" {
+		return store.ValidationErrorf("session namespace, name, and turn ID are required")
+	}
+	now := time.Now()
+	if !expiresAt.After(now) {
+		return store.ValidationErrorf("chat turn expiration must be in the future")
+	}
+	createdAt := session.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO sessions (namespace, name, session_type, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
+		 VALUES (?, ?, ?, '', 0, 0, 0, ?, ?, ?)
+		 ON CONFLICT(namespace, name) DO NOTHING`,
+		session.Namespace, session.Name, session.SessionType, session.Cancelled, createdAt, now,
+	); err != nil {
+		return err
+	}
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET chat_turn_id = ?, chat_turn_expires_at = ?, updated_at = ?
+		 WHERE namespace = ? AND name = ? AND active_task = ''
+		 AND (chat_turn_id = '' OR chat_turn_expires_at IS NULL OR chat_turn_expires_at <= ?)`,
+		turnID, expiresAt, now, session.Namespace, session.Name, now,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("%w: chat session %s/%s already has an active turn", store.ErrConflict, session.Namespace, session.Name)
+	}
+	return tx.Commit()
+}
+
+// ReleaseChatTurn clears the chat reservation if it still belongs to turnID.
+func (s *Store) ReleaseChatTurn(ctx context.Context, namespace, name, turnID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET chat_turn_id = '', chat_turn_expires_at = NULL WHERE namespace = ? AND name = ? AND chat_turn_id = ?`,
+		namespace, name, turnID,
+	)
+	return err
 }
 
 // ReleaseLock clears the active_task if it matches the given task name.
@@ -165,6 +233,123 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	if err := insertSessionMessages(ctx, tx, namespace, name, messages); err != nil {
+		return err
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`UPDATE sessions SET message_count = message_count + ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND name = ?`,
+		len(messages), namespace, name,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// CommitSessionTurn atomically creates the session when absent, appends the
+// supplied turn messages, and increments token usage. expectedMessageCount is
+// an optimistic guard for the session revision reserved by the chat turn lock.
+func (s *Store) CommitSessionTurn(
+	ctx context.Context,
+	session *store.SessionRecord,
+	turnID string,
+	expectedMessageCount int,
+	messages []store.SessionMessage,
+	inputTokens, outputTokens int,
+) error {
+	if session == nil {
+		return store.ValidationErrorf("session is required")
+	}
+	if session.Namespace == "" || session.Name == "" {
+		return store.ValidationErrorf("session namespace and name are required")
+	}
+	if expectedMessageCount < 0 {
+		return store.ValidationErrorf("expected message count must not be negative")
+	}
+	if inputTokens < 0 || outputTokens < 0 {
+		return store.ValidationErrorf("token increments must not be negative")
+	}
+	if len(messages) == 0 && (inputTokens != 0 || outputTokens != 0) {
+		return store.ValidationErrorf("token increments require transcript messages")
+	}
+
+	now := time.Now()
+	createdAt := session.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	updatedAt := session.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO sessions (namespace, name, session_type, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
+		 ON CONFLICT(namespace, name) DO NOTHING`,
+		session.Namespace, session.Name, session.SessionType, session.ActiveTask,
+		session.Cancelled, createdAt, updatedAt,
+	); err != nil {
+		return err
+	}
+
+	var currentMessageCount int
+	var activeTurn string
+	var activeTurnExpiresAt sql.NullTime
+	if err := tx.QueryRowContext(ctx,
+		`SELECT message_count, chat_turn_id, chat_turn_expires_at FROM sessions WHERE namespace = ? AND name = ?`,
+		session.Namespace, session.Name,
+	).Scan(&currentMessageCount, &activeTurn, &activeTurnExpiresAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		}
+		return err
+	}
+	if activeTurn != turnID {
+		return fmt.Errorf("%w: chat turn no longer owns session", store.ErrConflict)
+	}
+	if turnID != "" && (!activeTurnExpiresAt.Valid || !activeTurnExpiresAt.Time.After(now)) {
+		return fmt.Errorf("%w: chat turn reservation expired", store.ErrConflict)
+	}
+	if currentMessageCount != expectedMessageCount {
+		return fmt.Errorf("%w: session message count is %d, expected %d", store.ErrConflict, currentMessageCount, expectedMessageCount)
+	}
+
+	if err := insertSessionMessages(ctx, tx, session.Namespace, session.Name, messages); err != nil {
+		return err
+	}
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions
+		 SET message_count = message_count + ?, "input_tokens" = "input_tokens" + ?, "output_tokens" = "output_tokens" + ?, updated_at = ?
+		 WHERE namespace = ? AND name = ? AND message_count = ? AND chat_turn_id = ?
+		 AND (chat_turn_id = '' OR chat_turn_expires_at > ?)`,
+		len(messages), inputTokens, outputTokens, now,
+		session.Namespace, session.Name, expectedMessageCount, turnID, now,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("%w: session changed while committing turn", store.ErrConflict)
+	}
+
+	return tx.Commit()
+}
+
+func insertSessionMessages(ctx context.Context, tx *sql.Tx, namespace, name string, messages []store.SessionMessage) error {
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO session_messages (namespace, session_name, role, content, name, input, tool_calls, tool_call_id, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -202,16 +387,7 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 			return err
 		}
 	}
-
-	_, err = tx.ExecContext(ctx,
-		`UPDATE sessions SET message_count = message_count + ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND name = ?`,
-		len(messages), namespace, name,
-	)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return nil
 }
 
 // LoadTranscript retrieves session messages ordered by ID. If maxMessages > 0, limits results.

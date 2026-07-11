@@ -2,8 +2,10 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -270,6 +272,150 @@ func TestSessionLocking(t *testing.T) {
 			t.Errorf("got %v, want ErrNotFound", err)
 		}
 	})
+}
+
+func TestChatTurnMigrationPreservesLegacySessions(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-sessions.db")
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	if _, err := legacyDB.Exec(`CREATE TABLE sessions (
+		namespace TEXT NOT NULL,
+		name TEXT NOT NULL,
+		session_type TEXT NOT NULL DEFAULT 'task',
+		active_task TEXT NOT NULL DEFAULT '',
+		message_count INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cancelled BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (namespace, name)
+	)`); err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("create legacy sessions table: %v", err)
+	}
+	if _, err := legacyDB.Exec(`INSERT INTO sessions (namespace, name, session_type) VALUES ('ns1', 'legacy-chat', 'chat')`); err != nil {
+		_ = legacyDB.Close()
+		t.Fatalf("insert legacy session: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	db, err := NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := NewStore(db, dbPath)
+	now := time.Now()
+	if err := s.AcquireChatTurn(context.Background(), &store.SessionRecord{
+		Namespace: "ns1", Name: "legacy-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
+	}, "chat-turn-migrated", now.Add(time.Hour)); err != nil {
+		t.Fatalf("AcquireChatTurn on migrated session: %v", err)
+	}
+	if err := s.ReleaseChatTurn(context.Background(), "ns1", "legacy-chat", "chat-turn-migrated"); err != nil {
+		t.Fatalf("ReleaseChatTurn on migrated session: %v", err)
+	}
+	session, err := s.GetSession(context.Background(), "ns1", "legacy-chat")
+	if err != nil {
+		t.Fatalf("GetSession after migration: %v", err)
+	}
+	if session.SessionType != "chat" || session.MessageCount != 0 || session.InputTokens != 0 || session.OutputTokens != 0 {
+		t.Fatalf("legacy session changed during migration: %+v", session)
+	}
+}
+
+func TestAcquireChatTurn(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	session := &store.SessionRecord{Namespace: "ns1", Name: "chat-lock", SessionType: "chat", CreatedAt: now, UpdatedAt: now}
+
+	if err := s.AcquireChatTurn(ctx, session, "chat-turn-a", now.Add(time.Minute)); err != nil {
+		t.Fatalf("AcquireChatTurn new session: %v", err)
+	}
+	got, err := s.GetSession(ctx, "ns1", "chat-lock")
+	if err != nil {
+		t.Fatalf("GetSession locked chat: %v", err)
+	}
+	if got.ActiveTask != "" {
+		t.Fatalf("chat reservation occupied task lock: %q", got.ActiveTask)
+	}
+	var activeChatTurn string
+	if err := s.db.QueryRow(`SELECT chat_turn_id FROM sessions WHERE namespace = 'ns1' AND name = 'chat-lock'`).Scan(&activeChatTurn); err != nil {
+		t.Fatalf("read chat turn owner: %v", err)
+	}
+	if activeChatTurn != "chat-turn-a" {
+		t.Fatalf("chat turn owner = %q, want chat-turn-a", activeChatTurn)
+	}
+	locked, err := s.IsLocked(ctx, "ns1", "chat-lock", "task-a")
+	if err != nil {
+		t.Fatalf("IsLocked during chat turn: %v", err)
+	}
+	if locked {
+		t.Fatal("chat reservation incorrectly occupied the task lock domain")
+	}
+	if err := s.AcquireLock(ctx, "ns1", "chat-lock", "task-a"); err != nil {
+		t.Fatalf("AcquireLock during chat turn: %v", err)
+	}
+	if err := s.CommitSessionTurn(ctx, session, "chat-turn-a", 0, []store.SessionMessage{{Role: roleUser, Content: "checkpoint while task runs"}}, 1, 1); err != nil {
+		t.Fatalf("CommitSessionTurn while task lock active: %v", err)
+	}
+	if err := s.ReleaseLock(ctx, "ns1", "chat-lock", "task-a"); err != nil {
+		t.Fatalf("ReleaseLock during chat turn: %v", err)
+	}
+
+	if err := s.AcquireChatTurn(ctx, session, "chat-turn-b", now.Add(time.Minute)); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("concurrent AcquireChatTurn error = %v, want ErrConflict", err)
+	}
+	if err := s.ReleaseChatTurn(ctx, "ns1", "chat-lock", "chat-turn-a"); err != nil {
+		t.Fatalf("ReleaseChatTurn chat turn: %v", err)
+	}
+	if err := s.AcquireChatTurn(ctx, session, "chat-turn-b", now.Add(time.Minute)); err != nil {
+		t.Fatalf("AcquireChatTurn after release: %v", err)
+	}
+
+	if _, err := s.db.Exec(`UPDATE sessions SET chat_turn_id = 'chat-turn-stale', chat_turn_expires_at = ? WHERE namespace = 'ns1' AND name = 'chat-lock'`, now.Add(-2*time.Hour)); err != nil {
+		t.Fatalf("age chat reservation: %v", err)
+	}
+	if err := s.AcquireChatTurn(ctx, session, "chat-turn-c", now.Add(time.Hour)); err != nil {
+		t.Fatalf("AcquireChatTurn stale takeover: %v", err)
+	}
+	if err := s.CommitSessionTurn(ctx, session, "chat-turn-b", 0, []store.SessionMessage{{Role: roleUser, Content: "stale owner"}}, 1, 1); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale owner CommitSessionTurn error = %v, want ErrConflict", err)
+	}
+	if err := s.CommitSessionTurn(ctx, session, "chat-turn-c", 1, []store.SessionMessage{{Role: roleUser, Content: "current owner"}}, 1, 1); err != nil {
+		t.Fatalf("current owner CommitSessionTurn: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET chat_turn_expires_at = ? WHERE namespace = 'ns1' AND name = 'chat-lock'`, now.Add(-time.Minute)); err != nil {
+		t.Fatalf("expire chat reservation: %v", err)
+	}
+	if err := s.CommitSessionTurn(ctx, session, "chat-turn-c", 2, []store.SessionMessage{{Role: roleAssistant, Content: "too late"}}, 2, 3); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expired owner CommitSessionTurn error = %v, want ErrConflict", err)
+	}
+	if err := s.AcquireChatTurn(ctx, session, "chat-turn-after-expiry", now.Add(time.Hour)); err != nil {
+		t.Fatalf("AcquireChatTurn did not reclaim expired reservation: %v", err)
+	}
+	if err := s.ReleaseChatTurn(ctx, "ns1", "chat-lock", "chat-turn-after-expiry"); err != nil {
+		t.Fatalf("ReleaseChatTurn after expiration: %v", err)
+	}
+
+	taskSession := &store.SessionRecord{Namespace: "ns1", Name: "task-lock", SessionType: "task", CreatedAt: now, UpdatedAt: now}
+	if err := s.CreateSession(ctx, taskSession); err != nil {
+		t.Fatalf("CreateSession task lock: %v", err)
+	}
+	if err := s.AcquireLock(ctx, "ns1", "task-lock", "chat-turn-task-owner"); err != nil {
+		t.Fatalf("AcquireLock task owner: %v", err)
+	}
+	if _, err := s.db.Exec(`UPDATE sessions SET updated_at = ? WHERE namespace = 'ns1' AND name = 'task-lock'`, now.Add(-2*time.Hour)); err != nil {
+		t.Fatalf("age task lock: %v", err)
+	}
+	if err := s.AcquireChatTurn(ctx, taskSession, "chat-turn-d", now.Add(time.Hour)); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("AcquireChatTurn stole task lock: %v", err)
+	}
 }
 
 func TestSessionMessages(t *testing.T) {
@@ -602,6 +748,131 @@ func TestUpdateTokenCounts(t *testing.T) {
 	})
 }
 
+func TestCommitSessionTurn(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	session := &store.SessionRecord{
+		Namespace:   "ns1",
+		Name:        "atomic-turn",
+		SessionType: "chat",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := s.CommitSessionTurn(ctx, session, "", 0, nil, 1, 0); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("token-only CommitSessionTurn error = %v, want ErrValidation", err)
+	}
+	if _, err := s.GetSession(ctx, "ns1", "atomic-turn"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("token-only CommitSessionTurn created session: %v", err)
+	}
+
+	firstTurn := []store.SessionMessage{
+		{Role: roleUser, Content: "hello", Timestamp: now},
+		{Role: roleAssistant, Content: "hi", Timestamp: now},
+	}
+	if err := s.CommitSessionTurn(ctx, session, "", 0, firstTurn, 10, 20); err != nil {
+		t.Fatalf("CommitSessionTurn first turn: %v", err)
+	}
+
+	got, err := s.GetSession(ctx, "ns1", "atomic-turn")
+	if err != nil {
+		t.Fatalf("GetSession after first turn: %v", err)
+	}
+	if got.MessageCount != 2 || got.InputTokens != 10 || got.OutputTokens != 20 {
+		t.Fatalf("first turn metadata = messages:%d input:%d output:%d, want 2/10/20", got.MessageCount, got.InputTokens, got.OutputTokens)
+	}
+
+	secondTurn := []store.SessionMessage{
+		{Role: roleUser, Content: "again", Timestamp: now},
+		{Role: roleAssistant, Content: "welcome back", Timestamp: now},
+	}
+	if err := s.CommitSessionTurn(ctx, session, "", 2, secondTurn, 5, 7); err != nil {
+		t.Fatalf("CommitSessionTurn second turn: %v", err)
+	}
+
+	got, err = s.GetSession(ctx, "ns1", "atomic-turn")
+	if err != nil {
+		t.Fatalf("GetSession after second turn: %v", err)
+	}
+	if got.MessageCount != 4 || got.InputTokens != 15 || got.OutputTokens != 27 {
+		t.Fatalf("second turn metadata = messages:%d input:%d output:%d, want 4/15/27", got.MessageCount, got.InputTokens, got.OutputTokens)
+	}
+	if len(got.Messages) != 4 {
+		t.Fatalf("transcript length = %d, want 4", len(got.Messages))
+	}
+
+	err = s.CommitSessionTurn(ctx, session, "", 2, []store.SessionMessage{{Role: roleUser, Content: "stale"}}, 100, 200)
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale CommitSessionTurn error = %v, want ErrConflict", err)
+	}
+	got, err = s.GetSession(ctx, "ns1", "atomic-turn")
+	if err != nil {
+		t.Fatalf("GetSession after conflict: %v", err)
+	}
+	if got.MessageCount != 4 || got.InputTokens != 15 || got.OutputTokens != 27 || len(got.Messages) != 4 {
+		t.Fatalf("conflicting turn changed session: %+v", got)
+	}
+
+}
+
+func TestCommitSessionTurnRollsBackOnFailure(t *testing.T) {
+	t.Run("existing session", func(t *testing.T) {
+		s := setupTestStore(t)
+		ctx := context.Background()
+		now := time.Now().Truncate(time.Second)
+		session := &store.SessionRecord{Namespace: "ns1", Name: "atomic-fail", SessionType: "chat", CreatedAt: now, UpdatedAt: now}
+		if err := s.CommitSessionTurn(ctx, session, "", 0, []store.SessionMessage{{Role: roleAssistant, Content: "prior", Timestamp: now}}, 3, 4); err != nil {
+			t.Fatalf("seed CommitSessionTurn: %v", err)
+		}
+		if _, err := s.db.Exec(`CREATE TRIGGER fail_atomic_turn_update
+			BEFORE UPDATE ON sessions
+			WHEN NEW.namespace = 'ns1' AND NEW.name = 'atomic-fail'
+			BEGIN SELECT RAISE(ABORT, 'injected turn commit failure'); END`); err != nil {
+			t.Fatalf("create failure trigger: %v", err)
+		}
+
+		err := s.CommitSessionTurn(ctx, session, "", 1, []store.SessionMessage{
+			{Role: roleUser, Content: "new user", Timestamp: now},
+			{Role: roleAssistant, Content: "new assistant", Timestamp: now},
+		}, 10, 20)
+		if err == nil {
+			t.Fatal("CommitSessionTurn succeeded despite injected metadata failure")
+		}
+
+		got, getErr := s.GetSession(ctx, "ns1", "atomic-fail")
+		if getErr != nil {
+			t.Fatalf("GetSession after rollback: %v", getErr)
+		}
+		if got.MessageCount != 1 || got.InputTokens != 3 || got.OutputTokens != 4 || len(got.Messages) != 1 {
+			t.Fatalf("failed turn was partially committed: %+v", got)
+		}
+	})
+
+	t.Run("new session", func(t *testing.T) {
+		s := setupTestStore(t)
+		ctx := context.Background()
+		now := time.Now().Truncate(time.Second)
+		if _, err := s.db.Exec(`CREATE TRIGGER fail_new_atomic_turn_update
+			BEFORE UPDATE ON sessions
+			WHEN NEW.namespace = 'ns1' AND NEW.name = 'new-atomic-fail'
+			BEGIN SELECT RAISE(ABORT, 'injected new turn commit failure'); END`); err != nil {
+			t.Fatalf("create failure trigger: %v", err)
+		}
+		session := &store.SessionRecord{Namespace: "ns1", Name: "new-atomic-fail", SessionType: "chat", CreatedAt: now, UpdatedAt: now}
+		err := s.CommitSessionTurn(ctx, session, "", 0, []store.SessionMessage{
+			{Role: roleUser, Content: "hello", Timestamp: now},
+			{Role: roleAssistant, Content: "hi", Timestamp: now},
+		}, 10, 20)
+		if err == nil {
+			t.Fatal("CommitSessionTurn succeeded despite injected metadata failure")
+		}
+		if _, getErr := s.GetSession(ctx, "ns1", "new-atomic-fail"); !errors.Is(getErr, store.ErrNotFound) {
+			t.Fatalf("new session survived failed atomic turn: %v", getErr)
+		}
+	})
+}
+
 func TestAppendMessagesZeroTimestamp(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -832,6 +1103,12 @@ func TestClosedDBErrors(t *testing.T) {
 	}
 	if err := s.AcquireLock(ctx, "ns", "s", "t"); err == nil {
 		t.Error("expected error from AcquireLock on closed DB")
+	}
+	if err := s.AcquireChatTurn(ctx, &store.SessionRecord{Namespace: "ns", Name: "s", SessionType: "chat"}, "chat-turn-test", time.Now().Add(time.Hour)); err == nil {
+		t.Error("expected error from AcquireChatTurn on closed DB")
+	}
+	if err := s.ReleaseChatTurn(ctx, "ns", "s", "chat-turn-test"); err == nil {
+		t.Error("expected error from ReleaseChatTurn on closed DB")
 	}
 	if _, err := s.IsLocked(ctx, "ns", "s", "t"); err == nil {
 		t.Error("expected error from IsLocked on closed DB")

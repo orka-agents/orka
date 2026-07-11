@@ -42,7 +42,10 @@ import (
 
 var chatLog = logf.Log.WithName("chat-handler")
 
-const defaultNamespace = "default"
+const (
+	defaultNamespace      = "default"
+	chatDurabilityTimeout = 10 * time.Second
+)
 
 // ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
@@ -105,6 +108,59 @@ type SSEEvent struct {
 	Usage     any    `json:"usage,omitempty"`
 }
 
+type sseEmitter func(event, data string) error
+
+type chatTurnCommitState struct {
+	turnID            string
+	persistedMessages int
+	committedInput    int
+	committedOutput   int
+}
+
+type toolResultSSE struct {
+	id     string
+	name   string
+	result string
+}
+
+type chatToolBatch struct {
+	response          *llm.CompletionResponse
+	executor          *ToolExecutor
+	messages          []llm.Message
+	modelMessages     []llm.Message
+	repetitionTracker map[string]int
+	namespace         string
+	sessionID         string
+	usage             *ChatUsage
+	turnState         *chatTurnCommitState
+	emitSSE           sseEmitter
+}
+
+type chatToolBatchResult struct {
+	messages      []llm.Message
+	modelMessages []llm.Message
+	toolCalls     []ToolCallInfo
+	iterationBump int
+}
+
+type chatSSEStream struct {
+	parentCtx      context.Context
+	provider       llm.Provider
+	messages       []llm.Message
+	systemPrompt   string
+	tools          []llm.Tool
+	executor       *ToolExecutor
+	sessionID      string
+	turnID         string
+	deadline       time.Time
+	namespace      string
+	model          string
+	temperature    float64
+	maxOutput      int
+	persistedCount int
+	span           trace.Span
+}
+
 // ChatHandler implements the orchestrator chat endpoints.
 type ChatHandler struct {
 	client                    client.Client
@@ -115,6 +171,7 @@ type ChatHandler struct {
 	watchNamespace            string
 	enforceNamespaceIsolation bool
 	sessionStore              store.SessionStore
+	sessionTurnCommitter      store.SessionTurnCommitter
 	resultStore               store.ResultStore
 	contextTokenAuthorization ContextTokenAuthorizationConfig
 	cooldownTracker           *llm.CooldownTracker
@@ -128,6 +185,8 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		kubeClient = kubeClientOpt[0]
 	}
 
+	turnCommitter, _ := ss.(store.SessionTurnCommitter)
+
 	return &ChatHandler{
 		client:                    c,
 		kubeClient:                kubeClient,
@@ -137,6 +196,7 @@ func NewChatHandler(c client.Client, sm *controller.SessionManager, config ChatC
 		watchNamespace:            watchNamespace,
 		enforceNamespaceIsolation: enforceNS,
 		sessionStore:              ss,
+		sessionTurnCommitter:      turnCommitter,
 		resultStore:               rs,
 		cooldownTracker:           llm.NewCooldownTracker(),
 		resolver:                  resolver,
@@ -255,11 +315,20 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to build system prompt")
 	}
 
-	// Load session history
+	turnID, turnDeadline, err := ch.reserveChatTurn(ctx, namespace, sessionID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if !sseMode {
+			ch.releaseChatTurn(namespace, sessionID, turnID)
+		}
+	}()
+
+	// Load session history only after reserving its revision for this turn.
 	messages, err := ch.loadChatSession(ctx, namespace, sessionID)
 	if err != nil {
-		chatLog.Info("no existing session, starting fresh", "sessionId", sessionID, "error", err)
-		messages = []llm.Message{}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to load chat session: %v", err))
 	}
 	persistedCount := len(messages)
 
@@ -347,7 +416,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	accept := c.Get("Accept")
 	if accept == "application/json" {
 		// JSON mode: run tool loop, collect all content, return JSON
-		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil)
+		content, usage, toolCalls, err := ch.runToolLoop(ctx, provider, messages, systemPrompt, tools, executor, sessionID, namespace, model, temperature, maxTokens, persistedCount, nil, turnID)
 		if err != nil {
 			chatLog.Error(err, "tool loop error")
 			span.RecordError(err)
@@ -381,40 +450,130 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		baggage.FromContext(ctx),
 	)
 
-	sseMode = true
-	return c.SendStreamWriter(func(w *bufio.Writer) {
-		defer span.End()
-		defer func() { <-ch.semaphore }()
-		// SendStreamWriter outlives the handler, so use a background context
-		// seeded with the originating chat span context rather than Fiber's
-		// recycled request context.
-		sseCtx, sseCancel := context.WithTimeout(sseParentCtx, ch.config.MaxDuration)
-		defer sseCancel()
-
-		emitSSE := func(event, data string) {
-			_ = writeSSE(w, event, data)
-		}
-
-		// Emit status event
-		statusData, _ := json.Marshal(map[string]string{
-			"sessionId": sessionID,
-			"provider":  sseProvider.Name(),
-			"model":     model,
-		})
-		emitSSE("status", string(statusData))
-
-		content, usage, _, err := ch.runToolLoop(sseCtx, sseProvider, sseMessages, sseSystemPrompt, sseTools, sseExecutor, sessionID, namespace, model, temperature, maxTokens, persistedCount, emitSSE)
-		if err != nil {
-			errData, _ := json.Marshal(map[string]string{"error": err.Error()})
-			emitSSE("error", string(errData))
-		}
-
-		_ = content // content already emitted via SSE
-
-		// Emit done event
-		doneData, _ := json.Marshal(map[string]any{"usage": usage})
-		emitSSE("done", string(doneData))
+	stream := chatSSEStream{
+		parentCtx:      sseParentCtx,
+		provider:       sseProvider,
+		messages:       sseMessages,
+		systemPrompt:   sseSystemPrompt,
+		tools:          sseTools,
+		executor:       sseExecutor,
+		sessionID:      sessionID,
+		turnID:         turnID,
+		deadline:       turnDeadline,
+		namespace:      namespace,
+		model:          model,
+		temperature:    temperature,
+		maxOutput:      maxTokens,
+		persistedCount: persistedCount,
+		span:           span,
+	}
+	streamErr := c.SendStreamWriter(func(w *bufio.Writer) {
+		ch.writeChatSSEStream(w, stream)
 	})
+	if streamErr == nil {
+		sseMode = true
+	}
+	return streamErr
+}
+
+func (ch *ChatHandler) reserveChatTurn(ctx context.Context, namespace, sessionID string) (string, time.Time, error) {
+	if ch.sessionTurnCommitter == nil {
+		return "", time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "session store does not support atomic chat turns")
+	}
+
+	turnLifetime := ch.config.MaxDuration
+	if turnLifetime <= 0 {
+		turnLifetime = 5 * time.Minute
+	}
+	turnID := fmt.Sprintf("chat-turn-%s", generateChatID())
+	now := time.Now()
+	turnDeadline := now.Add(turnLifetime)
+	err := ch.sessionTurnCommitter.AcquireChatTurn(ctx, &store.SessionRecord{
+		Namespace:   namespace,
+		Name:        sessionID,
+		SessionType: "chat",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}, turnID, turnDeadline.Add(chatDurabilityTimeout))
+	if errors.Is(err, store.ErrConflict) {
+		return "", time.Time{}, fiber.NewError(fiber.StatusConflict, "chat session is busy")
+	}
+	if err != nil {
+		return "", time.Time{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to reserve chat session: %v", err))
+	}
+	return turnID, turnDeadline, nil
+}
+
+func (ch *ChatHandler) writeChatSSEStream(w *bufio.Writer, stream chatSSEStream) {
+	defer stream.span.End()
+	defer func() { <-ch.semaphore }()
+	defer ch.releaseChatTurn(stream.namespace, stream.sessionID, stream.turnID)
+
+	sseCtx, sseCancel := context.WithDeadline(stream.parentCtx, stream.deadline)
+	defer sseCancel()
+
+	emitSSE := func(event, data string) error {
+		if err := writeSSE(w, event, data); err != nil {
+			sseCancel()
+			return fmt.Errorf("failed to emit SSE %s event: %w", event, err)
+		}
+		return nil
+	}
+
+	statusData, _ := json.Marshal(map[string]string{
+		"sessionId": stream.sessionID,
+		"provider":  stream.provider.Name(),
+		"model":     stream.model,
+	})
+	if err := emitSSE("status", string(statusData)); err != nil {
+		stream.span.RecordError(err)
+		stream.span.SetStatus(codes.Error, err.Error())
+		return
+	}
+
+	_, usage, _, err := ch.runToolLoop(
+		sseCtx,
+		stream.provider,
+		stream.messages,
+		stream.systemPrompt,
+		stream.tools,
+		stream.executor,
+		stream.sessionID,
+		stream.namespace,
+		stream.model,
+		stream.temperature,
+		stream.maxOutput,
+		stream.persistedCount,
+		emitSSE,
+		stream.turnID,
+	)
+	if err != nil {
+		stream.span.RecordError(err)
+		stream.span.SetStatus(codes.Error, err.Error())
+		errData, _ := json.Marshal(map[string]string{"error": err.Error()})
+		_ = emitSSE("error", string(errData))
+		return
+	}
+
+	doneData, _ := json.Marshal(map[string]any{"usage": usage})
+	if err := emitSSE("done", string(doneData)); err != nil {
+		stream.span.RecordError(err)
+		stream.span.SetStatus(codes.Error, err.Error())
+	}
+}
+
+func (ch *ChatHandler) releaseChatTurn(namespace, sessionID, turnID string) {
+	if turnID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatDurabilityTimeout)
+	defer cancel()
+	if ch.sessionTurnCommitter == nil {
+		return
+	}
+	if err := ch.sessionTurnCommitter.ReleaseChatTurn(ctx, namespace, sessionID, turnID); err != nil {
+		chatLog.Error(err, "failed to release chat turn", "namespace", namespace, "sessionId", sessionID)
+	}
 }
 
 // runToolLoop executes the agentic tool loop until the LLM produces a final text response.
@@ -429,12 +588,18 @@ func (ch *ChatHandler) runToolLoop(
 	temperature float64,
 	maxTokens int,
 	persistedCount int,
-	emitSSE func(event, data string),
+	emitSSE sseEmitter,
+	turnIDs ...string,
 ) (string, ChatUsage, []ToolCallInfo, error) {
 	var usage ChatUsage
 	var allToolCalls []ToolCallInfo
 	repetitionTracker := make(map[string]int)
 	start := time.Now()
+	turnState := chatTurnCommitState{persistedMessages: persistedCount}
+	if len(turnIDs) > 0 {
+		turnState.turnID = turnIDs[0]
+	}
+	modelMessages := append([]llm.Message(nil), messages...)
 
 	for iteration := 0; ; iteration++ {
 		iterTracer := tracing.Tracer("orka.chat")
@@ -449,36 +614,46 @@ func (ch *ChatHandler) runToolLoop(
 		select {
 		case <-iterCtx.Done():
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
-			iterSpan.End()
-			return "I ran out of time. Here's what I accomplished so far.", usage, allToolCalls, nil
-		default:
-		}
-
-		if content, hit := ch.handleIterationLimit(iterCtx, iteration, provider, messages, systemPrompt, model, namespace, sessionID, maxTokens, persistedCount, temperature, emitSSE, executor, &usage, start); hit {
-			setUsageSpanAttributes(iterSpan, usage)
-			iterSpan.End()
-			return content, usage, allToolCalls, nil
-		}
-
-		if iteration > 0 && iteration%5 == 0 {
-			messages = append(messages, llm.Message{
-				Role:    "user",
-				Content: "[System: Progress check — summarize what you've done so far and what remains.]",
-			})
-		}
-
-		if ch.config.MaxSessionSize > 0 {
-			messages = llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
-		}
-
-		resp, updatedMsgs, err := ch.callLLMWithRetry(iterCtx, provider, messages, systemPrompt, model, tools, maxTokens, temperature)
-		messages = updatedMsgs
-		if err != nil {
-			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			err := fmt.Errorf("chat turn interrupted: %w", iterCtx.Err())
 			iterSpan.RecordError(err)
 			iterSpan.SetStatus(codes.Error, err.Error())
 			iterSpan.End()
-			return "", usage, allToolCalls, fmt.Errorf("LLM completion failed: %w", err)
+			return "", usage, allToolCalls, err
+		default:
+		}
+
+		if content, hit, err := ch.handleIterationLimit(iterCtx, iteration, provider, messages, modelMessages, systemPrompt, model, namespace, sessionID, maxTokens, temperature, emitSSE, executor, &usage, &turnState, start); hit {
+			setUsageSpanAttributes(iterSpan, usage)
+			if err != nil {
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+			}
+			iterSpan.End()
+			return content, usage, allToolCalls, err
+		}
+
+		if iteration > 0 && iteration%5 == 0 {
+			progressMessage := llm.Message{
+				Role:    "user",
+				Content: "[System: Progress check — summarize what you've done so far and what remains.]",
+			}
+			messages = append(messages, progressMessage)
+			modelMessages = append(modelMessages, progressMessage)
+		}
+
+		if ch.config.MaxSessionSize > 0 {
+			modelMessages = llm.TruncateMessages(modelMessages, ch.config.MaxSessionSize/4)
+		}
+
+		resp, updatedModelMessages, err := ch.callLLMWithRetry(iterCtx, provider, modelMessages, systemPrompt, model, tools, maxTokens, temperature)
+		modelMessages = updatedModelMessages
+		if err != nil {
+			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			err = fmt.Errorf("LLM completion failed: %w", err)
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
+			iterSpan.End()
+			return "", usage, allToolCalls, err
 		}
 		iterSpan.SetAttributes(attribute.Int("chat.tool_call_count", len(resp.ToolCalls)))
 		usage.LLMCalls++
@@ -489,87 +664,135 @@ func (ch *ChatHandler) runToolLoop(
 			// Check if any tasks created in this session are still running.
 			// If so, re-prompt the LLM to keep waiting instead of ending the session.
 			if executor.tasksCreated > 0 && ch.hasRunningTasks(iterCtx, namespace, sessionID) {
+				progressMessages := []llm.Message{
+					{Role: "assistant", Content: resp.Content},
+					{Role: "user", Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
+				}
+				messages = append(messages, progressMessages...)
+				modelMessages = append(modelMessages, progressMessages...)
+				if err := ch.commitChatProgress(iterCtx, namespace, sessionID, messages, &turnState, usage); err != nil {
+					usage.Duration = time.Since(start).Round(time.Millisecond).String()
+					err = fmt.Errorf("failed to checkpoint chat progress: %w", err)
+					iterSpan.RecordError(err)
+					iterSpan.SetStatus(codes.Error, err.Error())
+					iterSpan.End()
+					return "", usage, allToolCalls, err
+				}
 				if emitSSE != nil && resp.Content != "" {
 					msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-					emitSSE("message", string(msgData))
+					if err := emitSSE("message", string(msgData)); err != nil {
+						usage.Duration = time.Since(start).Round(time.Millisecond).String()
+						err = fmt.Errorf("failed to emit progress message: %w", err)
+						iterSpan.RecordError(err)
+						iterSpan.SetStatus(codes.Error, err.Error())
+						iterSpan.End()
+						return "", usage, allToolCalls, err
+					}
 				}
-				messages = append(messages,
-					llm.Message{Role: "assistant", Content: resp.Content},
-					llm.Message{Role: "user", Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
-				)
-				// Don't increment iteration here — the for loop's post-statement handles it
 				iterSpan.End()
 				continue
 			}
-			content := ch.handleFinalResponse(iterCtx, resp.Content, messages, namespace, sessionID, persistedCount, emitSSE, executor, &usage, start)
+			content, err := ch.handleFinalResponse(iterCtx, resp.Content, messages, namespace, sessionID, emitSSE, executor, &usage, &turnState, start)
 			setUsageSpanAttributes(iterSpan, usage)
+			if err != nil {
+				iterSpan.RecordError(err)
+				iterSpan.SetStatus(codes.Error, err.Error())
+			}
 			iterSpan.End()
-			return content, usage, allToolCalls, nil
+			return content, usage, allToolCalls, err
 		}
 
-		var newToolCalls []ToolCallInfo
-		var iterBump int
-		messages, newToolCalls, iterBump = ch.executeToolCalls(iterCtx, resp, executor, emitSSE, messages, repetitionTracker)
-		allToolCalls = append(allToolCalls, newToolCalls...)
-		usage.ToolCalls += len(newToolCalls)
-		iteration += iterBump
+		if err := emitToolCallEvents(resp, emitSSE); err != nil {
+			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
+			iterSpan.End()
+			return "", usage, allToolCalls, err
+		}
+
+		pendingTools := pendingToolCheckpointMessage(resp.ToolCalls)
+		messages = append(messages, pendingTools)
+		modelMessages = append(modelMessages, pendingTools)
+		if err := ch.commitChatProgress(iterCtx, namespace, sessionID, messages, &turnState, usage); err != nil {
+			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			err = fmt.Errorf("failed to persist tool intent: %w", err)
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
+			iterSpan.End()
+			return "", usage, allToolCalls, err
+		}
+
+		batchResult, batchErr := ch.executeToolCalls(iterCtx, chatToolBatch{
+			response:          resp,
+			executor:          executor,
+			messages:          messages,
+			modelMessages:     modelMessages,
+			repetitionTracker: repetitionTracker,
+			namespace:         namespace,
+			sessionID:         sessionID,
+			usage:             &usage,
+			turnState:         &turnState,
+			emitSSE:           emitSSE,
+		})
+		messages = batchResult.messages
+		modelMessages = batchResult.modelMessages
+		allToolCalls = append(allToolCalls, batchResult.toolCalls...)
+		if batchErr != nil {
+			usage.Duration = time.Since(start).Round(time.Millisecond).String()
+			iterSpan.RecordError(batchErr)
+			iterSpan.SetStatus(codes.Error, batchErr.Error())
+			iterSpan.End()
+			return "", usage, allToolCalls, batchErr
+		}
+		iteration += batchResult.iterationBump
 		iterSpan.End()
 	}
 }
 
-// handleIterationLimit checks if the iteration limit is reached and if so,
-// injects a termination prompt, makes a final LLM call, emits SSE, and saves the session.
+// handleIterationLimit checks if the iteration limit is reached and, if so,
+// makes one final summary call and durably commits that response.
 func (ch *ChatHandler) handleIterationLimit(
 	ctx context.Context,
 	iteration int,
 	provider llm.Provider,
-	messages []llm.Message,
+	messages, modelMessages []llm.Message,
 	systemPrompt, model, namespace, sessionID string,
-	maxTokens, persistedCount int,
+	limit int,
 	temperature float64,
-	emitSSE func(event, data string),
+	emitSSE sseEmitter,
 	executor *ToolExecutor,
 	usage *ChatUsage,
+	turnState *chatTurnCommitState,
 	start time.Time,
-) (string, bool) {
+) (string, bool, error) {
 	if iteration < ch.config.MaxIterations {
-		return "", false
+		return "", false, nil
 	}
 
-	messages = append(messages, llm.Message{
+	terminationMessage := llm.Message{
 		Role:    "user",
 		Content: "[System: You have reached the maximum number of iterations. Please provide a final summary of what you accomplished.]",
-	})
+	}
+	messages = append(messages, terminationMessage)
+	modelMessages = append(modelMessages, terminationMessage)
 
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
 		Model:        model,
 		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		MaxTokens:    maxTokens,
+		Messages:     modelMessages,
+		MaxTokens:    limit,
 		Temperature:  temperature,
 	})
 	if err != nil {
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
-		return "Reached iteration limit.", true
+		return "", true, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
 	}
 	usage.LLMCalls++
 	usage.InputTokens += resp.InputTokens
 	usage.OutputTokens += resp.OutputTokens
 
-	if emitSSE != nil && resp.Content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": resp.Content})
-		emitSSE("message", string(msgData))
-	}
-
-	finalMessages := append(messages, llm.Message{Role: "assistant", Content: resp.Content})
-	usage.Duration = time.Since(start).Round(time.Millisecond).String()
-	usage.TasksCreated = executor.tasksCreated
-	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
-	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-		chatLog.Error(err, "failed to update token counts")
-	}
-
-	return resp.Content, true
+	content, err := ch.handleFinalResponse(ctx, resp.Content, messages, namespace, sessionID, emitSSE, executor, usage, turnState, start)
+	return content, true, err
 }
 
 // callLLMWithRetry calls the LLM provider and retries once with truncated messages
@@ -580,7 +803,7 @@ func (ch *ChatHandler) callLLMWithRetry(
 	messages []llm.Message,
 	systemPrompt, model string,
 	tools []llm.Tool,
-	maxTokens int,
+	limit int,
 	temperature float64,
 ) (*llm.CompletionResponse, []llm.Message, error) {
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
@@ -588,7 +811,7 @@ func (ch *ChatHandler) callLLMWithRetry(
 		SystemPrompt: systemPrompt,
 		Messages:     messages,
 		Tools:        tools,
-		MaxTokens:    maxTokens,
+		MaxTokens:    limit,
 		Temperature:  temperature,
 	})
 	if err != nil && llm.IsContextTooLongErr(err) {
@@ -602,123 +825,198 @@ func (ch *ChatHandler) callLLMWithRetry(
 			SystemPrompt: systemPrompt,
 			Messages:     messages,
 			Tools:        tools,
-			MaxTokens:    maxTokens,
+			MaxTokens:    limit,
 			Temperature:  temperature,
 		})
 	}
 	return resp, messages, err
 }
 
-// executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
-// executes each tool, tracks repetitions, and appends results to messages.
-func (ch *ChatHandler) executeToolCalls(
-	ctx context.Context,
-	resp *llm.CompletionResponse,
-	executor *ToolExecutor,
-	emitSSE func(event, data string),
-	messages []llm.Message,
-	repetitionTracker map[string]int,
-) ([]llm.Message, []ToolCallInfo, int) {
-	messages = append(messages, llm.Message{
-		Role:      "assistant",
-		Content:   resp.Content,
-		ToolCalls: resp.ToolCalls,
-	})
+func pendingToolCheckpointMessage(toolCalls []llm.ToolCall) llm.Message {
+	payload, err := json.Marshal(toolCalls)
+	if err != nil {
+		payload = []byte(`[]`)
+	}
+	return llm.Message{
+		Role: "user",
+		Content: "[System: The following tool calls are durably pending, including their original arguments: " + string(payload) +
+			". A matching assistant/tool result sequence immediately after this note means they completed. If results are absent, inspect existing side effects before retrying.]",
+	}
+}
 
-	toolCalls := make([]ToolCallInfo, 0, len(resp.ToolCalls))
-	var iterationBump int
+func emitToolCallEvents(resp *llm.CompletionResponse, emitSSE sseEmitter) error {
+	if emitSSE == nil {
+		return nil
+	}
+	for _, tc := range resp.ToolCalls {
+		tcData, err := json.Marshal(map[string]any{
+			"id":   tc.ID,
+			"name": tc.Name,
+			"args": tc.Arguments,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to marshal tool_call event: %w", err)
+		}
+		if err := emitSSE("tool_call", string(tcData)); err != nil {
+			return fmt.Errorf("failed to emit tool_call event: %w", err)
+		}
+	}
+	return nil
+}
+
+// executeToolCalls executes, checkpoints, and emits each tool result before
+// starting the next tool in the batch. Each durable checkpoint contains only
+// complete assistant/tool pairs, while all tool_call frames have already been
+// flushed and the pending batch intent has already been committed.
+func (ch *ChatHandler) executeToolCalls(ctx context.Context, batch chatToolBatch) (chatToolBatchResult, error) {
+	result := chatToolBatchResult{
+		messages:      batch.messages,
+		modelMessages: batch.modelMessages,
+		toolCalls:     make([]ToolCallInfo, 0, len(batch.response.ToolCalls)),
+	}
 	var repetitionWarning string
 
-	for _, tc := range resp.ToolCalls {
-		if emitSSE != nil {
-			tcData, _ := json.Marshal(map[string]any{
-				"id":   tc.ID,
-				"name": tc.Name,
-				"args": tc.Arguments,
-			})
-			emitSSE("tool_call", string(tcData))
+	for index, tc := range batch.response.ToolCalls {
+		if err := ctx.Err(); err != nil {
+			return result, fmt.Errorf("chat turn interrupted before tool %s: %w", tc.Name, err)
 		}
 
 		argsHash := hashArgs(tc.Name, tc.Arguments)
-		repetitionTracker[argsHash]++
-		if repetitionTracker[argsHash] >= 3 {
-			repetitionWarning = fmt.Sprintf("[System: Warning — you have called %s with the same arguments %d times. Try a different approach.]", tc.Name, repetitionTracker[argsHash])
-			iterationBump += 5
+		batch.repetitionTracker[argsHash]++
+		if batch.repetitionTracker[argsHash] >= 3 {
+			repetitionWarning = fmt.Sprintf("[System: Warning — you have called %s with the same arguments %d times. Try a different approach.]", tc.Name, batch.repetitionTracker[argsHash])
+			result.iterationBump += 5
 		}
 
-		result, execErr := executor.Execute(ctx, tc)
+		intentContent := ""
+		if index == 0 {
+			intentContent = batch.response.Content
+		}
+		toolIntent := llm.Message{Role: "assistant", Content: intentContent, ToolCalls: []llm.ToolCall{tc}}
+		result.messages = append(result.messages, toolIntent)
+		result.modelMessages = append(result.modelMessages, toolIntent)
+
+		toolResult, execErr := batch.executor.Execute(ctx, tc)
 		if execErr != nil {
 			errResult := map[string]any{"success": false, "error": execErr.Error()}
 			if errJSON, jsonErr := json.Marshal(errResult); jsonErr == nil {
-				result = string(errJSON)
+				toolResult = string(errJSON)
 			} else {
-				result = `{"success":false,"error":"tool execution failed"}`
+				toolResult = `{"success":false,"error":"tool execution failed"}`
 			}
 		}
 
-		if emitSSE != nil {
-			trData, _ := json.Marshal(map[string]any{
-				"id":     tc.ID,
-				"name":   tc.Name,
-				"result": json.RawMessage(result),
-			})
-			emitSSE("tool_result", string(trData))
-		}
-
-		messages = append(messages, llm.Message{
+		resultMessage := llm.Message{
 			Role:       "tool",
 			ToolCallID: tc.ID,
 			Name:       tc.Name,
-			Content:    result,
-		})
+			Content:    toolResult,
+		}
+		result.messages = append(result.messages, resultMessage)
+		result.modelMessages = append(result.modelMessages, resultMessage)
 
 		var argsAny any
 		_ = json.Unmarshal(tc.Arguments, &argsAny)
 		var resultAny any
-		_ = json.Unmarshal([]byte(result), &resultAny)
-		toolCalls = append(toolCalls, ToolCallInfo{
-			Name:   tc.Name,
-			Args:   argsAny,
-			Result: resultAny,
-		})
+		_ = json.Unmarshal([]byte(toolResult), &resultAny)
+		result.toolCalls = append(result.toolCalls, ToolCallInfo{Name: tc.Name, Args: argsAny, Result: resultAny})
+		batch.usage.ToolCalls++
+
+		if index == len(batch.response.ToolCalls)-1 && repetitionWarning != "" {
+			warning := llm.Message{Role: "user", Content: repetitionWarning}
+			result.messages = append(result.messages, warning)
+			result.modelMessages = append(result.modelMessages, warning)
+		}
+
+		// External side effects cannot be transacted with SQLite. Their intent is
+		// already durable; checkpoint this result before exposing it or starting
+		// the next side effect.
+		durabilityCtx, durabilityCancel := context.WithTimeout(context.WithoutCancel(ctx), chatDurabilityTimeout)
+		commitErr := ch.commitChatProgress(durabilityCtx, batch.namespace, batch.sessionID, result.messages, batch.turnState, *batch.usage)
+		durabilityCancel()
+		if commitErr != nil {
+			return result, fmt.Errorf("failed to checkpoint executed tools after %s: %w", tc.Name, commitErr)
+		}
+
+		resultEvent := toolResultSSE{id: tc.ID, name: tc.Name, result: toolResult}
+		if err := emitToolResultEvent(resultEvent, batch.emitSSE); err != nil {
+			return result, err
+		}
 	}
 
-	if repetitionWarning != "" {
-		messages = append(messages, llm.Message{
-			Role:    "user",
-			Content: repetitionWarning,
-		})
-	}
-
-	return messages, toolCalls, iterationBump
+	return result, nil
 }
 
-// handleFinalResponse emits the final SSE message and saves the chat session.
+func emitToolResultEvent(result toolResultSSE, emitSSE sseEmitter) error {
+	if emitSSE == nil {
+		return nil
+	}
+	data, err := json.Marshal(map[string]any{
+		"id":     result.id,
+		"name":   result.name,
+		"result": json.RawMessage(result.result),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal tool_result event: %w", err)
+	}
+	if err := emitSSE("tool_result", string(data)); err != nil {
+		return fmt.Errorf("failed to emit tool_result event: %w", err)
+	}
+	return nil
+}
+
+// handleFinalResponse durably commits the completed turn before exposing its
+// final response as a successful result.
 func (ch *ChatHandler) handleFinalResponse(
 	ctx context.Context,
 	content string,
 	messages []llm.Message,
 	namespace, sessionID string,
-	persistedCount int,
-	emitSSE func(event, data string),
+	emitSSE sseEmitter,
 	executor *ToolExecutor,
 	usage *ChatUsage,
+	turnState *chatTurnCommitState,
 	start time.Time,
-) string {
-	if emitSSE != nil && content != "" {
-		msgData, _ := json.Marshal(map[string]string{"content": content})
-		emitSSE("message", string(msgData))
-	}
-
+) (string, error) {
 	finalMessages := append(messages, llm.Message{Role: "assistant", Content: content})
 	usage.Duration = time.Since(start).Round(time.Millisecond).String()
 	usage.TasksCreated = executor.tasksCreated
-	_ = ch.saveChatSession(ctx, namespace, sessionID, finalMessages, persistedCount, *usage)
-	if err := ch.sessionStore.UpdateTokenCounts(ctx, namespace, sessionID, usage.InputTokens, usage.OutputTokens); err != nil {
-		chatLog.Error(err, "failed to update token counts")
+	if err := ch.commitChatProgress(ctx, namespace, sessionID, finalMessages, turnState, *usage); err != nil {
+		return "", fmt.Errorf("failed to commit chat turn: %w", err)
 	}
 
-	return content
+	if emitSSE != nil && content != "" {
+		msgData, _ := json.Marshal(map[string]string{"content": content})
+		if err := emitSSE("message", string(msgData)); err != nil {
+			return "", fmt.Errorf("failed to emit final message: %w", err)
+		}
+	}
+
+	return content, nil
+}
+
+func (ch *ChatHandler) commitChatProgress(
+	ctx context.Context,
+	namespace, sessionID string,
+	messages []llm.Message,
+	turnState *chatTurnCommitState,
+	usage ChatUsage,
+) error {
+	incrIn := usage.InputTokens - turnState.committedInput
+	incrOut := usage.OutputTokens - turnState.committedOutput
+	if incrIn < 0 || incrOut < 0 {
+		return fmt.Errorf("chat usage moved backwards while committing progress")
+	}
+	if err := ch.saveChatSession(ctx, namespace, sessionID, messages, turnState.persistedMessages, ChatUsage{
+		InputTokens:  incrIn,
+		OutputTokens: incrOut,
+	}, turnState.turnID); err != nil {
+		return err
+	}
+	turnState.persistedMessages = len(messages)
+	turnState.committedInput = usage.InputTokens
+	turnState.committedOutput = usage.OutputTokens
+	return nil
 }
 
 func setUsageSpanAttributes(span trace.Span, usage ChatUsage) {
@@ -763,35 +1061,20 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 	return llmMessages, nil
 }
 
-// saveChatSession saves chat session messages to the session store.
-func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, _ ChatUsage) error {
-	// Check if session exists
-	_, err := ch.sessionStore.GetSession(ctx, namespace, sessionID)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("failed to get session: %w", err)
-		}
-		// Create new session
-		now := time.Now()
-		session := &store.SessionRecord{
-			Namespace:   namespace,
-			Name:        sessionID,
-			SessionType: "chat",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if err := ch.sessionStore.CreateSession(ctx, session); err != nil {
-			return fmt.Errorf("failed to create session: %w", err)
-		}
+// saveChatSession atomically commits the new transcript messages and their usage.
+func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID string, messages []llm.Message, persistedCount int, usage ChatUsage, turnIDs ...string) error {
+	if persistedCount < 0 || persistedCount > len(messages) {
+		return fmt.Errorf("invalid persisted message count %d for %d messages", persistedCount, len(messages))
 	}
 
-	// Only append messages that haven't been persisted yet
 	newMessages := messages[persistedCount:]
 	if len(newMessages) == 0 {
+		if usage.InputTokens != 0 || usage.OutputTokens != 0 {
+			return fmt.Errorf("cannot commit token usage without new transcript messages")
+		}
 		return nil
 	}
 
-	// Convert llm.Message to store.SessionMessage
 	storeMessages := make([]store.SessionMessage, 0, len(newMessages))
 	now := time.Now()
 	for _, msg := range newMessages {
@@ -808,7 +1091,21 @@ func (ch *ChatHandler) saveChatSession(ctx context.Context, namespace, sessionID
 		storeMessages = append(storeMessages, sm)
 	}
 
-	return ch.sessionStore.AppendMessages(ctx, namespace, sessionID, storeMessages)
+	session := &store.SessionRecord{
+		Namespace:   namespace,
+		Name:        sessionID,
+		SessionType: "chat",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	turnID := ""
+	if len(turnIDs) > 0 {
+		turnID = turnIDs[0]
+	}
+	if ch.sessionTurnCommitter == nil {
+		return fmt.Errorf("session store does not support atomic chat turns")
+	}
+	return ch.sessionTurnCommitter.CommitSessionTurn(ctx, session, turnID, persistedCount, storeMessages, usage.InputTokens, usage.OutputTokens)
 }
 
 // HandleChatConfig handles GET /api/v1/chat/config.
