@@ -36,14 +36,21 @@ The migration helper requires Bash, Helm, `kubectl`, `jq`, `tar`, `base64`,
    the latest release must be `deployed` or `failed` so no pending Helm operation
    can race the migration;
 2. snapshots all existing Orka CRDs;
-3. runs every exact patch or create with `--dry-run=server` before changing any
-   CRD;
+3. runs every exact patch or create with `--dry-run=server` and rechecks the
+   namespace plus both Helm storage backends before changing any CRD;
 4. replaces each live CRD spec with the server-normalized target spec, waits for
-   `Established`, and verifies the result; and
+   the target generation, accepted names, and every served-version discovery
+   endpoint, then rechecks Helm state again before reporting success; and
 5. leaves any partial CRD mutations in place and preserves recovery artifacts
    plus a unique migration marker. Automatic schema rollback is intentionally
    avoided because it can invalidate custom resources or alter API field
    ownership; reconcile and rerun the helper before upgrading Helm.
+
+For existing CRDs, the verifier currently permits changes to singular names,
+short names, categories, validation schemas, and the status subresource. It
+refuses kind/list-kind/plural, conversion, scope, served/storage version,
+printer-column, and scale-setting changes before mutation until those publication
+paths have equivalent readiness checks.
 
 Set explicit targets first; never rely on the ambient Kubernetes context or an
 unpinned remote chart version:

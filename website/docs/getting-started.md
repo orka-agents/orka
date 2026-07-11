@@ -93,9 +93,10 @@ TARGET_CONTEXT="replace-with-context"
 
 The `jq`-based helper rejects `HELM_KUBE*` endpoint or credential overrides,
 reads Helm release storage through the explicit kubectl context, requires a
-`deployed` or `failed` latest release, server-preflights all nine exact
-patch/create operations before mutation, and verifies every live
-target spec. On failure partial changes
+`deployed` or `failed` latest release, and server-preflights all nine exact
+patch/create operations before mutation. It rechecks Helm state before and after
+mutation, then verifies target generation, accepted names, and served API
+discovery for every CRD. On failure partial changes
 are retained with recovery artifacts and a unique migration marker; automatic
 schema rollback is intentionally avoided because it can invalidate custom
 resources or alter field ownership. For a remote chart, pull one exact

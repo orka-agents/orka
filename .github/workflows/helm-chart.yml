@@ -16,6 +16,7 @@ on:
       - "README.md"
       - "scripts/helm-chart.sh"
       - "scripts/helm-crd-upgrade.sh"
+      - "testdata/helm-crd-upgrade/**"
       - "website/docs/getting-started.md"
       - ".github/workflows/helm-chart.yml"
   pull_request:
@@ -31,6 +32,7 @@ on:
       - "README.md"
       - "scripts/helm-chart.sh"
       - "scripts/helm-crd-upgrade.sh"
+      - "testdata/helm-crd-upgrade/**"
       - "website/docs/getting-started.md"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:

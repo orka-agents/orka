@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_DIR="${ROOT_DIR}/charts/orka"
 GENERATED_CRD_DIR="${ROOT_DIR}/config/crd/bases"
 CHART_CRD_DIR="${CHART_DIR}/crds"
+LEGACY_TASK_CRD_FIXTURE="${ROOT_DIR}/testdata/helm-crd-upgrade/legacy-task-crd.yaml"
 CHART_README="${CHART_DIR}/README.md"
 CRD_UPGRADE_HELPER="${ROOT_DIR}/scripts/helm-crd-upgrade.sh"
 ROOT_README="${ROOT_DIR}/README.md"
@@ -210,6 +211,8 @@ check_chart() (
 
   [[ -x "$CRD_UPGRADE_HELPER" ]] || \
     fail "missing executable chart CRD migration helper ${CRD_UPGRADE_HELPER}"
+  [[ -f "$LEGACY_TASK_CRD_FIXTURE" ]] || \
+    fail "missing pinned legacy Task CRD fixture ${LEGACY_TASK_CRD_FIXTURE}"
   bash -n "$CRD_UPGRADE_HELPER" || fail "chart CRD migration helper has invalid Bash syntax"
 
   check_crd_mirror
@@ -418,8 +421,42 @@ remove_test_crds() {
   done
   kubectl --context "$kube_context" delete \
     --ignore-not-found \
-    --wait=true \
+    --wait=false \
+    "${resources[@]}" >/dev/null || return 1
+  if kubectl --context "$kube_context" wait \
+    --for=delete \
     --timeout=90s \
+    "${resources[@]}" >/dev/null; then
+    return 0
+  fi
+
+  # CRD deletion can remain blocked after repeated schema publication tests
+  # while apiextensions storage is reinitializing. This path is restricted to
+  # the preflight-verified empty, dedicated kind cluster. Force-remove only the
+  # known cleanup finalizer in that specific transient state, then verify the
+  # CRDs are gone.
+  local current reason message deletion_timestamp
+  for name in "${EXPECTED_CRD_NAMES[@]}"; do
+    current=$(kubectl --context "$kube_context" get customresourcedefinition "$name" \
+      --ignore-not-found \
+      -o json) || return 1
+    [[ -n "$current" ]] || continue
+    deletion_timestamp=$(jq -r '.metadata.deletionTimestamp // empty' <<<"$current")
+    reason=$(jq -r '.status.conditions[]? | select(.type == "Terminating") | .reason // empty' <<<"$current")
+    message=$(jq -r '.status.conditions[]? | select(.type == "Terminating") | .message // empty' <<<"$current")
+    if [[ -n "$deletion_timestamp" && "$reason" == "InstanceDeletionFailed" && "$message" == *"storage is (re)initializing"* ]]; then
+      echo "helm-chart: forcing dedicated-test cleanup for CRD ${name} after apiextensions storage reinitialization timeout" >&2
+      kubectl --context "$kube_context" patch customresourcedefinition "$name" \
+        --type=merge \
+        -p '{"metadata":{"finalizers":[]}}' >/dev/null || return 1
+    else
+      echo "helm-chart: refusing forced cleanup for CRD ${name}: unexpected termination state" >&2
+      return 1
+    fi
+  done
+  kubectl --context "$kube_context" wait \
+    --for=delete \
+    --timeout=30s \
     "${resources[@]}" >/dev/null
 }
 
@@ -891,37 +928,8 @@ test_upgrade() (
     -f "$CHART_CRD_DIR/core.orka.ai_tasks.yaml" \
     -o json | jq -c '.spec.versions[] | select(.name == "v1alpha1") | .schema.openAPIV3Schema.properties.spec.properties.type.enum')
   legacy_task_type_enum='["legacy-only"]'
-  cat >"$temp_dir/legacy-task-crd.yaml" <<'EOF_LEGACY_CRD'
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  name: tasks.core.orka.ai
-spec:
-  group: core.orka.ai
-  names:
-    kind: Task
-    listKind: TaskList
-    plural: tasks
-    singular: task
-  scope: Namespaced
-  versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            legacyOnly:
-              type: string
-            spec:
-              type: object
-              properties:
-                type:
-                  type: string
-                  enum:
-                    - legacy-only
-EOF_LEGACY_CRD
+  cp "$LEGACY_TASK_CRD_FIXTURE" "$temp_dir/legacy-task-crd.yaml"
+
   kubectl --context "$kube_context" apply \
     --server-side \
     --force-conflicts \
