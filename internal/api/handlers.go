@@ -88,6 +88,7 @@ func toolSpecHTTPURL(tool *corev1alpha1.Tool) string {
 
 type Handlers struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	clientset                 kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
@@ -109,6 +110,7 @@ type Handlers struct {
 // HandlersConfig holds configuration for creating Handlers.
 type HandlersConfig struct {
 	Client                    client.Client
+	APIReader                 client.Reader
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
@@ -127,8 +129,13 @@ type HandlersConfig struct {
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
+	apiReader := cfg.APIReader
+	if apiReader == nil {
+		apiReader = cfg.Client
+	}
 	return &Handlers{
 		client:                    cfg.Client,
+		apiReader:                 apiReader,
 		clientset:                 cfg.KubeClient,
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
@@ -527,6 +534,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	continueToken := c.Query("continue", "")
 
 	opts := &client.ListOptions{}
+	listReader := h.apiReader
 
 	// Apply namespace filter with smart defaults
 	namespace, err := h.resolveNamespace(c, explicitNS)
@@ -544,6 +552,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 		if continueToken != "" {
 			return fiber.NewError(fiber.StatusBadRequest, "continue cannot be used with limit=0")
 		}
+		listReader = h.client
 	} else {
 		pagination, err := ParsePagination(limit, continueToken)
 		if err != nil {
@@ -555,8 +564,8 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 
 	taskList := &corev1alpha1.TaskList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, taskList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
+	if err := listReader.List(ctx, taskList, opts); err != nil {
+		return paginationListError("tasks", err)
 	}
 	filteredList := false
 	if h.contextTokenAuthorization.Enabled() {
@@ -1041,64 +1050,47 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listTools", h.contextTokenAuthorization.ToolReadScopes); err != nil {
 		return err
 	}
-	limit := c.Query("limit", "100")
-	continueToken := c.Query("continue", "")
 
-	opts := &client.ListOptions{Namespace: namespace}
-
-	// Apply pagination
-	pagination, err := ParsePagination(limit, continueToken)
+	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	opts.Limit = pagination.Limit
-	opts.Continue = pagination.Continue
-
-	toolList := &corev1alpha1.ToolList{}
-	ctx := c.Context()
-	if err := h.client.List(ctx, toolList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tools: %v", err))
+	builtins, err := h.allowedBuiltinTools(c)
+	if err != nil {
+		return err
+	}
+	filteredNames, filteredMode := h.filteredCustomToolNames(c)
+	mode := toolCursorModeKubernetes
+	if filteredMode {
+		mode = toolCursorModeFiltered
+	}
+	cursor, err := decodeToolListCursor(
+		pagination.Continue,
+		h.toolListCursorScope(c, namespace, builtins, mode),
+		mode,
+		len(builtins),
+		len(filteredNames),
+	)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	// Add built-in tools to the response
-	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
-	for _, tool := range builtinToolsList {
-		name, _ := tool["name"].(string)
-		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", name)
-		if err != nil {
-			return err
-		}
-		if allowed {
-			toolItems = append(toolItems, tool)
-		}
+	pageSize := int(pagination.Limit)
+	toolItems := make([]fiber.Map, 0, pageSize)
+	for cursor.BuiltinOffset < len(builtins) && len(toolItems) < pageSize {
+		toolItems = append(toolItems, builtins[cursor.BuiltinOffset])
+		cursor.BuiltinOffset++
 	}
 
-	for _, tool := range toolList.Items {
-		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", tool.Name)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			continue
-		}
-		toolItems = append(toolItems, fiber.Map{
-			"name":        tool.Name,
-			"namespace":   tool.Namespace,
-			"builtin":     false,
-			"description": tool.Spec.Description,
-			"available":   tool.Status.Available,
-			"url":         toolSpecHTTPURL(&tool),
-		})
+	var response ListResponse
+	if filteredMode {
+		response, err = h.filteredToolListPage(c, namespace, pageSize, builtins, filteredNames, cursor, toolItems)
+	} else {
+		response, err = h.kubernetesToolListPage(c, namespace, pageSize, builtins, cursor, toolItems)
 	}
-
-	response := ListResponse{
-		Items: toolItems,
-		Metadata: ListMeta{
-			Continue:           toolList.Continue,
-			RemainingItemCount: toolList.RemainingItemCount,
-		},
+	if err != nil {
+		return err
 	}
-
 	return c.JSON(response)
 }
 
@@ -1161,8 +1153,8 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 
 	agentList := &corev1alpha1.AgentList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, agentList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list agents: %v", err))
+	if err := h.apiReader.List(ctx, agentList, opts); err != nil {
+		return paginationListError("agents", err)
 	}
 	if h.contextTokenAuthorization.Enabled() {
 		filtered := agentList.Items[:0]
@@ -1392,8 +1384,8 @@ func (h *Handlers) ListSkills(c fiber.Ctx) error {
 
 	skillList := &corev1alpha1.SkillList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, skillList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list skills: %v", err))
+	if err := h.apiReader.List(ctx, skillList, opts); err != nil {
+		return paginationListError("skills", err)
 	}
 
 	skills := make([]fiber.Map, 0, len(skillList.Items))

@@ -2547,13 +2547,17 @@ func TestParseDuration(t *testing.T) {
 func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "test-ns"})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: apiReader, WatchNamespace: "test-ns"})
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
 	if handlers.watchNamespace != "test-ns" {
 		t.Errorf("watchNamespace = %s, want test-ns", handlers.watchNamespace)
+	}
+	if handlers.apiReader != apiReader {
+		t.Error("apiReader was not configured")
 	}
 }
 
