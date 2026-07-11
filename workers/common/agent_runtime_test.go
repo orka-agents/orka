@@ -1837,7 +1837,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesNewWorkspace(t *testing
 
 	recorder := newRecordingWorkspaceExecutor()
 	recorder.waitReadyErr = fmt.Errorf("not ready")
-	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
 
 	err := runAgentInWorkspace(
@@ -2007,7 +2007,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailureDeletesPooledWorkspace(t *test
 
 	recorder := newRecordingWorkspaceExecutor()
 	recorder.waitReadyErr = fmt.Errorf("not ready")
-	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
 
 	err := runAgentInWorkspace(
@@ -2076,7 +2076,7 @@ func TestRunAgent_SubstratePreHandoffRetainFailurePreservesReusedWorkspace(t *te
 		t.Fatalf("retain seeded workspace: %v", err)
 	}
 	recorder.waitReadyErr = fmt.Errorf("not ready")
-	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+	restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 	t.Cleanup(restoreExecutor)
 
 	err = runAgentInWorkspace(

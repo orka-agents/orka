@@ -571,12 +571,12 @@ func setAgentSandboxWorkspaceExecutorForTest(executor workspace.WorkspaceExecuto
 	}
 }
 
-func setSubstrateWorkspaceExecutorForTest(executor workspace.WorkspaceExecutor, err error) func() {
+func setSubstrateWorkspaceExecutorForTest(executor workspace.WorkspaceExecutor) func() {
 	substrateWorkspaceExecutorMu.Lock()
 	previousExecutor := substrateWorkspaceExecutor
 	previousErr := substrateWorkspaceExecutorErr
 	substrateWorkspaceExecutor = executor
-	substrateWorkspaceExecutorErr = err
+	substrateWorkspaceExecutorErr = nil
 	substrateWorkspaceExecutorMu.Unlock()
 
 	return func() {

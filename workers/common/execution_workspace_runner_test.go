@@ -100,7 +100,11 @@ func TestRunAgentInWorkspaceRetriesTransientReleaseWithRetainedScrub(t *testing.
 		t.Fatalf("runAgentInWorkspace() error = %q, want recovered cleanup failure omitted", runErr.Error())
 	}
 
-	assertOperationOrder(t, recorder.operations(), "claim", "waitReady", "exec", "release", "describe", "describe", "release")
+	assertOperationOrder(
+		t,
+		recorder.operations(),
+		"claim", "waitReady", "exec", "release", "describe", "describe", "release",
+	)
 	execReqs := recorder.execRequests()
 	if len(execReqs) != 1 {
 		t.Fatalf("recorded %d scrub requests, want one before release retries", len(execReqs))
@@ -392,7 +396,7 @@ func TestRunAgentInWorkspaceCleanupRetriesPreserveSubstratePoolContracts(t *test
 			} else {
 				recorder.releaseFailures = []error{transientErr}
 			}
-			restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder, nil)
+			restoreExecutor := setSubstrateWorkspaceExecutorForTest(recorder)
 			t.Cleanup(restoreExecutor)
 
 			var runErr error
