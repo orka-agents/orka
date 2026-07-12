@@ -150,7 +150,14 @@ jobs:
             ! -name '*.prov' \
             -exec rm -rf {} +
 
-          rsync -a ../website/build/ ./
+          # Do not let generated website content overwrite preserved Helm
+          # repository artifacts at the Pages root.
+          rsync -a \
+            --exclude='/charts' \
+            --exclude='/index.yaml' \
+            --exclude='/*.tgz' \
+            --exclude='/*.prov' \
+            ../website/build/ ./
           touch .nojekyll
 
           git add -A
