@@ -46,6 +46,9 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return ChatToolErrorResult("invalid_arguments", "name is required", "Provide the task name")
 	}
 	namespace := chatGetStringArgDefault(a, namespaceField, tc.Namespace)
+	if r, ok := checkChatNamespaceScope(tc, namespace); !ok {
+		return r, nil
+	}
 	timeout := min(chatGetIntArg(a, timeoutField, 30), 60)
 
 	task := &corev1alpha1.Task{}
