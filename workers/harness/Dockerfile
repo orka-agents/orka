@@ -20,6 +20,10 @@ FROM --platform=$TARGETPLATFORM golang:1.26 AS target-go
 # Runtime stage with common CLI dependencies for generic, Codex, and Claude adapters.
 FROM node:22-slim
 
+# Pin Codex instead of consuming `latest`: 0.142.2 started sending an
+# OpenAI-compatible request field that the live Copilot proxy rejects.
+ARG CODEX_CLI_VERSION=0.142.0
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
@@ -31,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code \
+RUN npm install -g @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code \
     && npm cache clean --force
 
 COPY --from=target-go /usr/local/go /usr/local/go

@@ -57,25 +57,40 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 		return nil, fmt.Errorf("unsupported runtime type %q", runtimeType)
 	}
 
-	if requested != "" {
-		exists, err := secretExists(ctx, k8sClient, namespace, requested)
-		if err != nil {
-			return nil, err
-		}
-		if !exists {
-			return nil, fmt.Errorf("runtime secretRef %q not found in namespace %q", requested, namespace)
-		}
-		return &corev1.LocalObjectReference{Name: requested}, nil
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return nil, fmt.Errorf("runtime secretRef is required for %s runtime agents; provide runtime.secretRef explicitly", runtimeType)
 	}
 
-	name, err := firstExistingSecretName(ctx, k8sClient, namespace, candidates)
+	if err := authorizeRuntimeSecretRef(ctx, namespace, requested); err != nil {
+		return nil, err
+	}
+
+	exists, err := secretExists(ctx, k8sClient, namespace, requested)
 	if err != nil {
 		return nil, err
 	}
-	if name == "" {
-		return nil, fmt.Errorf("no supported %s runtime credentials found in namespace %q; expected one of %s", runtimeType, namespace, strings.Join(candidates, ", "))
+	if !exists {
+		return nil, fmt.Errorf("runtime secretRef %q not found in namespace %q", requested, namespace)
 	}
-	return &corev1.LocalObjectReference{Name: name}, nil
+	return &corev1.LocalObjectReference{Name: requested}, nil
+}
+
+func authorizeRuntimeSecretRef(ctx context.Context, namespace, secretName string) error {
+	tc := GetToolContext(ctx)
+	if tc == nil {
+		return nil
+	}
+	if tc.AuthorizeSecretRead != nil {
+		if authErr := tc.AuthorizeSecretRead(ctx, namespace, secretName); authErr != nil {
+			return fmt.Errorf("runtime secretRef %q is not authorized: %s", secretName, authErr.Message)
+		}
+		return nil
+	}
+	if tc.RequireSecretReadAuthorization {
+		return fmt.Errorf("runtime secretRef %q requires secret credential authorization", secretName)
+	}
+	return nil
 }
 
 func resolveWorkspaceGitSecretRef(ctx context.Context, k8sClient client.Reader, namespace string, agent *corev1alpha1.Agent, requested string) (*corev1.LocalObjectReference, error) {

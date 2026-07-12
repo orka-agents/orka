@@ -1463,7 +1463,8 @@ func TestExecuteCreateAgent_WithRuntime(t *testing.T) {
 	args := map[string]any{
 		"name": "runtime-agent",
 		"runtime": map[string]any{
-			"type": "copilot",
+			"type":      "copilot",
+			"secretRef": "copilot-token",
 		},
 	}
 	r := e.executeTool(context.Background(), "create_agent", args)
@@ -1853,7 +1854,7 @@ func TestHandleInitialPrompt_WithRuntimeAgent(t *testing.T) {
 	})
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{
 		"name":          "rt-agent",
-		"runtime":       map[string]any{"type": "copilot"},
+		"runtime":       map[string]any{"type": "copilot", "secretRef": "copilot-token"},
 		"initialPrompt": "do work",
 	})
 	if !r.Success {

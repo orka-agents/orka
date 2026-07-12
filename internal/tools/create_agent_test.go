@@ -48,6 +48,21 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
+	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
+	if !ok {
+		t.Fatalf("properties = %T, want map[string]any", schema[jsonSchemaPropertiesField])
+	}
+	runtimeSchema, ok := props[runtimeField].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime schema = %T, want map[string]any", props[runtimeField])
+	}
+	required, ok := runtimeSchema[jsonSchemaRequiredField].([]any)
+	if !ok {
+		t.Fatalf("runtime.required = %T, want []any", runtimeSchema[jsonSchemaRequiredField])
+	}
+	if !containsAnyString(required, jsonSchemaTypeField) || !containsAnyString(required, secretRefField) {
+		t.Fatalf("runtime.required = %#v, want type and secretRef", required)
+	}
 }
 
 func TestCreateAgentTool_Execute(t *testing.T) {
@@ -466,7 +481,7 @@ func TestCreateAgentTool_Execute_PreservesExplicitRuntimeSecretRef(t *testing.T)
 	}
 }
 
-func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *testing.T) {
+func TestCreateAgentTool_Execute_RejectsOmittedRuntimeSecretRef(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
@@ -484,39 +499,19 @@ func TestCreateAgentTool_Execute_AutoDiscoversRuntimeSecretRefWhenOmitted(t *tes
 		}
 	}`)
 
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error")
 	}
-
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
+	if !strings.Contains(err.Error(), "runtime secretRef is required") {
+		t.Fatalf("error = %v, want it to mention required secretRef", err)
 	}
-
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
-	}
-
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
-	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType(runtimeTypeClaude) {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, runtimeTypeClaude)
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != claudeAPIKeySecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, claudeAPIKeySecretName)
+	if strings.Contains(err.Error(), claudeCredentialsSecretName) || strings.Contains(err.Error(), claudeAPIKeySecretName) {
+		t.Fatalf("error = %v, must not disclose runtime secret candidates", err)
 	}
 }
 
-func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t *testing.T) {
+func TestCreateAgentTool_Execute_RejectsOmittedCodexRuntimeSecretRef(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
@@ -534,35 +529,47 @@ func TestCreateAgentTool_Execute_AutoDiscoversCodexRuntimeSecretRefWhenOmitted(t
 		}
 	}`)
 
-	result, err := tool.Execute(context.Background(), args)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error")
 	}
+	if !strings.Contains(err.Error(), "runtime secretRef is required") {
+		t.Fatalf("error = %v, want it to mention required secretRef", err)
+	}
+	if strings.Contains(err.Error(), codexRuntimeCopilotSecretName) || strings.Contains(err.Error(), codexProxyTokenSecretName) {
+		t.Fatalf("error = %v, must not disclose runtime secret candidates", err)
+	}
+}
 
-	var agentResult CreateAgentResult
-	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
-		t.Fatalf("failed to unmarshal result: %v", err)
-	}
+func TestResolveRuntimeSecretRef_RejectsUnauthorizedSecretRef(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		AuthorizeSecretRead: func(context.Context, string, string) *ChatToolError {
+			return &ChatToolError{Type: "authorization_failed", Message: "secret blocked by transaction"}
+		},
+	})
 
-	agent := &corev1alpha1.Agent{}
-	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
-		Name:      agentResult.AgentName,
-		Namespace: agentResult.Namespace,
-	}, agent); err != nil {
-		t.Fatalf("failed to get agent: %v", err)
+	_, err := resolveRuntimeSecretRef(ctx, fc, defaultNamespace, corev1alpha1.AgentRuntimeClaude, testRuntimeCredsSecretName)
+	if err == nil {
+		t.Fatal("expected authorization error")
 	}
+	if !strings.Contains(err.Error(), "not authorized") || !strings.Contains(err.Error(), "secret blocked by transaction") {
+		t.Fatalf("error = %v, want authorization failure", err)
+	}
+}
 
-	if agent.Spec.Runtime == nil {
-		t.Fatal("agent.Spec.Runtime is nil")
+func TestResolveRuntimeSecretRef_FailsClosedWhenAuthorizationRequiredWithoutAuthorizer(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		RequireSecretReadAuthorization: true,
+	})
+
+	_, err := resolveRuntimeSecretRef(ctx, fc, defaultNamespace, corev1alpha1.AgentRuntimeClaude, testRuntimeCredsSecretName)
+	if err == nil {
+		t.Fatal("expected fail-closed authorization error")
 	}
-	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeType("codex") {
-		t.Errorf("runtime.type = %q, want %q", agent.Spec.Runtime.Type, "codex")
-	}
-	if agent.Spec.SecretRef == nil {
-		t.Fatal("agent.Spec.SecretRef is nil")
-	}
-	if agent.Spec.SecretRef.Name != codexProxyTokenSecretName {
-		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, codexProxyTokenSecretName)
+	if !strings.Contains(err.Error(), "requires secret credential authorization") {
+		t.Fatalf("error = %v, want missing authorizer failure", err)
 	}
 }
 
