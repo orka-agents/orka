@@ -130,6 +130,23 @@ if [[ "$missing_image_code" == "0" ]] || ! grep -q "ADAPTER_IMAGE is required" "
 fi
 rm -f "$missing_image_err"
 
+invalid_class_err="$(mktemp)"
+set +e
+ORKA_FOUNDRY_RESPONSES_ENDPOINT="http://127.0.0.1/agents/test/endpoint/protocols/openai/responses" \
+  ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
+  ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES="r ead" \
+  examples/harness/foundry-responses/live-smoke.sh >/dev/null 2>"$invalid_class_err"
+invalid_class_code=$?
+set -e
+if [[ "$invalid_class_code" == "0" ]] || ! grep -q "unsupported brokered class 'r ead'" "$invalid_class_err"; then
+  cat "$invalid_class_err" >&2
+  rm -f "$invalid_class_err"
+  echo "expected internally spaced brokered class to fail preflight" >&2
+  exit 1
+fi
+rm -f "$invalid_class_err"
+
 smoke_tmp="$(mktemp -d)"
 smoke_capture="$smoke_tmp/rendered.yaml"
 cat >"$smoke_tmp/kubectl" <<'SH'

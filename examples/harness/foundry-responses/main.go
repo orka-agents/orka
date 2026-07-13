@@ -1155,9 +1155,15 @@ func (s *server) postResponses(
 			strings.TrimSpace(string(data)),
 		)
 	}
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxFoundryBodyBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read Foundry hosted Responses response: %w", err)
+	}
+	if len(responseBody) > maxFoundryBodyBytes {
+		return "", fmt.Errorf("foundry hosted Responses response exceeded %d bytes", maxFoundryBodyBytes)
+	}
 	if out != nil {
-		decoder := json.NewDecoder(io.LimitReader(resp.Body, maxFoundryBodyBytes))
-		if err := decoder.Decode(out); err != nil {
+		if err := json.Unmarshal(responseBody, out); err != nil {
 			return "", fmt.Errorf("decode Foundry hosted Responses response: %w", err)
 		}
 		sessionID = firstNonBlank(out.AgentSessionID, sessionID)
@@ -1378,6 +1384,9 @@ func outputItemText(item responsesOutput) string {
 			if m, ok := entry.(map[string]any); ok {
 				if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
 					parts = append(parts, strings.TrimSpace(text))
+				}
+				if refusal, ok := m["refusal"].(string); ok && strings.TrimSpace(refusal) != "" {
+					parts = append(parts, strings.TrimSpace(refusal))
 				}
 				if textMap, ok := m["text"].(map[string]any); ok {
 					if value, ok := textMap["value"].(string); ok && strings.TrimSpace(value) != "" {

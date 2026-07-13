@@ -205,7 +205,7 @@ preflight() {
   if [[ -n "${brokered_classes//[[:space:],]/}" ]]; then
     IFS=',' read -r -a classes <<<"$brokered_classes"
     for class in "${classes[@]}"; do
-      class="${class//[[:space:]]/}"
+      class="$(printf '%s' "$class" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
       [[ -z "$class" ]] && continue
       [[ "$class" == "read" || "$class" == "write" ]] || fail "unsupported brokered class '$class' (expected read/write)"
     done

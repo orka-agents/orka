@@ -1479,6 +1479,65 @@ func TestResponsesAdapterStateLossContinueFailsSafely(t *testing.T) {
 	}
 }
 
+func TestPostResponsesRejectsOversizedAndTrailingBodies(t *testing.T) {
+	valid, err := json.Marshal(finalResponsesMessage())
+	if err != nil {
+		t.Fatalf("marshal valid response: %v", err)
+	}
+	tests := []struct {
+		name    string
+		body    []byte
+		wantErr string
+	}{
+		{
+			name:    "oversized",
+			body:    append(append([]byte(nil), valid...), bytes.Repeat([]byte(" "), maxFoundryBodyBytes+1-len(valid))...),
+			wantErr: "exceeded",
+		},
+		{
+			name:    "trailing data",
+			body:    append(append([]byte(nil), valid...), []byte("trailing")...),
+			wantErr: "decode",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(tt.body)
+			}))
+			t.Cleanup(upstream.Close)
+			server := newServer(config{
+				endpoint:       upstream.URL + "/agents/test/endpoint/protocols/openai/responses?api-version=v1",
+				foundryAuth:    "foundry-auth-value",
+				requestTimeout: time.Second,
+			}, &http.Client{Timeout: time.Second})
+			var response responsesResponse
+			_, err := server.postResponses(
+				context.Background(),
+				"runtime-session",
+				responsesRequest{Input: "test"},
+				&response,
+			)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("postResponses error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestResponsesMessageTextPreservesRefusal(t *testing.T) {
+	got := responsesMessageText([]responsesOutput{{
+		Type: "message",
+		Content: []any{map[string]any{
+			"type":    "refusal",
+			"refusal": "I cannot perform that request.",
+		}},
+	}})
+	if got != "I cannot perform that request." {
+		t.Fatalf("responsesMessageText refusal = %q", got)
+	}
+}
+
 func TestResponsesAPIVersionDefaultsToSDKValue(t *testing.T) {
 	t.Setenv(envAPIVersion, "")
 	if got := loadConfig().apiVersion; got != defaultAPIVersion {

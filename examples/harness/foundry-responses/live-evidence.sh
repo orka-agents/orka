@@ -193,99 +193,130 @@ import sys
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text())
-if isinstance(payload, dict):
-    if isinstance(payload.get("events"), list):
-        events = payload["events"]
-    elif isinstance(payload.get("items"), list):
-        events = payload["items"]
-    else:
-        events = [payload]
-elif isinstance(payload, list):
-    events = payload
-else:
-    events = []
-
-
-def content_dict(event):
-    content = event.get("content") if isinstance(event, dict) else None
-    if isinstance(content, dict):
-        return content
-    if isinstance(content, str):
-        try:
-            decoded = json.loads(content)
-        except Exception:  # noqa: BLE001 - best-effort evidence summarizer
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
-    return {}
-
-
-def event_field(event, *names):
-    if not isinstance(event, dict):
-        return None
-    content = content_dict(event)
-    for name in names:
-        value = event.get(name)
-        if value not in (None, ""):
-            return value
-        value = content.get(name)
-        if value not in (None, ""):
-            return value
-    return None
-
-
-def has_idempotency(value):
-    if isinstance(value, dict):
-        if any(k in value for k in ("idempotencyKey", "Idempotency-Key")):
-            return True
-        return any(has_idempotency(v) for v in value.values())
-    if isinstance(value, list):
-        return any(has_idempotency(v) for v in value)
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except Exception:  # noqa: BLE001
-            return False
-        return has_idempotency(decoded)
-    return False
-
-latest_seq = payload.get("latestSeq") if isinstance(payload, dict) else None
+if not isinstance(payload, dict) or not isinstance(payload.get("events"), list):
+    raise SystemExit("task event capture must be a paginated event object")
+events = payload["events"]
+latest_seq = int(payload.get("latestSeq", 0))
+after_seq = int(payload.get("afterSeq", 0))
 sequence_values = [
     int(event.get("seq", 0))
     for event in events
     if isinstance(event, dict) and event.get("seq") is not None
 ]
-captured_through_seq = max(sequence_values, default=0)
-if latest_seq is not None:
-    after_seq = int(payload.get("afterSeq", 0))
-    if after_seq != 0:
-        raise SystemExit(f"task event capture is incomplete: afterSeq must be 0, got {after_seq}")
-    complete_sequence = len(sequence_values) == int(latest_seq) and all(
-        seq == expected for expected, seq in enumerate(sequence_values, start=1)
+if after_seq != 0:
+    raise SystemExit(f"task event capture is incomplete: afterSeq must be 0, got {after_seq}")
+complete_sequence = len(sequence_values) == latest_seq and all(
+    seq == expected for expected, seq in enumerate(sequence_values, start=1)
+)
+if not complete_sequence:
+    raise SystemExit(
+        "task event capture is incomplete: "
+        f"sequences do not cover 1 through latestSeq {latest_seq}"
     )
-    if not complete_sequence:
-        raise SystemExit(
-            "task event capture is incomplete: "
-            f"sequences do not cover 1 through latestSeq {latest_seq}"
-        )
 
-summary = []
-for index, event in enumerate(events, start=1):
-    event = event if isinstance(event, dict) else {}
-    summary.append({
-        "index": index,
-        "type": event.get("type") or event.get("eventType"),
-        "toolName": event_field(event, "toolName", "tool", "name"),
-        "hasIdempotencyEvidence": has_idempotency(event),
-        "hasError": bool(event_field(event, "error", "errorCode")),
-    })
-Path(sys.argv[2]).write_text(json.dumps({
-    "eventCount": len(events),
-    "capturedThroughSeq": captured_through_seq,
+safe_top_level = {
+    "seq",
+    "type",
+    "eventType",
+    "severity",
+    "toolName",
+    "tool",
+    "name",
+    "toolCallID",
+    "toolCallId",
+    "approvalID",
+    "approvalId",
+    "targetTool",
+    "brokeredClass",
+    "executionState",
+    "idempotencyKey",
+    "executionIdempotencyKey",
+    "Idempotency-Key",
+    "createdAt",
+}
+safe_scalar_content_keys = {
+    "approvalID",
+    "approvalId",
+    "targetTool",
+    "toolCallID",
+    "toolCallId",
+    "toolName",
+    "tool",
+    "name",
+    "brokeredClass",
+    "executionState",
+    "decision",
+}
+
+
+def scalar(value):
+    return value if isinstance(value, (str, int, float, bool)) and not isinstance(value, type(None)) else None
+
+
+def error_marker_is_set(value):
+    return value not in (None, "", False, 0, {}, [])
+
+
+def has_direct_error(value):
+    if not isinstance(value, dict):
+        return False
+    return error_marker_is_set(value.get("error")) or error_marker_is_set(value.get("errorCode"))
+
+
+def safe_content(value):
+    if not isinstance(value, dict):
+        return {}
+    safe = {}
+    for key in safe_scalar_content_keys:
+        found = scalar(value.get(key))
+        if found not in (None, ""):
+            safe[key] = found
+    for key in ("executionIdempotencyKey", "idempotencyKey", "Idempotency-Key"):
+        idempotency = scalar(value.get(key))
+        if isinstance(idempotency, str) and idempotency.strip():
+            safe["idempotencyKey"] = idempotency.strip()
+            break
+    harness = value.get("harness")
+    if isinstance(harness, dict):
+        frame_type = scalar(harness.get("frameType"))
+        if isinstance(frame_type, str) and frame_type:
+            safe["harness"] = {"frameType": frame_type}
+    return safe
+
+
+safe_events = []
+for event in events:
+    if not isinstance(event, dict):
+        raise SystemExit("task event capture contains a non-object event")
+    safe_event = {}
+    for key in safe_top_level:
+        if key in event:
+            value = scalar(event[key])
+            if value not in (None, ""):
+                safe_event[key] = value
+    content = event.get("content")
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except Exception:  # noqa: BLE001 - unsafe content is omitted, not stored
+            content = {}
+    redacted_content = safe_content(content)
+    if redacted_content:
+        safe_event["content"] = redacted_content
+    safe_event["hasError"] = has_direct_error(event) or has_direct_error(content)
+    safe_events.append(safe_event)
+
+safe_payload = {
+    "namespace": scalar(payload.get("namespace")),
+    "streamType": scalar(payload.get("streamType")),
+    "streamID": scalar(payload.get("streamID")),
+    "afterSeq": 0,
     "latestSeq": latest_seq,
-    "events": summary,
-}, indent=2, sort_keys=True) + "\n")
+    "events": safe_events,
+}
+Path(sys.argv[2]).write_text(json.dumps(safe_payload, indent=2, sort_keys=True) + "\n")
 PY
-scan_saved_artifact "$events_json" "task events summary"
+scan_saved_artifact "$events_json" "redacted task events"
 python3 - "$approvals_tmp" "$approvals_json" <<'PY'
 import json
 import sys
@@ -319,7 +350,8 @@ fibey_verifier="${script_dir}/../fibey-custom-agent-demo/verify-foundry-response
 if [[ ! -x "$fibey_verifier" ]]; then
   fibey_verifier="${script_dir}/../../fibey-custom-agent-demo/verify-foundry-responses.sh"
 fi
-"$fibey_verifier" --json "$events_tmp" >"$verifier_out"
+"$fibey_verifier" --json "$events_tmp" >/dev/null
+"$fibey_verifier" --json "$events_json" >"$verifier_out"
 scan_saved_artifact "$verifier_out" "Fibey verifier output"
 
 pods_tmp="$(mktemp)"
