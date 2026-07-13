@@ -1075,7 +1075,14 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	pageSize := int(pagination.Limit)
+	pageLimit := pagination.Limit
+	if pageLimit < 1 {
+		return fiber.NewError(fiber.StatusBadRequest, "limit is outside the supported range")
+	}
+	if pageLimit > MaxLimit {
+		pageLimit = MaxLimit
+	}
+	pageSize := int(pageLimit)
 	toolItems := make([]fiber.Map, 0, pageSize)
 	for cursor.BuiltinOffset < len(builtins) && len(toolItems) < pageSize {
 		toolItems = append(toolItems, builtins[cursor.BuiltinOffset])

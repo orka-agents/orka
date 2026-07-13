@@ -512,6 +512,20 @@ func TestHandlers_ListTools_RejectsLimitZero(t *testing.T) {
 	require.Empty(t, apiReader.snapshotCalls())
 }
 
+func TestHandlers_ListTools_ClampsMaxInt64LimitBeforeIntConversion(t *testing.T) {
+	cacheClient, _ := newCachePaginationClient(t)
+	apiReader := &paginatedAPIReader{}
+	handlers := NewHandlers(HandlersConfig{Client: cacheClient, APIReader: apiReader})
+	app := newListTestApp(handlers)
+
+	page, status := listPage[toolListTestItem](t, app, "/tools?limit=9223372036854775807")
+	require.Equal(t, http.StatusOK, status)
+	require.Len(t, page.Items, len(builtinToolsList))
+	require.Empty(t, page.Metadata.Continue)
+	require.Len(t, apiReader.snapshotCalls(), 1)
+	require.EqualValues(t, MaxLimit-len(builtinToolsList), apiReader.snapshotCalls()[0].Limit)
+}
+
 func TestHandlers_ListTools_RejectsCombinedCursorFromDifferentNamespace(t *testing.T) {
 	cacheClient, _ := newCachePaginationClient(t)
 	apiReader := &paginatedAPIReader{}
