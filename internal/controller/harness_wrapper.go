@@ -1495,7 +1495,7 @@ func harnessWrapperStreamErrorIsTerminal(err error) bool {
 }
 
 func harnessWrapperStreamErrorIsBrokeredPause(err error) bool {
-	if err == nil {
+	if err == nil || harnessWrapperStreamErrorIsTerminal(err) {
 		return false
 	}
 	return strings.Contains(err.Error(), "continue brokered tool call") || errors.Is(err, errHarnessBrokeredApprovalPending)

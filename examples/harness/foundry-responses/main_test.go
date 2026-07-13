@@ -1468,8 +1468,8 @@ func TestResponsesAdapterStateLossContinueFailsSafely(t *testing.T) {
 		context.Background(),
 		goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`)),
 	)
-	if err == nil || !strings.Contains(err.Error(), "turn not found") {
-		t.Fatalf("restart continue error = %v, want clear turn not found", err)
+	if err == nil || !strings.Contains(err.Error(), "410") {
+		t.Fatalf("restart continue error = %v, want non-retryable gone state", err)
 	}
 	if foundry.postCount.Load() != 1 {
 		t.Fatalf(
@@ -2229,6 +2229,59 @@ func TestResponsesOversizedBatchValidatesAllResultsBeforeFailure(t *testing.T) {
 			turn.bufferedResults,
 			turn.bufferedDigests,
 		)
+	}
+}
+
+func TestResponsesTerminalFailureSuppressesPendingToolFrames(t *testing.T) {
+	server := newServer(config{
+		adapterBearer:       "adapter-auth-value",
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-suppress-pending")
+	turn := &turnState{
+		request:             request,
+		pendingTools:        map[string]string{},
+		suppressedToolCalls: map[string]struct{}{},
+		bufferedResults:     map[string]harness.ToolCallResult{},
+		bufferedDigests:     map[string]toolResultDigest{},
+		submittedDigests:    map[string]toolResultDigest{},
+	}
+	server.turns[request.TurnID] = turn
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-1",
+		Status: "completed",
+		Output: []responsesOutput{
+			{
+				Type: "function_call", CallID: "call-1", Name: "support-ticket-lookup",
+				Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+			},
+			{
+				Type: "function_call", CallID: "call-2", Name: "support-ticket-lookup",
+				Arguments: json.RawMessage(`{"incident":"inc-2"}`),
+			},
+		},
+	})
+	first := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
+	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{first})
+	if err != nil || len(toSubmit) != 0 {
+		t.Fatalf("buffer first result = %#v, %v", toSubmit, err)
+	}
+	oversizedOutput, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
+	if err != nil {
+		t.Fatalf("marshal oversized output: %v", err)
+	}
+	second := toolResultForRequest(request, "call-2", true, oversizedOutput, nil)
+	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{second}); err == nil {
+		t.Fatal("oversized second result error = nil")
+	}
+
+	adapter := httptest.NewServer(server.handler())
+	t.Cleanup(adapter.Close)
+	client := newHarnessClient(t, adapter)
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if hasFrameType(frames, harness.FrameToolCallRequested) || !hasFrameType(frames, harness.FrameTurnFailed) {
+		t.Fatalf("replayed frames = %#v, want pending tool requests suppressed before terminal failure", frames)
 	}
 }
 

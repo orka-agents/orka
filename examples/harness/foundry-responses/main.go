@@ -105,6 +105,7 @@ type turnState struct {
 	responseID           string
 	foundrySessionID     string
 	pendingTools         map[string]string
+	suppressedToolCalls  map[string]struct{}
 	requestedToolCalls   int
 	bufferedResults      map[string]harness.ToolCallResult
 	bufferedDigests      map[string]toolResultDigest
@@ -392,13 +393,14 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	turn := &turnState{
-		request:          req,
-		initializing:     true,
-		pendingTools:     map[string]string{},
-		bufferedResults:  map[string]harness.ToolCallResult{},
-		bufferedDigests:  map[string]toolResultDigest{},
-		submittedDigests: map[string]toolResultDigest{},
-		frameUpdates:     make(chan struct{}),
+		request:             req,
+		initializing:        true,
+		pendingTools:        map[string]string{},
+		suppressedToolCalls: map[string]struct{}{},
+		bufferedResults:     map[string]harness.ToolCallResult{},
+		bufferedDigests:     map[string]toolResultDigest{},
+		submittedDigests:    map[string]toolResultDigest{},
+		frameUpdates:        make(chan struct{}),
 	}
 	s.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	s.turns[req.TurnID] = turn
@@ -459,11 +461,11 @@ func (s *server) turn(w http.ResponseWriter, r *http.Request) {
 	_, consumed := s.consumedTurns[turnID]
 	s.mu.Unlock()
 	if turn == nil {
+		message := "turn state unavailable after runtime restart"
 		if consumed {
-			harness.WriteError(w, http.StatusGone, "terminal turn expired from runtime retention")
-			return
+			message = "terminal turn expired from runtime retention"
 		}
-		harness.WriteError(w, http.StatusNotFound, "turn not found")
+		harness.WriteError(w, http.StatusGone, message)
 		return
 	}
 	switch resource {
@@ -497,6 +499,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 	for {
 		s.mu.Lock()
 		frames := append([]harness.HarnessEventFrame(nil), turn.frames...)
+		suppressed := maps.Clone(turn.suppressedToolCalls)
 		completed := turn.completed
 		updates := turn.frameUpdates
 		if updates == nil {
@@ -507,6 +510,11 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 		for _, frame := range frames {
 			if frame.Seq <= nextSeq {
 				continue
+			}
+			if frame.Type == harness.FrameToolCallRequested {
+				if _, skip := suppressed[frame.ToolCallID]; skip {
+					continue
+				}
 			}
 			if err := harness.WriteSSEFrame(w, frame); err != nil {
 				return
@@ -682,6 +690,7 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 	}
 	s.mu.Lock()
 	if !turn.completed {
+		s.suppressPendingToolCallsLocked(turn)
 		s.clearBufferedToolResultsLocked(turn)
 		s.appendFrameLocked(turn, harness.FrameTurnCancelled, "turn cancelled")
 		turn.completed = true
@@ -1424,6 +1433,15 @@ func (s *server) newToolResultFrame(
 	)
 }
 
+func (s *server) suppressPendingToolCallsLocked(turn *turnState) {
+	if turn.suppressedToolCalls == nil {
+		turn.suppressedToolCalls = map[string]struct{}{}
+	}
+	for toolCallID := range turn.pendingTools {
+		turn.suppressedToolCalls[toolCallID] = struct{}{}
+	}
+}
+
 func (s *server) clearBufferedToolResultsLocked(turn *turnState) {
 	clear(turn.bufferedResults)
 	clear(turn.bufferedDigests)
@@ -1464,6 +1482,7 @@ func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
 	if turn.completed {
 		return
 	}
+	s.suppressPendingToolCallsLocked(turn)
 	s.clearBufferedToolResultsLocked(turn)
 	failedFrame := s.newFrame(
 		turn,

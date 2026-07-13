@@ -2598,6 +2598,16 @@ func TestHarnessWrapperCancelMissingTurnErrorClassification(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperBrokeredPauseExcludesTerminalGone(t *testing.T) {
+	err := fmt.Errorf("continue brokered tool call \"call-1\": stream_frames failed (410): gone")
+	if harnessWrapperStreamErrorIsBrokeredPause(err) {
+		t.Fatal("terminal 410 continuation error should not be classified as a brokered pause")
+	}
+	if !harnessWrapperStreamErrorIsBrokeredPause(fmt.Errorf("continue brokered tool call \"call-1\": approval pending")) {
+		t.Fatal("ordinary continuation pause should remain classified as brokered pause")
+	}
+}
+
 func TestHarnessWrapperStreamTerminalErrorClassification(t *testing.T) {
 	for _, message := range []string{
 		"stream_frames failed (410): terminal turn expired from runtime retention",
