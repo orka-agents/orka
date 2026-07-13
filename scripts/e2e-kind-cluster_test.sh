@@ -910,5 +910,6 @@ test_persisted_pending_state_is_not_erased_by_finalizer
 test_recursive_make_overrides_cannot_escape_scoped_environment
 test_make_dry_run_does_not_execute_cluster_lifecycle
 test_make_test_e2e_scopes_recursive_make_and_cleans_failure
+"${script_dir}/live-github-e2e-kind-scope_test.sh"
 
 printf 'PASS: e2e Kind cluster targeting safety tests\n'
