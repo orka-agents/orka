@@ -32,7 +32,6 @@ Use this adapter for AgentKit agents deployed as Foundry hosted agents. Use `exa
 | `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` | Comma-separated static classes the hosted AgentKit deployment has been configured and conformance-tested to request, e.g. `read` or `read,write`. Empty means observed-only. |
 | `ORKA_FOUNDRY_RESPONSES_POLL_TIMEOUT` | Per-request timeout for hosted Responses calls, default `20s`. |
 | `ORKA_FOUNDRY_RESPONSES_STATE_RETENTION` | How long terminal in-memory turn/session state is retained, default `10m`. |
-| `ORKA_FOUNDRY_RESPONSES_MAX_APPROVAL_WAIT` | Maximum time a pending brokered call may wait before a late continuation fails safely, default `30m`. |
 
 Exactly one Foundry auth mode (`API_KEY` or `AUTH_BEARER`) must be set.
 

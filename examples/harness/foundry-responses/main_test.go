@@ -314,6 +314,106 @@ func TestResponsesAdapterDuplicateStartDuringInitializationRejected(t *testing.T
 	}
 }
 
+func TestResponsesAdapterDiscardsUnusedTurnEnvironment(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
+	adapter, server := newTestResponsesAdapterWithServer(t, foundry.endpoint(), nil)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-env-redaction")
+	request.Input.Env = []harness.TurnEnvVar{{Name: "SENSITIVE_VALUE", Value: "do-not-retain"}}
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	server.mu.Lock()
+	turn := server.turns[request.TurnID]
+	var retainedRequest harness.StartTurnRequest
+	if turn != nil {
+		retainedRequest = turn.request
+	}
+	server.mu.Unlock()
+	if turn == nil {
+		t.Fatal("turn was not retained for duplicate handling")
+	}
+	if len(retainedRequest.Input.Env) != 0 {
+		t.Fatalf("retained turn env = %#v, want discarded credentials", retainedRequest.Input.Env)
+	}
+	encoded, err := json.Marshal(retainedRequest)
+	if err != nil {
+		t.Fatalf("marshal retained request: %v", err)
+	}
+	if bytes.Contains(encoded, []byte("do-not-retain")) {
+		t.Fatalf("retained request contains discarded environment value: %s", encoded)
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("duplicate StartTurn with original environment: %v", err)
+	}
+}
+
+func TestResponsesAdapterCancelDuringInitialPostDoesNotRetainSession(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFoundry := func() { releaseOnce.Do(func() { close(release) }) }
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-received:
+		default:
+			close(received)
+		}
+		<-release
+		w.Header().Set("x-agent-session-id", "cancelled-session")
+		writeJSON(w, finalResponsesMessage())
+	}))
+	t.Cleanup(foundry.Close)
+	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter, server := newTestResponsesAdapterWithServer(t, endpoint, nil)
+	t.Cleanup(releaseFoundry)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-cancel-initial")
+
+	startErr := make(chan error, 1)
+	go func() {
+		_, err := client.StartTurn(context.Background(), request)
+		startErr <- err
+	}()
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("initial Foundry request did not arrive")
+	}
+	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
+		t.Fatalf("CancelTurn: %v", err)
+	}
+	releaseFoundry()
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("StartTurn after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StartTurn did not finish after releasing Foundry response")
+	}
+
+	server.mu.Lock()
+	turn := server.turns[request.TurnID]
+	_, sessionRetained := server.runtimeSessions[request.RuntimeSessionID]
+	foundrySessionID := ""
+	if turn != nil {
+		foundrySessionID = turn.foundrySessionID
+	}
+	server.mu.Unlock()
+	if turn == nil || !turn.completed || !hasFrameType(turn.frames, harness.FrameTurnCancelled) {
+		t.Fatalf("turn = %#v, want retained terminal cancellation", turn)
+	}
+	if sessionRetained || foundrySessionID != "" {
+		t.Fatalf(
+			"cancelled initial post retained session map=%v turnSession=%q",
+			sessionRetained,
+			foundrySessionID,
+		)
+	}
+}
+
 func TestResponsesAdapterInitialPostSurvivesControlDisconnect(t *testing.T) {
 	received := make(chan struct{})
 	release := make(chan struct{})
@@ -757,7 +857,6 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		continuationProof:   "proof-for-test",
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
@@ -836,7 +935,6 @@ func TestResponsesAdapterRejectedContinueDoesNotBufferPartialResults(t *testing.
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-partial-reject")
@@ -845,7 +943,6 @@ func TestResponsesAdapterRejectedContinueDoesNotBufferPartialResults(t *testing.
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
@@ -866,7 +963,6 @@ func TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-already-submitted")
@@ -878,7 +974,6 @@ func TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit(t *testing.T) {
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
 		bufferedResults:   map[string]harness.ToolCallResult{"call-1": result},
 		bufferedPayloads:  map[string]string{"call-1": payload},
 		submittedPayloads: map[string]string{"call-1": payload},
@@ -1010,19 +1105,17 @@ func TestResponsesRepeatedSubmittedFunctionCallFailsTurn(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-repeated-call")
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{"call-1": `{"approved":true}`},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-repeat",
 		Status: "completed",
@@ -1047,19 +1140,17 @@ func TestResponsesMixedRepeatedFunctionCallFailsTurn(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-mixed-repeated-call")
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-repeat",
 		Status: "completed",
@@ -1087,53 +1178,12 @@ func TestResponsesMixedRepeatedFunctionCallFailsTurn(t *testing.T) {
 	}
 }
 
-func TestResponsesAdapterPendingToolTimesOutWithoutContinuation(t *testing.T) {
-	server := newServer(config{
-		runtimeName:         "test",
-		adapterBearer:       "adapter-auth-value",
-		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:         "foundry-auth-value",
-		requestTimeout:      time.Second,
-		stateRetention:      time.Minute,
-		maxApprovalWait:     10 * time.Millisecond,
-		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
-	}, &http.Client{Timeout: time.Second})
-	turn := &turnState{
-		request:           brokeredReadRequest("foundry-timeout"),
-		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
-	}
-	server.turns[turn.request.TurnID] = turn
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
-	server.handleResponsesResponse(turn, responsesResponse{
-		ID:     "resp-1",
-		Status: "completed",
-		Output: []responsesOutput{{
-			Type:      "function_call",
-			CallID:    "call-1",
-			Name:      "support-ticket-lookup",
-			Arguments: json.RawMessage(`{"incident":"inc-1"}`),
-		}},
-	})
-	time.Sleep(50 * time.Millisecond)
-	server.mu.Lock()
-	defer server.mu.Unlock()
-	failed := findFrame(turn.frames, harness.FrameTurnFailed)
-	if failed == nil || failed.Failed.Reason != "approval_wait_exceeded" {
-		t.Fatalf("failed frame = %#v, want approval_wait_exceeded", failed)
-	}
-}
-
 func TestResponsesAdapterAlreadySubmittedPendingResultIsNoop(t *testing.T) {
-	server := newServer(config{maxApprovalWait: time.Minute}, &http.Client{Timeout: time.Second})
+	server := newServer(config{}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-submitted-noop")
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
@@ -1154,36 +1204,6 @@ func TestResponsesAdapterAlreadySubmittedPendingResultIsNoop(t *testing.T) {
 	}
 }
 
-func TestResponsesAdapterPendingTimeoutSkipsSubmittedCall(t *testing.T) {
-	server := newServer(config{
-		runtimeName:         "test",
-		adapterBearer:       "adapter-auth-value",
-		endpoint:            "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:         "foundry-auth-value",
-		requestTimeout:      time.Second,
-		stateRetention:      time.Minute,
-		maxApprovalWait:     10 * time.Millisecond,
-		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
-	}, &http.Client{Timeout: time.Second})
-	turn := &turnState{
-		request:           brokeredReadRequest("foundry-timeout-submitted"),
-		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{"call-1": `{"approved":true}`},
-	}
-	server.turns[turn.request.TurnID] = turn
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
-	server.schedulePendingToolTimeoutLocked(turn, "call-1")
-	time.Sleep(50 * time.Millisecond)
-	server.mu.Lock()
-	defer server.mu.Unlock()
-	if failed := findFrame(turn.frames, harness.FrameTurnFailed); failed != nil {
-		t.Fatalf("failed frame = %#v, submitted call should not time out", failed)
-	}
-}
-
 func TestResponsesAdapterBrokeredMaxTurnIsUnknown(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
 	s := newServer(config{
@@ -1193,7 +1213,6 @@ func TestResponsesAdapterBrokeredMaxTurnIsUnknown(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      2 * time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     30 * time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(s.handler())
@@ -1269,13 +1288,12 @@ func TestResponsesAPIVersionDefaultsToSDKValue(t *testing.T) {
 func TestResponsesAdapterRejectsConsumedTurnAfterCleanup(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "platform_error"})
 	server := newServer(config{
-		runtimeName:     "foundry-responses-test",
-		adapterBearer:   "adapter-auth-value",
-		endpoint:        foundry.endpoint(),
-		foundryAuth:     "foundry-auth-value",
-		requestTimeout:  time.Second,
-		stateRetention:  50 * time.Millisecond,
-		maxApprovalWait: time.Minute,
+		runtimeName:    "foundry-responses-test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       foundry.endpoint(),
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: 50 * time.Millisecond,
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(server.handler())
 	t.Cleanup(adapter.Close)
@@ -1480,7 +1498,6 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 			foundryAuth:         "foundry-auth-value",
 			requestTimeout:      time.Second,
 			stateRetention:      time.Minute,
-			maxApprovalWait:     time.Minute,
 			brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 		},
 		&http.Client{Timeout: time.Second},
@@ -1489,12 +1506,11 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	var functionCall responsesResponse
 	decodeFixtureInto(t, "testdata/golden/02_function_call_response.json", &functionCall)
 	server.handleResponsesResponse(turn, functionCall)
@@ -1507,12 +1523,11 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	finalTurn := &turnState{
 		request:           responsesStartTurnRequest("foundry-final"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started")
 	var finalMessage responsesResponse
 	decodeFixtureInto(t, "testdata/golden/06_final_message_response.json", &finalMessage)
 	server.handleResponsesResponse(finalTurn, finalMessage)
@@ -1524,12 +1539,11 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	multipleTurn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(multipleTurn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(multipleTurn, harness.FrameTurnStarted, "foundry hosted response started")
 	var multiple responsesResponse
 	decodeFixtureInto(t, "testdata/golden/10_multiple_calls_response.json", &multiple)
 	server.handleResponsesResponse(multipleTurn, multiple)
@@ -1548,7 +1562,6 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 			foundryAuth:         "foundry-auth-value",
 			requestTimeout:      time.Second,
 			stateRetention:      time.Minute,
-			maxApprovalWait:     time.Minute,
 			brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 		},
 		&http.Client{Timeout: time.Second},
@@ -1564,12 +1577,11 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 	turn := &turnState{
 		request:           request,
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	var functionCall responsesResponse
 	decodeFixtureInto(
 		t,
@@ -1608,12 +1620,11 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 	finalTurn := &turnState{
 		request:           responsesStartTurnRequest("agentkit-final-fixture"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started")
 	var finalMessage responsesResponse
 	decodeFixtureInto(t, "testdata/agentkit-foundry-brokered/final_message_response.json", &finalMessage)
 	server.handleResponsesResponse(finalTurn, finalMessage)
@@ -1709,23 +1720,21 @@ func TestResponsesPreservesNumericJSONTokens(t *testing.T) {
 
 func TestResponsesLargeOutputFails(t *testing.T) {
 	server := newServer(config{
-		runtimeName:     "test",
-		adapterBearer:   "adapter-auth-value",
-		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:     "foundry-auth-value",
-		requestTimeout:  time.Second,
-		stateRetention:  time.Minute,
-		maxApprovalWait: time.Minute,
+		runtimeName:    "test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           responsesStartTurnRequest("foundry-large-output"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-large",
 		Status: "completed",
@@ -1745,23 +1754,21 @@ func TestResponsesLargeOutputFails(t *testing.T) {
 
 func TestResponsesOutputThatExceedsSSEFrameLimitFails(t *testing.T) {
 	server := newServer(config{
-		runtimeName:     "test",
-		adapterBearer:   "adapter-auth-value",
-		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:     "foundry-auth-value",
-		requestTimeout:  time.Second,
-		stateRetention:  time.Minute,
-		maxApprovalWait: time.Minute,
+		runtimeName:    "test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           responsesStartTurnRequest("foundry-large-frame-output"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-large-frame",
 		Status: "completed",
@@ -1787,18 +1794,16 @@ func TestResponsesOversizedToolCallFrameFailsBeforeRequestingTool(t *testing.T) 
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           brokeredReadRequest("foundry-large-tool-call-frame"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	arguments, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
 	if err != nil {
 		t.Fatalf("marshal arguments: %v", err)
@@ -1830,7 +1835,6 @@ func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) 
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-large-tool-result-frame")
@@ -1838,12 +1842,11 @@ func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) 
 		request:           request,
 		responseID:        "resp-1",
 		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		pendingSince:      map[string]time.Time{"call-1": time.Now().UTC()},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	output, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
 	if err != nil {
 		t.Fatalf("marshal output: %v", err)
@@ -1905,23 +1908,21 @@ func TestResponsesInitialPlatformErrorRetainsFailedTurn(t *testing.T) {
 //nolint:dupl // Mirrors failure-status regression with a distinct non-terminal status.
 func TestResponsesNonTerminalStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	server := newServer(config{
-		runtimeName:     "test",
-		adapterBearer:   "adapter-auth-value",
-		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:     "foundry-auth-value",
-		requestTimeout:  time.Second,
-		stateRetention:  time.Minute,
-		maxApprovalWait: time.Minute,
+		runtimeName:    "test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           responsesStartTurnRequest("foundry-in-progress"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-in-progress",
 		Status: "in_progress",
@@ -1939,23 +1940,21 @@ func TestResponsesNonTerminalStatusDoesNotCompleteWithPartialText(t *testing.T) 
 //nolint:dupl // Mirrors non-terminal-status regression with a distinct failed status.
 func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	server := newServer(config{
-		runtimeName:     "test",
-		adapterBearer:   "adapter-auth-value",
-		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:     "foundry-auth-value",
-		requestTimeout:  time.Second,
-		stateRetention:  time.Minute,
-		maxApprovalWait: time.Minute,
+		runtimeName:    "test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           responsesStartTurnRequest("foundry-failed-status"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-failed",
 		Status: "failed",
@@ -1981,18 +1980,16 @@ func TestResponsesFailureStatusWithFunctionCallFailsBeforeToolRequest(t *testing
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           brokeredReadRequest("foundry-failed-function-call"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-failed",
 		Status: "incomplete",
@@ -2021,23 +2018,21 @@ func TestSanitizeEndpointDoesNotReturnRawMalformedURL(t *testing.T) {
 
 func TestResponsesMissingStatusDoesNotCompleteWithPartialText(t *testing.T) {
 	server := newServer(config{
-		runtimeName:     "test",
-		adapterBearer:   "adapter-auth-value",
-		endpoint:        "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
-		foundryAuth:     "foundry-auth-value",
-		requestTimeout:  time.Second,
-		stateRetention:  time.Minute,
-		maxApprovalWait: time.Minute,
+		runtimeName:    "test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "http://127.0.0.1/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           responsesStartTurnRequest("foundry-missing-status"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-missing-status",
 		Output: []responsesOutput{{Type: "message", Content: "partial text"}},
@@ -2059,18 +2054,16 @@ func TestResponsesFunctionCallWithoutResponseIDFailsBeforeToolRequest(t *testing
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
 		request:           brokeredReadRequest("foundry-missing-id"),
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 	}
-	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		Status: "completed",
 		Output: []responsesOutput{{
@@ -2312,7 +2305,6 @@ func newTestResponsesAdapterWithServer(
 		apiVersion:          "v1",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		maxApprovalWait:     time.Minute,
 		brokeredToolClasses: append([]harness.BrokeredToolClass(nil), classes...),
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(s.handler())

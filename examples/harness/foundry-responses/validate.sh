@@ -51,6 +51,11 @@ run() {
 
 cd "$repo_root"
 
+grep -qx '!examples/harness/foundry-responses/\*.go' .dockerignore || {
+  echo "Foundry Responses Go sources are not included in the Docker build context" >&2
+  exit 1
+}
+
 run go test ./examples/harness/foundry-responses -count=1
 run go test \
   ./examples/harness/foundry \

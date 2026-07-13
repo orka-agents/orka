@@ -28,7 +28,6 @@ const (
 	defaultAPIVersion        = "v1"
 	defaultRequestTimeout    = 20 * time.Second
 	defaultStateRetention    = 10 * time.Minute
-	defaultMaxApprovalWait   = 30 * time.Minute
 	defaultReadHeaderTimeout = 5 * time.Second
 	defaultReadTimeout       = 30 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
@@ -49,7 +48,6 @@ const (
 	envAPIVersion          = "ORKA_FOUNDRY_RESPONSES_API_VERSION"
 	envRequestTimeout      = "ORKA_FOUNDRY_RESPONSES_POLL_TIMEOUT"
 	envStateRetention      = "ORKA_FOUNDRY_RESPONSES_STATE_RETENTION"
-	envMaxApprovalWait     = "ORKA_FOUNDRY_RESPONSES_MAX_APPROVAL_WAIT"
 	envContinuationProof   = "ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF"
 	envBrokeredToolClasses = "ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES"
 	envAudience            = "ORKA_FOUNDRY_RESPONSES_TOKEN_AUDIENCE"
@@ -67,7 +65,6 @@ type config struct {
 	apiVersion          string
 	requestTimeout      time.Duration
 	stateRetention      time.Duration
-	maxApprovalWait     time.Duration
 	continuationProof   string
 	brokeredToolClasses []harness.BrokeredToolClass
 	configError         string
@@ -95,7 +92,6 @@ type turnState struct {
 	responseID        string
 	foundrySessionID  string
 	pendingTools      map[string]string
-	pendingSince      map[string]time.Time
 	bufferedResults   map[string]harness.ToolCallResult
 	bufferedPayloads  map[string]string
 	submittedPayloads map[string]string
@@ -198,7 +194,6 @@ func loadConfig() config {
 		apiVersion:          firstNonBlank(os.Getenv(envAPIVersion), defaultAPIVersion),
 		requestTimeout:      parseDurationEnv(envRequestTimeout, defaultRequestTimeout),
 		stateRetention:      parseDurationEnv(envStateRetention, defaultStateRetention),
-		maxApprovalWait:     parseDurationEnv(envMaxApprovalWait, defaultMaxApprovalWait),
 		continuationProof:   strings.TrimSpace(os.Getenv(envContinuationProof)),
 		brokeredToolClasses: classes,
 	}
@@ -340,6 +335,9 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Resolved turn environment values can contain credentials. This adapter does
+	// not consume them, so discard them before duplicate comparison or retention.
+	req.Input.Env = nil
 	eventsPath, err := harness.EventStreamPath(req.TurnID)
 	if err != nil {
 		harness.WriteError(w, http.StatusBadRequest, err.Error())
@@ -371,13 +369,12 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		request:           req,
 		initializing:      true,
 		pendingTools:      map[string]string{},
-		pendingSince:      map[string]time.Time{},
 		bufferedResults:   map[string]harness.ToolCallResult{},
 		bufferedPayloads:  map[string]string{},
 		submittedPayloads: map[string]string{},
 		frameUpdates:      make(chan struct{}),
 	}
-	s.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started", nil)
+	s.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	s.turns[req.TurnID] = turn
 	s.mu.Unlock()
 
@@ -408,10 +405,10 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	s.recordTurnSessionLocked(turn, foundrySessionID)
-	s.mu.Unlock()
-	s.handleResponsesResponse(turn, response)
-	s.mu.Lock()
+	if !turn.completed {
+		s.recordTurnSessionLocked(turn, foundrySessionID)
+		s.handleResponsesResponseLocked(turn, response)
+	}
 	turn.initializing = false
 	s.mu.Unlock()
 	harness.WriteJSON(w, http.StatusAccepted, startTurnResponse(req, eventsPath))
@@ -608,13 +605,12 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		}
 		s.appendPreparedFrameLocked(turn, frame)
 		delete(turn.pendingTools, result.ToolCallID)
-		delete(turn.pendingSince, result.ToolCallID)
 		delete(turn.bufferedResults, result.ToolCallID)
 		delete(turn.bufferedPayloads, result.ToolCallID)
 	}
 	s.recordTurnSessionLocked(turn, updatedSessionID)
+	s.handleResponsesResponseLocked(turn, response)
 	s.mu.Unlock()
-	s.handleResponsesResponse(turn, response)
 	harness.WriteJSON(w, http.StatusAccepted, continueResponse(req, "continue accepted"))
 }
 
@@ -640,7 +636,7 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 	defer turn.continueMu.Unlock()
 	s.mu.Lock()
 	if !turn.completed {
-		s.appendFrameLocked(turn, harness.FrameTurnCancelled, "turn cancelled", nil)
+		s.appendFrameLocked(turn, harness.FrameTurnCancelled, "turn cancelled")
 		turn.completed = true
 		s.scheduleTurnCleanupLocked(turn)
 	}
@@ -661,6 +657,10 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 func (s *server) handleResponsesResponse(turn *turnState, response responsesResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.handleResponsesResponseLocked(turn, response)
+}
+
+func (s *server) handleResponsesResponseLocked(turn *turnState, response responsesResponse) {
 	if turn.completed {
 		return
 	}
@@ -754,11 +754,8 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 			}
 			frames = append(frames, frame)
 		}
-		now := time.Now().UTC()
 		for index, call := range calls {
 			turn.pendingTools[call.callID] = call.name
-			turn.pendingSince[call.callID] = now
-			s.schedulePendingToolTimeoutLocked(turn, call.callID)
 			s.appendPreparedFrameLocked(turn, frames[index])
 		}
 		return
@@ -855,7 +852,6 @@ func (s *server) recordContinueResults(
 	if len(turn.pendingTools) == 0 {
 		return nil, fmt.Errorf("no tool calls are pending for this turn")
 	}
-	now := time.Now().UTC()
 	newResults := map[string]harness.ToolCallResult{}
 	newPayloads := map[string]string{}
 	for _, result := range results {
@@ -871,27 +867,6 @@ func (s *server) recordContinueResults(
 		}
 		if _, pending := turn.pendingTools[result.ToolCallID]; !pending {
 			return nil, fmt.Errorf("tool result %q is not pending for this turn", result.ToolCallID)
-		}
-		if pendingAt := turn.pendingSince[result.ToolCallID]; !pendingAt.IsZero() && s.cfg.maxApprovalWait > 0 &&
-			now.Sub(pendingAt) > s.cfg.maxApprovalWait {
-			turn.completed = true
-			s.appendFrameLocked(
-				turn,
-				harness.FrameTurnFailed,
-				"approval wait exceeded",
-				func(f *harness.HarnessEventFrame) {
-					f.Failed = &harness.TurnFailed{
-						Reason:  "approval_wait_exceeded",
-						Message: "maximum brokered tool wait exceeded",
-					}
-					f.Error = &harness.ErrorInfo{
-						Code:    "approval_wait_exceeded",
-						Message: "maximum brokered tool wait exceeded",
-					}
-				},
-			)
-			s.scheduleTurnCleanupLocked(turn)
-			return nil, fmt.Errorf("maximum brokered tool wait exceeded")
 		}
 		if buffered, exists := turn.bufferedPayloads[result.ToolCallID]; exists {
 			if buffered == payload {
@@ -1380,33 +1355,6 @@ func (s *server) recordTurnSessionLocked(turn *turnState, sessionID string) {
 	s.runtimeSessions[turn.request.RuntimeSessionID] = foundrySession{ID: sessionID, LastSeen: time.Now().UTC()}
 }
 
-func (s *server) schedulePendingToolTimeoutLocked(turn *turnState, toolCallID string) {
-	wait := s.cfg.maxApprovalWait
-	if wait <= 0 {
-		return
-	}
-	turnID := turn.request.TurnID
-	time.AfterFunc(wait, func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		current := s.turns[turnID]
-		if current != turn || turn.completed {
-			return
-		}
-		if _, pending := turn.pendingTools[toolCallID]; !pending {
-			return
-		}
-		if _, submitted := turn.submittedPayloads[toolCallID]; submitted {
-			return
-		}
-		s.appendFailedLocked(
-			turn,
-			"approval_wait_exceeded",
-			"maximum brokered tool wait exceeded",
-		)
-	})
-}
-
 func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
 	if turn.completed {
 		return
@@ -1489,13 +1437,8 @@ func (s *server) activeRuntimeSessionsLocked() map[harness.RuntimeSessionID]bool
 	return active
 }
 
-func (s *server) appendFrameLocked(
-	turn *turnState,
-	typ harness.FrameType,
-	summary string,
-	mutate func(*harness.HarnessEventFrame),
-) {
-	frame := s.newFrame(turn, int64(len(turn.frames)+1), typ, summary, mutate)
+func (s *server) appendFrameLocked(turn *turnState, typ harness.FrameType, summary string) {
+	frame := s.newFrame(turn, int64(len(turn.frames)+1), typ, summary, nil)
 	s.appendPreparedFrameLocked(turn, frame)
 }
 
