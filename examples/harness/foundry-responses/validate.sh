@@ -59,6 +59,7 @@ run go test \
   ./internal/harness \
   ./internal/harness/conformance
 run go test ./internal/controller -run 'Test.*(AgentRuntime|Harness|Brokered|Runtime)'
+run python3 -m unittest examples/harness/foundry-responses/test_fetch_task_events.py
 while IFS= read -r -d '' script; do
   run bash -n "$script"
 done < <(find examples -type f -name '*.sh' -print0 | sort -z)
@@ -127,6 +128,14 @@ expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-partial-idempotency.json \
   "write execution for escalate-incident is missing idempotency key evidence" \
   "partial-idempotency"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-truncated-page.json \
+  "event JSON is incomplete" \
+  "truncated-event-page"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-tail-page.json \
+  "afterSeq must be 0" \
+  "tail-event-page"
 
 if [[ "$run_full" == "1" ]]; then
   run make test

@@ -70,14 +70,14 @@ uv run --extra dev pytest -q \
 | Duplicate/replayed function calls fail closed | `TestResponsesRepeatedSubmittedFunctionCallFailsTurn` and `TestResponsesMixedRepeatedFunctionCallFailsTurn`. |
 | Duplicate identical `/continue` is idempotent and conflicting duplicates reject | `TestResponsesAdapterDuplicateContinueIsIdempotentAndConflictsReject`, `TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit`, and `TestResponsesAdapterAlreadySubmittedPendingResultIsNoop`. |
 | Continuation failures fail closed rather than duplicating hosted progress | `TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost`. |
-| Pending approval/tool waits are bounded | `TestResponsesAdapterPendingToolTimesOutWithoutContinuation`, `TestResponsesAdapterPendingTimeoutSkipsSubmittedCall`, and `TestResponsesAdapterBrokeredMaxTurnIncludesApprovalWait`. |
+| Pending approval/tool waits are bounded without understating total brokered duration | `TestResponsesAdapterPendingToolTimesOutWithoutContinuation`, `TestResponsesAdapterPendingTimeoutSkipsSubmittedCall`, and `TestResponsesAdapterBrokeredMaxTurnIsUnknown`. |
 | Restart/state loss fails safely without hosted continuation | `TestResponsesAdapterStateLossContinueFailsSafely`. |
 | Runtime session continuity | `TestResponsesAdapterRuntimeSessionHeaderReuse` and `TestResponsesAdapterContinuationUsesTurnSessionAfterSessionMapCleanup`. |
 | Hosted response status handling is fail-closed | `TestResponsesFailureStatusDoesNotCompleteWithPartialText`, `TestResponsesFailureStatusWithFunctionCallFailsBeforeToolRequest`, `TestResponsesNonTerminalStatusDoesNotCompleteWithPartialText`, and `TestResponsesMissingStatusDoesNotCompleteWithPartialText`. |
-| Large hosted output and platform failures are safe | `TestResponsesLargeOutputFails` and `TestResponsesInitialPlatformErrorDoesNotRetainTurn`. |
+| Large hosted output and uncertain initial platform failures are safe | `TestResponsesLargeOutputFails` and `TestResponsesInitialPlatformErrorRetainsFailedTurn`. |
 | No secrets or endpoint URLs in golden fixtures | `TestResponsesGoldenFixturesDoNotContainEndpointsOrSecrets`. |
 | Existing Orka broker approval/idempotency/write ledger behavior | `go test ./internal/controller -run 'Test.*(AgentRuntime|Harness|Brokered|Runtime)'`, especially brokered write approval, decline, replay, and unresolved-ledger tests in `internal/controller/harness_wrapper_test.go`. |
-| Fibey live evidence verifier behavior | `examples/harness/foundry-responses/validate.sh` runs `verify-foundry-responses.sh` against pass/fail fixtures under `examples/fibey-custom-agent-demo/testdata/`. |
+| Fibey live evidence verifier behavior | `examples/harness/foundry-responses/validate.sh` tests paginated event aggregation and runs `verify-foundry-responses.sh` against pass/fail fixtures under `examples/fibey-custom-agent-demo/testdata/`, including an explicitly truncated event page. |
 | Kubernetes smoke skeleton is credentials-free | `examples/harness/foundry-responses/kubernetes.example.yaml` uses `REDACTED` placeholders and a read-only advertised class by default. |
 
 ## Live gates that cannot be satisfied by local fixtures

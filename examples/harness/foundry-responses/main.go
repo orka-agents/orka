@@ -35,6 +35,7 @@ const (
 	maxFoundryOutputBytes    = 1 << 20
 	maxFoundryBodyBytes      = 4 << 20
 	readinessPath            = "/v1/ready"
+	foundryInitialUnknown    = "foundry_initial_unknown"
 
 	envAddr                = "ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR"
 	envRuntimeName         = "ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME"
@@ -288,7 +289,11 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 	maxTurnSeconds := int(s.cfg.requestTimeout.Seconds())
 	if len(s.cfg.brokeredToolClasses) > 0 {
 		modes = append(modes, harness.ToolExecutionModeBrokered)
-		maxTurnSeconds = int((s.cfg.requestTimeout + s.cfg.maxApprovalWait).Seconds())
+		// A brokered turn can contain multiple hosted request/tool-result rounds,
+		// each with its own request timeout and approval wait. The harness contract
+		// has only one runtime-wide ceiling, so advertise unknown rather than an
+		// understated duration when brokered mode is available.
+		maxTurnSeconds = 0
 	}
 	harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
 		Version:                 harness.ProtocolVersion,
@@ -374,9 +379,23 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	foundrySessionID, err := s.postResponses(ctx, req.RuntimeSessionID, initialRequest, &response)
 	if err != nil {
 		s.mu.Lock()
-		delete(s.turns, req.TurnID)
+		turn.initializing = false
+		s.appendFailedLocked(
+			turn,
+			foundryInitialUnknown,
+			"initial hosted request failed after submission was attempted; "+
+				"failing closed to avoid a duplicate hosted turn",
+		)
 		s.mu.Unlock()
-		harness.WriteError(w, http.StatusBadGateway, err.Error())
+		log.Printf(
+			"Foundry hosted Responses initial request failed after submission for turn %q (error type %T)",
+			req.TurnID,
+			err,
+		)
+		// Accept the turn so Orka consumes and persists the terminal failure frame.
+		// Returning a control-plane error here would cause the caller to retry a
+		// submission whose outcome is unknown at Foundry.
+		harness.WriteJSON(w, http.StatusAccepted, startTurnResponse(req, eventsPath))
 		return
 	}
 	s.mu.Lock()
@@ -534,10 +553,15 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 			turn,
 			"foundry_continuation_unknown",
 			"hosted continuation failed after submission was attempted; "+
-				"failing closed to avoid duplicate continuation: "+err.Error(),
+				"failing closed to avoid duplicate continuation",
 		)
 		s.mu.Unlock()
-		harness.WriteError(w, http.StatusBadGateway, err.Error())
+		log.Printf(
+			"Foundry hosted Responses continuation failed after submission for turn %q (error type %T)",
+			req.TurnID,
+			err,
+		)
+		harness.WriteError(w, http.StatusBadGateway, "hosted continuation failed after submission was attempted")
 		return
 	}
 	s.mu.Lock()

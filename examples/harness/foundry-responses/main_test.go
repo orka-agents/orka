@@ -69,8 +69,14 @@ func TestResponsesAdapterDoesNotFollowCredentialedRedirects(t *testing.T) {
 		"/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
 	adapter := newTestResponsesAdapter(t, endpoint, nil)
 	client := newHarnessClient(t, adapter)
-	if _, err := client.StartTurn(context.Background(), responsesStartTurnRequest("foundry-redirect")); err == nil {
-		t.Fatalf("StartTurn followed redirect and succeeded, want rejection")
+	request := responsesStartTurnRequest("foundry-redirect")
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn should accept terminal redirect failure: %v", err)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil ||
+		failed.Failed.Reason != foundryInitialUnknown {
+		t.Fatalf("failed frame = %#v, want foundry_initial_unknown", failed)
 	}
 	if redirectTargetHit.Load() {
 		t.Fatal("redirect target was called; credentialed Foundry request followed an unvalidated redirect")
@@ -406,11 +412,16 @@ func TestResponsesAdapterInitialPostHonorsTurnDeadline(t *testing.T) {
 	request.Deadline = time.Now().Add(150 * time.Millisecond)
 
 	started := time.Now()
-	if _, err := client.StartTurn(context.Background(), request); err == nil {
-		t.Fatal("StartTurn past turn deadline succeeded, want failure")
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn should accept terminal deadline failure: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 800*time.Millisecond {
 		t.Fatalf("StartTurn elapsed = %v, want turn deadline to beat request timeout", elapsed)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil ||
+		failed.Failed.Reason != foundryInitialUnknown {
+		t.Fatalf("failed frame = %#v, want foundry_initial_unknown", failed)
 	}
 }
 
@@ -963,8 +974,12 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 		t.Fatalf("frames = %#v, want tool request", frames)
 	}
 	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
-	if _, err := client.ContinueTurn(context.Background(), continueRequest); err == nil {
+	_, continueErr := client.ContinueTurn(context.Background(), continueRequest)
+	if continueErr == nil {
 		t.Fatalf("ContinueTurn succeeded, want hosted continuation failure")
+	}
+	if strings.Contains(continueErr.Error(), foundry.URL) || strings.Contains(continueErr.Error(), "HTTP 500") {
+		t.Fatalf("ContinueTurn error leaked upstream detail: %v", continueErr)
 	}
 	if foundry.postCount.Load() != 2 {
 		t.Fatalf("hosted post count after failed continue = %d, want 2", foundry.postCount.Load())
@@ -979,6 +994,10 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	failed := findFrame(frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "foundry_continuation_unknown" {
 		t.Fatalf("failed frame = %#v, want fail-closed continuation failure", failed)
+	}
+	if strings.Contains(failed.Failed.Message, foundry.URL) ||
+		strings.Contains(failed.Failed.Message, "HTTP 500") {
+		t.Fatalf("failed frame leaked upstream detail: %#v", failed.Failed)
 	}
 }
 
@@ -1164,7 +1183,7 @@ func TestResponsesAdapterPendingTimeoutSkipsSubmittedCall(t *testing.T) {
 	}
 }
 
-func TestResponsesAdapterBrokeredMaxTurnIncludesApprovalWait(t *testing.T) {
+func TestResponsesAdapterBrokeredMaxTurnIsUnknown(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
 	s := newServer(config{
 		runtimeName:         "foundry-responses-test",
@@ -1184,8 +1203,8 @@ func TestResponsesAdapterBrokeredMaxTurnIncludesApprovalWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	if caps.MaxTurnSeconds < int((30*time.Minute + 2*time.Second).Seconds()) {
-		t.Fatalf("MaxTurnSeconds = %d, want approval wait included", caps.MaxTurnSeconds)
+	if caps.MaxTurnSeconds != 0 {
+		t.Fatalf("MaxTurnSeconds = %d, want unknown ceiling for brokered turns", caps.MaxTurnSeconds)
 	}
 }
 
@@ -1235,6 +1254,17 @@ func TestResponsesAdapterStateLossContinueFailsSafely(t *testing.T) {
 	}
 }
 
+func TestResponsesAPIVersionDefaultsToSDKValue(t *testing.T) {
+	t.Setenv(envAPIVersion, "")
+	if got := loadConfig().apiVersion; got != defaultAPIVersion {
+		t.Fatalf("loadConfig apiVersion = %q, want %q", got, defaultAPIVersion)
+	}
+	t.Setenv(envAPIVersion, "2025-11-15-preview")
+	if got := loadConfig().apiVersion; got != "2025-11-15-preview" {
+		t.Fatalf("loadConfig apiVersion override = %q", got)
+	}
+}
+
 func TestResponsesEndpointSafety(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1242,7 +1272,12 @@ func TestResponsesEndpointSafety(t *testing.T) {
 		want     bool
 	}{
 		{
-			name:     "https responses",
+			name:     "https responses without version",
+			endpoint: "https://example.openai.azure.com/agents/a/endpoint/protocols/openai/responses",
+			want:     true,
+		},
+		{
+			name:     "https responses with explicit version",
 			endpoint: "https://example.openai.azure.com/agents/a/endpoint/protocols/openai/responses?api-version=v1",
 			want:     true,
 		},
@@ -1672,19 +1707,44 @@ func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) 
 	}
 }
 
-func TestResponsesInitialPlatformErrorDoesNotRetainTurn(t *testing.T) {
+func TestResponsesInitialPlatformErrorRetainsFailedTurn(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "platform_error"})
 	adapter, server := newTestResponsesAdapterWithServer(t, foundry.endpoint(), nil)
 	client := newHarnessClient(t, adapter)
 	request := responsesStartTurnRequest("foundry-platform-error")
 
-	if _, err := client.StartTurn(context.Background(), request); err == nil {
-		t.Fatal("StartTurn succeeded, want platform error")
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn should accept the terminal failed turn: %v", err)
 	}
 	server.mu.Lock()
-	defer server.mu.Unlock()
-	if _, exists := server.turns[request.TurnID]; exists {
-		t.Fatalf("turn %q retained after failed initial hosted response", request.TurnID)
+	turn := server.turns[request.TurnID]
+	if turn == nil {
+		server.mu.Unlock()
+		t.Fatalf("turn %q was discarded after an uncertain initial hosted response", request.TurnID)
+	}
+	if turn.initializing || !turn.completed {
+		server.mu.Unlock()
+		t.Fatalf("turn state = initializing:%v completed:%v, want terminal failed turn", turn.initializing, turn.completed)
+	}
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	server.mu.Unlock()
+	if failed == nil || failed.Failed.Reason != foundryInitialUnknown {
+		t.Fatalf("failed frame = %#v, want foundry_initial_unknown", failed)
+	}
+	if strings.Contains(failed.Failed.Message, foundry.URL) ||
+		strings.Contains(failed.Failed.Message, "unknown scenario") {
+		t.Fatalf("failed frame leaked upstream detail: %#v", failed.Failed)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if streamed := findFrame(frames, harness.FrameTurnFailed); streamed == nil ||
+		streamed.Failed.Reason != foundryInitialUnknown {
+		t.Fatalf("streamed failed frame = %#v, want foundry_initial_unknown", streamed)
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("retrying retained TurnID: %v", err)
+	}
+	if foundry.postCount.Load() != 1 {
+		t.Fatalf("hosted post count after retry = %d, want 1", foundry.postCount.Load())
 	}
 }
 

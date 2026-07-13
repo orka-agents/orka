@@ -6,8 +6,9 @@ usage() {
 Usage: examples/fibey-custom-agent-demo/verify-foundry-responses.sh [--task NAME] [--namespace NAME] [--json EVENTS.json]
 
 Checks the live Fibey Foundry hosted AgentKit Responses scenario evidence from
-Orka task events. By default it calls `orka task events --output json`. Use
---json to verify a previously captured event payload without contacting Orka.
+Orka task events. By default it paginates `orka task events --output json`
+through `latestSeq`. Use --json to verify a previously captured event payload
+without contacting Orka; payloads with `latestSeq` must be complete.
 
 Expected evidence:
   - read brokered tool request for check-network-telemetry or get-active-incidents
@@ -68,7 +69,9 @@ trap cleanup EXIT
 if [[ -z "$json_file" ]]; then
   require_cmd orka
   json_tmp="$(mktemp)"
-  orka task events "$task" --namespace "$namespace" --output json >"$json_tmp"
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  event_fetcher="${script_dir}/../harness/foundry-responses/fetch_task_events.py"
+  python3 "$event_fetcher" --task "$task" --namespace "$namespace" --output "$json_tmp"
   json_file="$json_tmp"
 fi
 
@@ -94,6 +97,26 @@ elif isinstance(payload, list):
     events = payload
 else:
     raise SystemExit("error: event JSON must be an object or list")
+
+if isinstance(payload, dict) and payload.get("latestSeq") is not None:
+    try:
+        after_seq = int(payload.get("afterSeq", 0))
+        latest_seq = int(payload["latestSeq"])
+        sequences = [int(event.get("seq", 0)) for event in events if isinstance(event, dict)]
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"error: invalid event sequence metadata: {exc}") from exc
+    if after_seq != 0:
+        raise SystemExit(f"error: event JSON is incomplete: afterSeq must be 0, got {after_seq}")
+    complete_sequence = len(sequences) == latest_seq and all(
+        seq == expected for expected, seq in enumerate(sequences, start=1)
+    )
+    if not complete_sequence:
+        captured_seq = max(sequences, default=0)
+        raise SystemExit(
+            "error: event JSON is incomplete: "
+            f"captured sequences do not cover 1 through latestSeq {latest_seq} "
+            f"(highest captured sequence {captured_seq})"
+        )
 
 READ_TOOLS = {"check-network-telemetry", "get-active-incidents"}
 WRITE_TOOLS = {"dispatch-work-order", "escalate-incident"}

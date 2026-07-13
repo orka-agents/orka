@@ -24,7 +24,7 @@ Use this adapter for AgentKit agents deployed as Foundry hosted agents. Use `exa
 | `ORKA_FOUNDRY_RESPONSES_ADAPTER_BEARER_TOKEN` | Bearer token Orka uses for mutating/streaming harness endpoints. |
 | `ORKA_FOUNDRY_RESPONSES_ENDPOINT` | Preferred full hosted Responses endpoint URL, including `/agents/<name>/endpoint/protocols/openai/responses`. The adapter appends `api-version` from `ORKA_FOUNDRY_RESPONSES_API_VERSION` when missing. |
 | `ORKA_FOUNDRY_RESPONSES_PROJECT_ENDPOINT` + `ORKA_FOUNDRY_RESPONSES_AGENT_NAME` | Optional alternative to build the hosted Responses endpoint from a project endpoint and agent name. |
-| `ORKA_FOUNDRY_RESPONSES_API_VERSION` | API version query value, default `v1`. |
+| `ORKA_FOUNDRY_RESPONSES_API_VERSION` | API-version query value, default `v1`, matching the current `AIProjectClient.get_openai_client(agent_name=...)` default query. Override it for deployments pinned to another preview version. |
 | `ORKA_FOUNDRY_RESPONSES_API_KEY` | Static API-key auth mode. Tests/demo only unless your deployment standard permits it. |
 | `ORKA_FOUNDRY_RESPONSES_AUTH_BEARER` | Static bearer auth mode. Tests/demo only unless supplied by a production token refresher sidecar. |
 | `ORKA_FOUNDRY_RESPONSES_TOKEN_AUDIENCE` | Reserved for future workload-identity token refresh support; currently not used. |

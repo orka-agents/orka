@@ -7,8 +7,9 @@ Usage: examples/harness/foundry-responses/live-evidence.sh [--namespace NAME] [-
 
 Capture a credentials-safe evidence bundle for the live Foundry hosted
 Responses/Fibey gate after the task has run. The bundle stores Kubernetes
-AgentRuntime metadata, Orka task events/approvals, verifier output, and a
-summary-only adapter log scan. It intentionally does not store raw adapter logs.
+AgentRuntime metadata, the complete paginated Orka task event stream, approvals,
+verifier output, and a summary-only adapter log scan. It intentionally does not
+store raw adapter logs.
 
 Defaults:
   --namespace  default
@@ -180,7 +181,11 @@ scan_saved_artifact "$agentruntime_json" "AgentRuntime summary"
 
 events_tmp="$(mktemp)"
 approvals_tmp="$(mktemp)"
-orka task events "$task" --namespace "$namespace" --output json >"$events_tmp"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${script_dir}/fetch_task_events.py" \
+  --task "$task" \
+  --namespace "$namespace" \
+  --output "$events_tmp"
 orka task approvals "$task" --namespace "$namespace" --output json >"$approvals_tmp"
 python3 - "$events_tmp" "$events_json" <<'PY'
 import json
@@ -243,6 +248,26 @@ def has_idempotency(value):
         return has_idempotency(decoded)
     return False
 
+latest_seq = payload.get("latestSeq") if isinstance(payload, dict) else None
+sequence_values = [
+    int(event.get("seq", 0))
+    for event in events
+    if isinstance(event, dict) and event.get("seq") is not None
+]
+captured_through_seq = max(sequence_values, default=0)
+if latest_seq is not None:
+    after_seq = int(payload.get("afterSeq", 0))
+    if after_seq != 0:
+        raise SystemExit(f"task event capture is incomplete: afterSeq must be 0, got {after_seq}")
+    complete_sequence = len(sequence_values) == int(latest_seq) and all(
+        seq == expected for expected, seq in enumerate(sequence_values, start=1)
+    )
+    if not complete_sequence:
+        raise SystemExit(
+            "task event capture is incomplete: "
+            f"sequences do not cover 1 through latestSeq {latest_seq}"
+        )
+
 summary = []
 for index, event in enumerate(events, start=1):
     event = event if isinstance(event, dict) else {}
@@ -253,7 +278,12 @@ for index, event in enumerate(events, start=1):
         "hasIdempotencyEvidence": has_idempotency(event),
         "hasError": bool(event_field(event, "error", "errorCode")),
     })
-Path(sys.argv[2]).write_text(json.dumps({"eventCount": len(events), "events": summary}, indent=2, sort_keys=True) + "\n")
+Path(sys.argv[2]).write_text(json.dumps({
+    "eventCount": len(events),
+    "capturedThroughSeq": captured_through_seq,
+    "latestSeq": latest_seq,
+    "events": summary,
+}, indent=2, sort_keys=True) + "\n")
 PY
 scan_saved_artifact "$events_json" "task events summary"
 python3 - "$approvals_tmp" "$approvals_json" <<'PY'
@@ -285,7 +315,6 @@ Path(sys.argv[2]).write_text(json.dumps({"approvalCount": len(items), "approvals
 PY
 scan_saved_artifact "$approvals_json" "task approvals summary"
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fibey_verifier="${script_dir}/../fibey-custom-agent-demo/verify-foundry-responses.sh"
 if [[ ! -x "$fibey_verifier" ]]; then
   fibey_verifier="${script_dir}/../../fibey-custom-agent-demo/verify-foundry-responses.sh"
