@@ -349,6 +349,36 @@ func TestResponsesAdapterDiscardsUnusedTurnEnvironment(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterRejectedResponseDoesNotRetainSession(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "failed_with_session"})
+	adapter, server := newTestResponsesAdapterWithServer(t, foundry.endpoint(), nil)
+	client := newHarnessClient(t, adapter)
+	first := responsesStartTurnRequest("foundry-rejected-session-first")
+
+	if _, err := client.StartTurn(context.Background(), first); err != nil {
+		t.Fatalf("first StartTurn: %v", err)
+	}
+	frames := streamCurrentFrames(t, client, first.TurnID)
+	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil || failed.Failed.Reason != "foundry_failed" {
+		t.Fatalf("failed frame = %#v, want foundry_failed", failed)
+	}
+	server.mu.Lock()
+	_, retained := server.runtimeSessions[first.RuntimeSessionID]
+	server.mu.Unlock()
+	if retained {
+		t.Fatal("rejected hosted response retained runtime session")
+	}
+
+	second := responsesStartTurnRequest("foundry-rejected-session-second")
+	second.RuntimeSessionID = first.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), second); err != nil {
+		t.Fatalf("second StartTurn: %v", err)
+	}
+	if got := requestMap(t, foundry.requestBody(1))["agent_session_id"]; got != nil {
+		t.Fatalf("second request agent_session_id = %#v, want no rejected session reuse", got)
+	}
+}
+
 func TestResponsesAdapterCancelDuringInitialPostDoesNotRetainSession(t *testing.T) {
 	received := make(chan struct{})
 	release := make(chan struct{})
@@ -2286,6 +2316,12 @@ func newFakeResponses(t *testing.T, cfg fakeResponsesConfig) *fakeResponses {
 				writeJSON(w, finalResponsesMessage())
 			case "function_call":
 				writeJSON(w, functionCallResponse(f.cfg.toolName))
+			case "failed_with_session":
+				writeJSON(w, map[string]any{
+					"id":               "resp-failed",
+					"agent_session_id": fakeSessionID,
+					"status":           "failed",
+				})
 			case "malformed_arguments":
 				writeJSON(
 					w,

@@ -22,12 +22,13 @@ Required environment for preflight/apply:
 Optional environment:
   ORKA_FOUNDRY_RESPONSES_NAMESPACE            default: foundry-responses-smoke
   ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME         default: sample-foundry-responses-runtime
-  ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE        default: ghcr.io/orka-agents/orka/foundry-responses-harness-adapter:latest
+  ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE        required with --apply; build/publish this PR's Dockerfile first
   ORKA_FOUNDRY_RESPONSES_ADAPTER_BEARER_TOKEN generated if absent for this run
   ORKA_FOUNDRY_RESPONSES_API_VERSION          default: v1
   ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES default: read
-    Every advertised class requires the hosted agent to statically expose the
-    matching probe-only conformance_read/conformance_write schema.
+    Set explicitly to an empty string for observed-only mode. Every advertised
+    class requires the hosted agent to statically expose the matching probe-only
+    conformance_read/conformance_write schema.
   ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF optional
 
 The script never prints secret values. Do not run with shell tracing (set -x).
@@ -72,9 +73,9 @@ fi
 
 runtime_name="${ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME:-sample-foundry-responses-runtime}"
 service_url="http://${runtime_name}.${namespace}.svc.cluster.local:8080"
-adapter_image="${ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE:-ghcr.io/orka-agents/orka/foundry-responses-harness-adapter:latest}"
+adapter_image="${ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE:-}"
 api_version="${ORKA_FOUNDRY_RESPONSES_API_VERSION:-v1}"
-brokered_classes="${ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES:-read}"
+brokered_classes="${ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES-read}"
 endpoint="${ORKA_FOUNDRY_RESPONSES_ENDPOINT:-}"
 project_endpoint="${ORKA_FOUNDRY_RESPONSES_PROJECT_ENDPOINT:-}"
 agent_name="${ORKA_FOUNDRY_RESPONSES_AGENT_NAME:-}"
@@ -201,12 +202,18 @@ preflight() {
     fail "set one Foundry auth value: ORKA_FOUNDRY_RESPONSES_API_KEY or ORKA_FOUNDRY_RESPONSES_AUTH_BEARER"
   fi
 
-  IFS=',' read -r -a classes <<<"$brokered_classes"
-  for class in "${classes[@]}"; do
-    class="${class//[[:space:]]/}"
-    [[ "$class" == "read" || "$class" == "write" ]] || fail "unsupported brokered class '$class' (expected read/write)"
-  done
+  if [[ -n "${brokered_classes//[[:space:],]/}" ]]; then
+    IFS=',' read -r -a classes <<<"$brokered_classes"
+    for class in "${classes[@]}"; do
+      class="${class//[[:space:]]/}"
+      [[ -z "$class" ]] && continue
+      [[ "$class" == "read" || "$class" == "write" ]] || fail "unsupported brokered class '$class' (expected read/write)"
+    done
+  fi
 
+  if [[ "$apply" == "1" && -z "$adapter_image" ]]; then
+    fail "ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE is required with --apply"
+  fi
   if [[ "$apply" == "1" || "$wait_ready" == "1" ]]; then
     require_cmd kubectl
   fi
@@ -280,6 +287,16 @@ emit_runtime_yaml() {
   if [[ -n "$auth_bearer" ]]; then
     auth_env_name="ORKA_FOUNDRY_RESPONSES_AUTH_BEARER"
     auth_key_name="foundry-bearer"
+  fi
+  local tool_modes_yaml="    - observed"
+  local brokered_classes_yaml=""
+  local supports_continuation="false"
+  local normalized_classes
+  normalized_classes="$(printf '%s' "$brokered_classes" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d')"
+  if [[ -n "$normalized_classes" ]]; then
+    tool_modes_yaml+=$'\n    - brokered'
+    brokered_classes_yaml=$(printf '    brokeredToolClasses:\n%s' "$(printf '%s\n' "$normalized_classes" | sed 's/^/    - /')")
+    supports_continuation="true"
   fi
 
   cat <<YAML
@@ -372,13 +389,11 @@ spec:
       key: harness-bearer
   capabilities:
     toolExecutionModes:
-    - observed
-    - brokered
-    brokeredToolClasses:
-$(printf '%s' "$brokered_classes" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^/    - /')
+${tool_modes_yaml}
+${brokered_classes_yaml}
     supportsCancel: true
     supportsRuntimeSessions: true
-    supportsContinuation: true
+    supportsContinuation: ${supports_continuation}
 YAML
 }
 

@@ -39,7 +39,8 @@ spec:
     spec:
       containers:
       - name: adapter
-        image: ghcr.io/orka-agents/orka/foundry-responses-harness-adapter:latest
+        # Build and load/publish examples/harness/foundry-responses/Dockerfile first.
+        image: foundry-responses-harness-adapter:local
         imagePullPolicy: IfNotPresent
         env:
         - name: ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR

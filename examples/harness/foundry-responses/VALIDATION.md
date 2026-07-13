@@ -87,7 +87,8 @@ Use the credentials-safe live smoke helper as the first live preflight/deploy st
 
 ```bash
 examples/harness/foundry-responses/live-smoke.sh
-examples/harness/foundry-responses/live-smoke.sh --apply --wait
+ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE=<registry/image:tag> \
+  examples/harness/foundry-responses/live-smoke.sh --apply --wait
 ```
 
 The helper validates required environment without printing secret values and can

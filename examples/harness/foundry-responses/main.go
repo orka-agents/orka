@@ -411,9 +411,8 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if !turn.completed {
+	if !turn.completed && s.handleResponsesResponseLocked(turn, response) {
 		s.recordTurnSessionLocked(turn, foundrySessionID)
-		s.handleResponsesResponseLocked(turn, response)
 	}
 	turn.initializing = false
 	s.mu.Unlock()
@@ -600,8 +599,9 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		delete(turn.bufferedResults, result.ToolCallID)
 		delete(turn.bufferedDigests, result.ToolCallID)
 	}
-	s.recordTurnSessionLocked(turn, updatedSessionID)
-	s.handleResponsesResponseLocked(turn, response)
+	if s.handleResponsesResponseLocked(turn, response) {
+		s.recordTurnSessionLocked(turn, updatedSessionID)
+	}
 	s.mu.Unlock()
 	harness.WriteJSON(w, http.StatusAccepted, continueResponse(req, "continue accepted"))
 }
@@ -650,12 +650,12 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 func (s *server) handleResponsesResponse(turn *turnState, response responsesResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.handleResponsesResponseLocked(turn, response)
+	_ = s.handleResponsesResponseLocked(turn, response)
 }
 
-func (s *server) handleResponsesResponseLocked(turn *turnState, response responsesResponse) {
+func (s *server) handleResponsesResponseLocked(turn *turnState, response responsesResponse) bool {
 	if turn.completed {
-		return
+		return false
 	}
 	responseIDPresent := strings.TrimSpace(response.ID) != ""
 	if responseIDPresent {
@@ -667,24 +667,24 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			"foundry_response_error",
 			firstNonBlank(response.Error.Message, response.Error.Code, "Foundry hosted Responses returned an error"),
 		)
-		return
+		return false
 	}
 	if isFailureStatus(response.Status) {
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
-		return
+		return false
 	}
 	if strings.TrimSpace(response.Status) == "" {
 		s.appendFailedLocked(turn, "foundry_status_missing", "Foundry hosted Responses status is missing")
-		return
+		return false
 	}
 	if !isCompletionStatus(response.Status) {
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
-		return
+		return false
 	}
 	calls, err := s.extractFunctionCalls(turn.request, response.Output)
 	if err != nil {
 		s.appendFailedLocked(turn, "foundry_function_call_invalid", err.Error())
-		return
+		return false
 	}
 	if len(calls) > 0 {
 		if !responseIDPresent {
@@ -693,7 +693,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 				"foundry_response_id_missing",
 				"hosted response returned a function_call without an id needed for continuation",
 			)
-			return
+			return false
 		}
 		seenInResponse := map[string]struct{}{}
 		for _, call := range calls {
@@ -703,7 +703,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_repeated_function_call",
 					"hosted response repeated a function call id",
 				)
-				return
+				return false
 			}
 			seenInResponse[call.callID] = struct{}{}
 			if _, submitted := turn.submittedDigests[call.callID]; submitted {
@@ -712,7 +712,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_repeated_function_call",
 					"hosted response repeated an already-submitted function call",
 				)
-				return
+				return false
 			}
 			if _, pending := turn.pendingTools[call.callID]; pending {
 				s.appendFailedLocked(
@@ -720,7 +720,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_repeated_function_call",
 					"hosted response repeated an already-pending function call",
 				)
-				return
+				return false
 			}
 		}
 		frames := make([]harness.HarnessEventFrame, 0, len(calls))
@@ -743,7 +743,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_tool_call_frame_too_large",
 					"hosted function call exceeded the harness SSE frame limit",
 				)
-				return
+				return false
 			}
 			frames = append(frames, frame)
 		}
@@ -751,12 +751,12 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			turn.pendingTools[call.callID] = call.name
 			s.appendPreparedFrameLocked(turn, frames[index])
 		}
-		return
+		return true
 	}
 	result := responsesMessageText(response.Output)
 	if len([]byte(result)) > maxFoundryOutputBytes {
 		s.appendFailedLocked(turn, "foundry_output_too_large", "foundry completion exceeded advertised output limit")
-		return
+		return false
 	}
 	completedFrame := s.newFrame(
 		turn,
@@ -773,12 +773,13 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			"foundry_output_frame_too_large",
 			"foundry completion exceeded the harness SSE frame limit",
 		)
-		return
+		return false
 	}
 	s.appendPreparedFrameLocked(turn, completedFrame)
 	s.clearBufferedToolResultsLocked(turn)
 	turn.completed = true
 	s.scheduleTurnCleanupLocked(turn)
+	return true
 }
 
 func (s *server) extractFunctionCalls(

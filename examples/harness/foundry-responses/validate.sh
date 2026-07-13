@@ -113,6 +113,61 @@ if [[ "$live_smoke_code" == "0" ]] || ! grep -q "safe /responses URL" "$live_smo
 fi
 rm -f "$live_smoke_err"
 
+missing_image_err="$(mktemp)"
+set +e
+ORKA_FOUNDRY_RESPONSES_ENDPOINT="http://127.0.0.1/agents/test/endpoint/protocols/openai/responses" \
+  ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
+  ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
+  ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE="" \
+  examples/harness/foundry-responses/live-smoke.sh --apply >/dev/null 2>"$missing_image_err"
+missing_image_code=$?
+set -e
+if [[ "$missing_image_code" == "0" ]] || ! grep -q "ADAPTER_IMAGE is required" "$missing_image_err"; then
+  cat "$missing_image_err" >&2
+  rm -f "$missing_image_err"
+  echo "expected live smoke apply without an explicit image to fail" >&2
+  exit 1
+fi
+rm -f "$missing_image_err"
+
+smoke_tmp="$(mktemp -d)"
+smoke_capture="$smoke_tmp/rendered.yaml"
+cat >"$smoke_tmp/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" apply "* ]]; then
+  cat >>"$CAPTURE_FILE"
+  printf '\n---\n' >>"$CAPTURE_FILE"
+  exit 0
+fi
+if [[ "${1:-}" == "get" && "${2:-}" == "namespace" ]]; then
+  exit 0
+fi
+if [[ " $* " == *" get deployment/"* ]]; then
+  exit 1
+fi
+exit 0
+SH
+chmod +x "$smoke_tmp/kubectl"
+PATH="$smoke_tmp:$PATH" \
+  CAPTURE_FILE="$smoke_capture" \
+  ORKA_FOUNDRY_RESPONSES_ENDPOINT="http://127.0.0.1/agents/test/endpoint/protocols/openai/responses" \
+  ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
+  ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
+  ORKA_FOUNDRY_RESPONSES_ADAPTER_BEARER_TOKEN="adapter-placeholder" \
+  ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE="example.invalid/foundry-adapter:test" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES="" \
+  examples/harness/foundry-responses/live-smoke.sh --apply >/dev/null 2>"$smoke_tmp/stderr"
+if grep -q '^    - brokered$' "$smoke_capture" || \
+   grep -q '^    brokeredToolClasses:' "$smoke_capture" || \
+   ! grep -q '^    supportsContinuation: false$' "$smoke_capture"; then
+  cat "$smoke_capture" >&2
+  rm -rf "$smoke_tmp"
+  echo "observed-only live smoke rendered incompatible brokered capabilities" >&2
+  exit 1
+fi
+rm -rf "$smoke_tmp"
+
 run examples/fibey-custom-agent-demo/verify-foundry-responses.sh \
   --json examples/fibey-custom-agent-demo/testdata/foundry-responses-events-pass.json
 expect_verifier_failure \

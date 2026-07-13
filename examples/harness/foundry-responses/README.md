@@ -105,13 +105,13 @@ The adapter captures Foundry session identifiers from the hosted response body (
 ## Local build
 
 ```bash
-docker build -t ghcr.io/orka-agents/orka/foundry-responses-harness-adapter:latest -f examples/harness/foundry-responses/Dockerfile .
+docker build -t foundry-responses-harness-adapter:local -f examples/harness/foundry-responses/Dockerfile .
 ```
 
 
 ## Kubernetes smoke skeleton
 
-`kubernetes.example.yaml` contains a credentials-free Deployment, Service, Secret placeholders, and matching `AgentRuntime` facade for a read-profile hosted Responses smoke. Replace the `REDACTED` values through your secret-management flow, set the hosted Responses endpoint or project/agent-name pair, ensure the hosted agent statically exposes the probe-only `conformance_read` schema, and keep `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` narrowed to classes whose live AgentRuntime conformance passed.
+`kubernetes.example.yaml` contains a credentials-free Deployment, Service, Secret placeholders, and matching `AgentRuntime` facade for a read-profile hosted Responses smoke. It references the local image tag built above; load that image into your local cluster or replace it with an explicitly published image. Replace the `REDACTED` values through your secret-management flow, set the hosted Responses endpoint or project/agent-name pair, ensure the hosted agent statically exposes the probe-only `conformance_read` schema, and keep `ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES` narrowed to classes whose live AgentRuntime conformance passed.
 
 ```bash
 kubectl apply -f examples/harness/foundry-responses/kubernetes.example.yaml
@@ -136,7 +136,8 @@ For the live Foundry hosted AgentKit smoke gate, first run the credentials-safe 
 
 ```bash
 examples/harness/foundry-responses/live-smoke.sh
-examples/harness/foundry-responses/live-smoke.sh --apply --wait
+ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE=<registry/image:tag> \
+  examples/harness/foundry-responses/live-smoke.sh --apply --wait
 
 # After the live task completes, capture redacted evidence.
 examples/harness/foundry-responses/live-evidence.sh \
