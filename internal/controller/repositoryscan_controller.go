@@ -2495,6 +2495,13 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 						skippedSlices++
 					}
 				}
+				preserveNewer, err := r.reviewSliceOwnedByNewerRun(ctx, scan, run, slice.ID)
+				if err != nil {
+					return err
+				}
+				if preserveNewer {
+					continue
+				}
 				if err := r.preserveCurrentRunReviewSliceTerminalState(ctx, scan, &slice); err != nil {
 					return err
 				}
@@ -2538,6 +2545,38 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 	}
 
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, false)
+}
+
+func (r *RepositoryScanReconciler) reviewSliceOwnedByNewerRun(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+	sliceID string,
+) (bool, error) {
+	if run == nil || strings.TrimSpace(sliceID) == "" {
+		return false, nil
+	}
+	existing, err := r.SecurityStore.GetReviewSlice(ctx, scan.Namespace, scan.Name, sliceID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if existing.LastScanRunID == "" || existing.LastScanRunID == run.ID {
+		return false, nil
+	}
+	existingRun, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, existing.LastScanRunID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if existingRun.StartedAt.After(run.StartedAt) {
+		return true, nil
+	}
+	return existingRun.StartedAt.Equal(run.StartedAt) && existingRun.ID > run.ID, nil
 }
 
 func (r *RepositoryScanReconciler) preserveCurrentRunReviewSliceTerminalState(ctx context.Context, scan *corev1alpha1.RepositoryScan, slice *store.ReviewSlice) error {

@@ -590,6 +590,96 @@ func TestMapperReingestPreservesReviewedSliceForCurrentRun(t *testing.T) {
 	}
 }
 
+func TestHistoricalMapperReplayDoesNotResetNewerReviewedSlice(t *testing.T) {
+	const (
+		scanName = "kaset"
+		oldRunID = "scan_historical"
+		newRunID = "scan_current"
+		sliceID  = "slice_api"
+	)
+	ctx := context.Background()
+	securityStore := setupControllerSQLiteStore(t)
+	reconciler := &RepositoryScanReconciler{SecurityStore: securityStore, ArtifactStore: securityStore}
+	scan := &corev1alpha1.RepositoryScan{ObjectMeta: metav1.ObjectMeta{Name: scanName, Namespace: defaultNS}}
+	oldStarted := time.Now().Add(-time.Hour)
+	newStarted := time.Now()
+	for _, run := range []*storepkg.ScanRun{
+		{ID: oldRunID, Namespace: defaultNS, RepositoryScan: scanName, Mode: "initial", Phase: scanRunPhaseSucceeded, SliceCount: 1, ReviewedSliceCount: 1, StartedAt: oldStarted},
+		{ID: newRunID, Namespace: defaultNS, RepositoryScan: scanName, Mode: "manual", Phase: scanRunPhaseSucceeded, SliceCount: 1, ReviewedSliceCount: 1, StartedAt: newStarted},
+	} {
+		if err := securityStore.CreateScanRun(ctx, run); err != nil {
+			t.Fatalf("CreateScanRun(%s) error = %v", run.ID, err)
+		}
+	}
+	if err := securityStore.UpsertReviewSlice(ctx, &storepkg.ReviewSlice{
+		ID: sliceID, Namespace: defaultNS, RepositoryScan: scanName, Source: "deterministic-go-package",
+		Title: "Go package internal/api", Kind: "package", Status: reviewSliceStatusReviewed, LastScanRunID: newRunID,
+		OwnedFiles: []storepkg.ReviewSliceFile{{Path: "internal/api/security.go", Reason: "source"}},
+	}); err != nil {
+		t.Fatalf("UpsertReviewSlice() error = %v", err)
+	}
+	mapperArtifact := security.ReviewSlicesArtifact{
+		SchemaVersion: security.SchemaVersionReviewSlices,
+		Slices: []storepkg.ReviewSlice{{
+			ID: sliceID, RepositoryScan: scanName, Source: "deterministic-go-package", Title: "Go package internal/api",
+			Kind: "package", Status: reviewSliceStatusPending,
+			OwnedFiles: []storepkg.ReviewSliceFile{{Path: "internal/api/security.go", Reason: "source"}},
+		}},
+	}
+	mapperData, err := json.Marshal(mapperArtifact)
+	if err != nil {
+		t.Fatalf("json.Marshal(mapperArtifact) error = %v", err)
+	}
+	newTask := func(name, runID, stage string) *corev1alpha1.Task {
+		labelsMap := map[string]string{
+			labels.LabelSecurityTarget: scanName,
+			labels.LabelSecurityScanID: runID,
+			labels.LabelSecurityStage:  stage,
+		}
+		if stage == security.StageReview {
+			labelsMap[labels.LabelSecuritySliceID] = sliceID
+		}
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS, Labels: labelsMap},
+			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+		}
+	}
+	oldMapper := newTask("historical-mapper", oldRunID, security.StageMapper)
+	oldReview := newTask("historical-review", oldRunID, security.StageReview)
+	newMapper := newTask("current-mapper", newRunID, security.StageMapper)
+	newReview := newTask("current-review", newRunID, security.StageReview)
+	for _, task := range []*corev1alpha1.Task{oldMapper, newMapper} {
+		if err := securityStore.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactSlices, "application/json", mapperData); err != nil {
+			t.Fatalf("SaveArtifact(%s) error = %v", task.Name, err)
+		}
+	}
+
+	for range 2 {
+		for _, task := range []*corev1alpha1.Task{oldMapper, oldReview, newMapper, newReview} {
+			if err := reconciler.ingestScanTask(ctx, scan, task); err != nil {
+				t.Fatalf("ingestScanTask(%s) error = %v", task.Name, err)
+			}
+		}
+	}
+
+	for _, runID := range []string{oldRunID, newRunID} {
+		run, err := securityStore.GetScanRun(ctx, defaultNS, runID)
+		if err != nil {
+			t.Fatalf("GetScanRun(%s) error = %v", runID, err)
+		}
+		if run.Phase != scanRunPhaseSucceeded || run.ErrorMessage != "" || run.ReviewedSliceCount != 1 {
+			t.Fatalf("run %s = phase:%q error:%q reviewed:%d, want succeeded/empty/1", runID, run.Phase, run.ErrorMessage, run.ReviewedSliceCount)
+		}
+	}
+	reviewSlice, err := securityStore.GetReviewSlice(ctx, defaultNS, scanName, sliceID)
+	if err != nil {
+		t.Fatalf("GetReviewSlice() error = %v", err)
+	}
+	if reviewSlice.LastScanRunID != newRunID || reviewSlice.Status != reviewSliceStatusReviewed {
+		t.Fatalf("review slice = %#v, want current run reviewed state preserved", reviewSlice)
+	}
+}
+
 func TestRepositoryScanCustomPolicyIncludedInReviewPrompt(t *testing.T) {
 	ctx := context.Background()
 	store := setupControllerSQLiteStore(t)
