@@ -11,6 +11,21 @@
 - `POST /v1/turns/{turnID}/cancel` when `supportsCancel=true`
 - `POST /v1/turns/{turnID}/continue` when brokered profiles are advertised
 
+## Transport and client authentication
+
+- `AgentRuntime.spec.deployment.transportSecurity` defaults to `tls`, paired
+  with an `https://` endpoint.
+- `insecure-cluster-local-http` must be paired with `http://` and is limited to
+  a selector-backed, non-`ExternalName` Service in the same namespace as the
+  `AgentRuntime`.
+- Orka rejects redirects for registered `AgentRuntime` requests. Adapters must
+  expose the contract directly at the configured base URL.
+- Orka disables HTTP proxy use for `insecure-cluster-local-http` so authenticated
+  requests use the validated cluster-local Service connection directly.
+- `GET /v1/health` and `GET /v1/capabilities` are intentionally unauthenticated;
+  Orka does not attach the runtime bearer token to those requests. Turn start,
+  stream, output, continuation, and cancellation endpoints remain authenticated.
+
 ## Capability profiles
 
 | Profile | Capabilities | Required behavior |

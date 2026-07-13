@@ -285,13 +285,14 @@ func TestHarnessCancellationRecoversAfterRuntimeAuthRotation(t *testing.T) {
 	defer server.Close()
 
 	task := harnessDurabilityTask(corev1alpha1.TaskPhaseCancelled)
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL)
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, server.URL)
 	token.Data["token"] = []byte("old-token")
 	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
 		RuntimeRefName:         runtime.Name,
 		RuntimeName:            runtime.Name,
 		ContractVersion:        string(runtime.Spec.ContractVersion),
 		Endpoint:               runtime.Spec.Deployment.Endpoint,
+		TransportSecurity:      runtime.Spec.Deployment.TransportSecurity,
 		RuntimeGeneration:      runtime.Generation,
 		AuthRefName:            runtime.Spec.ClientAuth.BearerAuthRef.Name,
 		AuthRefField:           runtime.Spec.ClientAuth.BearerAuthRef.Key,

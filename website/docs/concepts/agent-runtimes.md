@@ -40,6 +40,7 @@ spec:
   deployment:
     mode: external-endpoint
     endpoint: http://sample-http-runtime.default.svc.cluster.local:8080
+    transportSecurity: insecure-cluster-local-http
   clientAuth:
     bearerTokenSecretRef:
       name: sample-http-runtime-token
@@ -59,6 +60,12 @@ spec:
     runtimeRef:
       name: sample-http-runtime
 ```
+
+`spec.deployment.transportSecurity` defaults to `tls`, which requires an
+`https://` endpoint. `insecure-cluster-local-http` is an explicit development
+or private-cluster opt-in: the endpoint must name a selector-backed,
+non-`ExternalName` Service in the same namespace as the `AgentRuntime`. Orka
+revalidates that Service before fresh and already-planned task dispatches.
 
 ## Quick Start
 

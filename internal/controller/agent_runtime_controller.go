@@ -8,11 +8,17 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"hash/fnv"
+	"net"
 	"net/netip"
 	"net/url"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,7 +38,13 @@ import (
 	"github.com/orka-agents/orka/internal/harness/conformance"
 )
 
-var agentRuntimeAllowInsecureLoopbackForTests bool
+var (
+	agentRuntimeAllowInsecureLoopbackForTests bool
+	agentRuntimeClusterDomainForTests         string
+	agentRuntimeClusterDomainOnce             sync.Once
+	agentRuntimeClusterDomainValue            string
+	errAgentRuntimePinnedBackendLost          = errors.New("pinned AgentRuntime backend lost")
+)
 
 const (
 	agentRuntimeReadyCondition = "Ready"
@@ -48,7 +61,8 @@ const (
 // AgentRuntimeReconciler reconciles AgentRuntime registry entries.
 type AgentRuntimeReconciler struct {
 	client.Client
-	Scheme *k8sruntime.Scheme
+	APIReader client.Reader
+	Scheme    *k8sruntime.Scheme
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes,verbs=get;list;watch;create;update;patch;delete
@@ -56,6 +70,7 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile validates an external Orka harness endpoint and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -83,17 +98,46 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
 		return nil, false, "", err.Error()
 	}
+	probeBaseURL, transportSecurity, err := agentRuntimeRequestEndpoint(
+		runtime.Spec.Deployment.Endpoint,
+		runtime.Spec.Deployment.TransportSecurity,
+	)
+	if err != nil {
+		return nil, false, "", err.Error()
+	}
 	token, authRefResourceVersion, err := r.agentRuntimeBearerToken(ctx, runtime)
 	if err != nil {
 		return nil, false, "", err.Error()
+	}
+	insecureHTTP := transportSecurity == corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+	dialAddress, err := resolveAgentRuntimeInsecureDialAddress(
+		ctx,
+		r.apiReader(),
+		runtime.Namespace,
+		runtime.Spec.Deployment.Endpoint,
+		runtime.Spec.Deployment.TransportSecurity,
+		runtime.Namespace+"/"+runtime.Name+"/"+strconv.FormatInt(runtime.Generation, 10),
+	)
+	if err != nil {
+		return nil, false, authRefResourceVersion, err.Error()
+	}
+	probeHTTPClient := harness.NewAgentRuntimeHTTPClient(insecureHTTP)
+	if insecureHTTP && dialAddress != "" {
+		probeHTTPClient, err = harness.NewPinnedAgentRuntimeHTTPClient(dialAddress)
+		if err != nil {
+			return nil, false, authRefResourceVersion, err.Error()
+		}
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, agentRuntimeProbeTimeout)
 	defer cancel()
 	deepProbe := runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready ||
 		runtime.Status.ObservedAuthRefResourceVersion != authRefResourceVersion
+	// conformance.Check uses a tokenless client for health/capabilities and applies
+	// BearerToken only to authenticated turn and turn-resource probes.
 	preflight := conformance.Check(probeCtx, conformance.Target{
-		BaseURL:        runtime.Spec.Deployment.Endpoint,
+		BaseURL:        probeBaseURL,
 		BearerToken:    token,
+		HTTPClient:     probeHTTPClient,
 		ControlTimeout: agentRuntimeProbeTimeout,
 		RequireAuth:    true,
 	})
@@ -112,8 +156,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 			switch class {
 			case corev1alpha1.AgentRuntimeBrokeredToolClassRead:
 				brokeredReadProbe := conformance.Check(probeCtx, conformance.Target{
-					BaseURL:           runtime.Spec.Deployment.Endpoint,
+					BaseURL:           probeBaseURL,
 					BearerToken:       token,
+					HTTPClient:        probeHTTPClient,
 					ControlTimeout:    agentRuntimeProbeTimeout,
 					ProbeBrokeredRead: true,
 					RequireAuth:       true,
@@ -123,8 +168,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 				}
 			case corev1alpha1.AgentRuntimeBrokeredToolClassWrite:
 				brokeredWriteProbe := conformance.Check(probeCtx, conformance.Target{
-					BaseURL:            runtime.Spec.Deployment.Endpoint,
+					BaseURL:            probeBaseURL,
 					BearerToken:        token,
+					HTTPClient:         probeHTTPClient,
 					ControlTimeout:     agentRuntimeProbeTimeout,
 					ProbeBrokeredWrite: true,
 					RequireAuth:        true,
@@ -134,8 +180,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 				}
 			case corev1alpha1.AgentRuntimeBrokeredToolClassCoordination:
 				brokeredCoordinationProbe := conformance.Check(probeCtx, conformance.Target{
-					BaseURL:                   runtime.Spec.Deployment.Endpoint,
+					BaseURL:                   probeBaseURL,
 					BearerToken:               token,
+					HTTPClient:                probeHTTPClient,
 					ControlTimeout:            agentRuntimeProbeTimeout,
 					ProbeBrokeredCoordination: true,
 					RequireAuth:               true,
@@ -148,8 +195,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	}
 	if deepProbe && capabilityHasToolMode(preflight.ObservedCapabilities, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
 		turnProbe := conformance.Check(probeCtx, conformance.Target{
-			BaseURL:        runtime.Spec.Deployment.Endpoint,
+			BaseURL:        probeBaseURL,
 			BearerToken:    token,
+			HTTPClient:     probeHTTPClient,
 			ControlTimeout: agentRuntimeProbeTimeout,
 			ProbeTurn:      true,
 			RequireAuth:    true,
@@ -198,12 +246,9 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if endpoint == "" {
 		return fmt.Errorf("deployment.endpoint is required for external-endpoint AgentRuntime")
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("deployment.endpoint must be an absolute http(s) URL")
-	}
-	if parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS {
-		return fmt.Errorf("deployment.endpoint scheme %q is not supported", parsed.Scheme)
+	parsed, _, err := validateAgentRuntimeTransportSecurity(endpoint, runtime.Spec.Deployment.TransportSecurity)
+	if err != nil {
+		return err
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("deployment.endpoint must not include credentials, query, or fragment components")
@@ -219,26 +264,492 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 }
 
 func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.Context, runtime *corev1alpha1.AgentRuntime) error {
-	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("deployment.endpoint must be an absolute http(s) URL")
+	if runtime == nil {
+		return fmt.Errorf("AgentRuntime is required")
 	}
-	if parsed.Scheme != urlSchemeHTTP {
+	return validateAgentRuntimeTransportPolicy(
+		ctx,
+		r.apiReader(),
+		runtime.Namespace,
+		runtime.Spec.Deployment.Endpoint,
+		runtime.Spec.Deployment.TransportSecurity,
+	)
+}
+
+func (r *AgentRuntimeReconciler) apiReader() client.Reader {
+	if r != nil && r.APIReader != nil {
+		return r.APIReader
+	}
+	if r == nil {
+		return nil
+	}
+	return r.Client
+}
+
+func effectiveAgentRuntimeTransportSecurity(security corev1alpha1.AgentRuntimeTransportSecurity) corev1alpha1.AgentRuntimeTransportSecurity {
+	if security == "" {
+		return corev1alpha1.AgentRuntimeTransportSecurityTLS
+	}
+	return security
+}
+
+func validateAgentRuntimeTransportSecurity(
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+) (*url.URL, corev1alpha1.AgentRuntimeTransportSecurity, error) {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, "", fmt.Errorf("deployment.endpoint must be an absolute http(s) URL")
+	}
+	if parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS {
+		return nil, "", fmt.Errorf("deployment.endpoint scheme %q is not supported", parsed.Scheme)
+	}
+	security = effectiveAgentRuntimeTransportSecurity(security)
+	switch security {
+	case corev1alpha1.AgentRuntimeTransportSecurityTLS:
+		if parsed.Scheme != urlSchemeHTTPS {
+			return nil, "", fmt.Errorf("deployment.endpoint must use https when deployment.transportSecurity is %q", security)
+		}
+	case corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP:
+		if parsed.Scheme != urlSchemeHTTP {
+			return nil, "", fmt.Errorf("deployment.endpoint must use http when deployment.transportSecurity is %q", security)
+		}
+	default:
+		return nil, "", fmt.Errorf("unsupported deployment.transportSecurity %q", security)
+	}
+	return parsed, security, nil
+}
+
+func agentRuntimeTransportRequiresPinnedBackend(
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+) bool {
+	parsed, security, err := validateAgentRuntimeTransportSecurity(endpoint, security)
+	if err != nil || security != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		return false
+	}
+	return !isLoopbackAgentRuntimeEndpoint(parsed.Hostname()) || !agentRuntimeAllowInsecureLoopbackForTests
+}
+
+func agentRuntimeRequestEndpoint(
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+) (string, corev1alpha1.AgentRuntimeTransportSecurity, error) {
+	parsed, security, err := validateAgentRuntimeTransportSecurity(endpoint, security)
+	if err != nil {
+		return "", "", err
+	}
+	if security == corev1alpha1.AgentRuntimeTransportSecurityTLS {
+		return parsed.String(), security, nil
+	}
+	if isLoopbackAgentRuntimeEndpoint(parsed.Hostname()) && agentRuntimeAllowInsecureLoopbackForTests {
+		return parsed.String(), security, nil
+	}
+	if _, _, ok := parseAgentRuntimeServiceNamespaceHost(parsed.Hostname()); !ok {
+		return "", "", fmt.Errorf("deployment.transportSecurity %q requires deployment.endpoint to reference a Kubernetes Service", security)
+	}
+	// Preserve the configured authority for the HTTP Host header. In insecure
+	// mode NewAgentRuntimeHTTPClient roots the DNS name in its DialContext, so
+	// resolver search domains cannot redirect the validated Service hostname.
+	return parsed.String(), security, nil
+}
+
+func validateAgentRuntimeTransportPolicy(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+) error {
+	parsed, security, err := validateAgentRuntimeTransportSecurity(endpoint, security)
+	if err != nil {
+		return err
+	}
+	if security == corev1alpha1.AgentRuntimeTransportSecurityTLS {
 		return nil
 	}
 	host := parsed.Hostname()
 	if isLoopbackAgentRuntimeEndpoint(host) && agentRuntimeAllowInsecureLoopbackForTests {
 		return nil
 	}
-	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok && serviceNamespace == runtime.Namespace {
-		if r != nil && r.Client != nil {
-			service := &corev1.Service{}
-			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil && service.Spec.Type != corev1.ServiceTypeExternalName && len(service.Spec.Selector) > 0 {
-				return nil
+	serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host)
+	if !ok || serviceNamespace != namespace {
+		return fmt.Errorf("deployment.transportSecurity %q requires deployment.endpoint to reference a same-namespace Kubernetes Service", security)
+	}
+	if reader == nil {
+		return fmt.Errorf("deployment.transportSecurity %q requires Kubernetes Service validation", security)
+	}
+	service := &corev1.Service{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("deployment.transportSecurity %q requires Service %q in namespace %q to exist", security, serviceName, serviceNamespace)
+		}
+		return fmt.Errorf("read Service %q in namespace %q for deployment.transportSecurity %q: %w", serviceName, serviceNamespace, security, err)
+	}
+	if service.Spec.Type == corev1.ServiceTypeExternalName {
+		return fmt.Errorf("deployment.transportSecurity %q does not allow ExternalName Service %q", security, serviceName)
+	}
+	if len(service.Spec.Selector) == 0 {
+		return fmt.Errorf("deployment.transportSecurity %q requires Service %q to have a non-empty selector", security, serviceName)
+	}
+	return nil
+}
+
+type agentRuntimeBackend struct {
+	PodName     string
+	PodUID      string
+	DialAddress string
+}
+
+func resolveAgentRuntimeInsecureDialAddress(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+	selectionKey string,
+) (string, error) {
+	backend, err := resolveAgentRuntimeInsecureBackend(ctx, reader, namespace, endpoint, security, selectionKey)
+	if err != nil {
+		return "", err
+	}
+	return backend.DialAddress, nil
+}
+
+func resolveAgentRuntimeInsecureBackend(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+	selectionKey string,
+) (agentRuntimeBackend, error) {
+	candidates, err := agentRuntimeInsecureBackendCandidates(ctx, reader, namespace, endpoint, security)
+	if err != nil {
+		return agentRuntimeBackend{}, err
+	}
+	if len(candidates) == 0 {
+		return agentRuntimeBackend{}, nil
+	}
+	slices.SortFunc(candidates, func(left, right agentRuntimeBackend) int {
+		if comparison := strings.Compare(left.DialAddress, right.DialAddress); comparison != 0 {
+			return comparison
+		}
+		if comparison := strings.Compare(left.PodName, right.PodName); comparison != 0 {
+			return comparison
+		}
+		return strings.Compare(left.PodUID, right.PodUID)
+	})
+	if strings.TrimSpace(selectionKey) == "" {
+		selectionKey = namespace + "/" + endpoint
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(selectionKey))
+	return candidates[hash.Sum64()%uint64(len(candidates))], nil
+}
+
+func validateAgentRuntimeInsecureBackend(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+	expected agentRuntimeBackend,
+	requireReady bool,
+) (agentRuntimeBackend, error) {
+	parsed, security, err := validateAgentRuntimeTransportSecurity(endpoint, security)
+	if err != nil {
+		return agentRuntimeBackend{}, err
+	}
+	if security != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP ||
+		(isLoopbackAgentRuntimeEndpoint(parsed.Hostname()) && agentRuntimeAllowInsecureLoopbackForTests) {
+		return agentRuntimeBackend{}, nil
+	}
+	if reader == nil || expected.PodName == "" || expected.PodUID == "" || expected.DialAddress == "" {
+		return agentRuntimeBackend{}, fmt.Errorf("pinned AgentRuntime backend identity is incomplete")
+	}
+	pod, err := validateAgentRuntimePinnedPodIdentity(ctx, reader, namespace, expected)
+	if err != nil {
+		return agentRuntimeBackend{}, err
+	}
+	serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(parsed.Hostname())
+	if !ok || serviceNamespace != namespace {
+		return agentRuntimeBackend{}, fmt.Errorf("deployment.endpoint no longer references the pinned backend Service")
+	}
+	service := &corev1.Service{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err != nil {
+		return agentRuntimeBackend{}, fmt.Errorf("read Service %q for pinned AgentRuntime backend: %w", serviceName, err)
+	}
+	if service.Spec.Type == corev1.ServiceTypeExternalName || len(service.Spec.Selector) == 0 {
+		return agentRuntimeBackend{}, fmt.Errorf("service %q is no longer a selector-backed non-ExternalName Service", serviceName)
+	}
+	if !agentRuntimePodMatchesSelector(pod, service.Spec.Selector) {
+		return agentRuntimeBackend{}, fmt.Errorf("pinned AgentRuntime Pod %q is no longer selected by the Service", expected.PodName)
+	}
+	if requireReady && !agentRuntimePodReady(pod) {
+		return agentRuntimeBackend{}, fmt.Errorf("pinned AgentRuntime Pod %q is not Ready for turn start", expected.PodName)
+	}
+	if !requireReady && (pod.Spec.HostNetwork || pod.Status.Phase != corev1.PodRunning) {
+		return agentRuntimeBackend{}, fmt.Errorf("pinned AgentRuntime Pod %q is not a Running selector-matched backend", expected.PodName)
+	}
+	servicePort, err := agentRuntimeServicePort(parsed, service)
+	if err != nil {
+		return agentRuntimeBackend{}, err
+	}
+	targetPort, ok := agentRuntimePodTargetPort(pod, servicePort)
+	if !ok {
+		return agentRuntimeBackend{}, fmt.Errorf("pinned AgentRuntime Pod %q no longer resolves the Service target port", expected.PodName)
+	}
+	podIP, ok := agentRuntimePodIPForService(pod, service)
+	if !ok {
+		return agentRuntimeBackend{}, fmt.Errorf("pinned AgentRuntime Pod %q has no IP matching the Service IP families", expected.PodName)
+	}
+	current := agentRuntimeBackend{
+		PodName:     pod.Name,
+		PodUID:      string(pod.UID),
+		DialAddress: net.JoinHostPort(podIP.String(), strconv.Itoa(int(targetPort))),
+	}
+	if current.DialAddress != expected.DialAddress {
+		return agentRuntimeBackend{}, fmt.Errorf("%w: Pod %q address changed from %q to %q", errAgentRuntimePinnedBackendLost, expected.PodName, expected.DialAddress, current.DialAddress)
+	}
+	return current, nil
+}
+
+func validateAgentRuntimePinnedPodIdentity(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	expected agentRuntimeBackend,
+) (*corev1.Pod, error) {
+	if reader == nil || expected.PodName == "" || expected.PodUID == "" || expected.DialAddress == "" {
+		return nil, fmt.Errorf("pinned AgentRuntime backend identity is incomplete")
+	}
+	pod := &corev1.Pod{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: expected.PodName, Namespace: namespace}, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: Pod %q no longer exists", errAgentRuntimePinnedBackendLost, expected.PodName)
+		}
+		return nil, fmt.Errorf("read pinned AgentRuntime Pod %q: %w", expected.PodName, err)
+	}
+	if string(pod.UID) != expected.PodUID {
+		return nil, fmt.Errorf("%w: Pod %q UID changed from %q to %q", errAgentRuntimePinnedBackendLost, expected.PodName, expected.PodUID, pod.UID)
+	}
+	if !pod.DeletionTimestamp.IsZero() {
+		return nil, fmt.Errorf("%w: Pod %q is terminating", errAgentRuntimePinnedBackendLost, expected.PodName)
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return nil, fmt.Errorf("%w: Pod %q reached terminal phase %q", errAgentRuntimePinnedBackendLost, expected.PodName, pod.Status.Phase)
+	}
+	expectedHost, _, err := net.SplitHostPort(expected.DialAddress)
+	if err != nil {
+		return nil, fmt.Errorf("pinned AgentRuntime backend address %q is invalid: %w", expected.DialAddress, err)
+	}
+	expectedIP := net.ParseIP(strings.Trim(expectedHost, "[]"))
+	if expectedIP == nil || !agentRuntimePodHasIP(pod, expectedIP) {
+		return nil, fmt.Errorf("%w: Pod %q no longer has pinned IP %q", errAgentRuntimePinnedBackendLost, expected.PodName, expectedHost)
+	}
+	return pod, nil
+}
+
+func agentRuntimePodMatchesSelector(pod *corev1.Pod, selector map[string]string) bool {
+	if pod == nil || len(selector) == 0 {
+		return false
+	}
+	for key, value := range selector {
+		if pod.Labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func agentRuntimeInsecureBackendCandidates(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	endpoint string,
+	security corev1alpha1.AgentRuntimeTransportSecurity,
+) ([]agentRuntimeBackend, error) {
+	parsed, security, err := validateAgentRuntimeTransportSecurity(endpoint, security)
+	if err != nil {
+		return nil, err
+	}
+	if security == corev1alpha1.AgentRuntimeTransportSecurityTLS {
+		return nil, nil
+	}
+	if isLoopbackAgentRuntimeEndpoint(parsed.Hostname()) && agentRuntimeAllowInsecureLoopbackForTests {
+		return nil, nil
+	}
+	serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(parsed.Hostname())
+	if !ok || serviceNamespace != namespace || reader == nil {
+		return nil, fmt.Errorf("deployment.transportSecurity %q requires a validated same-namespace Kubernetes Service", security)
+	}
+	service := &corev1.Service{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err != nil {
+		return nil, fmt.Errorf("read Service %q in namespace %q for pinned AgentRuntime dial: %w", serviceName, serviceNamespace, err)
+	}
+	if service.Spec.Type == corev1.ServiceTypeExternalName || len(service.Spec.Selector) == 0 {
+		return nil, fmt.Errorf("service %q is no longer a selector-backed non-ExternalName Service", serviceName)
+	}
+	servicePort, err := agentRuntimeServicePort(parsed, service)
+	if err != nil {
+		return nil, err
+	}
+	var pods corev1.PodList
+	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels(service.Spec.Selector)); err != nil {
+		return nil, fmt.Errorf("list Pods selected by AgentRuntime Service %q: %w", serviceName, err)
+	}
+	candidates := make([]agentRuntimeBackend, 0, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !agentRuntimePodReady(pod) || pod.UID == "" || strings.TrimSpace(pod.Name) == "" {
+			continue
+		}
+		podIP, ok := agentRuntimePodIPForService(pod, service)
+		if !ok {
+			continue
+		}
+		targetPort, ok := agentRuntimePodTargetPort(pod, servicePort)
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, agentRuntimeBackend{
+			PodName:     pod.Name,
+			PodUID:      string(pod.UID),
+			DialAddress: net.JoinHostPort(podIP.String(), strconv.Itoa(int(targetPort))),
+		})
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("AgentRuntime Service %q has no Ready selector-matched Pod with a resolvable target port", serviceName)
+	}
+	return candidates, nil
+}
+
+func agentRuntimePodIPForService(pod *corev1.Pod, service *corev1.Service) (net.IP, bool) {
+	ips := agentRuntimePodIPs(pod)
+	if len(ips) == 0 {
+		return nil, false
+	}
+	if service == nil || len(service.Spec.IPFamilies) == 0 {
+		return ips[0], true
+	}
+	for _, family := range service.Spec.IPFamilies {
+		for _, ip := range ips {
+			switch family {
+			case corev1.IPv4Protocol:
+				if ip.To4() != nil {
+					return ip, true
+				}
+			case corev1.IPv6Protocol:
+				if ip.To4() == nil {
+					return ip, true
+				}
 			}
 		}
 	}
-	return fmt.Errorf("deployment.endpoint must use https for non-local AgentRuntime endpoints")
+	return nil, false
+}
+
+func agentRuntimePodHasIP(pod *corev1.Pod, expected net.IP) bool {
+	if expected == nil {
+		return false
+	}
+	for _, ip := range agentRuntimePodIPs(pod) {
+		if ip.Equal(expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func agentRuntimePodIPs(pod *corev1.Pod) []net.IP {
+	if pod == nil {
+		return nil
+	}
+	values := make([]string, 0, len(pod.Status.PodIPs)+1)
+	for _, podIP := range pod.Status.PodIPs {
+		values = append(values, podIP.IP)
+	}
+	if len(values) == 0 && strings.TrimSpace(pod.Status.PodIP) != "" {
+		values = append(values, pod.Status.PodIP)
+	}
+	ips := make([]net.IP, 0, len(values))
+	for _, value := range values {
+		if ip := net.ParseIP(strings.TrimSpace(value)); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+	return ips
+}
+
+func agentRuntimeServicePort(endpoint *url.URL, service *corev1.Service) (*corev1.ServicePort, error) {
+	portNumber := 80
+	if endpoint.Port() != "" {
+		parsedPort, err := strconv.Atoi(endpoint.Port())
+		if err != nil || parsedPort < 1 || parsedPort > 65535 {
+			return nil, fmt.Errorf("deployment.endpoint has invalid port")
+		}
+		portNumber = parsedPort
+	}
+	for i := range service.Spec.Ports {
+		servicePort := &service.Spec.Ports[i]
+		if int(servicePort.Port) == portNumber && (servicePort.Protocol == "" || servicePort.Protocol == corev1.ProtocolTCP) {
+			return servicePort, nil
+		}
+	}
+	return nil, fmt.Errorf("AgentRuntime Service %q does not expose endpoint port %d over TCP", service.Name, portNumber)
+}
+
+func agentRuntimePodReady(pod *corev1.Pod) bool {
+	if pod == nil || !pod.DeletionTimestamp.IsZero() || pod.Spec.HostNetwork || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func agentRuntimePodTargetPort(pod *corev1.Pod, servicePort *corev1.ServicePort) (int32, bool) {
+	if pod == nil || servicePort == nil {
+		return 0, false
+	}
+	targetPort := servicePort.TargetPort
+	if targetPort.Type == intstr.Int {
+		if targetPort.IntVal > 0 {
+			return targetPort.IntVal, true
+		}
+		return servicePort.Port, servicePort.Port > 0
+	}
+	name := strings.TrimSpace(targetPort.StrVal)
+	if name == "" {
+		return servicePort.Port, servicePort.Port > 0
+	}
+	for _, container := range pod.Spec.Containers {
+		if port, ok := agentRuntimeNamedContainerPort(container, name); ok {
+			return port, true
+		}
+	}
+	for _, container := range pod.Spec.InitContainers {
+		if container.RestartPolicy == nil || *container.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			continue
+		}
+		if port, ok := agentRuntimeNamedContainerPort(container, name); ok {
+			return port, true
+		}
+	}
+	return 0, false
+}
+
+func agentRuntimeNamedContainerPort(container corev1.Container, name string) (int32, bool) {
+	for _, port := range container.Ports {
+		if port.Name == name && (port.Protocol == "" || port.Protocol == corev1.ProtocolTCP) && port.ContainerPort > 0 {
+			return port.ContainerPort, true
+		}
+	}
+	return 0, false
 }
 
 func isLoopbackAgentRuntimeEndpoint(host string) bool {
@@ -258,20 +769,76 @@ func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNam
 		return "", "", false
 	}
 	parts := strings.Split(host, ".")
-	switch {
-	case len(parts) == 2:
-		serviceName, serviceNamespace = parts[0], parts[1]
-	case len(parts) == 3 && parts[2] == k8sServiceDNSLabel:
-		serviceName, serviceNamespace = parts[0], parts[1]
-	case len(parts) == 5 && parts[2] == k8sServiceDNSLabel && parts[3] == k8sClusterDNSLabel && parts[4] == k8sLocalDNSLabel:
-		serviceName, serviceNamespace = parts[0], parts[1]
-	default:
+	clusterDomain := agentRuntimeClusterDomain()
+	if clusterDomain == "" {
 		return "", "", false
 	}
+	clusterDomainParts := strings.Split(clusterDomain, ".")
+	if len(parts) != 3+len(clusterDomainParts) || parts[2] != k8sServiceDNSLabel || !slices.Equal(parts[3:], clusterDomainParts) {
+		return "", "", false
+	}
+	serviceName, serviceNamespace = parts[0], parts[1]
 	if serviceName == "" || serviceNamespace == "" {
 		return "", "", false
 	}
 	return serviceName, serviceNamespace, true
+}
+
+func agentRuntimeClusterDomain() string {
+	if override := strings.Trim(strings.ToLower(strings.TrimSpace(agentRuntimeClusterDomainForTests)), "."); override != "" {
+		return override
+	}
+	agentRuntimeClusterDomainOnce.Do(func() {
+		agentRuntimeClusterDomainValue = discoverAgentRuntimeClusterDomain("/etc/resolv.conf")
+	})
+	return agentRuntimeClusterDomainValue
+}
+
+func discoverAgentRuntimeClusterDomain(resolvConfPath string) string {
+	data, err := os.ReadFile(resolvConfPath)
+	if err == nil {
+		matches := map[string]struct{}{}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 || fields[0] != "search" {
+				continue
+			}
+			searchDomains := make([]string, 0, len(fields)-1)
+			for _, domain := range fields[1:] {
+				domain = strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+				if domain != "" {
+					searchDomains = append(searchDomains, domain)
+				}
+			}
+			for clusterDomain := range clusterDomainsFromSearchDomains(searchDomains) {
+				matches[clusterDomain] = struct{}{}
+			}
+		}
+		if len(matches) == 1 {
+			for clusterDomain := range matches {
+				return clusterDomain
+			}
+		}
+	}
+	return ""
+}
+
+func clusterDomainsFromSearchDomains(searchDomains []string) map[string]struct{} {
+	matches := map[string]struct{}{}
+	for i := 0; i+2 < len(searchDomains); i++ {
+		namespaceDomain := searchDomains[i]
+		serviceDomain := searchDomains[i+1]
+		clusterDomain := searchDomains[i+2]
+		if serviceDomain != k8sServiceDNSLabel+"."+clusterDomain {
+			continue
+		}
+		namespace, ok := strings.CutSuffix(namespaceDomain, "."+serviceDomain)
+		if !ok || namespace == "" || strings.Contains(namespace, ".") {
+			continue
+		}
+		matches[clusterDomain] = struct{}{}
+	}
+	return matches
 }
 
 func validateAgentRuntimeBearerSecretUse(runtimeName string, endpoint string, secret *corev1.Secret) error {
@@ -299,7 +866,11 @@ func validateAgentRuntimeBearerSecretUse(runtimeName string, endpoint string, se
 func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, string, error) {
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: runtime.Namespace, Name: ref.Name}, secret); err != nil {
+	reader := r.apiReader()
+	if reader == nil {
+		return "", "", fmt.Errorf("kubernetes API reader is required to resolve AgentRuntime %q bearer token", runtime.Name)
+	}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: runtime.Namespace, Name: ref.Name}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", "", fmt.Errorf("bearer token Secret %q not found", ref.Name)
 		}
@@ -534,6 +1105,9 @@ func sanitizeAgentRuntimeCapabilityValue(value string) string {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.AgentRuntime{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).

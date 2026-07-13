@@ -26,6 +26,18 @@ const (
 	AgentRuntimeDeploymentModeExternalEndpoint AgentRuntimeDeploymentMode = "external-endpoint"
 )
 
+// AgentRuntimeTransportSecurity declares how Orka secures the connection to an AgentRuntime endpoint.
+// +kubebuilder:validation:Enum=tls;insecure-cluster-local-http
+type AgentRuntimeTransportSecurity string
+
+const (
+	// AgentRuntimeTransportSecurityTLS requires an HTTPS AgentRuntime endpoint.
+	AgentRuntimeTransportSecurityTLS AgentRuntimeTransportSecurity = "tls"
+	// AgentRuntimeTransportSecurityInsecureClusterLocalHTTP permits HTTP only for a selector-backed,
+	// non-ExternalName Service in the same namespace as the AgentRuntime.
+	AgentRuntimeTransportSecurityInsecureClusterLocalHTTP AgentRuntimeTransportSecurity = "insecure-cluster-local-http"
+)
+
 // AgentRuntimeToolExecutionMode declares how custom runtimes interact with tools.
 // +kubebuilder:validation:Enum=observed;brokered
 type AgentRuntimeToolExecutionMode string
@@ -58,6 +70,8 @@ type AgentRuntimeReference struct {
 }
 
 // AgentRuntimeDeploymentSpec configures where Orka reaches the harness runtime.
+// +kubebuilder:validation:XValidation:rule="self.transportSecurity != 'tls' || self.endpoint.startsWith('https://')",message="deployment.endpoint must use https when transportSecurity is tls"
+// +kubebuilder:validation:XValidation:rule="self.transportSecurity != 'insecure-cluster-local-http' || self.endpoint.startsWith('http://')",message="deployment.endpoint must use http when transportSecurity is insecure-cluster-local-http"
 type AgentRuntimeDeploymentSpec struct {
 	// Mode is the deployment mode. The first milestone supports external endpoints only.
 	// +kubebuilder:validation:Required
@@ -68,6 +82,14 @@ type AgentRuntimeDeploymentSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^https?://[^\s@?#]+$`
 	Endpoint string `json:"endpoint"`
+
+	// TransportSecurity declares the required endpoint transport. It defaults to TLS.
+	// insecure-cluster-local-http is an explicit opt-in limited to a selector-backed,
+	// non-ExternalName Service in the same namespace as the AgentRuntime, addressed
+	// with its service.namespace.svc.<cluster-domain> FQDN.
+	// +kubebuilder:default=tls
+	// +optional
+	TransportSecurity AgentRuntimeTransportSecurity `json:"transportSecurity,omitempty"`
 }
 
 // AgentRuntimeBearerAuthReference identifies the Secret key holding a harness bearer token.

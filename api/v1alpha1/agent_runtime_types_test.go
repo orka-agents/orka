@@ -378,8 +378,9 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 		Spec: AgentRuntimeRegistrySpec{
 			ContractVersion: AgentRuntimeContractHarnessV1,
 			Deployment: AgentRuntimeDeploymentSpec{
-				Mode:     AgentRuntimeDeploymentModeExternalEndpoint,
-				Endpoint: "http://fibey-agentkit.default.svc.cluster.local:8080",
+				Mode:              AgentRuntimeDeploymentModeExternalEndpoint,
+				Endpoint:          "http://fibey-agentkit.default.svc.cluster.local:8080",
+				TransportSecurity: AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
 			},
 			ClientAuth: AgentRuntimeClientAuth{BearerAuthRef: AgentRuntimeBearerAuthReference{
 				Name: "fibey-agentkit-harness-token",
@@ -398,6 +399,9 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 	}
 	if runtime.Spec.Deployment.Mode != AgentRuntimeDeploymentModeExternalEndpoint {
 		t.Fatalf("Deployment.Mode = %q", runtime.Spec.Deployment.Mode)
+	}
+	if runtime.Spec.Deployment.TransportSecurity != AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("Deployment.TransportSecurity = %q", runtime.Spec.Deployment.TransportSecurity)
 	}
 	if runtime.Spec.ClientAuth.BearerAuthRef.Name != "fibey-agentkit-harness-token" {
 		t.Fatalf("BearerAuthRef.Name = %q", runtime.Spec.ClientAuth.BearerAuthRef.Name)

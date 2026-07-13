@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path"
 	"slices"
@@ -57,6 +58,7 @@ const (
 	harnessWrapperCorrelationIDAnno           = "orka.ai/harness-wrapper-correlation-id"
 	harnessWrapperLastFrameSeqAnno            = "orka.ai/harness-wrapper-last-frame-seq"
 	harnessWrapperStartedAnno                 = "orka.ai/harness-wrapper-started"
+	harnessWrapperStartAttemptedAnno          = "orka.ai/harness-wrapper-start-attempted"
 	harnessWrapperPlannedAtAnno               = "orka.ai/harness-wrapper-planned-at"
 	harnessWrapperMetadataAnno                = "orka.ai/harness-wrapper-metadata"
 	harnessWrapperRuntimeRefAnno              = "orka.ai/harness-wrapper-runtime-ref"
@@ -83,6 +85,14 @@ func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
 	}
 	return strings.EqualFold(strings.TrimSpace(task.Annotations[harnessWrapperStartedAnno]), scheduledRunLabelValue) &&
 		taskHasPlannedHarnessWrapperTurn(task)
+}
+
+func taskHasHarnessWrapperStartAttempt(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	turnID := strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation])
+	return turnID != "" && strings.TrimSpace(task.Annotations[harnessWrapperStartAttemptedAnno]) == turnID
 }
 
 func taskHasPlannedHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -118,6 +128,10 @@ func harnessWrapperAuthValue() string {
 
 type harnessRuntimeTarget struct {
 	Endpoint               string
+	TransportSecurity      corev1alpha1.AgentRuntimeTransportSecurity
+	DialAddress            string
+	BackendPodName         string
+	BackendPodUID          string
 	BearerToken            string
 	RuntimeName            string
 	RuntimeRefName         string
@@ -198,6 +212,10 @@ func harnessRuntimeTargetFromStatus(task *corev1alpha1.Task) (harnessRuntimeTarg
 	}
 	return harnessRuntimeTarget{
 		Endpoint:               strings.TrimSpace(status.Endpoint),
+		TransportSecurity:      status.TransportSecurity,
+		DialAddress:            strings.TrimSpace(status.BackendAddress),
+		BackendPodName:         strings.TrimSpace(status.BackendPodName),
+		BackendPodUID:          strings.TrimSpace(status.BackendPodUID),
 		RuntimeName:            runtimeName,
 		RuntimeRefName:         strings.TrimSpace(status.RuntimeRefName),
 		ContractVersion:        contract,
@@ -234,6 +252,10 @@ func harnessRuntimeStatusFromTarget(target harnessRuntimeTarget) *corev1alpha1.H
 		RuntimeName:            target.RuntimeName,
 		ContractVersion:        target.ContractVersion,
 		Endpoint:               target.Endpoint,
+		TransportSecurity:      effectiveAgentRuntimeTransportSecurity(target.TransportSecurity),
+		BackendPodName:         target.BackendPodName,
+		BackendPodUID:          target.BackendPodUID,
+		BackendAddress:         target.DialAddress,
 		RuntimeGeneration:      target.Generation,
 		AuthRefName:            target.AuthRefName,
 		AuthRefField:           target.AuthRefField,
@@ -258,6 +280,28 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 ) (harnessRuntimeTarget, error) {
 	if taskHasPlannedHarnessWrapperTurn(task) {
 		if frozen, ok := harnessRuntimeTargetFromStatus(task); ok {
+			// harnessRuntimeTargetFromStatus only returns registered AgentRuntime targets;
+			// built-in CLI wrapper turns never freeze HarnessRuntime status.
+			migrated, backfilled, err := r.resolveFrozenAgentRuntimeTarget(ctx, task, frozen)
+			if err != nil {
+				return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
+			}
+			frozen = migrated
+			requiresPinnedBackend := agentRuntimeTransportRequiresPinnedBackend(frozen.Endpoint, frozen.TransportSecurity)
+			expectedBackend, hasBackend := agentRuntimeBackendFromTarget(frozen)
+			if err := validateAgentRuntimeTransportPolicy(ctx, r.agentRuntimeDispatchReader(), task.Namespace, frozen.Endpoint, frozen.TransportSecurity); err != nil {
+				if requiresPinnedBackend && hasBackend {
+					if _, identityErr := validateAgentRuntimePinnedPodIdentity(
+						ctx,
+						r.agentRuntimeDispatchReader(),
+						task.Namespace,
+						expectedBackend,
+					); errors.Is(identityErr, errAgentRuntimePinnedBackendLost) {
+						return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q pinned backend was lost and the turn cannot be safely resumed: %w", frozen.RuntimeRefName, identityErr)
+					}
+				}
+				return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
+			}
 			token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerTokenFromRef(ctx, task.Namespace, frozen.RuntimeRefName, frozen.Endpoint, frozen.AuthRefName, frozen.AuthRefField)
 			if err != nil {
 				return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
@@ -269,6 +313,53 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 			}
 			frozen.BearerToken = token
 			frozen.AuthRefResourceVersion = authRefResourceVersion
+			statusChanged := backfilled
+			if requiresPinnedBackend {
+				turnMayHaveStarted, startStateErr := r.harnessWrapperTurnMayHaveStarted(ctx, task)
+				if startStateErr != nil {
+					return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q start recovery state is unavailable: %v", frozen.RuntimeRefName, startStateErr)}
+				}
+				var backend agentRuntimeBackend
+				if hasBackend {
+					backend, err = validateAgentRuntimeInsecureBackend(
+						ctx,
+						r.agentRuntimeDispatchReader(),
+						task.Namespace,
+						frozen.Endpoint,
+						frozen.TransportSecurity,
+						expectedBackend,
+						!turnMayHaveStarted,
+					)
+					if err != nil {
+						if errors.Is(err, errAgentRuntimePinnedBackendLost) {
+							return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q pinned backend was lost and the turn cannot be safely resumed: %w", frozen.RuntimeRefName, err)
+						}
+						return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
+					}
+				} else {
+					if turnMayHaveStarted {
+						return harnessRuntimeTarget{}, fmt.Errorf("started legacy insecure AgentRuntime turn %q has no pinned backend identity and cannot be safely resumed", frozen.RuntimeRefName)
+					}
+					backend, err = resolveAgentRuntimeInsecureBackend(
+						ctx,
+						r.agentRuntimeDispatchReader(),
+						task.Namespace,
+						frozen.Endpoint,
+						frozen.TransportSecurity,
+						agentRuntimeTaskBackendSelectionKey(task, frozen.RuntimeRefName),
+					)
+					if err != nil {
+						return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", frozen.RuntimeRefName, err)}
+					}
+					statusChanged = true
+				}
+				applyAgentRuntimeBackendToTarget(&frozen, backend)
+			}
+			if statusChanged {
+				if err := r.patchHarnessRuntimeStatus(ctx, task, frozen); err != nil {
+					return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q frozen runtime status could not be persisted: %v", frozen.RuntimeRefName, err)}
+				}
+			}
 			return frozen, nil
 		}
 	}
@@ -289,6 +380,126 @@ func (r *TaskReconciler) resolveHarnessRuntimeTarget(
 	return r.resolveReadyAgentRuntimeTarget(ctx, task, runtimeRefName)
 }
 
+func (r *TaskReconciler) agentRuntimeDispatchReader() ctrlclient.Reader {
+	if r != nil && r.APIReader != nil {
+		return r.APIReader
+	}
+	if r == nil {
+		return nil
+	}
+	return r.Client
+}
+
+func (r *TaskReconciler) resolveFrozenAgentRuntimeTarget(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	target harnessRuntimeTarget,
+) (harnessRuntimeTarget, bool, error) {
+	if target.TransportSecurity != "" {
+		target.TransportSecurity = effectiveAgentRuntimeTransportSecurity(target.TransportSecurity)
+		return target, false, nil
+	}
+	if _, security, err := validateAgentRuntimeTransportSecurity(target.Endpoint, corev1alpha1.AgentRuntimeTransportSecurityTLS); err == nil {
+		target.TransportSecurity = security
+		return target, true, nil
+	}
+	if _, _, err := validateAgentRuntimeTransportSecurity(target.Endpoint, corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP); err != nil {
+		return harnessRuntimeTarget{}, false, err
+	}
+	if task == nil {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("task is required to migrate legacy AgentRuntime transport security")
+	}
+	reader := r.agentRuntimeDispatchReader()
+	if reader == nil {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("kubernetes API reader is required to migrate legacy AgentRuntime transport security")
+	}
+	runtime := &corev1alpha1.AgentRuntime{}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: target.RuntimeRefName}, runtime); err != nil {
+		if apierrors.IsNotFound(err) {
+			return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires AgentRuntime %q to exist with explicit insecure-cluster-local-http transport opt-in", target.RuntimeRefName)
+		}
+		return harnessRuntimeTarget{}, false, fmt.Errorf("read AgentRuntime %q for legacy transport migration: %w", target.RuntimeRefName, err)
+	}
+	ref := runtime.Spec.ClientAuth.BearerAuthRef
+	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint ||
+		runtime.Spec.Deployment.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP ||
+		strings.TrimSpace(ref.Name) != target.AuthRefName || strings.TrimSpace(ref.Key) != target.AuthRefField {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires current AgentRuntime %q to match the frozen endpoint and auth reference with explicit insecure-cluster-local-http transport opt-in", target.RuntimeRefName)
+	}
+	if runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires current AgentRuntime %q to be Ready at generation %d", target.RuntimeRefName, runtime.Generation)
+	}
+	currentEndpoint := strings.TrimSpace(runtime.Spec.Deployment.Endpoint)
+	if !legacyFrozenAgentRuntimeEndpointMatches(target.Endpoint, currentEndpoint, task.Namespace) {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires current AgentRuntime %q to reference the same Service, port, and path as the frozen endpoint", target.RuntimeRefName)
+	}
+	target.Endpoint = currentEndpoint
+	target.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+	return target, true, nil
+}
+
+func legacyFrozenAgentRuntimeEndpointMatches(frozenEndpoint, currentEndpoint, namespace string) bool {
+	frozen, _, err := validateAgentRuntimeTransportSecurity(frozenEndpoint, corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP)
+	if err != nil || frozen.User != nil || frozen.RawQuery != "" || frozen.Fragment != "" {
+		return false
+	}
+	current, _, err := validateAgentRuntimeTransportSecurity(currentEndpoint, corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP)
+	if err != nil || current.User != nil || current.RawQuery != "" || current.Fragment != "" {
+		return false
+	}
+	frozenService, frozenNamespace, ok := parseLegacyAgentRuntimeServiceNamespaceHost(frozen.Hostname())
+	if !ok || frozenNamespace != namespace {
+		return false
+	}
+	currentService, currentNamespace, ok := parseAgentRuntimeServiceNamespaceHost(current.Hostname())
+	return ok && currentNamespace == namespace && currentService == frozenService &&
+		agentRuntimeEffectiveURLPort(current) == agentRuntimeEffectiveURLPort(frozen) &&
+		agentRuntimeNormalizedURLPath(current) == agentRuntimeNormalizedURLPath(frozen)
+}
+
+func agentRuntimeEffectiveURLPort(endpoint *url.URL) string {
+	if endpoint == nil {
+		return ""
+	}
+	if port := endpoint.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(endpoint.Scheme) {
+	case urlSchemeHTTP:
+		return "80"
+	case urlSchemeHTTPS:
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func agentRuntimeNormalizedURLPath(endpoint *url.URL) string {
+	if endpoint == nil {
+		return ""
+	}
+	if escapedPath := endpoint.EscapedPath(); escapedPath != "" {
+		return escapedPath
+	}
+	return "/"
+}
+
+func parseLegacyAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNamespace string, ok bool) {
+	if serviceName, serviceNamespace, ok = parseAgentRuntimeServiceNamespaceHost(host); ok {
+		return serviceName, serviceNamespace, true
+	}
+	parts := strings.Split(strings.Trim(strings.ToLower(strings.TrimSpace(host)), "."), ".")
+	switch {
+	case len(parts) == 2:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	case len(parts) == 3 && parts[2] == k8sServiceDNSLabel:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	default:
+		return "", "", false
+	}
+	return serviceName, serviceNamespace, serviceName != "" && serviceNamespace != ""
+}
+
 func (r *TaskReconciler) validateFrozenRuntimeAuthObserved(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -299,7 +510,11 @@ func (r *TaskReconciler) validateFrozenRuntimeAuthObserved(
 		return fmt.Errorf("task is required to validate runtimeRef %q", runtimeRefName)
 	}
 	runtime := &corev1alpha1.AgentRuntime{}
-	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: runtimeRefName}, runtime); err != nil {
+	reader := r.agentRuntimeDispatchReader()
+	if reader == nil {
+		return fmt.Errorf("kubernetes API reader is required to validate AgentRuntime %q", runtimeRefName)
+	}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: runtimeRefName}, runtime); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("AgentRuntime %q not found in namespace %q", runtimeRefName, task.Namespace)
 		}
@@ -330,7 +545,11 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 		return harnessRuntimeTarget{}, fmt.Errorf("task is required to resolve runtimeRef %q", runtimeRefName)
 	}
 	runtime := &corev1alpha1.AgentRuntime{}
-	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: runtimeRefName}, runtime); err != nil {
+	reader := r.agentRuntimeDispatchReader()
+	if reader == nil {
+		return harnessRuntimeTarget{}, fmt.Errorf("kubernetes API reader is required to resolve AgentRuntime %q", runtimeRefName)
+	}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: runtimeRefName}, runtime); err != nil {
 		if apierrors.IsNotFound(err) {
 			return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q not found in namespace %q", runtimeRefName, task.Namespace)
 		}
@@ -352,6 +571,15 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
 		return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q has unsupported deployment.mode %q", runtimeRefName, runtime.Spec.Deployment.Mode)
 	}
+	if err := validateAgentRuntimeTransportPolicy(
+		ctx,
+		reader,
+		runtime.Namespace,
+		runtime.Spec.Deployment.Endpoint,
+		runtime.Spec.Deployment.TransportSecurity,
+	); err != nil {
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", runtimeRefName, err)}
+	}
 	token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerToken(ctx, runtime)
 	if err != nil {
 		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", runtimeRefName, err)}
@@ -364,8 +592,9 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 	if runtime.Status.ObservedCapabilities != nil && strings.TrimSpace(runtime.Status.ObservedCapabilities.RuntimeName) != "" {
 		runtimeName = strings.TrimSpace(runtime.Status.ObservedCapabilities.RuntimeName)
 	}
-	return harnessRuntimeTarget{
+	target := harnessRuntimeTarget{
 		Endpoint:               strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
+		TransportSecurity:      effectiveAgentRuntimeTransportSecurity(runtime.Spec.Deployment.TransportSecurity),
 		BearerToken:            token,
 		RuntimeName:            runtimeName,
 		RuntimeRefName:         runtimeRefName,
@@ -388,7 +617,73 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 			return append([]corev1alpha1.AgentRuntimeBrokeredToolClass(nil), runtime.Status.ObservedCapabilities.BrokeredToolClasses...)
 		}(),
 		SupportsContinuation: runtime.Status.ObservedCapabilities != nil && runtime.Status.ObservedCapabilities.SupportsContinuation,
-	}, nil
+	}
+	backend, err := resolveAgentRuntimeInsecureBackend(
+		ctx,
+		reader,
+		task.Namespace,
+		target.Endpoint,
+		target.TransportSecurity,
+		agentRuntimeTaskBackendSelectionKey(task, runtimeRefName),
+	)
+	if err != nil {
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", runtimeRefName, err)}
+	}
+	applyAgentRuntimeBackendToTarget(&target, backend)
+	return target, nil
+}
+
+func agentRuntimeTaskBackendSelectionKey(task *corev1alpha1.Task, runtimeRefName string) string {
+	if task == nil {
+		return strings.TrimSpace(runtimeRefName)
+	}
+	if task.Annotations != nil {
+		if runtimeSessionID := strings.TrimSpace(task.Annotations[harnessWrapperRuntimeAnnotation]); runtimeSessionID != "" {
+			return runtimeSessionID
+		}
+	}
+	return string(harnessWrapperRuntimeSessionID(task, strings.TrimSpace(runtimeRefName)))
+}
+
+func agentRuntimeBackendFromTarget(target harnessRuntimeTarget) (agentRuntimeBackend, bool) {
+	backend := agentRuntimeBackend{
+		PodName:     strings.TrimSpace(target.BackendPodName),
+		PodUID:      strings.TrimSpace(target.BackendPodUID),
+		DialAddress: strings.TrimSpace(target.DialAddress),
+	}
+	return backend, backend.PodName != "" && backend.PodUID != "" && backend.DialAddress != ""
+}
+
+func applyAgentRuntimeBackendToTarget(target *harnessRuntimeTarget, backend agentRuntimeBackend) {
+	if target == nil {
+		return
+	}
+	target.BackendPodName = backend.PodName
+	target.BackendPodUID = backend.PodUID
+	target.DialAddress = backend.DialAddress
+}
+
+func newHarnessClientForRuntimeTarget(target harnessRuntimeTarget) (*harness.Client, error) {
+	opts := []harness.ClientOption{harness.WithBearerToken(target.BearerToken)}
+	requestEndpoint := target.Endpoint
+	if target.RuntimeRefName != "" {
+		var err error
+		requestEndpoint, target.TransportSecurity, err = agentRuntimeRequestEndpoint(target.Endpoint, target.TransportSecurity)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, harness.WithPublicDiscovery())
+		insecureHTTP := target.TransportSecurity == corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+		httpClient := harness.NewAgentRuntimeHTTPClient(insecureHTTP)
+		if insecureHTTP && target.DialAddress != "" {
+			httpClient, err = harness.NewPinnedAgentRuntimeHTTPClient(target.DialAddress)
+			if err != nil {
+				return nil, err
+			}
+		}
+		opts = append(opts, harness.WithHTTPClient(httpClient))
+	}
+	return harness.NewClient(requestEndpoint, opts...)
 }
 
 func (r *TaskReconciler) resolveAgentRuntimeBearerToken(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (string, string, error) {
@@ -410,7 +705,11 @@ func (r *TaskReconciler) resolveAgentRuntimeBearerTokenFromRef(
 	refName = strings.TrimSpace(refName)
 	refField = strings.TrimSpace(refField)
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: refName}, secret); err != nil {
+	reader := r.agentRuntimeDispatchReader()
+	if reader == nil {
+		return "", "", fmt.Errorf("kubernetes API reader is required to resolve AgentRuntime %q bearer token", runtimeName)
+	}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: refName}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", "", fmt.Errorf("AgentRuntime %q bearer token Secret %q not found", runtimeName, refName)
 		}
@@ -472,6 +771,14 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 			return r.failTask(ctx, task, events.RedactExecutionEventText(err.Error()))
 		}
+		if target.RuntimeRefName != "" {
+			if _, frozen := harnessRuntimeTargetFromStatus(task); !frozen {
+				if err := r.patchHarnessRuntimeStatus(ctx, task, target); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+			}
+		}
 	} else {
 		request, err = r.harnessWrapperStartTurnRequest(ctx, task, agent, now.Time, attempts)
 		if err != nil {
@@ -522,7 +829,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			}
 			request.Metadata = harnessWrapperApplyRuntimeTargetMetadata(request.Metadata, target)
 		}
-		client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
+		client, err := newHarnessClientForRuntimeTarget(target)
 		if err != nil {
 			return r.failTask(ctx, task, fmt.Sprintf("invalid harness runtime endpoint: %v", err))
 		}
@@ -551,6 +858,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 					return ctrl.Result{RequeueAfter: time.Second}, nil
 				}
 				return r.failTask(ctx, task, err.Error())
+			}
+			if !taskHasHarnessWrapperStartAttempt(task) {
+				if err := r.patchHarnessWrapperStartAttempt(ctx, task, request.TurnID); err != nil {
+					return ctrl.Result{}, err
+				}
 			}
 			if _, err := client.StartTurn(ctx, request); err != nil {
 				message := err.Error()
@@ -671,6 +983,20 @@ func (r *TaskReconciler) harnessWrapperTurnJournal(ctx context.Context, task *co
 	return journal
 }
 
+func (r *TaskReconciler) harnessWrapperTurnMayHaveStarted(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if taskHasHarnessWrapperTurn(task) || taskHasHarnessWrapperStartAttempt(task) {
+		return true, nil
+	}
+	if r == nil || r.ExecutionEventStore == nil || task == nil || task.Annotations == nil {
+		return false, nil
+	}
+	turnID := harness.HarnessTurnID(strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]))
+	if turnID == "" {
+		return false, nil
+	}
+	return r.harnessWrapperTurnJournal(ctx, task).HasPersistedFrames(ctx, turnID)
+}
+
 //nolint:gocyclo // Handles stream polling, event mapping, and terminal task classification in one reconcile step.
 func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -700,7 +1026,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 	if !harnessWrapperTurnAnnotationsMatchTaskAttempt(task, harnessWrapperCurrentAttempt(task)) {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn identity does not match task")
 	}
-	client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
+	client, err := newHarnessClientForRuntimeTarget(target)
 	if err != nil {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("invalid harness runtime endpoint: %v", err))
 	}
@@ -1191,6 +1517,7 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperStartedAnno] = "false"
 	task.Annotations[harnessWrapperPlannedAtAnno] = time.Now().UTC().Format(time.RFC3339Nano)
+	delete(task.Annotations, harnessWrapperStartAttemptedAnno)
 	delete(task.Annotations, harnessWrapperCancellationAnno)
 	delete(task.Annotations, harnessWrapperCancelDependencyRetriesAnno)
 	delete(task.Annotations, labels.AnnotationHarnessTurnOutcomeUnknown)
@@ -1218,6 +1545,29 @@ func (r *TaskReconciler) patchHarnessWrapperPlannedTurn(
 		return err
 	}
 	task.Annotations[harnessWrapperMetadataAnno] = string(metadata)
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) patchHarnessWrapperStartAttempt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	turnID harness.HarnessTurnID,
+) error {
+	if task == nil {
+		return fmt.Errorf("task is required to persist harness start attempt")
+	}
+	value := strings.TrimSpace(string(turnID))
+	if value == "" {
+		return fmt.Errorf("turn ID is required to persist harness start attempt")
+	}
+	if taskHasHarnessWrapperStartAttempt(task) {
+		return nil
+	}
+	if task.Annotations == nil || strings.TrimSpace(task.Annotations[harnessWrapperTurnIDAnnotation]) != value {
+		return fmt.Errorf("harness start attempt does not match planned turn")
+	}
+	patch := ctrlclient.MergeFrom(task.DeepCopy())
+	task.Annotations[harnessWrapperStartAttemptedAnno] = value
 	return r.Patch(ctx, task, patch)
 }
 
@@ -1279,6 +1629,7 @@ func (r *TaskReconciler) patchHarnessWrapperStarted(ctx context.Context, task *c
 		}
 	}
 	latest.Annotations[harnessWrapperStartedAnno] = scheduledRunLabelValue
+	delete(latest.Annotations, harnessWrapperStartAttemptedAnno)
 	if err := r.Patch(ctx, latest, patch); err != nil {
 		return err
 	}
@@ -1646,6 +1997,7 @@ func (r *TaskReconciler) clearHarnessWrapperTurnState(ctx context.Context, task 
 		delete(task.Annotations, harnessWrapperCorrelationIDAnno)
 		delete(task.Annotations, harnessWrapperLastFrameSeqAnno)
 		delete(task.Annotations, harnessWrapperStartedAnno)
+		delete(task.Annotations, harnessWrapperStartAttemptedAnno)
 		delete(task.Annotations, harnessWrapperPlannedAtAnno)
 		delete(task.Annotations, harnessWrapperMetadataAnno)
 		delete(task.Annotations, harnessWrapperRuntimeRefAnno)
@@ -1728,7 +2080,7 @@ func (r *TaskReconciler) cancelHarnessWrapperTurnOnce(
 	if err != nil {
 		return harnessWrapperCancelPending, err
 	}
-	client, err := harness.NewClient(target.Endpoint, harness.WithBearerToken(target.BearerToken))
+	client, err := newHarnessClientForRuntimeTarget(target)
 	if err != nil {
 		return harnessWrapperCancelPending, err
 	}

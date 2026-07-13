@@ -150,10 +150,29 @@ spec:
                     enum:
                     - external-endpoint
                     type: string
+                  transportSecurity:
+                    default: tls
+                    description: |-
+                      TransportSecurity declares the required endpoint transport. It defaults to TLS.
+                      insecure-cluster-local-http is an explicit opt-in limited to a selector-backed,
+                      non-ExternalName Service in the same namespace as the AgentRuntime, addressed
+                      with its service.namespace.svc.<cluster-domain> FQDN.
+                    enum:
+                    - tls
+                    - insecure-cluster-local-http
+                    type: string
                 required:
                 - endpoint
                 - mode
                 type: object
+                x-kubernetes-validations:
+                - message: deployment.endpoint must use https when transportSecurity
+                    is tls
+                  rule: self.transportSecurity != 'tls' || self.endpoint.startsWith('https://')
+                - message: deployment.endpoint must use http when transportSecurity
+                    is insecure-cluster-local-http
+                  rule: self.transportSecurity != 'insecure-cluster-local-http' ||
+                    self.endpoint.startsWith('http://')
             required:
             - clientAuth
             - contractVersion

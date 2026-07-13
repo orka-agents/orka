@@ -2061,6 +2061,17 @@ spec:
                     description: AuthRefResourceVersion is the auth Secret resourceVersion
                       validated before starting the turn.
                     type: string
+                  backendAddress:
+                    description: BackendAddress is the non-secret Pod IP and target
+                      port pinned for the turn.
+                    type: string
+                  backendPodName:
+                    description: BackendPodName is the selector-matched Pod chosen
+                      for an insecure cluster-local HTTP turn.
+                    type: string
+                  backendPodUID:
+                    description: BackendPodUID is the immutable UID of BackendPodName.
+                    type: string
                   contractVersion:
                     description: ContractVersion is the Orka harness contract version
                       used for the turn.
@@ -2081,6 +2092,14 @@ spec:
                   runtimeRefName:
                     description: RuntimeRefName is the AgentRuntime name for custom
                       runtimeRef turns. Empty means built-in CLI wrapper.
+                    type: string
+                  transportSecurity:
+                    description: |-
+                      TransportSecurity is the AgentRuntime transport policy selected when the turn started.
+                      Empty is interpreted as tls for compatibility with tasks created before this field existed.
+                    enum:
+                    - tls
+                    - insecure-cluster-local-http
                     type: string
                 type: object
               iteration:

@@ -17,7 +17,7 @@ Orka Task
 - **AgentRuntime**: the Orka-facing CRD and protocol contract.
 - **Remote execution backend**: the workload runtime or adapter behind the facade.
 - **Brokered governance**: remote runtimes request tools; Orka authorizes and executes them.
-- **Namespace-local facade**: the `AgentRuntime`, `Agent`, `Task`, and `Tool` objects used by a workflow live in the workflow namespace. The endpoint may route to a Service elsewhere.
+- **Namespace-local facade**: the `AgentRuntime`, `Agent`, `Task`, and `Tool` objects used by a workflow live in the workflow namespace. TLS endpoints may be external. Insecure HTTP endpoints must name a selector-backed, non-`ExternalName` Service in that same namespace.
 
 ## Minimal runtime facade
 
@@ -34,6 +34,7 @@ spec:
   deployment:
     mode: external-endpoint
     endpoint: http://agentkit-runtime.default.svc.cluster.local:8080
+    transportSecurity: insecure-cluster-local-http
   clientAuth:
     bearerTokenSecretRef:
       name: agentkit-runtime-token
@@ -43,6 +44,14 @@ spec:
     supportsCancel: true
     supportsRuntimeSessions: true
 ```
+
+Transport security defaults to `tls`; omit `transportSecurity` only when the
+endpoint is `https://`. The explicit insecure mode above is accepted only for a
+same-namespace Kubernetes Service with a non-empty selector. Direct IPs,
+cross-namespace Services, selectorless Services, and `ExternalName` Services are
+rejected. Use the unambiguous
+`service.namespace.svc.<cluster-domain>` Service FQDN shown above (`cluster.local`
+is the Kubernetes default).
 
 The checked-in AgentKit Serve facades report lifecycle/output frames for
 AgentKit-owned observed runs. Do not add `brokeredToolClasses` or
@@ -62,6 +71,7 @@ spec:
   deployment:
     mode: external-endpoint
     endpoint: http://support-http-runtime.default.svc.cluster.local:8080
+    transportSecurity: insecure-cluster-local-http
   clientAuth:
     bearerTokenSecretRef:
       name: support-http-runtime-token

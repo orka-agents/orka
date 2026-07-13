@@ -25,6 +25,15 @@ CRDs will not create them. Migrate the CRDs from the **exact packaged target
 chart** and wait for all nine to become `Established` before upgrading the
 release.
 
+This migration is mandatory for controller versions that add AgentRuntime
+transport policy or frozen backend identity. Before the controller rollout,
+the live `agentruntimes.core.orka.ai` schema must accept
+`spec.deployment.transportSecurity`, and the live `tasks.core.orka.ai` schema
+must accept `status.harnessRuntime.transportSecurity`, `backendPodName`,
+`backendPodUID`, and `backendAddress`. The guarded `upgrade-crds` command below
+applies and verifies those schemas from the same packaged chart used for the
+release upgrade.
+
 The migration helper requires Bash, Helm, `kubectl`, `jq`, `tar`, `base64`,
 `gzip`, and either `sha256sum` or `shasum`. It supports Helm's standard
 `secret` storage driver (the default) and the `configmap` driver when
