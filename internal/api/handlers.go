@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -1081,6 +1082,9 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	}
 	if pageLimit > MaxLimit {
 		pageLimit = MaxLimit
+	}
+	if pageLimit > math.MaxInt {
+		return fiber.NewError(fiber.StatusBadRequest, "limit exceeds the supported integer range")
 	}
 	pageSize := int(pageLimit)
 	toolItems := make([]fiber.Map, 0, pageSize)
