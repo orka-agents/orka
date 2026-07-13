@@ -90,6 +90,24 @@ expect_verifier_failure() {
   rm -f "$out_file" "$err_file"
 }
 
+live_smoke_err="$(mktemp)"
+set +e
+ORKA_FOUNDRY_RESPONSES_ENDPOINT="https://:443/agents/test/endpoint/protocols/openai/responses" \
+  ORKA_FOUNDRY_RESPONSES_PROJECT_ENDPOINT="" \
+  ORKA_FOUNDRY_RESPONSES_AGENT_NAME="" \
+  ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
+  ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
+  examples/harness/foundry-responses/live-smoke.sh >/dev/null 2>"$live_smoke_err"
+live_smoke_code=$?
+set -e
+if [[ "$live_smoke_code" == "0" ]] || ! grep -q "safe /responses URL" "$live_smoke_err"; then
+  cat "$live_smoke_err" >&2
+  rm -f "$live_smoke_err"
+  echo "expected empty-hostname live smoke preflight to fail" >&2
+  exit 1
+fi
+rm -f "$live_smoke_err"
+
 run examples/fibey-custom-agent-demo/verify-foundry-responses.sh \
   --json examples/fibey-custom-agent-demo/testdata/foundry-responses-events-pass.json
 expect_verifier_failure \

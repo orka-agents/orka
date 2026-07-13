@@ -34,6 +34,7 @@ const (
 	defaultIdleTimeout       = 60 * time.Second
 	maxFoundryOutputBytes    = 1 << 20
 	maxFoundryBodyBytes      = 4 << 20
+	maxConsumedTurnIDs       = 1024
 	readinessPath            = "/v1/ready"
 	foundryInitialUnknown    = "foundry_initial_unknown"
 
@@ -78,6 +79,8 @@ type server struct {
 
 	mu              sync.Mutex
 	turns           map[harness.HarnessTurnID]*turnState
+	consumedTurns   map[harness.HarnessTurnID]struct{}
+	consumedOrder   []harness.HarnessTurnID
 	runtimeSessions map[harness.RuntimeSessionID]foundrySession
 }
 
@@ -220,6 +223,7 @@ func newServer(cfg config, client *http.Client) *server {
 		cfg:             cfg,
 		client:          &clientCopy,
 		turns:           map[harness.HarnessTurnID]*turnState{},
+		consumedTurns:   map[harness.HarnessTurnID]struct{}{},
 		runtimeSessions: map[harness.RuntimeSessionID]foundrySession{},
 	}
 }
@@ -356,6 +360,11 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		harness.WriteJSON(w, http.StatusAccepted, response)
+		return
+	}
+	if _, consumed := s.consumedTurns[req.TurnID]; consumed {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "turn already completed")
 		return
 	}
 	turn := &turnState{
@@ -614,6 +623,19 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 		harness.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	var req harness.CancelTurnRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		harness.WriteError(w, http.StatusBadRequest, "invalid JSON request")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		harness.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !sameCancelIdentity(turn.request, req) {
+		harness.WriteError(w, http.StatusBadRequest, "cancel request does not match started turn")
+		return
+	}
 	turn.continueMu.Lock()
 	defer turn.continueMu.Unlock()
 	s.mu.Lock()
@@ -622,7 +644,6 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 		turn.completed = true
 		s.scheduleTurnCleanupLocked(turn)
 	}
-	req := turn.request
 	s.mu.Unlock()
 	harness.WriteJSON(
 		w,
@@ -1157,7 +1178,8 @@ func responsesEndpointWithVersion(raw, apiVersion string) (string, error) {
 func responsesEndpointIsSafe(raw string) bool {
 	trimmed := strings.TrimSpace(raw)
 	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || strings.TrimSpace(parsed.Path) == "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || strings.TrimSpace(parsed.Hostname()) == "" ||
+		strings.TrimSpace(parsed.Path) == "" {
 		return false
 	}
 	if parsed.User != nil || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(trimmed, "#") {
@@ -1195,7 +1217,7 @@ func responsesEndpointIsSafe(raw string) bool {
 func projectEndpointIsSafe(raw string) bool {
 	trimmed := strings.TrimSpace(raw)
 	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || strings.TrimSpace(parsed.Hostname()) == "" {
 		return false
 	}
 	if parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" ||
@@ -1427,7 +1449,10 @@ func (s *server) scheduleTurnCleanupLocked(turn *turnState) {
 	time.AfterFunc(retention, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		delete(s.turns, turnID)
+		if current := s.turns[turnID]; current == turn {
+			delete(s.turns, turnID)
+			s.markTurnConsumedLocked(turnID)
+		}
 		activeSessions := s.activeRuntimeSessionsLocked()
 		cutoff := time.Now().UTC().Add(-retention)
 		for sessionID, session := range s.runtimeSessions {
@@ -1439,6 +1464,19 @@ func (s *server) scheduleTurnCleanupLocked(turn *turnState) {
 			}
 		}
 	})
+}
+
+func (s *server) markTurnConsumedLocked(turnID harness.HarnessTurnID) {
+	if _, consumed := s.consumedTurns[turnID]; consumed {
+		return
+	}
+	s.consumedTurns[turnID] = struct{}{}
+	s.consumedOrder = append(s.consumedOrder, turnID)
+	for len(s.consumedOrder) > maxConsumedTurnIDs {
+		oldest := s.consumedOrder[0]
+		s.consumedOrder = s.consumedOrder[1:]
+		delete(s.consumedTurns, oldest)
+	}
 }
 
 func (s *server) activeRuntimeSessionsLocked() map[harness.RuntimeSessionID]bool {
@@ -1513,6 +1551,15 @@ func (s *server) authorized(w http.ResponseWriter, r *http.Request) bool {
 
 func sameStartTurnRequest(existing, retry harness.StartTurnRequest) bool {
 	return reflect.DeepEqual(existing, retry)
+}
+
+func sameCancelIdentity(start harness.StartTurnRequest, cancel harness.CancelTurnRequest) bool {
+	return start.Namespace == cancel.Namespace &&
+		start.TaskName == cancel.TaskName &&
+		start.SessionName == cancel.SessionName &&
+		start.RuntimeSessionID == cancel.RuntimeSessionID &&
+		start.TurnID == cancel.TurnID &&
+		start.CorrelationID == cancel.CorrelationID
 }
 
 func sameContinueIdentity(start harness.StartTurnRequest, cont harness.ContinueTurnRequest) bool {

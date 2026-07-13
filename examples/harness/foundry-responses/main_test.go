@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1265,6 +1266,133 @@ func TestResponsesAPIVersionDefaultsToSDKValue(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterRejectsConsumedTurnAfterCleanup(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "platform_error"})
+	server := newServer(config{
+		runtimeName:     "foundry-responses-test",
+		adapterBearer:   "adapter-auth-value",
+		endpoint:        foundry.endpoint(),
+		foundryAuth:     "foundry-auth-value",
+		requestTimeout:  time.Second,
+		stateRetention:  50 * time.Millisecond,
+		maxApprovalWait: time.Minute,
+	}, &http.Client{Timeout: time.Second})
+	adapter := httptest.NewServer(server.handler())
+	t.Cleanup(adapter.Close)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-consumed-turn")
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	server.mu.Lock()
+	_, retainedBeforeCleanup := server.turns[request.TurnID]
+	_, consumedBeforeCleanup := server.consumedTurns[request.TurnID]
+	server.mu.Unlock()
+	if !retainedBeforeCleanup || consumedBeforeCleanup {
+		t.Fatalf(
+			"pre-cleanup state retained=%v consumed=%v, want retained state to own admission",
+			retainedBeforeCleanup,
+			consumedBeforeCleanup,
+		)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		_, retained := server.turns[request.TurnID]
+		_, consumed := server.consumedTurns[request.TurnID]
+		server.mu.Unlock()
+		if !retained && consumed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal turn was not evicted into the consumed-turn tombstone")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := client.StartTurn(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "turn already completed") {
+		t.Fatalf("retry after cleanup error = %v, want consumed-turn conflict", err)
+	}
+	if got := foundry.postCount.Load(); got != 1 {
+		t.Fatalf("hosted post count after consumed retry = %d, want 1", got)
+	}
+}
+
+func TestResponsesConsumedTurnTombstonesAreBounded(t *testing.T) {
+	server := newServer(config{}, nil)
+	server.mu.Lock()
+	for i := 0; i <= maxConsumedTurnIDs; i++ {
+		server.markTurnConsumedLocked(harness.HarnessTurnID(fmt.Sprintf("turn-%d", i)))
+	}
+	_, oldestRetained := server.consumedTurns["turn-0"]
+	_, newestRetained := server.consumedTurns[harness.HarnessTurnID(fmt.Sprintf("turn-%d", maxConsumedTurnIDs))]
+	count := len(server.consumedTurns)
+	server.mu.Unlock()
+	if count != maxConsumedTurnIDs || oldestRetained || !newestRetained {
+		t.Fatalf(
+			"consumed tombstone count=%d oldest=%v newest=%v, want bounded FIFO",
+			count,
+			oldestRetained,
+			newestRetained,
+		)
+	}
+}
+
+func TestResponsesAdapterValidatesCancelIdentityBeforeMutation(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
+	adapter, server := newTestResponsesAdapterWithServer(
+		t,
+		foundry.endpoint(),
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-cancel-identity")
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+
+	cancelPath, err := harness.CancelTurnPath(request.TurnID)
+	if err != nil {
+		t.Fatalf("CancelTurnPath: %v", err)
+	}
+	malformed, err := http.NewRequest(http.MethodPost, adapter.URL+cancelPath, strings.NewReader("{"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	malformed.Header.Set("Authorization", "Bearer adapter-auth-value")
+	response, err := http.DefaultClient.Do(malformed)
+	if err != nil {
+		t.Fatalf("malformed cancel request: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed cancel status = %d, want 400", response.StatusCode)
+	}
+
+	mismatched := cancelRequestForStart(request)
+	mismatched.CorrelationID = "other-correlation"
+	if _, err := client.CancelTurn(context.Background(), mismatched); err == nil ||
+		!strings.Contains(err.Error(), "does not match started turn") {
+		t.Fatalf("mismatched cancel error = %v, want identity rejection", err)
+	}
+	server.mu.Lock()
+	turn := server.turns[request.TurnID]
+	completedAfterReject := turn == nil || turn.completed
+	server.mu.Unlock()
+	if completedAfterReject {
+		t.Fatal("malformed or mismatched cancel mutated the active turn")
+	}
+
+	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
+		t.Fatalf("valid CancelTurn: %v", err)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if !hasFrameType(frames, harness.FrameTurnCancelled) {
+		t.Fatalf("frames = %#v, want TurnCancelled", frames)
+	}
+}
+
 func TestResponsesEndpointSafety(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1285,6 +1413,11 @@ func TestResponsesEndpointSafety(t *testing.T) {
 			name:     "loopback http",
 			endpoint: "http://127.0.0.1:8080/agents/a/endpoint/protocols/openai/responses?api-version=v1",
 			want:     true,
+		},
+		{
+			name:     "empty hostname",
+			endpoint: "https://:443/agents/a/endpoint/protocols/openai/responses?api-version=v1",
+			want:     false,
 		},
 		{
 			name:     "http non-loopback",
@@ -1312,6 +1445,27 @@ func TestResponsesEndpointSafety(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := responsesEndpointIsSafe(tt.endpoint); got != tt.want {
 				t.Fatalf("responsesEndpointIsSafe(%q) = %v, want %v", tt.endpoint, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectEndpointSafety(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     bool
+	}{
+		{name: "https", endpoint: "https://example.services.ai.azure.com", want: true},
+		{name: "empty hostname", endpoint: "https://:443", want: false},
+		{name: "query", endpoint: "https://example.services.ai.azure.com?unsafe=x", want: false},
+		{name: "loopback", endpoint: "http://127.0.0.1:8080", want: true},
+		{name: "non-loopback http", endpoint: "http://example.com", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := projectEndpointIsSafe(tt.endpoint); got != tt.want {
+				t.Fatalf("projectEndpointIsSafe(%q) = %v, want %v", tt.endpoint, got, tt.want)
 			}
 		})
 	}
@@ -2192,6 +2346,19 @@ func responsesStartTurnRequest(name string) harness.StartTurnRequest {
 		AuthIdentity:      harness.AuthIdentity{Subject: "task:default/" + name},
 		ToolExecutionMode: harness.ToolExecutionModeObserved,
 		Input:             harness.TurnInput{Prompt: "Investigate incident"},
+	}
+}
+
+func cancelRequestForStart(start harness.StartTurnRequest) harness.CancelTurnRequest {
+	return harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        start.Namespace,
+		TaskName:         start.TaskName,
+		SessionName:      start.SessionName,
+		RuntimeSessionID: start.RuntimeSessionID,
+		TurnID:           start.TurnID,
+		CorrelationID:    start.CorrelationID,
+		Reason:           "test cancellation",
 	}
 }
 

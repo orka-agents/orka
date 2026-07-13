@@ -93,6 +93,15 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
 
+authority_has_hostname() {
+  local authority="$1"
+  if [[ "$authority" == \[* ]]; then
+    [[ "$authority" =~ ^\[[^]]+\](:[0-9]+)?$ ]]
+    return
+  fi
+  [[ -n "${authority%%:*}" ]]
+}
+
 is_https_or_loopback_http() {
   local value="$1"
   local rest authority
@@ -103,7 +112,8 @@ is_https_or_loopback_http() {
     authority="${rest%%/*}"
     authority="${authority%%\?*}"
     authority="${authority%%#*}"
-    [[ -n "$authority" && "$authority" != *@* && "$authority" != *[[:space:]]* ]]
+    [[ -n "$authority" && "$authority" != *@* && "$authority" != *[[:space:]]* ]] || return 1
+    authority_has_hostname "$authority"
     return
   fi
   [[ "$value" == http://* ]] || return 1
