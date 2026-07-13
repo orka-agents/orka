@@ -309,22 +309,33 @@ validate_kubeconfig_target() {
 
 hash_text() {
   local value="$1"
+  local digest=""
 
   if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "${value}" | sha256sum | awk '{print $1}'
-    return
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
-    return
-  fi
-  if command -v openssl >/dev/null 2>&1; then
-    printf '%s' "${value}" | openssl dgst -sha256 | awk '{print $NF}'
-    return
+    if ! digest="$(printf '%s' "${value}" | sha256sum | awk '{print $1}')"; then
+      error "failed to compute SHA-256 digest"
+      return 1
+    fi
+  elif command -v shasum >/dev/null 2>&1; then
+    if ! digest="$(printf '%s' "${value}" | shasum -a 256 | awk '{print $1}')"; then
+      error "failed to compute SHA-256 digest"
+      return 1
+    fi
+  elif command -v openssl >/dev/null 2>&1; then
+    if ! digest="$(printf '%s' "${value}" | openssl dgst -sha256 | awk '{print $NF}')"; then
+      error "failed to compute SHA-256 digest"
+      return 1
+    fi
+  else
+    error "no SHA-256 tool available (need sha256sum, shasum, or openssl)"
+    return 1
   fi
 
-  error "no SHA-256 tool available (need sha256sum, shasum, or openssl)"
-  return 1
+  if [[ "${#digest}" -ne 64 || "${digest}" == *[!0-9a-fA-F]* ]]; then
+    error "SHA-256 tool returned an invalid digest"
+    return 1
+  fi
+  printf '%s\n' "${digest}"
 }
 
 kubeconfig_identity() {
@@ -407,8 +418,13 @@ load_state() {
     error "E2E cluster state kubeconfig is not a regular helper-owned file: ${state_kubeconfig}"
     return 1
   fi
-  if [[ -z "${state_fingerprint}" ]]; then
-    error "incomplete E2E cluster state at ${state_dir}"
+  if [[ "${state_fingerprint}" == "unavailable" ]]; then
+    if [[ "${state_status}" != "blocked" && "${state_status}" != "pending" ]]; then
+      error "invalid E2E cluster state fingerprint at ${state_dir}"
+      return 1
+    fi
+  elif [[ "${#state_fingerprint}" -ne 64 || "${state_fingerprint}" == *[!0-9a-fA-F]* ]]; then
+    error "invalid E2E cluster state fingerprint at ${state_dir}"
     return 1
   fi
   state_validated=1

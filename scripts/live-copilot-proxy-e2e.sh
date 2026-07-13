@@ -156,9 +156,125 @@ start_port_forward() {
   echo $!
 }
 
+hash_text() {
+  local value="$1"
+  local digest=""
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "${value}" | sha256sum | awk '{print $1}')" ||
+      die "failed to compute SHA-256 digest"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' "${value}" | shasum -a 256 | awk '{print $1}')" ||
+      die "failed to compute SHA-256 digest"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(printf '%s' "${value}" | openssl dgst -sha256 | awk '{print $NF}')" ||
+      die "failed to compute SHA-256 digest"
+  else
+    die "no SHA-256 tool available (need sha256sum, shasum, or openssl)"
+  fi
+
+  [[ "${#digest}" -eq 64 && "${digest}" != *[!0-9a-fA-F]* ]] ||
+    die "SHA-256 tool returned an invalid digest"
+  printf '%s\n' "${digest}"
+}
+
+validate_scoped_target() {
+  local expected_context="kind-${kind_cluster}"
+  local state_dir="${E2E_CLUSTER_STATE_DIR:-}"
+  local lock_root="${E2E_CLUSTER_LOCK_ROOT:-}"
+  local operation_token="${E2E_KIND_OPERATION_TOKEN:-}"
+  local lock_dir
+  local current_context
+  local current_cluster
+  local identity_material
+  local server
+  local certificate_authority_data
+  local fingerprint
+  local state_fingerprint
+
+  [[ "${E2E_KIND_TARGET_READY:-}" == "1" ]] ||
+    die "refusing to run outside e2e-kind-cluster.sh run: target is not ready"
+  [[ -n "${KUBECONFIG:-}" && "${KUBECONFIG}" != *:* ]] ||
+    die "refusing to run without one isolated KUBECONFIG"
+  [[ -n "${state_dir}" && -n "${lock_root}" && -n "${operation_token}" ]] ||
+    die "refusing to run without helper state and operation lock metadata"
+  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] ||
+    die "helper state directory is missing or unsafe"
+  [[ "${E2E_KIND_EXPECTED_CONTEXT:-}" == "${expected_context}" ]] ||
+    die "helper expected context does not match ${expected_context}"
+  [[ "${E2E_KIND_EXPECTED_CLUSTER:-}" == "${expected_context}" ]] ||
+    die "helper expected cluster does not match ${expected_context}"
+  [[ "${KUBECONFIG}" == "${state_dir}/target.kubeconfig" ]] ||
+    die "KUBECONFIG is not the helper-owned target kubeconfig"
+  [[ -f "${KUBECONFIG}" && ! -L "${KUBECONFIG}" ]] ||
+    die "helper-owned target kubeconfig is missing or unsafe"
+
+  local state_file
+  for state_file in cluster context kubeconfig fingerprint status; do
+    [[ -f "${state_dir}/${state_file}" && ! -L "${state_dir}/${state_file}" ]] ||
+      die "helper state is missing safe ${state_file} metadata"
+  done
+  [[ "$(<"${state_dir}/cluster")" == "${kind_cluster}" ]] ||
+    die "helper state cluster does not match ${kind_cluster}"
+  [[ "$(<"${state_dir}/context")" == "${expected_context}" ]] ||
+    die "helper state context does not match ${expected_context}"
+  [[ "$(<"${state_dir}/kubeconfig")" == "${KUBECONFIG}" ]] ||
+    die "helper state kubeconfig does not match KUBECONFIG"
+  [[ "$(<"${state_dir}/status")" == "ready" ]] ||
+    die "helper target state is not ready"
+
+  lock_dir="${lock_root}/kind-${kind_cluster}.operation"
+  [[ -d "${lock_dir}" && ! -L "${lock_dir}" ]] ||
+    die "helper operation lock is not held"
+  [[ -f "${lock_dir}/token" && ! -L "${lock_dir}/token" ]] ||
+    die "helper operation lock token is missing or unsafe"
+  [[ "$(<"${lock_dir}/token")" == "${operation_token}" ]] ||
+    die "helper operation lock token does not match"
+  [[ -f "${lock_dir}/state_dir" && ! -L "${lock_dir}/state_dir" ]] ||
+    die "helper operation lock state metadata is missing or unsafe"
+  [[ "$(<"${lock_dir}/state_dir")" == "${state_dir}" ]] ||
+    die "helper operation lock targets different state"
+
+  current_context="$(kubectl --kubeconfig "${KUBECONFIG}" config current-context)" ||
+    die "failed to read scoped Kubernetes context"
+  current_cluster="$(kubectl --kubeconfig "${KUBECONFIG}" config view --minify -o 'jsonpath={.contexts[0].context.cluster}')" ||
+    die "failed to read scoped Kubernetes cluster"
+  [[ "${current_context}" == "${expected_context}" ]] ||
+    die "scoped Kubernetes context ${current_context} does not match ${expected_context}"
+  [[ "${current_cluster}" == "${expected_context}" ]] ||
+    die "scoped Kubernetes cluster ${current_cluster} does not match ${expected_context}"
+
+  identity_material="$(kubectl --kubeconfig "${KUBECONFIG}" config view --raw --minify -o 'jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.certificate-authority-data}')" ||
+    die "failed to read scoped Kubernetes target identity"
+  server="${identity_material%%$'\n'*}"
+  [[ "${identity_material}" == *$'\n'* ]] ||
+    die "scoped Kubernetes target identity is incomplete"
+  certificate_authority_data="${identity_material#*$'\n'}"
+  [[ -n "${server}" && -n "${certificate_authority_data}" ]] ||
+    die "scoped Kubernetes target identity is incomplete"
+  fingerprint="$(hash_text "${identity_material}")"
+  state_fingerprint="$(<"${state_dir}/fingerprint")"
+  [[ "${#state_fingerprint}" -eq 64 && "${state_fingerprint}" != *[!0-9a-fA-F]* ]] ||
+    die "helper state fingerprint is malformed"
+  [[ "${fingerprint}" == "${state_fingerprint}" ]] ||
+    die "scoped Kubernetes target identity does not match helper state"
+}
+
+run_under_e2e_kind_helper() {
+  local script_path="${script_dir}/$(basename "${BASH_SOURCE[0]}")"
+  local e2e_kind_helper="${script_dir}/e2e-kind-cluster.sh"
+
+  [[ -x "${e2e_kind_helper}" ]] || die "missing executable E2E Kind helper: ${e2e_kind_helper}"
+  log "Running live copilot-proxy e2e through isolated Kind helper"
+  env KIND_CLUSTER="${kind_cluster}" \
+    "${e2e_kind_helper}" run --create --cleanup -- \
+    "${script_path}" --e2e-kind-scoped "$@"
+}
+
 main() {
   require_cmd make
   require_cmd go
+  require_cmd docker
   require_cmd kubectl
   require_cmd kind
   require_cmd curl
@@ -166,10 +282,20 @@ main() {
 
   [[ -n "${token_value}" ]] || die "COPILOT_GITHUB_TOKEN is required"
 
-  trap 'on_exit $?' EXIT
+  if [[ "${1:-}" != "--e2e-kind-scoped" ]]; then
+    local helper_status=0
+    if run_under_e2e_kind_helper "$@"; then
+      helper_status=0
+    else
+      helper_status=$?
+    fi
+    rm -rf "${work_dir}" >/dev/null 2>&1 || true
+    return "${helper_status}"
+  fi
+  shift
 
-  log "Creating Kind cluster ${kind_cluster}"
-  make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
+  validate_scoped_target
+  trap 'on_exit $?' EXIT
 
   log "Creating proxy namespace ${copilot_proxy_namespace}"
   kubectl create namespace "${copilot_proxy_namespace}" --dry-run=client -o yaml | kubectl apply -f -

@@ -531,6 +531,34 @@ test_failed_create_never_deletes_unconfirmed_cluster() {
   [[ ! -e "${STATE_DIR}" ]] || fail "absent ambiguous cluster left stale state"
 }
 
+test_hash_failure_never_publishes_ready_state() {
+  begin_case hash-failure
+  printf 'decoy\n' >"${FAKE_KIND_CLUSTERS}"
+  cat >"${test_root}/bin/sha256sum" <<'FAKE_SHA256SUM'
+#!/usr/bin/env bash
+exit 91
+FAKE_SHA256SUM
+  chmod +x "${test_root}/bin/sha256sum"
+
+  if run_helper setup --create; then
+    fail "failing SHA-256 command unexpectedly produced ready E2E state"
+  fi
+
+  assert_contains "${FAKE_LOG}" "kind:create target"
+  assert_not_contains "${FAKE_LOG}" "kind:delete target"
+  assert_cluster_exists target
+  assert_cluster_exists decoy
+  [[ -d "${STATE_DIR}" ]] || fail "hash failure lost ownership state"
+  [[ "$(cat "${STATE_DIR}/status")" == "blocked" ]] || fail "hash failure did not block ownership state"
+  [[ "$(cat "${STATE_DIR}/fingerprint")" == "unavailable" ]] || fail "hash failure published an invalid fingerprint"
+
+  rm -f "${test_root}/bin/sha256sum"
+  awk '$0 != "target"' "${FAKE_KIND_CLUSTERS}" >"${FAKE_KIND_CLUSTERS}.next"
+  mv "${FAKE_KIND_CLUSTERS}.next" "${FAKE_KIND_CLUSTERS}"
+  run_helper cleanup
+  [[ ! -e "${STATE_DIR}" ]] || fail "absent hash-failure cluster left stale state"
+}
+
 test_signal_during_kind_create_preserves_ownership_state() {
   begin_case signal-during-create
   printf 'decoy\n' >"${FAKE_KIND_CLUSTERS}"
@@ -895,6 +923,7 @@ test_cluster_lease_blocks_other_state_directories
 test_exact_reuse_is_never_deleted
 test_mismatched_context_fails_closed
 test_failed_create_never_deletes_unconfirmed_cluster
+test_hash_failure_never_publishes_ready_state
 test_signal_during_kind_create_preserves_ownership_state
 test_partial_cleanup_rejects_replacement_cluster_identity
 test_stale_operation_lock_is_not_reclaimed

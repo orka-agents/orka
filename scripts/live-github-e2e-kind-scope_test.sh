@@ -325,6 +325,7 @@ run_live_script() {
     E2E_CLUSTER_LOCK_ROOT="${lock_root}" \
     RUNNER_TEMP="${runner_temp}" \
     ORKA_GITHUB_OIDC_TOKEN="${oidc_token}" \
+    COPILOT_GITHUB_TOKEN=mock-token \
     ACTIONS_ID_TOKEN_REQUEST_TOKEN= \
     ACTIONS_ID_TOKEN_REQUEST_URL= \
     GITHUB_LABEL_TRIGGER_TARGET_NUMBER="${target_number}" \
@@ -423,10 +424,27 @@ test_oidc_body_and_cleanup_stay_scoped() {
   assert_contains "${call_log}" "kind:args=delete ${kind_cluster}"
 }
 
+test_copilot_body_and_cleanup_stay_scoped() {
+  begin_case copilot-body-failure copilot-body-failure
+
+  if run_live_script "${script_dir}/live-copilot-proxy-e2e.sh" 0 0 93 test-oidc-token 1 >/dev/null 2>&1; then
+    fail "copilot proxy body failure unexpectedly succeeded"
+  fi
+
+  assert_contains "${body_log}" "body:go"
+  assert_contains "${body_log}" "scope=ok ready=1 kubeconfig=${state_dir}/target.kubeconfig"
+  assert_contains "${call_log}" "kubectl:args=create namespace default"
+  assert_no_decoy_mutations
+  assert_all_kubectl_calls_scoped
+  assert_cluster_absent "${kind_cluster}"
+  assert_contains "${call_log}" "kind:args=delete ${kind_cluster}"
+}
+
 write_fake_commands
 
 assert_not_contains "${script_dir}/live-github-label-trigger-e2e.sh" "kubectl config use-context"
 assert_not_contains "${script_dir}/live-github-oidc-e2e.sh" "kubectl config use-context"
+assert_not_contains "${script_dir}/live-copilot-proxy-e2e.sh" "kubectl config use-context"
 
 test_label_preflight_failure_has_no_cluster_side_effects
 test_oidc_preflight_failure_has_no_cluster_side_effects
@@ -434,5 +452,6 @@ test_setup_failure_never_arms_label_cleanup
 test_setup_failure_never_arms_oidc_cleanup
 test_label_body_and_cleanup_stay_scoped
 test_oidc_body_and_cleanup_stay_scoped
+test_copilot_body_and_cleanup_stay_scoped
 
-printf 'PASS: live GitHub E2E Kind scope safety tests (0 decoy mutations; all kubectl calls scoped)\n'
+printf 'PASS: live E2E Kind scope safety tests (0 decoy mutations; all kubectl calls scoped)\n'
