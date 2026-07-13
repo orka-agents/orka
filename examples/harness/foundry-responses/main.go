@@ -86,24 +86,33 @@ type server struct {
 
 type toolResultDigest [sha256.Size]byte
 
+type responseDisposition int
+
+const (
+	responseRejected responseDisposition = iota
+	responsePending
+	responseCompleted
+)
+
 type foundrySession struct {
 	ID       string
 	LastSeen time.Time
 }
 
 type turnState struct {
-	request          harness.StartTurnRequest
-	initializing     bool
-	responseID       string
-	foundrySessionID string
-	pendingTools     map[string]string
-	bufferedResults  map[string]harness.ToolCallResult
-	bufferedDigests  map[string]toolResultDigest
-	submittedDigests map[string]toolResultDigest
-	frames           []harness.HarnessEventFrame
-	completed        bool
-	frameUpdates     chan struct{}
-	continueMu       sync.Mutex
+	request              harness.StartTurnRequest
+	initializing         bool
+	responseID           string
+	foundrySessionID     string
+	pendingTools         map[string]string
+	bufferedResults      map[string]harness.ToolCallResult
+	bufferedDigests      map[string]toolResultDigest
+	submittedDigests     map[string]toolResultDigest
+	frames               []harness.HarnessEventFrame
+	completed            bool
+	continuationInFlight bool
+	frameUpdates         chan struct{}
+	continueMu           sync.Mutex
 }
 
 type responsesRequest struct {
@@ -417,8 +426,14 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	if !turn.completed && s.handleResponsesResponseLocked(turn, response) {
-		s.recordTurnSessionLocked(turn, foundrySessionID)
+	if !turn.completed {
+		disposition := s.handleResponsesResponseLocked(turn, response)
+		if disposition != responseRejected {
+			s.setTurnSessionLocked(turn, foundrySessionID)
+		}
+		if disposition == responseCompleted {
+			s.publishRuntimeSessionLocked(turn)
+		}
 	}
 	turn.initializing = false
 	s.mu.Unlock()
@@ -556,7 +571,21 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		return
 	}
 	ctx, cancel := s.foundryRequestContext(r.Context(), turn.request.Deadline)
-	defer cancel()
+	s.mu.Lock()
+	if turn.completed {
+		s.mu.Unlock()
+		cancel()
+		harness.WriteError(w, http.StatusConflict, "turn completed before hosted continuation submission")
+		return
+	}
+	turn.continuationInFlight = true
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		turn.continuationInFlight = false
+		s.mu.Unlock()
+	}()
 	var response responsesResponse
 	continuation := responsesRequest{
 		PreviousResponseID: previousResponseID,
@@ -566,13 +595,20 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 	updatedSessionID, err := s.postResponses(ctx, req.RuntimeSessionID, continuation, &response)
 	if err != nil {
 		s.mu.Lock()
-		s.appendFailedLocked(
-			turn,
-			"foundry_continuation_unknown",
-			"hosted continuation failed after submission was attempted; "+
-				"failing closed to avoid duplicate continuation",
-		)
+		completed := turn.completed
+		if !completed {
+			s.appendFailedLocked(
+				turn,
+				"foundry_continuation_unknown",
+				"hosted continuation failed after submission was attempted; "+
+					"failing closed to avoid duplicate continuation",
+			)
+		}
 		s.mu.Unlock()
+		if completed {
+			harness.WriteError(w, http.StatusConflict, "turn completed while hosted continuation was in flight")
+			return
+		}
 		log.Printf(
 			"Foundry hosted Responses continuation failed after submission for turn %q (error type %T)",
 			req.TurnID,
@@ -605,8 +641,12 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		delete(turn.bufferedResults, result.ToolCallID)
 		delete(turn.bufferedDigests, result.ToolCallID)
 	}
-	if s.handleResponsesResponseLocked(turn, response) {
-		s.recordTurnSessionLocked(turn, updatedSessionID)
+	disposition := s.handleResponsesResponseLocked(turn, response)
+	if disposition != responseRejected {
+		s.setTurnSessionLocked(turn, updatedSessionID)
+	}
+	if disposition == responseCompleted {
+		s.publishRuntimeSessionLocked(turn)
 	}
 	s.mu.Unlock()
 	harness.WriteJSON(w, http.StatusAccepted, continueResponse(req, "continue accepted"))
@@ -630,8 +670,6 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 		harness.WriteError(w, http.StatusBadRequest, "cancel request does not match started turn")
 		return
 	}
-	turn.continueMu.Lock()
-	defer turn.continueMu.Unlock()
 	s.mu.Lock()
 	if !turn.completed {
 		s.clearBufferedToolResultsLocked(turn)
@@ -659,9 +697,9 @@ func (s *server) handleResponsesResponse(turn *turnState, response responsesResp
 	_ = s.handleResponsesResponseLocked(turn, response)
 }
 
-func (s *server) handleResponsesResponseLocked(turn *turnState, response responsesResponse) bool {
+func (s *server) handleResponsesResponseLocked(turn *turnState, response responsesResponse) responseDisposition {
 	if turn.completed {
-		return false
+		return responseRejected
 	}
 	responseIDPresent := strings.TrimSpace(response.ID) != ""
 	if responseIDPresent {
@@ -673,24 +711,24 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			"foundry_response_error",
 			firstNonBlank(response.Error.Message, response.Error.Code, "Foundry hosted Responses returned an error"),
 		)
-		return false
+		return responseRejected
 	}
 	if isFailureStatus(response.Status) {
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
-		return false
+		return responseRejected
 	}
 	if strings.TrimSpace(response.Status) == "" {
 		s.appendFailedLocked(turn, "foundry_status_missing", "Foundry hosted Responses status is missing")
-		return false
+		return responseRejected
 	}
 	if !isCompletionStatus(response.Status) {
 		s.appendFailedLocked(turn, "foundry_"+response.Status, "Foundry hosted Responses status "+response.Status)
-		return false
+		return responseRejected
 	}
 	calls, err := s.extractFunctionCalls(turn.request, response.Output)
 	if err != nil {
 		s.appendFailedLocked(turn, "foundry_function_call_invalid", err.Error())
-		return false
+		return responseRejected
 	}
 	if len(calls) > 0 {
 		if !responseIDPresent {
@@ -699,7 +737,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 				"foundry_response_id_missing",
 				"hosted response returned a function_call without an id needed for continuation",
 			)
-			return false
+			return responseRejected
 		}
 		seenInResponse := map[string]struct{}{}
 		for _, call := range calls {
@@ -709,7 +747,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_repeated_function_call",
 					"hosted response repeated a function call id",
 				)
-				return false
+				return responseRejected
 			}
 			seenInResponse[call.callID] = struct{}{}
 			if _, submitted := turn.submittedDigests[call.callID]; submitted {
@@ -718,7 +756,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_repeated_function_call",
 					"hosted response repeated an already-submitted function call",
 				)
-				return false
+				return responseRejected
 			}
 			if _, pending := turn.pendingTools[call.callID]; pending {
 				s.appendFailedLocked(
@@ -726,7 +764,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_repeated_function_call",
 					"hosted response repeated an already-pending function call",
 				)
-				return false
+				return responseRejected
 			}
 		}
 		frames := make([]harness.HarnessEventFrame, 0, len(calls))
@@ -749,7 +787,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 					"foundry_tool_call_frame_too_large",
 					"hosted function call exceeded the harness SSE frame limit",
 				)
-				return false
+				return responseRejected
 			}
 			frames = append(frames, frame)
 		}
@@ -757,12 +795,12 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			turn.pendingTools[call.callID] = call.name
 			s.appendPreparedFrameLocked(turn, frames[index])
 		}
-		return true
+		return responsePending
 	}
 	result := responsesMessageText(response.Output)
 	if len([]byte(result)) > maxFoundryOutputBytes {
 		s.appendFailedLocked(turn, "foundry_output_too_large", "foundry completion exceeded advertised output limit")
-		return false
+		return responseRejected
 	}
 	completedFrame := s.newFrame(
 		turn,
@@ -779,13 +817,13 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			"foundry_output_frame_too_large",
 			"foundry completion exceeded the harness SSE frame limit",
 		)
-		return false
+		return responseRejected
 	}
 	s.appendPreparedFrameLocked(turn, completedFrame)
 	s.clearBufferedToolResultsLocked(turn)
 	turn.completed = true
 	s.scheduleTurnCleanupLocked(turn)
-	return true
+	return responseCompleted
 }
 
 func (s *server) extractFunctionCalls(
@@ -850,6 +888,9 @@ func (s *server) recordContinueResults(
 ) ([]harness.ToolCallResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if turn.completed {
+		return nil, fmt.Errorf("turn is already terminal")
+	}
 	if len(turn.pendingTools) == 0 {
 		return nil, fmt.Errorf("no tool calls are pending for this turn")
 	}
@@ -1373,13 +1414,22 @@ func isFailureStatus(status string) bool {
 	}
 }
 
-func (s *server) recordTurnSessionLocked(turn *turnState, sessionID string) {
+func (s *server) setTurnSessionLocked(turn *turnState, sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return
 	}
 	turn.foundrySessionID = sessionID
-	s.runtimeSessions[turn.request.RuntimeSessionID] = foundrySession{ID: sessionID, LastSeen: time.Now().UTC()}
+}
+
+func (s *server) publishRuntimeSessionLocked(turn *turnState) {
+	if strings.TrimSpace(turn.foundrySessionID) == "" {
+		return
+	}
+	s.runtimeSessions[turn.request.RuntimeSessionID] = foundrySession{
+		ID:       turn.foundrySessionID,
+		LastSeen: time.Now().UTC(),
+	}
 }
 
 func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
@@ -1458,7 +1508,7 @@ func (s *server) markTurnConsumedLocked(turnID harness.HarnessTurnID) {
 func (s *server) activeTurnCountLocked() int {
 	active := 0
 	for _, turn := range s.turns {
-		if turn != nil && (turn.initializing || !turn.completed) {
+		if turn != nil && (turn.initializing || turn.continuationInFlight || !turn.completed) {
 			active++
 		}
 	}

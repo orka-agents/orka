@@ -233,8 +233,8 @@ func TestResponsesAdapterInterleavedResponsesRetainResponseSpecificSession(t *te
 	firstTurn := &turnState{request: firstRequest}
 	secondTurn := &turnState{request: secondRequest}
 	server.mu.Lock()
-	server.recordTurnSessionLocked(secondTurn, secondSession)
-	server.recordTurnSessionLocked(firstTurn, firstSession)
+	server.setTurnSessionLocked(secondTurn, secondSession)
+	server.setTurnSessionLocked(firstTurn, firstSession)
 	server.mu.Unlock()
 	if firstTurn.foundrySessionID != "session-a" {
 		t.Fatalf("first turn session = %q, want session-a", firstTurn.foundrySessionID)
@@ -979,6 +979,102 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterCancelDuringHostedContinuationWins(t *testing.T) {
+	continuationReceived := make(chan struct{})
+	releaseContinuation := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFoundry := func() { releaseOnce.Do(func() { close(releaseContinuation) }) }
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := ioReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			http.Error(w, "decode body", http.StatusBadRequest)
+			return
+		}
+		if _, continuing := decoded["previous_response_id"]; !continuing {
+			w.Header().Set("x-agent-session-id", fakeSessionID)
+			writeJSON(w, functionCallResponse("support-ticket-lookup"))
+			return
+		}
+		select {
+		case <-continuationReceived:
+		default:
+			close(continuationReceived)
+		}
+		<-releaseContinuation
+		w.Header().Set("x-agent-session-id", "session-after-cancel")
+		writeJSON(w, finalResponsesMessage())
+	}))
+	t.Cleanup(foundry.Close)
+	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter, server := newTestResponsesAdapterWithServer(
+		t,
+		endpoint,
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	)
+	t.Cleanup(releaseFoundry)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-cancel-continuation")
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	requested := findFrame(frames, harness.FrameToolCallRequested)
+	if requested == nil {
+		t.Fatalf("frames = %#v, want tool request", frames)
+	}
+	server.mu.Lock()
+	_, publishedBeforeCompletion := server.runtimeSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if publishedBeforeCompletion {
+		t.Fatal("pending function call published runtime session before completion")
+	}
+
+	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
+	continueErr := make(chan error, 1)
+	go func() {
+		_, err := client.ContinueTurn(context.Background(), continueRequest)
+		continueErr <- err
+	}()
+	select {
+	case <-continuationReceived:
+	case <-time.After(time.Second):
+		t.Fatal("hosted continuation did not arrive")
+	}
+	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
+		t.Fatalf("CancelTurn during continuation: %v", err)
+	}
+	second := responsesStartTurnRequest("foundry-after-cancel-continuation")
+	second.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), second); err == nil ||
+		!strings.Contains(err.Error(), "maximum concurrent turns reached") {
+		t.Fatalf("StartTurn during cancelled continuation error = %v, want admission rejection", err)
+	}
+	releaseFoundry()
+	select {
+	case err := <-continueErr:
+		if err == nil || !strings.Contains(err.Error(), "turn completed while hosted continuation was in flight") {
+			t.Fatalf("ContinueTurn after cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ContinueTurn did not finish after releasing hosted response")
+	}
+	frames = streamCurrentFrames(t, client, request.TurnID)
+	if !hasFrameType(frames, harness.FrameTurnCancelled) || hasFrameType(frames, harness.FrameTurnCompleted) {
+		t.Fatalf("frames = %#v, want cancellation to win continuation race", frames)
+	}
+	server.mu.Lock()
+	_, publishedAfterCancel := server.runtimeSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if publishedAfterCancel {
+		t.Fatal("cancelled continuation published runtime session")
+	}
+}
+
 func TestResponsesAdapterContinuationHonorsOriginalTurnDeadline(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "function_call", toolName: "support-ticket-lookup"})
 	adapter := newTestResponsesAdapter(
@@ -1263,6 +1359,27 @@ func TestResponsesMixedRepeatedFunctionCallFailsTurn(t *testing.T) {
 	}
 	if _, exists := turn.pendingTools["call-2"]; exists {
 		t.Fatal("new call was accepted after repeated pending call")
+	}
+}
+
+func TestResponsesRecordContinueResultsRejectsTerminalTurn(t *testing.T) {
+	server := newServer(config{}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-terminal-record")
+	turn := &turnState{
+		request:          request,
+		pendingTools:     map[string]string{"call-1": "support-ticket-lookup"},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
+		completed:        true,
+	}
+	result := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
+	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{result}); err == nil ||
+		!strings.Contains(err.Error(), "already terminal") {
+		t.Fatalf("recordContinueResults terminal error = %v", err)
+	}
+	if len(turn.submittedDigests) != 0 || len(turn.bufferedResults) != 0 {
+		t.Fatalf("terminal result mutation = %#v/%#v", turn.submittedDigests, turn.bufferedResults)
 	}
 }
 
