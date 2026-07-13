@@ -1456,6 +1456,19 @@ func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
 		return false
 	}
 	message := err.Error()
+	for _, marker := range []string{"(404)", "turn not found"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func harnessWrapperCancelErrorIsMissingTurn(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
 	for _, marker := range []string{"(404)", "(410)", "turn not found"} {
 		if strings.Contains(message, marker) {
 			return true
@@ -1513,7 +1526,7 @@ func (r *TaskReconciler) cancelHarnessWrapperTurn(ctx context.Context, task *cor
 		CorrelationID:    strings.TrimSpace(task.Annotations[harnessWrapperCorrelationIDAnno]),
 		Reason:           reason,
 	})
-	if err != nil && harnessWrapperStreamErrorIsMissingTurn(err) {
+	if err != nil && harnessWrapperCancelErrorIsMissingTurn(err) {
 		return nil
 	}
 	return err

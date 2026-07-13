@@ -2574,18 +2574,33 @@ func TestHarnessWrapperCapabilitiesReadErrorRetryable(t *testing.T) {
 }
 
 func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
-	for _, message := range []string{"stream_frames failed (404): turn not found", "stream_frames failed (410): gone"} {
-		if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
-			t.Fatalf("%q should be classified as missing turn", message)
+	if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (404): turn not found")) {
+		t.Fatal("404 turn-not-found stream error should be classified as retryable missing turn")
+	}
+	for _, message := range []string{
+		"stream_frames failed (410): terminal turn expired from runtime retention",
+		"stream_frames failed (401): unauthorized",
+	} {
+		if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should not be classified as retryable missing turn", message)
 		}
 	}
-	if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (401): unauthorized")) {
-		t.Fatal("unauthorized stream error should not be classified as missing turn")
+}
+
+func TestHarnessWrapperCancelMissingTurnErrorClassification(t *testing.T) {
+	for _, message := range []string{
+		"cancel_turn failed (404): turn not found",
+		"cancel_turn failed (410): terminal turn expired from runtime retention",
+	} {
+		if !harnessWrapperCancelErrorIsMissingTurn(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should be ignored during cancellation", message)
+		}
 	}
 }
 
 func TestHarnessWrapperStreamTerminalErrorClassification(t *testing.T) {
 	for _, message := range []string{
+		"stream_frames failed (410): terminal turn expired from runtime retention",
 		"harness frame identity does not match running turn",
 		"invalid harness frame: turn completed payload is required",
 		"stream_frames failed: decode harness frame: invalid character",

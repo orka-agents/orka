@@ -26,19 +26,19 @@ import (
 )
 
 const (
-	defaultAddr                    = ":8090"
-	defaultAPIVersion              = "v1"
-	defaultRequestTimeout          = 20 * time.Second
-	defaultStateRetention          = 10 * time.Minute
-	defaultReadHeaderTimeout       = 5 * time.Second
-	defaultReadTimeout             = 30 * time.Second
-	defaultIdleTimeout             = 60 * time.Second
-	maxFoundryOutputBytes          = 1 << 20
-	maxFoundryBodyBytes            = 4 << 20
-	maxConsumedTurnIDs             = 1024
-	maxFrameSequence         int64 = 1<<63 - 1
-	readinessPath                  = "/v1/ready"
-	foundryInitialUnknown          = "foundry_initial_unknown"
+	defaultAddr              = ":8090"
+	defaultAPIVersion        = "v1"
+	defaultRequestTimeout    = 20 * time.Second
+	defaultStateRetention    = 10 * time.Minute
+	defaultReadHeaderTimeout = 5 * time.Second
+	defaultReadTimeout       = 30 * time.Second
+	defaultIdleTimeout       = 60 * time.Second
+	maxFoundryOutputBytes    = 1 << 20
+	maxFoundryBodyBytes      = 4 << 20
+	maxConsumedTurnIDs       = 1024
+	maxBrokeredToolCalls     = 32
+	readinessPath            = "/v1/ready"
+	foundryInitialUnknown    = "foundry_initial_unknown"
 
 	envAddr                = "ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR"
 	envRuntimeName         = "ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME"
@@ -105,6 +105,7 @@ type turnState struct {
 	responseID           string
 	foundrySessionID     string
 	pendingTools         map[string]string
+	requestedToolCalls   int
 	bufferedResults      map[string]harness.ToolCallResult
 	bufferedDigests      map[string]toolResultDigest
 	submittedDigests     map[string]toolResultDigest
@@ -175,11 +176,15 @@ const responsesEndpointRequirement = "foundry hosted Responses endpoint must use
 func main() {
 	cfg := loadConfig()
 	s := newServer(cfg, &http.Client{Timeout: cfg.requestTimeout})
+	logEndpoint, err := s.responsesEndpoint()
+	if err != nil {
+		logEndpoint = cfg.endpoint
+	}
 	log.Printf(
 		"Foundry hosted Responses AgentRuntime adapter listening on %s runtime=%s endpoint=%s",
 		cfg.addr,
 		cfg.runtimeName,
-		sanitizeEndpoint(cfg.endpoint),
+		sanitizeEndpoint(logEndpoint),
 	)
 	if err := newAdapterHTTPServer(cfg.addr, s.handler()).ListenAndServe(); err != nil {
 		log.Fatal(err)
@@ -451,8 +456,13 @@ func (s *server) turn(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	turn := s.turns[turnID]
+	_, consumed := s.consumedTurns[turnID]
 	s.mu.Unlock()
 	if turn == nil {
+		if consumed {
+			harness.WriteError(w, http.StatusGone, "terminal turn expired from runtime retention")
+			return
+		}
 		harness.WriteError(w, http.StatusNotFound, "turn not found")
 		return
 	}
@@ -731,6 +741,14 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 		return responseRejected
 	}
 	if len(calls) > 0 {
+		if len(calls) > maxBrokeredToolCalls-turn.requestedToolCalls {
+			s.appendFailedLocked(
+				turn,
+				"foundry_tool_call_limit_exceeded",
+				"hosted response exceeded the brokered tool-call limit",
+			)
+			return responseRejected
+		}
 		if !responseIDPresent {
 			s.appendFailedLocked(
 				turn,
@@ -791,6 +809,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 			}
 			frames = append(frames, frame)
 		}
+		turn.requestedToolCalls += len(calls)
 		for index, call := range calls {
 			turn.pendingTools[call.callID] = call.name
 			s.appendPreparedFrameLocked(turn, frames[index])

@@ -1533,6 +1533,11 @@ func TestResponsesAdapterRejectsConsumedTurnAfterCleanup(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	if err := client.StreamFrames(context.Background(), request.TurnID, 0, func(harness.HarnessEventFrame) error {
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "410") {
+		t.Fatalf("expired terminal stream error = %v, want non-retryable 410", err)
+	}
 	if _, err := client.StartTurn(context.Background(), request); err == nil ||
 		!strings.Contains(err.Error(), "turn already completed") {
 		t.Fatalf("retry after cleanup error = %v, want consumed-turn conflict", err)
@@ -1616,6 +1621,23 @@ func TestResponsesAdapterValidatesCancelIdentityBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointComposesProjectAndAgent(t *testing.T) {
+	server := newServer(config{
+		projectEndpoint: "https://example.services.ai.azure.com/api/projects/project-a/",
+		agentName:       "agent/name",
+		apiVersion:      "v1",
+	}, nil)
+	endpoint, err := server.responsesEndpoint()
+	if err != nil {
+		t.Fatalf("responsesEndpoint: %v", err)
+	}
+	want := "https://example.services.ai.azure.com/api/projects/project-a/agents/" +
+		"agent%2Fname/endpoint/protocols/openai/responses?api-version=v1"
+	if endpoint != want {
+		t.Fatalf("responsesEndpoint = %q, want %q", endpoint, want)
+	}
+}
+
 func TestResponsesEndpointSafety(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1691,6 +1713,37 @@ func TestProjectEndpointSafety(t *testing.T) {
 				t.Fatalf("projectEndpointIsSafe(%q) = %v, want %v", tt.endpoint, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResponsesRejectsOversizedHostedFunctionCallBatch(t *testing.T) {
+	server := newServer(config{
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, nil)
+	turn := &turnState{
+		request:          brokeredReadRequest("foundry-tool-call-cap"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	output := make([]responsesOutput, 0, maxBrokeredToolCalls+1)
+	for i := 0; i <= maxBrokeredToolCalls; i++ {
+		output = append(output, responsesOutput{
+			Type:      "function_call",
+			CallID:    fmt.Sprintf("call-%d", i),
+			Name:      "support-ticket-lookup",
+			Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+		})
+	}
+	server.handleResponsesResponse(turn, responsesResponse{ID: "resp-cap", Status: "completed", Output: output})
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed.Reason != "foundry_tool_call_limit_exceeded" {
+		t.Fatalf("failed frame = %#v, want foundry_tool_call_limit_exceeded", failed)
+	}
+	if hasFrameType(turn.frames, harness.FrameToolCallRequested) || turn.requestedToolCalls != 0 {
+		t.Fatalf("oversized hosted batch was partially accepted: frames=%#v count=%d", turn.frames, turn.requestedToolCalls)
 	}
 }
 
