@@ -37,6 +37,19 @@ const (
 	AgentRuntimeToolExecutionModeBrokered AgentRuntimeToolExecutionMode = "brokered"
 )
 
+// AgentRuntimeBrokeredToolClass declares which classes of Orka-brokered tools a runtime can request.
+// +kubebuilder:validation:Enum=read;write;coordination
+type AgentRuntimeBrokeredToolClass string
+
+const (
+	// AgentRuntimeBrokeredToolClassRead covers read-only evidence and lookup tools.
+	AgentRuntimeBrokeredToolClassRead AgentRuntimeBrokeredToolClass = "read"
+	// AgentRuntimeBrokeredToolClassWrite covers consequential tools that may require approval and idempotency.
+	AgentRuntimeBrokeredToolClassWrite AgentRuntimeBrokeredToolClass = "write"
+	// AgentRuntimeBrokeredToolClassCoordination covers Orka coordination tools such as delegate_task/wait_for_tasks.
+	AgentRuntimeBrokeredToolClassCoordination AgentRuntimeBrokeredToolClass = "coordination"
+)
+
 // AgentRuntimeReference selects a registered AgentRuntime for a type: agent task.
 type AgentRuntimeReference struct {
 	// Name is the AgentRuntime name. RuntimeRefs are resolved in the task namespace.
@@ -87,6 +100,11 @@ type AgentRuntimeCapabilitiesSpec struct {
 	// +optional
 	ToolExecutionModes []AgentRuntimeToolExecutionMode `json:"toolExecutionModes,omitempty"`
 
+	// BrokeredToolClasses lists brokered tool classes the runtime must advertise when brokered mode is required.
+	// +listType=set
+	// +optional
+	BrokeredToolClasses []AgentRuntimeBrokeredToolClass `json:"brokeredToolClasses,omitempty"`
+
 	// SupportsCancel requires the runtime to advertise cancellation support when true.
 	// +optional
 	SupportsCancel *bool `json:"supportsCancel,omitempty"`
@@ -94,6 +112,14 @@ type AgentRuntimeCapabilitiesSpec struct {
 	// SupportsRuntimeSessions requires the runtime to advertise stable runtime sessions when true.
 	// +optional
 	SupportsRuntimeSessions *bool `json:"supportsRuntimeSessions,omitempty"`
+
+	// SupportsContinuation requires the runtime to advertise continuation after Orka-brokered tool results when true.
+	// +optional
+	SupportsContinuation *bool `json:"supportsContinuation,omitempty"`
+
+	// SupportsArtifacts requires the runtime to advertise artifact/result reference support when true.
+	// +optional
+	SupportsArtifacts *bool `json:"supportsArtifacts,omitempty"`
 }
 
 // AgentRuntimeRegistrySpec defines the desired state of a registered Orka harness runtime.
@@ -143,6 +169,11 @@ type AgentRuntimeObservedCapabilities struct {
 	// +optional
 	ToolExecutionModes []AgentRuntimeToolExecutionMode `json:"toolExecutionModes,omitempty"`
 
+	// BrokeredToolClasses are the brokered tool classes advertised by /v1/capabilities.
+	// +listType=set
+	// +optional
+	BrokeredToolClasses []AgentRuntimeBrokeredToolClass `json:"brokeredToolClasses,omitempty"`
+
 	// SupportsCancel reports whether the runtime advertises cancellation support.
 	// +optional
 	SupportsCancel bool `json:"supportsCancel,omitempty"`
@@ -150,6 +181,14 @@ type AgentRuntimeObservedCapabilities struct {
 	// SupportsRuntimeSessions reports whether the runtime advertises runtime-session support.
 	// +optional
 	SupportsRuntimeSessions bool `json:"supportsRuntimeSessions,omitempty"`
+
+	// SupportsContinuation reports whether the runtime advertises continuation support.
+	// +optional
+	SupportsContinuation bool `json:"supportsContinuation,omitempty"`
+
+	// SupportsArtifacts reports whether the runtime advertises artifact/result reference support.
+	// +optional
+	SupportsArtifacts bool `json:"supportsArtifacts,omitempty"`
 
 	// SupportsSuspend reports whether the runtime advertises suspend support.
 	// +optional
@@ -162,6 +201,14 @@ type AgentRuntimeObservedCapabilities struct {
 	// MaxConcurrentTurns is the advertised concurrency ceiling.
 	// +optional
 	MaxConcurrentTurns int `json:"maxConcurrentTurns,omitempty"`
+
+	// MaxTurnSeconds is the advertised per-turn duration ceiling.
+	// +optional
+	MaxTurnSeconds int `json:"maxTurnSeconds,omitempty"`
+
+	// MaxOutputBytes is the advertised maximum output payload size.
+	// +optional
+	MaxOutputBytes int64 `json:"maxOutputBytes,omitempty"`
 }
 
 // AgentRuntimeStatus defines the observed state of an AgentRuntime.

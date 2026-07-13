@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,6 +29,14 @@ type ToolExecutionMode string
 const (
 	ToolExecutionModeObserved ToolExecutionMode = "observed"
 	ToolExecutionModeBrokered ToolExecutionMode = "brokered"
+)
+
+type BrokeredToolClass string
+
+const (
+	BrokeredToolClassRead         BrokeredToolClass = "read"
+	BrokeredToolClassWrite        BrokeredToolClass = "write"
+	BrokeredToolClassCoordination BrokeredToolClass = "coordination"
 )
 
 type FrameType string
@@ -110,6 +119,19 @@ type TurnInput struct {
 	Prompt      string       `json:"prompt,omitempty"`
 	ContextRefs []ContextRef `json:"contextRefs,omitempty"`
 	Env         []TurnEnvVar `json:"env,omitempty"`
+	// Tools carries safe Orka-governed tool schemas that the remote runtime may request
+	// through brokered governance. It intentionally omits downstream execution URLs,
+	// auth references, headers, and credentials; Orka remains the only executor.
+	Tools []ToolDefinition `json:"tools,omitempty"`
+}
+
+// ToolDefinition is the safe schema view exposed to brokered remote runtimes.
+// It is a declaration of what may be requested, not execution authority.
+type ToolDefinition struct {
+	Name          string            `json:"name"`
+	Description   string            `json:"description,omitempty"`
+	BrokeredClass BrokeredToolClass `json:"brokeredClass,omitempty"`
+	Parameters    json.RawMessage   `json:"parameters,omitempty"`
 }
 
 // TurnEnvVar is a resolved, literal environment variable passed to the
@@ -159,6 +181,27 @@ type CancelTurnResponse struct {
 	Message          string           `json:"message,omitempty"`
 }
 
+type ContinueTurnRequest struct {
+	Version          string            `json:"version"`
+	Namespace        string            `json:"namespace"`
+	TaskName         string            `json:"taskName"`
+	SessionName      string            `json:"sessionName"`
+	RuntimeSessionID RuntimeSessionID  `json:"runtimeSessionID"`
+	TurnID           HarnessTurnID     `json:"turnID"`
+	CorrelationID    string            `json:"correlationID"`
+	ToolResults      []ToolCallResult  `json:"toolResults,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
+}
+
+type ContinueTurnResponse struct {
+	Version          string           `json:"version"`
+	Accepted         bool             `json:"accepted"`
+	RuntimeSessionID RuntimeSessionID `json:"runtimeSessionID"`
+	TurnID           HarnessTurnID    `json:"turnID"`
+	CorrelationID    string           `json:"correlationID,omitempty"`
+	Message          string           `json:"message,omitempty"`
+}
+
 type CapabilitiesResponse struct {
 	Version                   string              `json:"version"`
 	ProtocolVersion           string              `json:"protocolVersion"`
@@ -167,11 +210,16 @@ type CapabilitiesResponse struct {
 	RuntimeVersion            string              `json:"runtimeVersion,omitempty"`
 	ProviderKind              ProviderKind        `json:"providerKind"`
 	ToolExecutionModes        []ToolExecutionMode `json:"toolExecutionModes"`
+	BrokeredToolClasses       []BrokeredToolClass `json:"brokeredToolClasses,omitempty"`
 	SupportsCancel            bool                `json:"supportsCancel"`
 	SupportsRuntimeSessions   bool                `json:"supportsRuntimeSessions"`
+	SupportsContinuation      bool                `json:"supportsContinuation,omitempty"`
+	SupportsArtifacts         bool                `json:"supportsArtifacts,omitempty"`
 	SupportsSuspend           bool                `json:"supportsSuspend,omitempty"`
 	SupportsWorkspaceSnapshot bool                `json:"supportsWorkspaceSnapshot,omitempty"`
 	MaxConcurrentTurns        int                 `json:"maxConcurrentTurns,omitempty"`
+	MaxTurnSeconds            int                 `json:"maxTurnSeconds,omitempty"`
+	MaxOutputBytes            int64               `json:"maxOutputBytes,omitempty"`
 	Metadata                  map[string]string   `json:"metadata,omitempty"`
 }
 
@@ -210,18 +258,31 @@ type HarnessEventFrame struct {
 }
 
 type TurnCompleted struct {
-	Result        string `json:"result,omitempty"`
-	OutputRef     string `json:"outputRef,omitempty"`
-	FinalEventSeq int64  `json:"finalEventSeq,omitempty"`
-	RetainSession bool   `json:"retainSession,omitempty"`
+	Result        string         `json:"result,omitempty"`
+	Data          map[string]any `json:"data,omitempty"`
+	Artifacts     []ArtifactRef  `json:"artifacts,omitempty"`
+	OutputRef     string         `json:"outputRef,omitempty"`
+	FinalEventSeq int64          `json:"finalEventSeq,omitempty"`
+	RetainSession bool           `json:"retainSession,omitempty"`
 }
 
 type TurnFailed struct {
-	Reason    string `json:"reason"`
-	Message   string `json:"message,omitempty"`
-	Result    string `json:"result,omitempty"`
-	OutputRef string `json:"outputRef,omitempty"`
-	Retryable bool   `json:"retryable,omitempty"`
+	Reason    string         `json:"reason"`
+	Message   string         `json:"message,omitempty"`
+	Result    string         `json:"result,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	Artifacts []ArtifactRef  `json:"artifacts,omitempty"`
+	OutputRef string         `json:"outputRef,omitempty"`
+	Retryable bool           `json:"retryable,omitempty"`
+}
+
+// ArtifactRef is safe artifact metadata passed through the harness protocol.
+// Artifact bytes remain in Orka-managed storage or at an adapter-provided outputRef.
+type ArtifactRef struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 type ErrorInfo struct {
@@ -313,6 +374,24 @@ func (r StartTurnRequest) Validate() error {
 			return fmt.Errorf("context ref %d seq must be non-negative", i)
 		}
 	}
+	for i, tool := range r.Input.Tools {
+		if err := tool.Validate(); err != nil {
+			return fmt.Errorf("input tool %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (t ToolDefinition) Validate() error {
+	if strings.TrimSpace(t.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if t.BrokeredClass != "" && !IsKnownBrokeredToolClass(t.BrokeredClass) {
+		return fmt.Errorf("unsupported brokered class %q", t.BrokeredClass)
+	}
+	if len(t.Parameters) > 0 && !json.Valid(t.Parameters) {
+		return fmt.Errorf("parameters must be valid JSON")
+	}
 	return nil
 }
 
@@ -357,6 +436,67 @@ func (r CancelTurnRequest) Validate() error {
 	return nil
 }
 
+func (r ContinueTurnRequest) Validate() error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.Namespace) == "" {
+		return fmt.Errorf("namespace is required")
+	}
+	if strings.TrimSpace(r.TaskName) == "" {
+		return fmt.Errorf("task name is required")
+	}
+	if strings.TrimSpace(r.SessionName) == "" {
+		return fmt.Errorf("session name is required")
+	}
+	if strings.TrimSpace(string(r.RuntimeSessionID)) == "" {
+		return fmt.Errorf("runtime session id is required")
+	}
+	if strings.TrimSpace(string(r.TurnID)) == "" {
+		return fmt.Errorf("turn id is required")
+	}
+	if strings.TrimSpace(r.CorrelationID) == "" {
+		return fmt.Errorf("correlation id is required")
+	}
+	if len(r.ToolResults) == 0 {
+		return fmt.Errorf("at least one tool result is required")
+	}
+	for i, result := range r.ToolResults {
+		if err := result.Validate(); err != nil {
+			return fmt.Errorf("tool result %d is invalid: %w", i, err)
+		}
+		if len(result.Output) == 0 && result.Error == nil {
+			return fmt.Errorf("tool result %d output or error is required", i)
+		}
+		if result.RuntimeSessionID != r.RuntimeSessionID {
+			return fmt.Errorf("tool result %d runtime session id %q does not match continue request %q", i, result.RuntimeSessionID, r.RuntimeSessionID)
+		}
+		if result.TurnID != r.TurnID {
+			return fmt.Errorf("tool result %d turn id %q does not match continue request %q", i, result.TurnID, r.TurnID)
+		}
+	}
+	return nil
+}
+
+func (r ContinueTurnResponse) ValidateFor(request ContinueTurnRequest) error {
+	if err := validateVersion(r.Version); err != nil {
+		return err
+	}
+	if !r.Accepted {
+		return fmt.Errorf("harness did not accept continuation")
+	}
+	if r.RuntimeSessionID != request.RuntimeSessionID {
+		return fmt.Errorf("harness continued runtime session %q, want %q", r.RuntimeSessionID, request.RuntimeSessionID)
+	}
+	if r.TurnID != request.TurnID {
+		return fmt.Errorf("harness continued turn %q, want %q", r.TurnID, request.TurnID)
+	}
+	if r.CorrelationID != "" && r.CorrelationID != request.CorrelationID {
+		return fmt.Errorf("harness continued correlation id %q, want %q", r.CorrelationID, request.CorrelationID)
+	}
+	return nil
+}
+
 func (r CapabilitiesResponse) Validate() error {
 	if err := validateVersion(r.Version); err != nil {
 		return err
@@ -381,8 +521,22 @@ func (r CapabilitiesResponse) Validate() error {
 			return fmt.Errorf("unsupported tool execution mode %q", mode)
 		}
 	}
+	for _, class := range r.BrokeredToolClasses {
+		if !IsKnownBrokeredToolClass(class) {
+			return fmt.Errorf("unsupported brokered tool class %q", class)
+		}
+	}
+	if len(r.BrokeredToolClasses) > 0 && !containsToolExecutionMode(r.ToolExecutionModes, ToolExecutionModeBrokered) {
+		return fmt.Errorf("brokeredToolClasses require tool execution mode %q", ToolExecutionModeBrokered)
+	}
 	if r.MaxConcurrentTurns < 0 {
 		return fmt.Errorf("max concurrent turns must be non-negative")
+	}
+	if r.MaxTurnSeconds < 0 {
+		return fmt.Errorf("max turn seconds must be non-negative")
+	}
+	if r.MaxOutputBytes < 0 {
+		return fmt.Errorf("max output bytes must be non-negative")
 	}
 	return nil
 }
@@ -492,6 +646,19 @@ func IsKnownToolExecutionMode(value ToolExecutionMode) bool {
 	default:
 		return false
 	}
+}
+
+func IsKnownBrokeredToolClass(value BrokeredToolClass) bool {
+	switch value {
+	case BrokeredToolClassRead, BrokeredToolClassWrite, BrokeredToolClassCoordination:
+		return true
+	default:
+		return false
+	}
+}
+
+func containsToolExecutionMode(modes []ToolExecutionMode, want ToolExecutionMode) bool {
+	return slices.Contains(modes, want)
 }
 
 func IsKnownHealthStatus(value HealthStatus) bool {

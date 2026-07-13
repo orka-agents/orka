@@ -16,6 +16,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // SendMessageTool implements inter-agent messaging
@@ -74,6 +76,29 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 
 	if a.ToTask == "" || a.Content == "" {
 		return "", fmt.Errorf("to_task and content are required")
+	}
+
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.MessageStore != nil {
+		taskName := strings.TrimSpace(toolCtx.TaskID)
+		namespace := strings.TrimSpace(toolCtx.Namespace)
+		parentTask := strings.TrimSpace(toolCtx.ParentTaskID)
+		if taskName == "" || namespace == "" || parentTask == "" {
+			return "", fmt.Errorf("messaging requires task, namespace, and parent task context")
+		}
+		if err := toolCtx.MessageStore.SendMessage(ctx, &store.Message{
+			Namespace:  namespace,
+			FromTask:   taskName,
+			ToTask:     a.ToTask,
+			ParentTask: parentTask,
+			Content:    a.Content,
+		}); err != nil {
+			return "", fmt.Errorf("failed to send message: %w", err)
+		}
+		target := a.ToTask
+		if target == "*" {
+			target = "all siblings"
+		}
+		return fmt.Sprintf("Message sent to %s", target), nil
 	}
 
 	taskName := os.Getenv(envOrkaTaskName)

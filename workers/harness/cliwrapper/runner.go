@@ -46,6 +46,7 @@ func (r CommandRunner) Run(ctx context.Context, spec *CommandSpec) (CommandResul
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.Dir
 	cmd.Env = mergeCommandEnv(sanitizedProcessEnv(os.Environ()), spec.Env)
+	cmd.Env = unsetCommandEnv(cmd.Env, spec.UnsetEnv)
 	if len(spec.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(spec.Stdin)
 	}
@@ -200,6 +201,32 @@ func mergeCommandEnv(base, overrides []string) []string {
 		}
 		key, _, _ := strings.Cut(entry, "=")
 		out = setEnv(out, key, strings.TrimPrefix(entry, key+"="))
+	}
+	return out
+}
+
+func unsetCommandEnv(env, names []string) []string {
+	if len(env) == 0 || len(names) == 0 {
+		return env
+	}
+	unset := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			unset[name] = struct{}{}
+		}
+	}
+	if len(unset) == 0 {
+		return env
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, remove := unset[key]; remove {
+				continue
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }

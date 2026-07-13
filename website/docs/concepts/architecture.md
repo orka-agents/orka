@@ -79,12 +79,13 @@ The controller is the central component that runs as a Kubernetes Deployment. It
 
 ### Custom Resource Definitions (`api/v1alpha1/`)
 
-Orka uses seven CRDs:
+Orka uses eight core CRDs:
 
 | CRD | Purpose |
 |-----|---------|
 | **Task** | Core work unit — container, AI, or agent type |
 | **Agent** | Reusable agent configurations with model, tools, skills, and optional runtime |
+| **AgentRuntime** | Namespace-local facade/registry entry for bring-your-own remote execution backends implementing the Orka runtime contract |
 | **Tool** | Custom HTTP-based tool definitions for agents |
 | **Provider** | LLM provider configuration (Anthropic, OpenAI, Azure OpenAI) |
 | **Skill** | Reusable prompt content injected into agent system prompts |

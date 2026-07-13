@@ -373,6 +373,7 @@ func TestAgentRuntimeReferenceOnAgentCLI(t *testing.T) {
 
 func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 	supportsCancel := true
+	supportsContinuation := true
 	runtime := AgentRuntime{
 		Spec: AgentRuntimeRegistrySpec{
 			ContractVersion: AgentRuntimeContractHarnessV1,
@@ -385,8 +386,10 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 				Key:  "token",
 			}},
 			Capabilities: &AgentRuntimeCapabilitiesSpec{
-				ToolExecutionModes: []AgentRuntimeToolExecutionMode{AgentRuntimeToolExecutionModeObserved},
-				SupportsCancel:     &supportsCancel,
+				ToolExecutionModes:   []AgentRuntimeToolExecutionMode{AgentRuntimeToolExecutionModeObserved, AgentRuntimeToolExecutionModeBrokered},
+				BrokeredToolClasses:  []AgentRuntimeBrokeredToolClass{AgentRuntimeBrokeredToolClassRead},
+				SupportsCancel:       &supportsCancel,
+				SupportsContinuation: &supportsContinuation,
 			},
 		},
 	}
@@ -398,5 +401,11 @@ func TestAgentRuntimeCRDSpecFields(t *testing.T) {
 	}
 	if runtime.Spec.ClientAuth.BearerAuthRef.Name != "fibey-agentkit-harness-token" {
 		t.Fatalf("BearerAuthRef.Name = %q", runtime.Spec.ClientAuth.BearerAuthRef.Name)
+	}
+	if len(runtime.Spec.Capabilities.BrokeredToolClasses) != 1 || runtime.Spec.Capabilities.BrokeredToolClasses[0] != AgentRuntimeBrokeredToolClassRead {
+		t.Fatalf("BrokeredToolClasses = %#v", runtime.Spec.Capabilities.BrokeredToolClasses)
+	}
+	if runtime.Spec.Capabilities.SupportsContinuation == nil || !*runtime.Spec.Capabilities.SupportsContinuation {
+		t.Fatalf("SupportsContinuation = %#v, want true", runtime.Spec.Capabilities.SupportsContinuation)
 	}
 }

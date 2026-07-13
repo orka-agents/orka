@@ -22,6 +22,14 @@ func TestTurnResourcePathBuildsEscapedSafePaths(t *testing.T) {
 	if cancelPath != "/v1/turns/turn-1/cancel" {
 		t.Fatalf("CancelTurnPath() = %q", cancelPath)
 	}
+
+	continuePath, err := ContinueTurnPath("turn-1")
+	if err != nil {
+		t.Fatalf("ContinueTurnPath() error = %v", err)
+	}
+	if continuePath != "/v1/turns/turn-1/continue" {
+		t.Fatalf("ContinueTurnPath() = %q", continuePath)
+	}
 }
 
 func TestTurnResourcePathRejectsUnsafeTurnIDs(t *testing.T) {

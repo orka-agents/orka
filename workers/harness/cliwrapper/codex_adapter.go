@@ -84,6 +84,7 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
 		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, baseURL),
 		Env:        buildCodexEnv(turn.Env),
+		UnsetEnv:   []string{workerenv.Prompt},
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
 		ResultFile: outputPath,
@@ -215,7 +216,13 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 
 func buildCodexEnv(extra []string) []string {
 	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(extra, workerenv.OpenAIBaseURL))
-	env := removeTurnEnv(append([]string(nil), extra...), workerenv.OpenAIBaseURL)
+	// Codex receives the turn prompt on stdin. Remove the explicit copy here;
+	// BuildCommand also unsets any inherited copy after the final environment merge.
+	env := removeTurnEnv(
+		append([]string(nil), extra...),
+		workerenv.OpenAIBaseURL,
+		workerenv.Prompt,
+	)
 	env = setEnv(env, "HOME", firstNonEmpty(envEntryValue(env, "HOME"), "/home/worker"))
 	if baseURL != "" {
 		env = setEnv(env, workerenv.OpenAIBaseURL, baseURL)

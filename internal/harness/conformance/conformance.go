@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +40,18 @@ type Target struct {
 	// checks may leave this false when they only need condition-ready health and
 	// capabilities data.
 	ProbeTurn bool
+
+	// ProbeBrokeredRead starts a brokered read-profile turn, waits for a tool call,
+	// sends a synthetic Orka tool result through /continue, and requires terminal completion.
+	ProbeBrokeredRead bool
+
+	// ProbeBrokeredWrite starts a brokered write-profile turn, waits for a tool call,
+	// sends a synthetic approved Orka tool result through /continue, and requires terminal completion.
+	ProbeBrokeredWrite bool
+
+	// ProbeBrokeredCoordination starts a brokered coordination-profile turn and
+	// verifies the same tool-request/continue/result/terminal contract.
+	ProbeBrokeredCoordination bool
 
 	// StartTurnRequest overrides the synthetic turn request used when ProbeTurn is true.
 	StartTurnRequest *harness.StartTurnRequest
@@ -91,7 +104,13 @@ func Check(ctx context.Context, target Target) Result {
 	}
 
 	if len(result.Failures) == 0 {
-		if target.ProbeTurn {
+		if target.ProbeBrokeredRead {
+			runBrokeredProbe(ctx, target, &result, baseURL, controlTimeout, harness.BrokeredToolClassRead)
+		} else if target.ProbeBrokeredWrite {
+			runBrokeredProbe(ctx, target, &result, baseURL, controlTimeout, harness.BrokeredToolClassWrite)
+		} else if target.ProbeBrokeredCoordination {
+			runBrokeredProbe(ctx, target, &result, baseURL, controlTimeout, harness.BrokeredToolClassCoordination)
+		} else if target.ProbeTurn {
 			runTurnProbe(ctx, target, &result, baseURL, controlTimeout)
 		} else if target.RequireAuth {
 			runAuthProbe(ctx, target, &result, baseURL, controlTimeout)
@@ -184,15 +203,398 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	}
 }
 
+//nolint:gocyclo // Brokered conformance is a compact protocol state-machine probe.
+func runBrokeredProbe(
+	ctx context.Context,
+	target Target,
+	result *Result,
+	baseURL string,
+	controlTimeout time.Duration,
+	profile harness.BrokeredToolClass,
+) {
+	if target.RequireAuth && strings.TrimSpace(target.BearerToken) == "" {
+		result.addFailure("bearer token is required for authenticated harness conformance")
+		return
+	}
+	if result.ObservedCapabilities == nil {
+		result.addFailure("capabilities are required for brokered conformance")
+		return
+	}
+	if !capabilitiesHaveToolMode(result.ObservedCapabilities, harness.ToolExecutionModeBrokered) {
+		result.addFailure(fmt.Sprintf("runtime does not advertise toolExecutionMode %q", harness.ToolExecutionModeBrokered))
+		return
+	}
+	if !capabilitiesHaveBrokeredClass(result.ObservedCapabilities, profile) {
+		result.addFailure(fmt.Sprintf("runtime does not advertise brokeredToolClass %q", profile))
+		return
+	}
+	if !result.ObservedCapabilities.SupportsContinuation {
+		result.addFailure("runtime does not advertise supportsContinuation")
+		return
+	}
+
+	request := defaultStartTurnRequest("conformance-brokered-" + string(profile))
+	if target.StartTurnRequest != nil {
+		request = *target.StartTurnRequest
+	}
+	request.ToolExecutionMode = harness.ToolExecutionModeBrokered
+	if request.Metadata == nil {
+		request.Metadata = map[string]string{}
+	}
+	request.Input.Prompt = fmt.Sprintf("Orka brokered %s conformance probe. Request one brokered tool and complete after the result.", profile)
+	request.Input.Tools = []harness.ToolDefinition{{
+		Name:          "conformance_" + string(profile),
+		Description:   "Synthetic Orka conformance tool schema",
+		BrokeredClass: profile,
+		Parameters:    json.RawMessage(`{"type":"object","properties":{},"additionalProperties":true}`),
+	}}
+	if result.ObservedCapabilities != nil && strings.TrimSpace(result.ObservedCapabilities.RuntimeName) != "" {
+		request.Metadata["runtime"] = strings.TrimSpace(result.ObservedCapabilities.RuntimeName)
+	}
+	request.Metadata["brokeredToolClasses"] = string(profile)
+	request.Metadata["brokeredToolClass"] = string(profile)
+	if target.RequireAuth && !assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request) {
+		return
+	}
+	client, err := newClient(baseURL, target.BearerToken, target.HTTPClient, controlTimeout)
+	if err != nil {
+		result.addFailure(fmt.Sprintf("create authenticated client: %v", err))
+		return
+	}
+	started, err := client.StartTurn(ctx, request)
+	if err != nil {
+		result.addFailure(fmt.Sprintf("start brokered turn failed: %v", err))
+		return
+	}
+	if strings.TrimSpace(started.EventStreamPath) == "" {
+		result.addFailure("start turn response eventStreamPath is required")
+	}
+	if target.RequireAuth {
+		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
+	}
+
+	streamCtx, streamCancel := context.WithTimeout(ctx, controlTimeout)
+	defer streamCancel()
+	framesCh := make(chan harness.HarnessEventFrame, maxProbeFrames)
+	errCh := make(chan error, 1)
+	go func() {
+		var frameBytes int
+		err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+			frameBytes += approximateProbeFrameBytes(frame)
+			if frameBytes > maxProbeFrameBytes {
+				return fmt.Errorf("conformance probe frame bytes exceeded %d", maxProbeFrameBytes)
+			}
+			select {
+			case framesCh <- frame:
+			case <-streamCtx.Done():
+				return streamCtx.Err()
+			}
+			if isProbeTerminalFrame(frame.Type) {
+				return nil
+			}
+			return nil
+		})
+		errCh <- err
+	}()
+
+	frames := []harness.HarnessEventFrame{}
+	var requested *harness.HarnessEventFrame
+	initialStreamEnded := false
+	for requested == nil {
+		select {
+		case frame := <-framesCh:
+			frames = append(frames, frame)
+			if err := validateBrokeredProbeFrame(request, frame); err != nil {
+				result.addFailure(err.Error())
+				cancelProbeTurn(ctx, client, result, request, "invalid brokered conformance frame")
+				return
+			}
+			if frame.Type == harness.FrameToolCallRequested {
+				if expected := expectedBrokeredProbeToolName(profile); frame.ToolName != expected {
+					result.addFailure(fmt.Sprintf("brokered %s probe requested tool %q, want %q", profile, frame.ToolName, expected))
+					return
+				}
+				copyFrame := frame
+				requested = &copyFrame
+			}
+			if isProbeTerminalFrame(frame.Type) && requested == nil {
+				result.addFailure("brokered turn completed before requesting a tool")
+				return
+			}
+		case err := <-errCh:
+			for len(framesCh) > 0 && requested == nil {
+				frame := <-framesCh
+				frames = append(frames, frame)
+				if err := validateBrokeredProbeFrame(request, frame); err != nil {
+					result.addFailure(err.Error())
+					cancelProbeTurn(ctx, client, result, request, "invalid brokered conformance frame")
+					return
+				}
+				if frame.Type == harness.FrameToolCallRequested {
+					if expected := expectedBrokeredProbeToolName(profile); frame.ToolName != expected {
+						result.addFailure(fmt.Sprintf("brokered %s probe requested tool %q, want %q", profile, frame.ToolName, expected))
+						return
+					}
+					copyFrame := frame
+					requested = &copyFrame
+					break
+				}
+				if isProbeTerminalFrame(frame.Type) {
+					result.addFailure("brokered turn completed before requesting a tool")
+					return
+				}
+			}
+			if requested != nil {
+				initialStreamEnded = true
+				if err != nil && !probeStreamStoppedByContext(err) {
+					result.addFailure(fmt.Sprintf("stream brokered frames failed before continue: %v", err))
+					return
+				}
+				break
+			}
+			if err != nil {
+				result.addFailure(fmt.Sprintf("stream brokered frames failed before tool request: %v", err))
+			} else {
+				result.addFailure("brokered stream ended before tool request")
+			}
+			return
+		case <-streamCtx.Done():
+			cancelProbeTurn(ctx, client, result, request, "brokered conformance timed out waiting for tool request")
+			result.addFailure("brokered conformance timed out waiting for tool request")
+			return
+		}
+	}
+	if !assertNoBrokeredPreContinueFrames(streamCtx, result, request, framesCh, &frames) {
+		cancelProbeTurn(ctx, client, result, request, "brokered runtime emitted result before continue")
+		return
+	}
+
+	toolResult := harness.ToolCallResult{
+		Version:          harness.ProtocolVersion,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		ToolCallID:       requested.ToolCallID,
+		IdempotencyKey:   harness.ToolRequestIdempotencyKey(request.RuntimeSessionID, request.TurnID, requested.ToolCallID),
+		Approved:         true,
+		Output:           json.RawMessage(`{"success":true,"data":{"conformance":"ok"}}`),
+	}
+	continueRequest := harness.ContinueTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        request.Namespace,
+		TaskName:         request.TaskName,
+		SessionName:      request.SessionName,
+		RuntimeSessionID: request.RuntimeSessionID,
+		TurnID:           request.TurnID,
+		CorrelationID:    request.CorrelationID,
+		ToolResults:      []harness.ToolCallResult{toolResult},
+	}
+	if target.RequireAuth && !assertUnauthenticatedContinueRejected(ctx, target, result, baseURL, controlTimeout, continueRequest) {
+		cancelProbeTurn(ctx, client, result, request, "unauthenticated brokered continue was accepted")
+		return
+	}
+	if _, err := client.ContinueTurn(ctx, continueRequest); err != nil {
+		cancelProbeTurn(ctx, client, result, request, "brokered conformance continue failed")
+		result.addFailure(fmt.Sprintf("continue brokered turn failed: %v", err))
+		return
+	}
+	continueStreamCtx, continueStreamCancel := context.WithTimeout(ctx, controlTimeout)
+	defer continueStreamCancel()
+	if initialStreamEnded {
+		reconnected, sawToolResult, sawTerminal, reconnectErr := streamBrokeredContinuationFrames(
+			continueStreamCtx,
+			client,
+			request,
+			*requested,
+			maxFrameSeq(frames),
+		)
+		frames = append(frames, reconnected...)
+		if reconnectErr != nil && (!sawTerminal || !probeStreamStoppedByContext(reconnectErr)) {
+			result.addFailure(fmt.Sprintf("stream brokered frames after continue failed: %v", reconnectErr))
+			return
+		}
+		if !sawTerminal {
+			result.addFailure("brokered stream ended without terminal frame")
+		}
+		if sawTerminal && !sawToolResult {
+			result.addFailure("brokered turn did not acknowledge tool result")
+		}
+		validateProbeFrames(result, request, frames)
+		return
+	}
+
+	terminalSeen := false
+	toolResultSeen := false
+	for !terminalSeen {
+		select {
+		case frame := <-framesCh:
+			frames = append(frames, frame)
+			if err := validateBrokeredProbeFrame(request, frame); err != nil {
+				result.addFailure(err.Error())
+				cancelProbeTurn(ctx, client, result, request, "invalid brokered conformance frame")
+				return
+			}
+			if frame.Type == harness.FrameToolResultReceived && frame.ToolCallID == requested.ToolCallID {
+				toolResultSeen = true
+			}
+			terminalSeen = isProbeTerminalFrame(frame.Type)
+		case err := <-errCh:
+			for len(framesCh) > 0 && !terminalSeen {
+				frame := <-framesCh
+				frames = append(frames, frame)
+				if frame.Type == harness.FrameToolResultReceived && frame.ToolCallID == requested.ToolCallID {
+					toolResultSeen = true
+				}
+				terminalSeen = isProbeTerminalFrame(frame.Type)
+			}
+			if err != nil && (!terminalSeen || !probeStreamStoppedByContext(err)) {
+				result.addFailure(fmt.Sprintf("stream brokered frames failed: %v", err))
+				return
+			}
+			if !terminalSeen {
+				reconnected, sawToolResult, sawTerminal, reconnectErr := streamBrokeredContinuationFrames(
+					continueStreamCtx,
+					client,
+					request,
+					*requested,
+					maxFrameSeq(frames),
+				)
+				frames = append(frames, reconnected...)
+				toolResultSeen = toolResultSeen || sawToolResult
+				terminalSeen = sawTerminal
+				if reconnectErr != nil && (!terminalSeen || !probeStreamStoppedByContext(reconnectErr)) {
+					result.addFailure(fmt.Sprintf("stream brokered frames after continue failed: %v", reconnectErr))
+					return
+				}
+			}
+			if !terminalSeen {
+				result.addFailure("brokered stream ended without terminal frame")
+			}
+			if terminalSeen && !toolResultSeen {
+				result.addFailure("brokered turn did not acknowledge tool result")
+			}
+			validateProbeFrames(result, request, frames)
+			return
+		case <-streamCtx.Done():
+			cancelProbeTurn(ctx, client, result, request, "brokered conformance timed out waiting for terminal frame")
+			result.addFailure("brokered conformance timed out waiting for terminal frame")
+			return
+		}
+	}
+	if !toolResultSeen {
+		result.addFailure("brokered turn did not acknowledge tool result")
+	}
+	validateProbeFrames(result, request, frames)
+}
+
+func expectedBrokeredProbeToolName(profile harness.BrokeredToolClass) string {
+	return "conformance_" + string(profile)
+}
+
+func streamBrokeredContinuationFrames(
+	ctx context.Context,
+	client *harness.Client,
+	request harness.StartTurnRequest,
+	requested harness.HarnessEventFrame,
+	afterSeq int64,
+) ([]harness.HarnessEventFrame, bool, bool, error) {
+	frames := []harness.HarnessEventFrame{}
+	toolResultSeen := false
+	terminalSeen := false
+	err := client.StreamFrames(ctx, request.TurnID, afterSeq, func(frame harness.HarnessEventFrame) error {
+		if err := validateBrokeredProbeFrame(request, frame); err != nil {
+			return err
+		}
+		frames = append(frames, frame)
+		if frame.Type == harness.FrameToolResultReceived && frame.ToolCallID == requested.ToolCallID {
+			toolResultSeen = true
+		}
+		terminalSeen = isProbeTerminalFrame(frame.Type)
+		return nil
+	})
+	return frames, toolResultSeen, terminalSeen, err
+}
+
+func maxFrameSeq(frames []harness.HarnessEventFrame) int64 {
+	var maxSeq int64
+	for _, frame := range frames {
+		if frame.Seq > maxSeq {
+			maxSeq = frame.Seq
+		}
+	}
+	return maxSeq
+}
+
+func assertNoBrokeredPreContinueFrames(
+	ctx context.Context,
+	result *Result,
+	request harness.StartTurnRequest,
+	framesCh <-chan harness.HarnessEventFrame,
+	frames *[]harness.HarnessEventFrame,
+) bool {
+	timer := time.NewTimer(postTerminalDrainTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case frame := <-framesCh:
+			*frames = append(*frames, frame)
+			if err := validateBrokeredProbeFrame(request, frame); err != nil {
+				result.addFailure(err.Error())
+				return false
+			}
+			if frame.Type == harness.FrameToolResultReceived || isProbeTerminalFrame(frame.Type) {
+				result.addFailure("brokered runtime emitted tool result or terminal frame before continue")
+				return false
+			}
+		case <-timer.C:
+			return true
+		case <-ctx.Done():
+			result.addFailure("brokered conformance context ended before continue")
+			return false
+		}
+	}
+}
+
+func validateBrokeredProbeFrame(request harness.StartTurnRequest, frame harness.HarnessEventFrame) error {
+	if err := frame.ValidateRequired(); err != nil {
+		return fmt.Errorf("invalid brokered frame: %w", err)
+	}
+	if frame.RuntimeSessionID != request.RuntimeSessionID || frame.TurnID != request.TurnID || frame.CorrelationID != request.CorrelationID {
+		return fmt.Errorf("brokered frame identity does not match requested turn")
+	}
+	return nil
+}
+
+func capabilitiesHaveToolMode(caps *harness.CapabilitiesResponse, want harness.ToolExecutionMode) bool {
+	if caps == nil {
+		return false
+	}
+	return slices.Contains(caps.ToolExecutionModes, want)
+}
+
+func capabilitiesHaveBrokeredClass(caps *harness.CapabilitiesResponse, want harness.BrokeredToolClass) bool {
+	if caps == nil {
+		return false
+	}
+	return slices.Contains(caps.BrokeredToolClasses, want)
+}
+
 func assertDuplicateStartRejected(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest) bool {
-	_, err := client.StartTurn(ctx, request)
+	started, err := client.StartTurn(ctx, request)
 	if err == nil {
-		result.addFailure("duplicate start turn was accepted")
-		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start was accepted")
+		expectedPath, pathErr := harness.EventStreamPath(request.TurnID)
+		if pathErr == nil &&
+			started.RuntimeSessionID == request.RuntimeSessionID &&
+			started.TurnID == request.TurnID &&
+			started.CorrelationID == request.CorrelationID &&
+			strings.TrimSpace(started.EventStreamPath) == expectedPath {
+			return true
+		}
+		result.addFailure("duplicate start turn was accepted with mismatched identity")
+		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start identity mismatch")
 		return false
 	}
 	if !isDuplicateStartRejectedError(err) {
-		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection", err))
+		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection or identical response", err))
 		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start returned an unexpected error")
 		return false
 	}
@@ -219,6 +621,29 @@ func approximateProbeFrameBytes(frame harness.HarnessEventFrame) int {
 		size += len(key) + len(value)
 	}
 	return size
+}
+
+func assertUnauthenticatedContinueRejected(
+	ctx context.Context,
+	target Target,
+	result *Result,
+	baseURL string,
+	controlTimeout time.Duration,
+	request harness.ContinueTurnRequest,
+) bool {
+	unauth, err := newClient(baseURL, "", target.HTTPClient, controlTimeout)
+	if err != nil {
+		result.addFailure(fmt.Sprintf("create unauthenticated client: %v", err))
+		return false
+	}
+	if _, err := unauth.ContinueTurn(ctx, request); err == nil {
+		result.addFailure("unauthenticated continue turn was accepted")
+		return false
+	} else if !isAuthRequiredError(err) {
+		result.addFailure(fmt.Sprintf("unauthenticated continue turn returned %v, want 401/403", err))
+		return false
+	}
+	return true
 }
 
 func assertUnauthenticatedStartRejected(

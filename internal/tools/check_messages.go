@@ -68,6 +68,26 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 	if a.MarkRead != nil && !*a.MarkRead {
 		markRead = falseStr
 	}
+	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.MessageStore != nil {
+		taskName := strings.TrimSpace(toolCtx.TaskID)
+		namespace := strings.TrimSpace(toolCtx.Namespace)
+		parentTask := strings.TrimSpace(toolCtx.ParentTaskID)
+		if taskName == "" || namespace == "" || parentTask == "" {
+			return "", fmt.Errorf("messaging requires task, namespace, and parent task context")
+		}
+		messages, err := toolCtx.MessageStore.GetMessages(ctx, namespace, taskName, parentTask, markRead == trueStr)
+		if err != nil {
+			return "", fmt.Errorf("failed to check messages: %w", err)
+		}
+		if len(messages) == 0 {
+			return noNewMessagesText, nil
+		}
+		body, err := json.Marshal(messages)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal messages: %w", err)
+		}
+		return string(body), nil
+	}
 
 	taskName := os.Getenv(envOrkaTaskName)
 	namespace := os.Getenv(envOrkaTaskNamespace)

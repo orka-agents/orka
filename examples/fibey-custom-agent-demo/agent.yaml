@@ -1,11 +1,11 @@
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
-  name: fibey-custom
+  name: fibey-remote-http
 spec:
   runtime:
     runtimeRef:
-      name: fibey-agentkit
+      name: fibey-http-runtime
   systemPrompt:
     inline: |
       You are Fibey's custom incident scout. Produce a concise dossier and propose any side-effecting work order instead of executing it directly.

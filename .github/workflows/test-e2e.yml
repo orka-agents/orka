@@ -18,6 +18,9 @@ on:
       - 'LICENSE'
       - '.gitignore'
 
+permissions:
+  contents: read
+
 jobs:
   test-e2e:
     name: Run on Ubuntu

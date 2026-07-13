@@ -201,6 +201,12 @@ func TestFormatStructuredResult(t *testing.T) {
 		Diff:    "diff --git a/auth.go b/auth.go\n+// auth",
 		Files:   []string{"auth.go"},
 		Verdict: "APPROVED",
+		Data:    map[string]any{"risk": "low", "count": float64(2)},
+		Artifacts: []ArtifactRef{{
+			Filename:    "evidence.json",
+			ContentType: "application/json",
+			Size:        128,
+		}},
 	}
 	data, err := FormatStructuredResult(sr)
 	if err != nil {
@@ -220,6 +226,12 @@ func TestFormatStructuredResult(t *testing.T) {
 	if parsed.Diff != sr.Diff {
 		t.Errorf("diff mismatch")
 	}
+	if parsed.Data["risk"] != "low" || parsed.Data["count"] != float64(2) {
+		t.Errorf("data mismatch: %#v", parsed.Data)
+	}
+	if len(parsed.Artifacts) != 1 || parsed.Artifacts[0].Filename != "evidence.json" {
+		t.Errorf("artifacts mismatch: %#v", parsed.Artifacts)
+	}
 }
 
 func TestFormatStructuredResult_PreservesVersion(t *testing.T) {
@@ -236,7 +248,10 @@ func TestFormatStructuredResult_PreservesVersion(t *testing.T) {
 }
 
 func TestParseStructuredResult_Valid(t *testing.T) {
-	input := `{"version":1,"summary":"done","baseSHA":"abc","diff":"patch","verdict":"APPROVED","files":["a.go"]}`
+	input := strings.Join([]string{
+		`{"version":1,"summary":"done","baseSHA":"abc","diff":"patch",`,
+		`"verdict":"APPROVED","files":["a.go"],"data":{"answer":42}}`,
+	}, "")
 	sr := ParseStructuredResult(input)
 	if sr.Version != 1 {
 		t.Errorf("expected version 1, got %d", sr.Version)
@@ -249,6 +264,9 @@ func TestParseStructuredResult_Valid(t *testing.T) {
 	}
 	if sr.Verdict != "APPROVED" {
 		t.Errorf("expected verdict APPROVED, got %q", sr.Verdict)
+	}
+	if sr.Data["answer"] != float64(42) {
+		t.Errorf("expected data answer=42, got %#v", sr.Data)
 	}
 }
 

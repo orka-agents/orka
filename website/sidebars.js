@@ -25,6 +25,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'guides/chat',
+        'guides/bring-your-own-agent-runtime',
         'guides/multi-agent-coordination',
         'guides/autonomous-tasks',
         'guides/kontxt-quickstart',
@@ -35,6 +36,14 @@ const sidebars = {
         'guides/issue-to-pr-automation',
         'guides/ui',
         'guides/observability',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Operations',
+      collapsed: false,
+      items: [
+        'operations/agent-runtime-security',
       ],
     },
     {
@@ -58,6 +67,7 @@ const sidebars = {
         'development/development',
         'development/testing',
         'development/security-scanning-design',
+        'development/agent-runtime-adapter-contract',
       ],
     },
   ],

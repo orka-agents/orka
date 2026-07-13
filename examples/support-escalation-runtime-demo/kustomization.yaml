@@ -1,0 +1,7 @@
+resources:
+- mock-http-runtime-service.yaml
+- mock-support-tool-service.yaml
+- tools.yaml
+- agentruntime.yaml
+- agent.yaml
+- task.yaml

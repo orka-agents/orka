@@ -1,0 +1,50 @@
+# Optional local/kind AgentKit Serve deployment for the Fibey AgentKit facade.
+# Build and load an AgentKit test-agent image named hello-agent:test, then apply
+# this manifest with secret-agentkit.yaml, agentruntime-agentkit.yaml, and
+# agent-agentkit.yaml. The offline echo fixture is for conformance/demo only; do
+# not use AGENTKIT_ORKA_OFFLINE_ECHO in production AgentKit deployments.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fibey-agentkit-runtime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fibey-agentkit-runtime
+  template:
+    metadata:
+      labels:
+        app: fibey-agentkit-runtime
+    spec:
+      containers:
+      - name: agentkit
+        image: hello-agent:test
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: AGENTKIT_PROTOCOL
+          value: orka
+        - name: AGENTKIT_BIND
+          value: 0.0.0.0
+        - name: AGENTKIT_ORKA_OFFLINE_ECHO
+          value: "1"
+        - name: AGENTKIT_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: fibey-agentkit-runtime-token
+              key: token
+        ports:
+        - name: http
+          containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fibey-agentkit-runtime
+spec:
+  selector:
+    app: fibey-agentkit-runtime
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

@@ -218,6 +218,11 @@ func (in *AgentRuntimeCapabilitiesSpec) DeepCopyInto(out *AgentRuntimeCapabiliti
 		*out = make([]AgentRuntimeToolExecutionMode, len(*in))
 		copy(*out, *in)
 	}
+	if in.BrokeredToolClasses != nil {
+		in, out := &in.BrokeredToolClasses, &out.BrokeredToolClasses
+		*out = make([]AgentRuntimeBrokeredToolClass, len(*in))
+		copy(*out, *in)
+	}
 	if in.SupportsCancel != nil {
 		in, out := &in.SupportsCancel, &out.SupportsCancel
 		*out = new(bool)
@@ -225,6 +230,16 @@ func (in *AgentRuntimeCapabilitiesSpec) DeepCopyInto(out *AgentRuntimeCapabiliti
 	}
 	if in.SupportsRuntimeSessions != nil {
 		in, out := &in.SupportsRuntimeSessions, &out.SupportsRuntimeSessions
+		*out = new(bool)
+		**out = **in
+	}
+	if in.SupportsContinuation != nil {
+		in, out := &in.SupportsContinuation, &out.SupportsContinuation
+		*out = new(bool)
+		**out = **in
+	}
+	if in.SupportsArtifacts != nil {
+		in, out := &in.SupportsArtifacts, &out.SupportsArtifacts
 		*out = new(bool)
 		**out = **in
 	}
@@ -309,6 +324,11 @@ func (in *AgentRuntimeObservedCapabilities) DeepCopyInto(out *AgentRuntimeObserv
 	if in.ToolExecutionModes != nil {
 		in, out := &in.ToolExecutionModes, &out.ToolExecutionModes
 		*out = make([]AgentRuntimeToolExecutionMode, len(*in))
+		copy(*out, *in)
+	}
+	if in.BrokeredToolClasses != nil {
+		in, out := &in.BrokeredToolClasses, &out.BrokeredToolClasses
+		*out = make([]AgentRuntimeBrokeredToolClass, len(*in))
 		copy(*out, *in)
 	}
 }

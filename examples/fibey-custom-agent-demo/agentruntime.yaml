@@ -1,15 +1,15 @@
 apiVersion: core.orka.ai/v1alpha1
 kind: AgentRuntime
 metadata:
-  name: fibey-agentkit
+  name: fibey-http-runtime
 spec:
   contractVersion: orka.harness.v1
   deployment:
     mode: external-endpoint
-    endpoint: http://fibey-agentkit.default.svc.cluster.local:8080
+    endpoint: http://fibey-http-runtime.default.svc.cluster.local:8080
   clientAuth:
     bearerTokenSecretRef:
-      name: fibey-agentkit-harness-token
+      name: fibey-http-runtime-token
       key: token
   capabilities:
     toolExecutionModes:

@@ -1,0 +1,20 @@
+# Example brokered read Tool CRD. Replace the URL with a real support/ticket lookup service.
+# Remote runtimes only request this tool; Orka owns execution and any downstream credentials.
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  name: support-ticket-lookup
+spec:
+  description: Look up sanitized support ticket and service health evidence for a customer escalation.
+  brokeredToolClass: read
+  parameters:
+    type: object
+    properties:
+      incident:
+        type: string
+        description: Support incident or customer identifier.
+    required:
+    - incident
+  http:
+    url: http://support-tool.default.svc.cluster.local:8080/lookup
+    method: POST

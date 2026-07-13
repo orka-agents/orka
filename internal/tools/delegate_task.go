@@ -41,14 +41,16 @@ type WorkspaceArgs struct {
 
 // DelegateTaskArgs are the arguments for the delegate_task tool
 type DelegateTaskArgs struct {
-	Agent     string         `json:"agent"`
-	Prompt    string         `json:"prompt"`
-	Namespace string         `json:"namespace,omitempty"`
-	Priority  *int32         `json:"priority,omitempty"`
-	Timeout   string         `json:"timeout,omitempty"`
-	Workspace *WorkspaceArgs `json:"workspace,omitempty"`
-	MaxTurns  *int32         `json:"maxTurns,omitempty"`
-	AllowBash *bool          `json:"allowBash,omitempty"`
+	Agent          string         `json:"agent"`
+	Prompt         string         `json:"prompt"`
+	Namespace      string         `json:"namespace,omitempty"`
+	AgentNamespace string         `json:"agentNamespace,omitempty"`
+	TaskNamespace  string         `json:"taskNamespace,omitempty"`
+	Priority       *int32         `json:"priority,omitempty"`
+	Timeout        string         `json:"timeout,omitempty"`
+	Workspace      *WorkspaceArgs `json:"workspace,omitempty"`
+	MaxTurns       *int32         `json:"maxTurns,omitempty"`
+	AllowBash      *bool          `json:"allowBash,omitempty"`
 
 	// PriorTask references a previously completed task whose diff should be
 	// applied to the workspace before this task begins. Optional.
@@ -107,7 +109,15 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			},
 			"namespace": {
 				"type": "string",
-				"description": "Namespace (defaults to current)"
+				"description": "Legacy namespace for both child task and agent lookup. Prefer taskNamespace/agentNamespace for cross-namespace delegation."
+			},
+			"agentNamespace": {
+				"type": "string",
+				"description": "Namespace containing the target Agent. Defaults to taskNamespace/current namespace."
+			},
+			"taskNamespace": {
+				"type": "string",
+				"description": "Namespace where the child Task should be created. Defaults to the parent task namespace."
 			},
 			"priority": {
 				"type": "integer",
@@ -178,9 +188,42 @@ type delegationContext struct {
 	parentName   string
 	currentDepth int
 	namespace    string
+	agentNS      string
 	parentTask   *corev1alpha1.Task
 	targetAgent  *corev1alpha1.Agent
 	priority     *int32
+}
+
+func delegatedAgentAllowed(agentName, agentNamespace, taskNamespace, allowedAgents string) bool {
+	agentName = strings.TrimSpace(agentName)
+	agentNamespace = strings.TrimSpace(agentNamespace)
+	taskNamespace = strings.TrimSpace(taskNamespace)
+	for allowed := range strings.SplitSeq(allowedAgents, ",") {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		parts := strings.SplitN(allowed, "/", 2)
+		if len(parts) == 2 {
+			if strings.TrimSpace(parts[0]) == agentNamespace && strings.TrimSpace(parts[1]) == agentName {
+				return true
+			}
+			continue
+		}
+		if allowed == agentName && (agentNamespace == "" || agentNamespace == taskNamespace) {
+			return true
+		}
+	}
+	return false
+}
+
+func namespacedDelegateAgent(namespace, name string) string {
+	namespace = strings.TrimSpace(namespace)
+	name = strings.TrimSpace(name)
+	if namespace == "" {
+		return name
+	}
+	return namespace + "/" + name
 }
 
 // parseDelegateArgs parses and validates the delegation arguments and environment.
@@ -201,21 +244,6 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	}
 	if delegateArgs.Prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
-	}
-
-	// Validate agent is allowed
-	if allowedAgents != "" {
-		allowed := strings.Split(allowedAgents, ",")
-		found := false
-		for _, a := range allowed {
-			if strings.TrimSpace(a) == delegateArgs.Agent {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("agent %q is not in the allowed agents list", delegateArgs.Agent)
-		}
 	}
 
 	// Validate depth
@@ -241,19 +269,46 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 		return nil, fmt.Errorf("coordination depth exceeded: current depth %d, max depth %d", currentDepth, maxDepth)
 	}
 
-	// Determine namespace
-	ns := delegateArgs.Namespace
-	if ns == "" {
-		ns = parentNamespace
+	// Determine child task and target agent namespaces. The legacy namespace
+	// field remains compatible: when no split fields are supplied it targets both
+	// the child task and agent. New callers should prefer taskNamespace and
+	// agentNamespace so cross-namespace agent catalogs do not move child tasks out
+	// of the parent namespace by accident.
+	taskNS := strings.TrimSpace(delegateArgs.TaskNamespace)
+	agentNS := strings.TrimSpace(delegateArgs.AgentNamespace)
+	legacyNS := strings.TrimSpace(delegateArgs.Namespace)
+	if taskNS == "" {
+		if legacyNS != "" && agentNS == "" {
+			taskNS = legacyNS
+		} else {
+			taskNS = parentNamespace
+		}
 	}
-	if ns == "" {
-		ns = defaultNamespace
+	if taskNS == "" {
+		taskNS = defaultNamespace
+	}
+	if agentNS == "" {
+		if legacyNS != "" {
+			agentNS = legacyNS
+		} else {
+			agentNS = taskNS
+		}
+	}
+
+	// Validate agent is allowed, including namespace when the allowlist entry is
+	// namespaced as namespace/name. Bare names retain existing same-name behavior.
+	if allowedAgents != "" && !delegatedAgentAllowed(delegateArgs.Agent, agentNS, taskNS, allowedAgents) {
+		return nil, fmt.Errorf("agent %q is not in the allowed agents list", namespacedDelegateAgent(agentNS, delegateArgs.Agent))
 	}
 
 	// Fetch parent Task for owner reference
 	parentTask := &corev1alpha1.Task{}
 	if parentName != "" {
-		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: ns}, parentTask); err != nil {
+		parentLookupNS := parentNamespace
+		if parentLookupNS == "" {
+			parentLookupNS = taskNS
+		}
+		if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: parentName, Namespace: parentLookupNS}, parentTask); err != nil {
 			return nil, fmt.Errorf("failed to get parent task: %w", err)
 		}
 	}
@@ -269,16 +324,17 @@ func (t *DelegateTaskTool) parseDelegateArgs(ctx context.Context, args json.RawM
 	// Look up the target Agent to determine task type
 	targetAgent := &corev1alpha1.Agent{}
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{
-		Name: delegateArgs.Agent, Namespace: ns,
+		Name: delegateArgs.Agent, Namespace: agentNS,
 	}, targetAgent); err != nil {
-		return nil, fmt.Errorf("failed to get agent %q: %w", delegateArgs.Agent, err)
+		return nil, fmt.Errorf("failed to get agent %q: %w", namespacedDelegateAgent(agentNS, delegateArgs.Agent), err)
 	}
 
 	return &delegationContext{
 		args:         delegateArgs,
 		parentName:   parentName,
 		currentDepth: currentDepth,
-		namespace:    ns,
+		namespace:    taskNS,
+		agentNS:      agentNS,
 		parentTask:   parentTask,
 		targetAgent:  targetAgent,
 		priority:     priority,
@@ -315,6 +371,9 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 			Prompt:   dc.args.Prompt,
 			Priority: dc.priority,
 		},
+	}
+	if dc.agentNS != "" && dc.agentNS != dc.namespace {
+		childTask.Spec.AgentRef.Namespace = dc.agentNS
 	}
 
 	if dc.args.Timeout != "" {
@@ -358,8 +417,10 @@ func (t *DelegateTaskTool) buildDelegatedTask(ctx context.Context, dc *delegatio
 
 	inheritTaskProvenance(childTask, dc.parentTask)
 
-	// Set owner reference if parent task exists
-	if dc.parentTask.UID != "" {
+	// Set owner reference only for same-namespace children. Kubernetes treats
+	// cross-namespace owner references for namespaced objects as invalid and may
+	// garbage-collect the child; labels/annotations still preserve lineage.
+	if dc.parentTask.UID != "" && dc.parentTask.Namespace == dc.namespace {
 		isController := true
 		blockOwnerDeletion := true
 		childTask.OwnerReferences = []metav1.OwnerReference{

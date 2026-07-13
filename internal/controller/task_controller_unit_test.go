@@ -93,6 +93,7 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		SessionManager:      NewSessionManager(ss),
 		Recorder:            record.NewFakeRecorder(100),
 		ResultStore:         ss,
+		MessageStore:        ss,
 		PlanStore:           ss,
 		ExecutionEventStore: ss,
 	}
@@ -567,7 +568,7 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *t
 		{
 			name: "agent defaultAllowedTools",
 			mutate: func(_ *corev1alpha1.Task, agent *corev1alpha1.Agent) {
-				agent.Spec.Runtime.DefaultAllowedTools = []string{"bash"}
+				agent.Spec.Runtime.DefaultAllowedTools = []string{"read_incident"}
 			},
 			wantError: "defaultAllowedTools",
 		},
@@ -580,11 +581,11 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *t
 			wantError: "defaultAllowBash",
 		},
 		{
-			name: "task allowedTools",
+			name: "task disallowedTools",
 			mutate: func(task *corev1alpha1.Task, _ *corev1alpha1.Agent) {
-				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read"}}
+				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"write"}}
 			},
-			wantError: "allowedTools",
+			wantError: "disallowedTools",
 		},
 		{
 			name: "task allowBash",
@@ -611,6 +612,24 @@ func TestValidateTaskAgentCompatibility_RuntimeRefRejectsToolPolicyMetadata(t *t
 				t.Fatalf("validateTaskAgentCompatibility() error = %v, want %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestValidateTaskAgentCompatibility_RuntimeRefAllowsBrokeredAllowedTools(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+		Type:         corev1alpha1.TaskTypeAgent,
+		Prompt:       "do stuff",
+		AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}},
+	}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "custom-runtime"}},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
 	}
 }
 

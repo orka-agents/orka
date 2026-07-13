@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -30,11 +31,13 @@ import (
 	"github.com/orka-agents/orka/internal/harness/conformance"
 )
 
+var agentRuntimeAllowInsecureLoopbackForTests bool
+
 const (
 	agentRuntimeReadyCondition = "Ready"
 	agentRuntimeReasonReady    = "ConformancePassed"
 	agentRuntimeReasonNotReady = "ConformanceFailed"
-	agentRuntimeProbeTimeout   = 10 * time.Second
+	agentRuntimeProbeTimeout   = 60 * time.Second
 	agentRuntimeRequeue        = 30 * time.Second
 
 	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"
@@ -52,6 +55,7 @@ type AgentRuntimeReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agentruntimes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 
 // Reconcile validates an external Orka harness endpoint and publishes condition-ready status.
 func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -76,6 +80,9 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := validateAgentRuntimeSpec(runtime); err != nil {
 		return nil, false, "", err.Error()
 	}
+	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
+		return nil, false, "", err.Error()
+	}
 	token, authRefResourceVersion, err := r.agentRuntimeBearerToken(ctx, runtime)
 	if err != nil {
 		return nil, false, "", err.Error()
@@ -97,7 +104,49 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := validateAgentRuntimeRequiredCapabilities(runtime, preflight.ObservedCapabilities); err != nil {
 		return observed, false, authRefResourceVersion, err.Error()
 	}
+	if err := validateAgentRuntimeExecutableCapabilities(preflight.ObservedCapabilities); err != nil {
+		return observed, false, authRefResourceVersion, err.Error()
+	}
 	if deepProbe {
+		for _, class := range brokeredClassesToProbe(preflight.ObservedCapabilities) {
+			switch class {
+			case corev1alpha1.AgentRuntimeBrokeredToolClassRead:
+				brokeredReadProbe := conformance.Check(probeCtx, conformance.Target{
+					BaseURL:           runtime.Spec.Deployment.Endpoint,
+					BearerToken:       token,
+					ControlTimeout:    agentRuntimeProbeTimeout,
+					ProbeBrokeredRead: true,
+					RequireAuth:       true,
+				})
+				if !brokeredReadProbe.Passed {
+					return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(brokeredReadProbe.Message)
+				}
+			case corev1alpha1.AgentRuntimeBrokeredToolClassWrite:
+				brokeredWriteProbe := conformance.Check(probeCtx, conformance.Target{
+					BaseURL:            runtime.Spec.Deployment.Endpoint,
+					BearerToken:        token,
+					ControlTimeout:     agentRuntimeProbeTimeout,
+					ProbeBrokeredWrite: true,
+					RequireAuth:        true,
+				})
+				if !brokeredWriteProbe.Passed {
+					return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(brokeredWriteProbe.Message)
+				}
+			case corev1alpha1.AgentRuntimeBrokeredToolClassCoordination:
+				brokeredCoordinationProbe := conformance.Check(probeCtx, conformance.Target{
+					BaseURL:                   runtime.Spec.Deployment.Endpoint,
+					BearerToken:               token,
+					ControlTimeout:            agentRuntimeProbeTimeout,
+					ProbeBrokeredCoordination: true,
+					RequireAuth:               true,
+				})
+				if !brokeredCoordinationProbe.Passed {
+					return observed, false, authRefResourceVersion, sanitizeAgentRuntimeStatusMessage(brokeredCoordinationProbe.Message)
+				}
+			}
+		}
+	}
+	if deepProbe && capabilityHasToolMode(preflight.ObservedCapabilities, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
 		turnProbe := conformance.Check(probeCtx, conformance.Target{
 			BaseURL:        runtime.Spec.Deployment.Endpoint,
 			BearerToken:    token,
@@ -118,6 +167,23 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	return observed, true, authRefResourceVersion, "AgentRuntime passed Orka harness readiness checks"
 }
 
+func brokeredClassesToProbe(caps *harness.CapabilitiesResponse) []corev1alpha1.AgentRuntimeBrokeredToolClass {
+	if caps == nil || len(caps.BrokeredToolClasses) == 0 {
+		return nil
+	}
+	classes := make([]corev1alpha1.AgentRuntimeBrokeredToolClass, 0, len(caps.BrokeredToolClasses))
+	seen := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
+	for _, class := range caps.BrokeredToolClasses {
+		converted := corev1alpha1.AgentRuntimeBrokeredToolClass(class)
+		if _, ok := seen[converted]; ok {
+			continue
+		}
+		seen[converted] = struct{}{}
+		classes = append(classes, converted)
+	}
+	return classes
+}
+
 func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if runtime == nil {
 		return fmt.Errorf("AgentRuntime is required")
@@ -136,7 +202,7 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return fmt.Errorf("deployment.endpoint must be an absolute http(s) URL")
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+	if parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS {
 		return fmt.Errorf("deployment.endpoint scheme %q is not supported", parsed.Scheme)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -150,6 +216,62 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 		return fmt.Errorf("clientAuth.bearerTokenSecretRef.key is required")
 	}
 	return nil
+}
+
+func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.Context, runtime *corev1alpha1.AgentRuntime) error {
+	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("deployment.endpoint must be an absolute http(s) URL")
+	}
+	if parsed.Scheme != urlSchemeHTTP {
+		return nil
+	}
+	host := parsed.Hostname()
+	if isLoopbackAgentRuntimeEndpoint(host) && agentRuntimeAllowInsecureLoopbackForTests {
+		return nil
+	}
+	if serviceName, serviceNamespace, ok := parseAgentRuntimeServiceNamespaceHost(host); ok && serviceNamespace == runtime.Namespace {
+		if r != nil && r.Client != nil {
+			service := &corev1.Service{}
+			if err := r.Get(ctx, client.ObjectKey{Name: serviceName, Namespace: serviceNamespace}, service); err == nil && service.Spec.Type != corev1.ServiceTypeExternalName && len(service.Spec.Selector) > 0 {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("deployment.endpoint must use https for non-local AgentRuntime endpoints")
+}
+
+func isLoopbackAgentRuntimeEndpoint(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "" {
+		return false
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.IsLoopback()
+	}
+	return host == "localhost"
+}
+
+func parseAgentRuntimeServiceNamespaceHost(host string) (serviceName, serviceNamespace string, ok bool) {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return "", "", false
+	}
+	parts := strings.Split(host, ".")
+	switch {
+	case len(parts) == 2:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	case len(parts) == 3 && parts[2] == k8sServiceDNSLabel:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	case len(parts) == 5 && parts[2] == k8sServiceDNSLabel && parts[3] == k8sClusterDNSLabel && parts[4] == k8sLocalDNSLabel:
+		serviceName, serviceNamespace = parts[0], parts[1]
+	default:
+		return "", "", false
+	}
+	if serviceName == "" || serviceNamespace == "" {
+		return "", "", false
+	}
+	return serviceName, serviceNamespace, true
 }
 
 func validateAgentRuntimeBearerSecretUse(runtimeName string, endpoint string, secret *corev1.Secret) error {
@@ -193,9 +315,50 @@ func (r *AgentRuntimeReconciler) agentRuntimeBearerToken(ctx context.Context, ru
 	return value, strings.TrimSpace(secret.ResourceVersion), nil
 }
 
-func validateObservedHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
+func validateBaseHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
 	if caps == nil {
 		return fmt.Errorf("observed capabilities are missing")
+	}
+	if caps.RuntimeName != sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName) {
+		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
+	}
+	for _, class := range caps.BrokeredToolClasses {
+		if !harness.IsKnownBrokeredToolClass(class) {
+			return fmt.Errorf("unsupported brokeredToolClass %q", class)
+		}
+	}
+	return nil
+}
+
+func validateAgentRuntimeExecutableCapabilities(caps *harness.CapabilitiesResponse) error {
+	if err := validateBaseHarnessCapabilities(caps); err != nil {
+		return err
+	}
+	if !caps.SupportsRuntimeSessions {
+		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
+	}
+	observed := capabilityHasToolMode(caps, corev1alpha1.AgentRuntimeToolExecutionModeObserved)
+	brokered := capabilityHasToolMode(caps, corev1alpha1.AgentRuntimeToolExecutionModeBrokered)
+	if observed && !caps.SupportsCancel {
+		return fmt.Errorf("runtime advertises observed mode but not supportsCancel")
+	}
+	if !observed && !brokered {
+		return fmt.Errorf("runtime must advertise toolExecutionMode %q or %q", corev1alpha1.AgentRuntimeToolExecutionModeObserved, corev1alpha1.AgentRuntimeToolExecutionModeBrokered)
+	}
+	if brokered {
+		if !caps.SupportsContinuation {
+			return fmt.Errorf("runtime advertises brokered mode but not supportsContinuation")
+		}
+		if len(caps.BrokeredToolClasses) == 0 {
+			return fmt.Errorf("runtime advertises brokered mode but no brokeredToolClasses")
+		}
+	}
+	return nil
+}
+
+func validateObservedHarnessCapabilities(caps *harness.CapabilitiesResponse) error {
+	if err := validateBaseHarnessCapabilities(caps); err != nil {
+		return err
 	}
 	if !capabilityHasToolMode(caps, corev1alpha1.AgentRuntimeToolExecutionModeObserved) {
 		return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", corev1alpha1.AgentRuntimeToolExecutionModeObserved)
@@ -213,11 +376,8 @@ func validateAgentRuntimeRequiredCapabilities(
 	runtime *corev1alpha1.AgentRuntime,
 	caps *harness.CapabilitiesResponse,
 ) error {
-	if err := validateObservedHarnessCapabilities(caps); err != nil {
+	if err := validateBaseHarnessCapabilities(caps); err != nil {
 		return err
-	}
-	if caps.RuntimeName != sanitizeAgentRuntimeCapabilityValue(caps.RuntimeName) {
-		return fmt.Errorf("runtimeName contains unsafe text or exceeds status length limits")
 	}
 	required := runtime.Spec.Capabilities
 	if required == nil {
@@ -229,9 +389,20 @@ func validateAgentRuntimeRequiredCapabilities(
 	if required.SupportsRuntimeSessions != nil && *required.SupportsRuntimeSessions && !caps.SupportsRuntimeSessions {
 		return fmt.Errorf("runtime does not advertise required supportsRuntimeSessions capability")
 	}
+	if required.SupportsContinuation != nil && *required.SupportsContinuation && !caps.SupportsContinuation {
+		return fmt.Errorf("runtime does not advertise required supportsContinuation capability")
+	}
+	if required.SupportsArtifacts != nil && *required.SupportsArtifacts && !caps.SupportsArtifacts {
+		return fmt.Errorf("runtime does not advertise required supportsArtifacts capability")
+	}
 	for _, requiredMode := range required.ToolExecutionModes {
 		if !capabilityHasToolMode(caps, requiredMode) {
 			return fmt.Errorf("runtime does not advertise required toolExecutionMode %q", requiredMode)
+		}
+	}
+	for _, requiredClass := range required.BrokeredToolClasses {
+		if !capabilityHasBrokeredToolClass(caps, requiredClass) {
+			return fmt.Errorf("runtime does not advertise required brokeredToolClass %q", requiredClass)
 		}
 	}
 	return nil
@@ -242,6 +413,15 @@ func capabilityHasToolMode(caps *harness.CapabilitiesResponse, want corev1alpha1
 		return false
 	}
 	return slices.ContainsFunc(caps.ToolExecutionModes, func(got harness.ToolExecutionMode) bool {
+		return string(got) == string(want)
+	})
+}
+
+func capabilityHasBrokeredToolClass(caps *harness.CapabilitiesResponse, want corev1alpha1.AgentRuntimeBrokeredToolClass) bool {
+	if caps == nil {
+		return false
+	}
+	return slices.ContainsFunc(caps.BrokeredToolClasses, func(got harness.BrokeredToolClass) bool {
 		return string(got) == string(want)
 	})
 }
@@ -260,6 +440,19 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 		seenModes[converted] = struct{}{}
 		modes = append(modes, converted)
 	}
+	classes := make([]corev1alpha1.AgentRuntimeBrokeredToolClass, 0, len(caps.BrokeredToolClasses))
+	seenClasses := map[corev1alpha1.AgentRuntimeBrokeredToolClass]struct{}{}
+	for _, class := range caps.BrokeredToolClasses {
+		if !harness.IsKnownBrokeredToolClass(class) {
+			continue
+		}
+		converted := corev1alpha1.AgentRuntimeBrokeredToolClass(class)
+		if _, seen := seenClasses[converted]; seen {
+			continue
+		}
+		seenClasses[converted] = struct{}{}
+		classes = append(classes, converted)
+	}
 	return &corev1alpha1.AgentRuntimeObservedCapabilities{
 		ProtocolVersion:           sanitizeAgentRuntimeCapabilityValue(caps.ProtocolVersion),
 		Transport:                 sanitizeAgentRuntimeCapabilityValue(caps.Transport),
@@ -267,11 +460,16 @@ func observedCapabilitiesFromConformance(caps *harness.CapabilitiesResponse) *co
 		RuntimeVersion:            sanitizeAgentRuntimeCapabilityValue(caps.RuntimeVersion),
 		ProviderKind:              sanitizeAgentRuntimeCapabilityValue(string(caps.ProviderKind)),
 		ToolExecutionModes:        modes,
+		BrokeredToolClasses:       classes,
 		SupportsCancel:            caps.SupportsCancel,
 		SupportsRuntimeSessions:   caps.SupportsRuntimeSessions,
+		SupportsContinuation:      caps.SupportsContinuation,
+		SupportsArtifacts:         caps.SupportsArtifacts,
 		SupportsSuspend:           caps.SupportsSuspend,
 		SupportsWorkspaceSnapshot: caps.SupportsWorkspaceSnapshot,
 		MaxConcurrentTurns:        caps.MaxConcurrentTurns,
+		MaxTurnSeconds:            caps.MaxTurnSeconds,
+		MaxOutputBytes:            caps.MaxOutputBytes,
 	}
 }
 
