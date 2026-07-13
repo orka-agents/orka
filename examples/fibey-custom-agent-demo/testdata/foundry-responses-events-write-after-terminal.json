@@ -58,6 +58,10 @@
         "executionIdempotencyKey": "approval-1"
       },
       "toolCallID": "write-call-1"
+    },
+    {
+      "seq": 7,
+      "eventType": "TaskSucceeded"
     }
   ]
 }

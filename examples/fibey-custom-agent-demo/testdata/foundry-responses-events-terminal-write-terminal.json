@@ -62,6 +62,10 @@
     {
       "seq": 7,
       "eventType": "AgentRuntimeCompleted"
+    },
+    {
+      "seq": 8,
+      "eventType": "TaskSucceeded"
     }
   ]
 }

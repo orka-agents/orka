@@ -314,6 +314,58 @@ func TestResponsesAdapterDuplicateStartDuringInitializationRejected(t *testing.T
 	}
 }
 
+func TestResponsesAdapterEnforcesAdvertisedConcurrentTurnLimit(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFoundry := func() { releaseOnce.Do(func() { close(release) }) }
+	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-received:
+		default:
+			close(received)
+		}
+		<-release
+		writeJSON(w, finalResponsesMessage())
+	}))
+	t.Cleanup(foundry.Close)
+	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter := newTestResponsesAdapter(t, endpoint, nil)
+	t.Cleanup(releaseFoundry)
+	client := newHarnessClient(t, adapter)
+	first := responsesStartTurnRequest("foundry-concurrent-first")
+	second := responsesStartTurnRequest("foundry-concurrent-second")
+	second.RuntimeSessionID = first.RuntimeSessionID
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := client.StartTurn(context.Background(), first)
+		firstErr <- err
+	}()
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("first Foundry request did not arrive")
+	}
+	if _, err := client.StartTurn(context.Background(), second); err == nil ||
+		!strings.Contains(err.Error(), "maximum concurrent turns reached") {
+		t.Fatalf("second concurrent StartTurn error = %v, want admission rejection", err)
+	}
+
+	releaseFoundry()
+	select {
+	case err := <-firstErr:
+		if err != nil {
+			t.Fatalf("first StartTurn: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first StartTurn did not finish")
+	}
+	if _, err := client.StartTurn(context.Background(), second); err != nil {
+		t.Fatalf("second StartTurn after first completed: %v", err)
+	}
+}
+
 func TestResponsesAdapterDiscardsUnusedTurnEnvironment(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
 	adapter, server := newTestResponsesAdapterWithServer(t, foundry.endpoint(), nil)
@@ -413,6 +465,12 @@ func TestResponsesAdapterCancelDuringInitialPostDoesNotRetainSession(t *testing.
 	}
 	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
 		t.Fatalf("CancelTurn: %v", err)
+	}
+	second := responsesStartTurnRequest("foundry-after-cancel-initial")
+	second.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), second); err == nil ||
+		!strings.Contains(err.Error(), "maximum concurrent turns reached") {
+		t.Fatalf("StartTurn during cancelled in-flight request error = %v, want admission rejection", err)
 	}
 	releaseFoundry()
 	select {
@@ -1945,6 +2003,48 @@ func TestResponsesOversizedBatchValidatesAllResultsBeforeFailure(t *testing.T) {
 	}
 }
 
+func TestResponsesOversizedResultTombstonesPreviouslyBufferedResults(t *testing.T) {
+	server := newServer(config{}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-partial-then-oversized")
+	turn := &turnState{
+		request: request,
+		pendingTools: map[string]string{
+			"call-1": "support-ticket-lookup",
+			"call-2": "support-ticket-lookup",
+		},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	first := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
+	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{first})
+	if err != nil || len(toSubmit) != 0 {
+		t.Fatalf("buffer first result = %#v, %v", toSubmit, err)
+	}
+	oversizedOutput, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
+	if err != nil {
+		t.Fatalf("marshal oversized output: %v", err)
+	}
+	second := toolResultForRequest(request, "call-2", true, oversizedOutput, nil)
+	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{second}); err == nil {
+		t.Fatal("oversized second result error = nil")
+	}
+	if !turn.completed || len(turn.bufferedResults) != 0 || len(turn.bufferedDigests) != 0 {
+		t.Fatalf(
+			"terminal oversized state = completed:%v buffers:%#v/%#v",
+			turn.completed,
+			turn.bufferedResults,
+			turn.bufferedDigests,
+		)
+	}
+	for _, result := range []harness.ToolCallResult{first, second} {
+		if err := server.ensureTerminalContinueIsDuplicate(turn, []harness.ToolCallResult{result}); err != nil {
+			t.Fatalf("terminal duplicate %s rejected: %v", result.ToolCallID, err)
+		}
+	}
+}
+
 func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",
@@ -1983,8 +2083,11 @@ func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) 
 	if len(turn.bufferedResults) != 0 || len(turn.bufferedDigests) != 0 {
 		t.Fatalf("oversized result retained buffered state: %#v/%#v", turn.bufferedResults, turn.bufferedDigests)
 	}
-	if len(turn.submittedDigests) != 0 {
-		t.Fatalf("oversized result retained submitted digests: %#v", turn.submittedDigests)
+	if len(turn.submittedDigests) != 1 {
+		t.Fatalf("oversized result submitted digests = %#v, want duplicate tombstone", turn.submittedDigests)
+	}
+	if err := server.ensureTerminalContinueIsDuplicate(turn, []harness.ToolCallResult{result}); err != nil {
+		t.Fatalf("identical oversized result retry was not accepted as duplicate: %v", err)
 	}
 }
 

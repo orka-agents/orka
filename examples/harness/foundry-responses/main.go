@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -369,6 +370,11 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	if _, consumed := s.consumedTurns[req.TurnID]; consumed {
 		s.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "turn already completed")
+		return
+	}
+	if s.activeTurnCountLocked() >= 1 {
+		s.mu.Unlock()
+		harness.WriteError(w, http.StatusConflict, "maximum concurrent turns reached")
 		return
 	}
 	turn := &turnState{
@@ -896,6 +902,8 @@ func (s *server) recordContinueResults(
 		toolName := firstNonBlank(turn.pendingTools[id], id)
 		frame := s.newToolResultFrame(turn, baseSeq+int64(index), toolName, result)
 		if !toolResultFrameFitsSSE(frame) {
+			maps.Copy(turn.submittedDigests, turn.bufferedDigests)
+			maps.Copy(turn.submittedDigests, newDigests)
 			s.appendFailedLocked(
 				turn,
 				"brokered_tool_result_frame_too_large",
@@ -1445,6 +1453,16 @@ func (s *server) markTurnConsumedLocked(turnID harness.HarnessTurnID) {
 		s.consumedOrder = s.consumedOrder[1:]
 		delete(s.consumedTurns, oldest)
 	}
+}
+
+func (s *server) activeTurnCountLocked() int {
+	active := 0
+	for _, turn := range s.turns {
+		if turn != nil && (turn.initializing || !turn.completed) {
+			active++
+		}
+	}
+	return active
 }
 
 func (s *server) activeRuntimeSessionsLocked() map[harness.RuntimeSessionID]bool {

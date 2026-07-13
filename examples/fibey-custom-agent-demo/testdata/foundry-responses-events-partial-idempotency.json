@@ -5,14 +5,22 @@
       "eventType": "ToolCallStarted",
       "toolName": "check-network-telemetry",
       "toolCallID": "read-call-1",
-      "content": {"harness": {"frameType": "ToolCallRequested"}}
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
     },
     {
       "seq": 2,
       "eventType": "ToolCallStarted",
       "toolName": "dispatch-work-order",
       "toolCallID": "dispatch-call-1",
-      "content": {"harness": {"frameType": "ToolCallRequested"}}
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
     },
     {
       "seq": 3,
@@ -29,7 +37,10 @@
       "seq": 4,
       "eventType": "ApprovalApproved",
       "toolCallID": "approval-dispatch",
-      "content": {"approvalID": "approval-dispatch", "decision": "approve"}
+      "content": {
+        "approvalID": "approval-dispatch",
+        "decision": "approve"
+      }
     },
     {
       "seq": 5,
@@ -48,7 +59,11 @@
       "eventType": "ToolCallStarted",
       "toolName": "escalate-incident",
       "toolCallID": "escalate-call-1",
-      "content": {"harness": {"frameType": "ToolCallRequested"}}
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
     },
     {
       "seq": 7,
@@ -65,7 +80,10 @@
       "seq": 8,
       "eventType": "ApprovalApproved",
       "toolCallID": "approval-escalate",
-      "content": {"approvalID": "approval-escalate", "decision": "approve"}
+      "content": {
+        "approvalID": "approval-escalate",
+        "decision": "approve"
+      }
     },
     {
       "seq": 9,
@@ -81,6 +99,10 @@
     {
       "seq": 10,
       "eventType": "AgentRuntimeCompleted"
+    },
+    {
+      "seq": 11,
+      "eventType": "TaskSucceeded"
     }
   ]
 }

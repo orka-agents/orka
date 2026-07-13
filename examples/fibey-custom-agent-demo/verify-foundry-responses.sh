@@ -126,6 +126,7 @@ TERMINAL_TYPES = {
     "TurnCompleted",
     "TaskCompleted",
 }
+TASK_TERMINAL_TYPES = {"TaskSucceeded", "TaskFailed", "TaskCancelled"}
 def field(event, name):
     if not isinstance(event, dict):
         return None
@@ -265,6 +266,7 @@ approval_declined_events = [e for e in events if event_type(e) == "ApprovalDecli
 write_exec_events = [e for e in write_events if is_write_execution_start(e)]
 write_start_events = write_exec_events
 terminal_events = [e for e in events if event_type(e) in TERMINAL_TYPES]
+task_terminal_events = [e for e in events if event_type(e) in TASK_TERMINAL_TYPES]
 idempotency_events = [e for e in write_exec_events if idempotency_value(e)]
 
 failures = []
@@ -358,6 +360,17 @@ elif write_exec_events:
     earliest_terminal_seq = min(seq(event) for event in terminal_events)
     if earliest_terminal_seq <= latest_write_seq:
         failures.append("terminal completion event does not follow all write executions")
+if not task_terminal_events:
+    failures.append("missing final TaskSucceeded lifecycle event")
+else:
+    final_task_terminal = max(task_terminal_events, key=seq)
+    final_task_type = event_type(final_task_terminal)
+    if final_task_type != "TaskSucceeded":
+        failures.append(f"final Task lifecycle outcome is {final_task_type}, want TaskSucceeded")
+    final_event = max(events, key=seq) if events else None
+    final_event_type = event_type(final_event) if final_event else ""
+    if final_event_type != "TaskSucceeded":
+        failures.append(f"final execution event is {final_event_type}, want TaskSucceeded")
 
 if failures:
     print("Fibey Foundry Responses verification failed:", file=sys.stderr)

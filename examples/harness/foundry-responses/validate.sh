@@ -222,6 +222,14 @@ expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-terminal-write-terminal.json \
   "terminal completion event does not follow all write executions" \
   "terminal-write-terminal"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-task-failed.json \
+  "final Task lifecycle outcome is TaskFailed" \
+  "task-failed-after-runtime-completion"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-success-before-runtime-completion.json \
+  "final execution event is AgentRuntimeCompleted" \
+  "task-success-before-runtime-completion"
 
 if [[ "$run_full" == "1" ]]; then
   run make test
