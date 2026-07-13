@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -24,18 +25,19 @@ import (
 )
 
 const (
-	defaultAddr              = ":8090"
-	defaultAPIVersion        = "v1"
-	defaultRequestTimeout    = 20 * time.Second
-	defaultStateRetention    = 10 * time.Minute
-	defaultReadHeaderTimeout = 5 * time.Second
-	defaultReadTimeout       = 30 * time.Second
-	defaultIdleTimeout       = 60 * time.Second
-	maxFoundryOutputBytes    = 1 << 20
-	maxFoundryBodyBytes      = 4 << 20
-	maxConsumedTurnIDs       = 1024
-	readinessPath            = "/v1/ready"
-	foundryInitialUnknown    = "foundry_initial_unknown"
+	defaultAddr                    = ":8090"
+	defaultAPIVersion              = "v1"
+	defaultRequestTimeout          = 20 * time.Second
+	defaultStateRetention          = 10 * time.Minute
+	defaultReadHeaderTimeout       = 5 * time.Second
+	defaultReadTimeout             = 30 * time.Second
+	defaultIdleTimeout             = 60 * time.Second
+	maxFoundryOutputBytes          = 1 << 20
+	maxFoundryBodyBytes            = 4 << 20
+	maxConsumedTurnIDs             = 1024
+	maxFrameSequence         int64 = 1<<63 - 1
+	readinessPath                  = "/v1/ready"
+	foundryInitialUnknown          = "foundry_initial_unknown"
 
 	envAddr                = "ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR"
 	envRuntimeName         = "ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME"
@@ -81,24 +83,26 @@ type server struct {
 	runtimeSessions map[harness.RuntimeSessionID]foundrySession
 }
 
+type toolResultDigest [sha256.Size]byte
+
 type foundrySession struct {
 	ID       string
 	LastSeen time.Time
 }
 
 type turnState struct {
-	request           harness.StartTurnRequest
-	initializing      bool
-	responseID        string
-	foundrySessionID  string
-	pendingTools      map[string]string
-	bufferedResults   map[string]harness.ToolCallResult
-	bufferedPayloads  map[string]string
-	submittedPayloads map[string]string
-	frames            []harness.HarnessEventFrame
-	completed         bool
-	frameUpdates      chan struct{}
-	continueMu        sync.Mutex
+	request          harness.StartTurnRequest
+	initializing     bool
+	responseID       string
+	foundrySessionID string
+	pendingTools     map[string]string
+	bufferedResults  map[string]harness.ToolCallResult
+	bufferedDigests  map[string]toolResultDigest
+	submittedDigests map[string]toolResultDigest
+	frames           []harness.HarnessEventFrame
+	completed        bool
+	frameUpdates     chan struct{}
+	continueMu       sync.Mutex
 }
 
 type responsesRequest struct {
@@ -151,6 +155,8 @@ type pendingFunctionCall struct {
 	name   string
 	args   json.RawMessage
 }
+
+var sseSizeProbeTime = time.Date(2000, time.January, 1, 0, 0, 0, 123456789, time.UTC)
 
 const responsesEndpointRequirement = "foundry hosted Responses endpoint must use https " +
 	"(http allowed only for loopback), target /responses, and must not include credentials, " +
@@ -366,13 +372,13 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	turn := &turnState{
-		request:           req,
-		initializing:      true,
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
-		frameUpdates:      make(chan struct{}),
+		request:          req,
+		initializing:     true,
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
+		frameUpdates:     make(chan struct{}),
 	}
 	s.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	s.turns[req.TurnID] = turn
@@ -577,22 +583,8 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		return
 	}
 	for _, result := range resultsToSubmit {
-		toolName := turn.pendingTools[result.ToolCallID]
-		if toolName == "" {
-			toolName = result.ToolCallID
-		}
-		frame := s.newFrame(
-			turn,
-			int64(len(turn.frames)+1),
-			harness.FrameToolResultReceived,
-			"brokered tool result received",
-			func(f *harness.HarnessEventFrame) {
-				f.ToolName = toolName
-				f.ToolCallID = result.ToolCallID
-				f.Content = result.Output
-				f.Error = result.Error
-			},
-		)
+		toolName := firstNonBlank(turn.pendingTools[result.ToolCallID], result.ToolCallID)
+		frame := s.newToolResultFrame(turn, int64(len(turn.frames)+1), toolName, result)
 		if !harnessFrameFitsSSE(frame) {
 			s.appendFailedLocked(
 				turn,
@@ -606,7 +598,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		s.appendPreparedFrameLocked(turn, frame)
 		delete(turn.pendingTools, result.ToolCallID)
 		delete(turn.bufferedResults, result.ToolCallID)
-		delete(turn.bufferedPayloads, result.ToolCallID)
+		delete(turn.bufferedDigests, result.ToolCallID)
 	}
 	s.recordTurnSessionLocked(turn, updatedSessionID)
 	s.handleResponsesResponseLocked(turn, response)
@@ -636,6 +628,7 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 	defer turn.continueMu.Unlock()
 	s.mu.Lock()
 	if !turn.completed {
+		s.clearBufferedToolResultsLocked(turn)
 		s.appendFrameLocked(turn, harness.FrameTurnCancelled, "turn cancelled")
 		turn.completed = true
 		s.scheduleTurnCleanupLocked(turn)
@@ -713,7 +706,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 				return
 			}
 			seenInResponse[call.callID] = struct{}{}
-			if _, submitted := turn.submittedPayloads[call.callID]; submitted {
+			if _, submitted := turn.submittedDigests[call.callID]; submitted {
 				s.appendFailedLocked(
 					turn,
 					"foundry_repeated_function_call",
@@ -783,6 +776,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 		return
 	}
 	s.appendPreparedFrameLocked(turn, completedFrame)
+	s.clearBufferedToolResultsLocked(turn)
 	turn.completed = true
 	s.scheduleTurnCleanupLocked(turn)
 }
@@ -853,14 +847,15 @@ func (s *server) recordContinueResults(
 		return nil, fmt.Errorf("no tool calls are pending for this turn")
 	}
 	newResults := map[string]harness.ToolCallResult{}
-	newPayloads := map[string]string{}
+	newDigests := map[string]toolResultDigest{}
 	for _, result := range results {
 		payload, err := canonicalToolResultOutput(result)
 		if err != nil {
 			return nil, err
 		}
-		if submitted, done := turn.submittedPayloads[result.ToolCallID]; done {
-			if submitted == payload {
+		digest := digestToolResultPayload(payload)
+		if submitted, done := turn.submittedDigests[result.ToolCallID]; done {
+			if submitted == digest {
 				continue
 			}
 			return nil, fmt.Errorf("conflicting duplicate result for tool call %q", result.ToolCallID)
@@ -868,28 +863,54 @@ func (s *server) recordContinueResults(
 		if _, pending := turn.pendingTools[result.ToolCallID]; !pending {
 			return nil, fmt.Errorf("tool result %q is not pending for this turn", result.ToolCallID)
 		}
-		if buffered, exists := turn.bufferedPayloads[result.ToolCallID]; exists {
-			if buffered == payload {
+		if buffered, exists := turn.bufferedDigests[result.ToolCallID]; exists {
+			if buffered == digest {
 				continue
 			}
 			return nil, fmt.Errorf("conflicting duplicate result for tool call %q", result.ToolCallID)
 		}
-		if buffered, exists := newPayloads[result.ToolCallID]; exists {
-			if buffered == payload {
+		if buffered, exists := newDigests[result.ToolCallID]; exists {
+			if buffered == digest {
 				continue
 			}
 			return nil, fmt.Errorf("conflicting duplicate result for tool call %q", result.ToolCallID)
 		}
 		newResults[result.ToolCallID] = result
-		newPayloads[result.ToolCallID] = payload
+		newDigests[result.ToolCallID] = digest
 	}
+
+	unsubmittedIDs := make([]string, 0, len(turn.pendingTools))
+	for id := range turn.pendingTools {
+		if _, submitted := turn.submittedDigests[id]; !submitted {
+			unsubmittedIDs = append(unsubmittedIDs, id)
+		}
+	}
+	sort.Strings(unsubmittedIDs)
+	baseSeq := int64(len(turn.frames) + 1)
+	for index, id := range unsubmittedIDs {
+		result, isNew := newResults[id]
+		if !isNew {
+			continue
+		}
+		toolName := firstNonBlank(turn.pendingTools[id], id)
+		frame := s.newToolResultFrame(turn, baseSeq+int64(index), toolName, result)
+		if !toolResultFrameFitsSSE(frame) {
+			s.appendFailedLocked(
+				turn,
+				"brokered_tool_result_frame_too_large",
+				"brokered tool result exceeded the harness SSE frame limit",
+			)
+			return nil, fmt.Errorf("brokered tool result %q exceeds harness SSE frame limit", id)
+		}
+	}
+
 	for id, result := range newResults {
 		turn.bufferedResults[id] = result
-		turn.bufferedPayloads[id] = newPayloads[id]
+		turn.bufferedDigests[id] = newDigests[id]
 	}
 	readyCount := 0
 	for id := range turn.pendingTools {
-		if _, submitted := turn.submittedPayloads[id]; submitted {
+		if _, submitted := turn.submittedDigests[id]; submitted {
 			readyCount++
 			continue
 		}
@@ -900,47 +921,15 @@ func (s *server) recordContinueResults(
 	if readyCount < len(turn.pendingTools) {
 		return nil, nil
 	}
-	ids := make([]string, 0, len(turn.pendingTools))
-	for id := range turn.pendingTools {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	toSubmit := make([]harness.ToolCallResult, 0, len(ids))
-	for _, id := range ids {
-		if _, submitted := turn.submittedPayloads[id]; submitted {
-			continue
-		}
+	toSubmit := make([]harness.ToolCallResult, 0, len(unsubmittedIDs))
+	for _, id := range unsubmittedIDs {
 		toSubmit = append(toSubmit, turn.bufferedResults[id])
 	}
 	if len(toSubmit) == 0 {
 		return nil, nil
 	}
-	baseSeq := int64(len(turn.frames) + 1)
-	for index, result := range toSubmit {
-		toolName := firstNonBlank(turn.pendingTools[result.ToolCallID], result.ToolCallID)
-		frame := s.newFrame(
-			turn,
-			baseSeq+int64(index),
-			harness.FrameToolResultReceived,
-			"brokered tool result received",
-			func(f *harness.HarnessEventFrame) {
-				f.ToolName = toolName
-				f.ToolCallID = result.ToolCallID
-				f.Content = result.Output
-				f.Error = result.Error
-			},
-		)
-		if !harnessFrameFitsSSE(frame) {
-			s.appendFailedLocked(
-				turn,
-				"brokered_tool_result_frame_too_large",
-				"brokered tool result exceeded the harness SSE frame limit",
-			)
-			return nil, fmt.Errorf("brokered tool result %q exceeds harness SSE frame limit", result.ToolCallID)
-		}
-	}
 	for _, result := range toSubmit {
-		turn.submittedPayloads[result.ToolCallID] = turn.bufferedPayloads[result.ToolCallID]
+		turn.submittedDigests[result.ToolCallID] = turn.bufferedDigests[result.ToolCallID]
 	}
 	return toSubmit, nil
 }
@@ -956,11 +945,11 @@ func (s *server) ensureTerminalContinueIsDuplicate(turn *turnState, results []ha
 		if err != nil {
 			return err
 		}
-		submitted, done := turn.submittedPayloads[result.ToolCallID]
+		submitted, done := turn.submittedDigests[result.ToolCallID]
 		if !done {
 			return fmt.Errorf("terminal turn cannot accept new tool result %q", result.ToolCallID)
 		}
-		if submitted != payload {
+		if submitted != digestToolResultPayload(payload) {
 			return fmt.Errorf("conflicting duplicate result for tool call %q", result.ToolCallID)
 		}
 	}
@@ -1333,6 +1322,35 @@ func outputItemText(item responsesOutput) string {
 	return ""
 }
 
+func digestToolResultPayload(payload string) toolResultDigest {
+	return sha256.Sum256([]byte(payload))
+}
+
+func (s *server) newToolResultFrame(
+	turn *turnState,
+	seq int64,
+	toolName string,
+	result harness.ToolCallResult,
+) harness.HarnessEventFrame {
+	return s.newFrame(
+		turn,
+		seq,
+		harness.FrameToolResultReceived,
+		"brokered tool result received",
+		func(f *harness.HarnessEventFrame) {
+			f.ToolName = toolName
+			f.ToolCallID = result.ToolCallID
+			f.Content = result.Output
+			f.Error = result.Error
+		},
+	)
+}
+
+func (s *server) clearBufferedToolResultsLocked(turn *turnState) {
+	clear(turn.bufferedResults)
+	clear(turn.bufferedDigests)
+}
+
 func isCompletionStatus(status string) bool {
 	return strings.EqualFold(strings.TrimSpace(status), "completed")
 }
@@ -1359,6 +1377,7 @@ func (s *server) appendFailedLocked(turn *turnState, reason, msg string) {
 	if turn.completed {
 		return
 	}
+	s.clearBufferedToolResultsLocked(turn)
 	failedFrame := s.newFrame(
 		turn,
 		int64(len(turn.frames)+1),
@@ -1464,6 +1483,13 @@ func (s *server) newFrame(
 		mutate(&frame)
 	}
 	return frame
+}
+
+func toolResultFrameFitsSSE(frame harness.HarnessEventFrame) bool {
+	// RFC3339Nano omits trailing zeros. Probe with full nanosecond precision so
+	// the preflight is conservative for the exact sequence the frame will use.
+	frame.CreatedAt = sseSizeProbeTime
+	return harnessFrameFitsSSE(frame)
 }
 
 func harnessFrameFitsSSE(frame harness.HarnessEventFrame) bool {

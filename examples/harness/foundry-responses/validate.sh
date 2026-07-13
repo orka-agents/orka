@@ -159,6 +159,14 @@ expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-tail-page.json \
   "afterSeq must be 0" \
   "tail-event-page"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-write-after-terminal.json \
+  "terminal completion event does not follow all write executions" \
+  "write-after-terminal"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-terminal-write-terminal.json \
+  "terminal completion event does not follow all write executions" \
+  "terminal-write-terminal"
 
 if [[ "$run_full" == "1" ]]; then
   run make test

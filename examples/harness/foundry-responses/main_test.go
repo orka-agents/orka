@@ -941,17 +941,17 @@ func TestResponsesAdapterRejectedContinueDoesNotBufferPartialResults(t *testing.
 	valid := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
 	unknown := toolResultForRequest(request, "call-missing", true, json.RawMessage(`{"success":true}`), nil)
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		pendingTools:     map[string]string{"call-1": "support-ticket-lookup"},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{valid, unknown}); err == nil {
 		t.Fatalf("recordContinueResults succeeded, want unknown tool result error")
 	}
-	if len(turn.bufferedResults) != 0 || len(turn.bufferedPayloads) != 0 {
-		t.Fatalf("buffered state = %#v/%#v, want no partial buffering", turn.bufferedResults, turn.bufferedPayloads)
+	if len(turn.bufferedResults) != 0 || len(turn.bufferedDigests) != 0 {
+		t.Fatalf("buffered state = %#v/%#v, want no partial buffering", turn.bufferedResults, turn.bufferedDigests)
 	}
 }
 
@@ -972,11 +972,11 @@ func TestResponsesAdapterAlreadySubmittedContinueDoesNotResubmit(t *testing.T) {
 		t.Fatalf("canonicalToolResultOutput: %v", err)
 	}
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		bufferedResults:   map[string]harness.ToolCallResult{"call-1": result},
-		bufferedPayloads:  map[string]string{"call-1": payload},
-		submittedPayloads: map[string]string{"call-1": payload},
+		request:          request,
+		pendingTools:     map[string]string{"call-1": "support-ticket-lookup"},
+		bufferedResults:  map[string]harness.ToolCallResult{"call-1": result},
+		bufferedDigests:  map[string]toolResultDigest{"call-1": digestToolResultPayload(payload)},
+		submittedDigests: map[string]toolResultDigest{"call-1": digestToolResultPayload(payload)},
 	}
 	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{result})
 	if err != nil {
@@ -1109,11 +1109,11 @@ func TestResponsesRepeatedSubmittedFunctionCallFailsTurn(t *testing.T) {
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-repeated-call")
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{"call-1": `{"approved":true}`},
+		request:          request,
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{"call-1": digestToolResultPayload(`{"approved":true}`)},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -1144,11 +1144,11 @@ func TestResponsesMixedRepeatedFunctionCallFailsTurn(t *testing.T) {
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-mixed-repeated-call")
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		pendingTools:     map[string]string{"call-1": "support-ticket-lookup"},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -1182,18 +1182,18 @@ func TestResponsesAdapterAlreadySubmittedPendingResultIsNoop(t *testing.T) {
 	server := newServer(config{}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-submitted-noop")
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		pendingTools:     map[string]string{"call-1": "support-ticket-lookup"},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	result := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true}`), nil)
 	payload, err := canonicalToolResultOutput(result)
 	if err != nil {
 		t.Fatalf("canonicalToolResultOutput: %v", err)
 	}
-	turn.submittedPayloads["call-1"] = payload
+	turn.submittedDigests["call-1"] = digestToolResultPayload(payload)
 
 	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{result})
 	if err != nil {
@@ -1504,11 +1504,11 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	)
 	request := brokeredReadRequest("foundry-brokered")
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	var functionCall responsesResponse
@@ -1521,11 +1521,11 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	assertJSONFileEqual(t, "testdata/golden/03_tool_call_requested_frame.json", scrubFrameForGolden(*requested))
 
 	finalTurn := &turnState{
-		request:           responsesStartTurnRequest("foundry-final"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("foundry-final"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started")
 	var finalMessage responsesResponse
@@ -1537,11 +1537,11 @@ func TestResponsesParserConsumesGoldenFixtures(t *testing.T) {
 	}
 
 	multipleTurn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(multipleTurn, harness.FrameTurnStarted, "foundry hosted response started")
 	var multiple responsesResponse
@@ -1575,11 +1575,11 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 		Parameters:    json.RawMessage(`{"type":"object","properties":{"probe":{"type":"boolean"}}}`),
 	}}
 	turn := &turnState{
-		request:           request,
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	var functionCall responsesResponse
@@ -1618,11 +1618,11 @@ func TestResponsesConsumesAgentKitBrokeredFixtures(t *testing.T) {
 	})
 
 	finalTurn := &turnState{
-		request:           responsesStartTurnRequest("agentkit-final-fixture"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("agentkit-final-fixture"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(finalTurn, harness.FrameTurnStarted, "foundry hosted response started")
 	var finalMessage responsesResponse
@@ -1728,11 +1728,11 @@ func TestResponsesLargeOutputFails(t *testing.T) {
 		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           responsesStartTurnRequest("foundry-large-output"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("foundry-large-output"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -1762,11 +1762,11 @@ func TestResponsesOutputThatExceedsSSEFrameLimitFails(t *testing.T) {
 		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           responsesStartTurnRequest("foundry-large-frame-output"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("foundry-large-frame-output"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -1797,11 +1797,11 @@ func TestResponsesOversizedToolCallFrameFailsBeforeRequestingTool(t *testing.T) 
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           brokeredReadRequest("foundry-large-tool-call-frame"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          brokeredReadRequest("foundry-large-tool-call-frame"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	arguments, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
@@ -1827,6 +1827,94 @@ func TestResponsesOversizedToolCallFrameFailsBeforeRequestingTool(t *testing.T) 
 	}
 }
 
+func TestResponsesToolResultPreflightUsesExactEventualSequence(t *testing.T) {
+	server := newServer(config{}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-tool-result-boundary")
+	turn := &turnState{
+		request:    request,
+		responseID: "resp-1",
+		pendingTools: map[string]string{
+			"call-1": "support-ticket-lookup",
+			"call-2": "support-ticket-lookup",
+		},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
+	}
+	for range 8 {
+		server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	}
+	emptyResult := toolResultForRequest(request, "call-1", true, json.RawMessage(`{"payload":""}`), nil)
+	seqNineFrame := server.newToolResultFrame(turn, 9, "support-ticket-lookup", emptyResult)
+	seqNineFrame.CreatedAt = sseSizeProbeTime
+	seqTenFrame := server.newToolResultFrame(turn, 10, "support-ticket-lookup", emptyResult)
+	seqTenFrame.CreatedAt = sseSizeProbeTime
+	seqNineJSON, err := json.Marshal(seqNineFrame)
+	if err != nil {
+		t.Fatalf("marshal sequence-nine frame: %v", err)
+	}
+	seqTenJSON, err := json.Marshal(seqTenFrame)
+	if err != nil {
+		t.Fatalf("marshal sequence-ten frame: %v", err)
+	}
+	if len(seqTenJSON) <= len(seqNineJSON) {
+		t.Fatalf("frame sizes seq10=%d seq9=%d, want decimal-boundary overhead", len(seqTenJSON), len(seqNineJSON))
+	}
+	payloadSize := harness.MaxSSEFrameBytes - len("data: ") - len(seqNineJSON) - 1
+	if payloadSize <= 0 {
+		t.Fatalf("payload boundary = %d, want positive", payloadSize)
+	}
+	output := json.RawMessage(`{"payload":"` + strings.Repeat("x", payloadSize) + `"}`)
+	result := toolResultForRequest(request, "call-1", true, output, nil)
+	if !toolResultFrameFitsSSE(server.newToolResultFrame(turn, 9, "support-ticket-lookup", result)) {
+		t.Fatal("eventual sequence-nine frame should fit")
+	}
+	if toolResultFrameFitsSSE(server.newToolResultFrame(turn, 10, "support-ticket-lookup", result)) {
+		t.Fatal("sequence-ten probe unexpectedly fits boundary frame")
+	}
+	toSubmit, err := server.recordContinueResults(turn, []harness.ToolCallResult{result})
+	if err != nil {
+		t.Fatalf("recordContinueResults rejected exact eventual sequence: %v", err)
+	}
+	if len(toSubmit) != 0 || len(turn.bufferedResults) != 1 {
+		t.Fatalf("toSubmit=%#v buffered=%#v, want one accepted partial result", toSubmit, turn.bufferedResults)
+	}
+}
+
+func TestResponsesOversizedBatchValidatesAllResultsBeforeFailure(t *testing.T) {
+	server := newServer(config{}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-oversized-batch")
+	turn := &turnState{
+		request: request,
+		pendingTools: map[string]string{
+			"call-1": "support-ticket-lookup",
+		},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
+	}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	oversizedOutput, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
+	if err != nil {
+		t.Fatalf("marshal oversized output: %v", err)
+	}
+	oversized := toolResultForRequest(request, "call-1", true, oversizedOutput, nil)
+	unknown := toolResultForRequest(request, "call-missing", true, json.RawMessage(`{"success":true}`), nil)
+
+	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{oversized, unknown}); err == nil ||
+		!strings.Contains(err.Error(), "not pending") {
+		t.Fatalf("recordContinueResults error = %v, want structural rejection", err)
+	}
+	if turn.completed || len(turn.bufferedResults) != 0 || len(turn.bufferedDigests) != 0 {
+		t.Fatalf(
+			"invalid batch mutated turn: completed=%v buffers=%#v/%#v",
+			turn.completed,
+			turn.bufferedResults,
+			turn.bufferedDigests,
+		)
+	}
+}
+
 func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",
@@ -1839,12 +1927,12 @@ func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) 
 	}, &http.Client{Timeout: time.Second})
 	request := brokeredReadRequest("foundry-large-tool-result-frame")
 	turn := &turnState{
-		request:           request,
-		responseID:        "resp-1",
-		pendingTools:      map[string]string{"call-1": "support-ticket-lookup"},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          request,
+		responseID:       "resp-1",
+		pendingTools:     map[string]string{"call-1": "support-ticket-lookup"},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	output, err := json.Marshal(map[string]any{"payload": strings.Repeat("x", harness.MaxSSEFrameBytes)})
@@ -1861,6 +1949,12 @@ func TestResponsesOversizedToolResultFrameFailsBeforeContinuation(t *testing.T) 
 	failed := findFrame(turn.frames, harness.FrameTurnFailed)
 	if failed == nil || failed.Failed.Reason != "brokered_tool_result_frame_too_large" {
 		t.Fatalf("failed frame = %#v, want brokered_tool_result_frame_too_large", failed)
+	}
+	if len(turn.bufferedResults) != 0 || len(turn.bufferedDigests) != 0 {
+		t.Fatalf("oversized result retained buffered state: %#v/%#v", turn.bufferedResults, turn.bufferedDigests)
+	}
+	if len(turn.submittedDigests) != 0 {
+		t.Fatalf("oversized result retained submitted digests: %#v", turn.submittedDigests)
 	}
 }
 
@@ -1916,11 +2010,11 @@ func TestResponsesNonTerminalStatusDoesNotCompleteWithPartialText(t *testing.T) 
 		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           responsesStartTurnRequest("foundry-in-progress"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("foundry-in-progress"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -1948,11 +2042,11 @@ func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           responsesStartTurnRequest("foundry-failed-status"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("foundry-failed-status"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -1983,11 +2077,11 @@ func TestResponsesFailureStatusWithFunctionCallFailsBeforeToolRequest(t *testing
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           brokeredReadRequest("foundry-failed-function-call"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          brokeredReadRequest("foundry-failed-function-call"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -2026,11 +2120,11 @@ func TestResponsesMissingStatusDoesNotCompleteWithPartialText(t *testing.T) {
 		stateRetention: time.Minute,
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           responsesStartTurnRequest("foundry-missing-status"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          responsesStartTurnRequest("foundry-missing-status"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
@@ -2057,11 +2151,11 @@ func TestResponsesFunctionCallWithoutResponseIDFailsBeforeToolRequest(t *testing
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	turn := &turnState{
-		request:           brokeredReadRequest("foundry-missing-id"),
-		pendingTools:      map[string]string{},
-		bufferedResults:   map[string]harness.ToolCallResult{},
-		bufferedPayloads:  map[string]string{},
-		submittedPayloads: map[string]string{},
+		request:          brokeredReadRequest("foundry-missing-id"),
+		pendingTools:     map[string]string{},
+		bufferedResults:  map[string]harness.ToolCallResult{},
+		bufferedDigests:  map[string]toolResultDigest{},
+		submittedDigests: map[string]toolResultDigest{},
 	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{

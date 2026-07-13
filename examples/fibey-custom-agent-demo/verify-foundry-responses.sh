@@ -353,6 +353,11 @@ for write_tool, keys in idempotency_by_tool.items():
         failures.append(f"multiple write idempotency keys for {write_tool}")
 if not terminal_events:
     failures.append("missing terminal completion event")
+elif write_exec_events:
+    latest_write_seq = max(seq(event) for event in write_exec_events)
+    earliest_terminal_seq = min(seq(event) for event in terminal_events)
+    if earliest_terminal_seq <= latest_write_seq:
+        failures.append("terminal completion event does not follow all write executions")
 
 if failures:
     print("Fibey Foundry Responses verification failed:", file=sys.stderr)
