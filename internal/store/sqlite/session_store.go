@@ -19,9 +19,9 @@ var (
 // CreateSession inserts a new session record.
 func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (namespace, name, session_type, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.Namespace, session.Name, session.SessionType, session.ActiveTask,
+		`INSERT INTO sessions (namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.Namespace, session.Name, session.SessionType, session.ActiveTask, session.ActiveTaskUID,
 		session.MessageCount, session.InputTokens, session.OutputTokens, session.Cancelled,
 		session.CreatedAt, session.UpdatedAt,
 	)
@@ -32,11 +32,11 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	session := &store.SessionRecord{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT namespace, name, session_type, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
+		`SELECT namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
 	).Scan(
-		&session.Namespace, &session.Name, &session.SessionType, &session.ActiveTask,
+		&session.Namespace, &session.Name, &session.SessionType, &session.ActiveTask, &session.ActiveTaskUID,
 		&session.MessageCount, &session.InputTokens, &session.OutputTokens, &session.Cancelled,
 		&session.CreatedAt, &session.UpdatedAt,
 	)
@@ -105,6 +105,11 @@ func (s *Store) DeleteSession(ctx context.Context, namespace, name string) error
 // AcquireLock atomically sets the active_task for a session.
 // Returns store.ErrNotFound if the session does not exist, or an error if already locked.
 func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName string) error {
+	return s.AcquireTaskLock(ctx, namespace, name, taskName, "")
+}
+
+// AcquireTaskLock atomically records the immutable Task identity as lock owner.
+func (s *Store) AcquireTaskLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	// Check if session exists
 	var count int
 	err := s.db.QueryRowContext(ctx,
@@ -121,8 +126,10 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName strin
 	// Chat reservations and task locks are separate domains: tasks created by a
 	// chat turn must still be able to run while that turn waits for them.
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET active_task = ? WHERE namespace = ? AND name = ? AND active_task = ''`,
-		taskName, namespace, name,
+		`UPDATE sessions SET active_task = ?, active_task_uid = ?
+		 WHERE namespace = ? AND name = ?
+		 AND (active_task = '' OR (active_task = ? AND active_task_uid = ''))`,
+		taskName, taskUID, namespace, name, taskName,
 	)
 	if err != nil {
 		return err
@@ -133,7 +140,7 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName strin
 		return err
 	}
 	if rows == 0 {
-		return fmt.Errorf("session %s/%s is already locked", namespace, name)
+		return fmt.Errorf("%w: session %s/%s is already locked", store.ErrConflict, namespace, name)
 	}
 	return nil
 }
@@ -203,8 +210,19 @@ func (s *Store) ReleaseChatTurn(ctx context.Context, namespace, name, turnID str
 // ReleaseLock clears the active_task if it matches the given task name.
 func (s *Store) ReleaseLock(ctx context.Context, namespace, name, taskName string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET active_task = '' WHERE namespace = ? AND name = ? AND active_task = ?`,
+		`UPDATE sessions SET active_task = '', active_task_uid = '' WHERE namespace = ? AND name = ? AND active_task = ?`,
 		namespace, name, taskName,
+	)
+	return err
+}
+
+// ReleaseTaskLock releases a task lock only for the same immutable Task UID.
+func (s *Store) ReleaseTaskLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET active_task = '', active_task_uid = ''
+		 WHERE namespace = ? AND name = ? AND active_task = ?
+		 AND (active_task_uid = ? OR active_task_uid = '')`,
+		namespace, name, taskName, taskUID,
 	)
 	return err
 }
@@ -223,6 +241,33 @@ func (s *Store) IsLocked(ctx context.Context, namespace, name, currentTask strin
 		return false, err
 	}
 	return activeTask != "" && activeTask != currentTask, nil
+}
+
+// IsTaskLocked returns true unless the lock is unowned, belongs to the exact
+// immutable Task identity, or is a same-name legacy lock whose UID can be
+// atomically backfilled by AcquireTaskLock.
+func (s *Store) IsTaskLocked(ctx context.Context, namespace, name, taskName, taskUID string) (bool, error) {
+	var activeTask, activeTaskUID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT active_task, active_task_uid FROM sessions WHERE namespace = ? AND name = ?`,
+		namespace, name,
+	).Scan(&activeTask, &activeTaskUID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, store.ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if activeTask == "" {
+		return false, nil
+	}
+	if activeTask != taskName {
+		return true, nil
+	}
+	if activeTaskUID == "" {
+		return false, nil
+	}
+	return activeTaskUID != taskUID, nil
 }
 
 // AppendMessages inserts messages into a session's transcript and updates the session metadata.
@@ -245,6 +290,68 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 		return err
 	}
 
+	return tx.Commit()
+}
+
+// FinalizeTaskSession atomically appends one task's terminal transcript and
+// releases the task lock. Replays after a crash are idempotent because an
+// already-released or differently-owned session does not append again.
+func (s *Store) FinalizeTaskSession(ctx context.Context, namespace, name, taskName, taskUID string, messages []store.SessionMessage) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var activeTask, activeTaskUID string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT active_task, active_task_uid FROM sessions WHERE namespace = ? AND name = ?`,
+		namespace, name,
+	).Scan(&activeTask, &activeTaskUID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if activeTask != taskName || activeTaskUID != taskUID {
+		if activeTask != taskName || activeTaskUID != "" || taskUID == "" {
+			return nil
+		}
+		result, err := tx.ExecContext(ctx,
+			`UPDATE sessions SET active_task_uid = ?
+			 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ''`,
+			taskUID, namespace, name, taskName,
+		)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return store.ErrConflict
+		}
+	}
+	if err := insertSessionMessages(ctx, tx, namespace, name, messages); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE sessions
+		 SET active_task = '', active_task_uid = '', message_count = message_count + ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE namespace = ? AND name = ? AND active_task = ? AND active_task_uid = ?`,
+		len(messages), namespace, name, taskName, taskUID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return store.ErrConflict
+	}
 	return tx.Commit()
 }
 

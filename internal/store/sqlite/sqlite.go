@@ -80,6 +80,7 @@ func migrate(db *sql.DB) error {
 			name          TEXT NOT NULL,
 			session_type  TEXT NOT NULL DEFAULT 'task',
 			active_task         TEXT NOT NULL DEFAULT '',
+			active_task_uid     TEXT NOT NULL DEFAULT '',
 			chat_turn_id        TEXT NOT NULL DEFAULT '',
 			chat_turn_expires_at TIMESTAMP,
 			message_count       INTEGER NOT NULL DEFAULT 0,
@@ -578,6 +579,7 @@ func migrate(db *sql.DB) error {
 	}
 
 	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
+		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
 		{Name: "chat_turn_id", Definition: "chat_turn_id TEXT NOT NULL DEFAULT ''"},
 		{Name: "chat_turn_expires_at", Definition: "chat_turn_expires_at TIMESTAMP"},
 	}); err != nil {

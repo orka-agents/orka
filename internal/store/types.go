@@ -4,17 +4,18 @@ import "time"
 
 // SessionRecord represents a full session.
 type SessionRecord struct {
-	Namespace    string
-	Name         string
-	SessionType  string // "task" or "chat"
-	ActiveTask   string
-	MessageCount int
-	InputTokens  int
-	OutputTokens int
-	Cancelled    bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	Messages     []SessionMessage
+	Namespace     string
+	Name          string
+	SessionType   string // "task" or "chat"
+	ActiveTask    string
+	ActiveTaskUID string
+	MessageCount  int
+	InputTokens   int
+	OutputTokens  int
+	Cancelled     bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	Messages      []SessionMessage
 }
 
 // SessionMetadata is the lightweight listing representation.

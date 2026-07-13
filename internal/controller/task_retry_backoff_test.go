@@ -16,6 +16,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -653,9 +654,10 @@ func TestRetryTask_ZeroRetryNotBeforeIsReplaced(t *testing.T) {
 	}
 }
 
-func TestRetryTask_RecoversAfterStatusUpdateFailureWithOldJobGone(t *testing.T) {
+func TestRetryTask_RecoversAfterCleanupClaimStatusFailure(t *testing.T) {
 	scheme := newTestScheme()
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "retry-status-error-job", Namespace: defaultNS}}
+	job.Status.Failed = 1
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "retry-status-error",
@@ -708,8 +710,8 @@ func TestRetryTask_RecoversAfterStatusUpdateFailureWithOldJobGone(t *testing.T) 
 	if intermediate.Annotations[labels.AnnotationRetryNotBefore] == "" {
 		t.Fatal("retry-not-before gate was not persisted before status failure")
 	}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("old Job error = %v, want NotFound before recovery reconcile", err)
+	if err := r.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &batchv1.Job{}); err != nil {
+		t.Fatalf("old Job was deleted before the retry cleanup claim succeeded: %v", err)
 	}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
@@ -1129,9 +1131,10 @@ func TestHandlePending_UsesAPIReaderBeforeStartingWithoutGate(t *testing.T) {
 	stale := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "retry-stale-cache", Namespace: defaultNS, Finalizers: []string{labels.TaskFinalizer}},
 		Spec: corev1alpha1.TaskSpec{
-			Type:    corev1alpha1.TaskTypeContainer,
-			Image:   testBusyboxImage,
-			Command: []string{testRetryGateCommand},
+			Type:        corev1alpha1.TaskTypeContainer,
+			Image:       testBusyboxImage,
+			Command:     []string{testRetryGateCommand},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 1},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
 	}
@@ -1401,8 +1404,8 @@ func TestHandlePending_RetryNotBeforeUpdateErrorLeavesRecoverableJob(t *testing.
 	if err := r.Get(context.Background(), nn, updated); err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
-		t.Fatalf("phase = %s, want Pending after gate update failure", updated.Status.Phase)
+	if updated.Status.Phase != corev1alpha1.TaskPhaseRunning || updated.Status.Attempts != 2 || updated.Status.JobName == "" {
+		t.Fatalf("status = %#v, want tracked Running replacement after gate update failure", updated.Status)
 	}
 	if updated.Annotations[labels.AnnotationRetryNotBefore] == "" {
 		t.Fatal("retry-not-before annotation unexpectedly disappeared")
@@ -1413,6 +1416,9 @@ func TestHandlePending_RetryNotBeforeUpdateErrorLeavesRecoverableJob(t *testing.
 	}
 	if len(jobs.Items) != 1 {
 		t.Fatalf("Jobs = %d, want one recoverable replacement after gate-clear failure", len(jobs.Items))
+	}
+	if jobs.Items[0].Spec.Suspend != nil && *jobs.Items[0].Spec.Suspend {
+		t.Fatal("tracked replacement remained suspended after JobStart completed")
 	}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
@@ -1430,7 +1436,7 @@ func TestHandlePending_RetryNotBeforeUpdateErrorLeavesRecoverableJob(t *testing.
 	}
 }
 
-func TestHandlePending_AdoptsCreatedReplacementAfterRetryBecomesDisallowed(t *testing.T) {
+func TestHandlePending_DeletesSuspendedReplacementAfterRetryBecomesDisallowed(t *testing.T) {
 	tests := []struct {
 		name         string
 		mutatePolicy func(*corev1alpha1.Task)
@@ -1471,65 +1477,37 @@ func TestHandlePending_AdoptsCreatedReplacementAfterRetryBecomesDisallowed(t *te
 				},
 				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
 			}
-			base := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithStatusSubresource(&corev1alpha1.Task{}).
-				WithObjects(task).
-				Build()
-			updateErr := errors.New("injected retry gate persistence failure")
-			failUpdateOnce := true
-			fc := interceptor.NewClient(base, interceptor.Funcs{
-				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-					if _, ok := obj.(*corev1alpha1.Task); ok && failUpdateOnce {
-						failUpdateOnce = false
-						return updateErr
-					}
-					return c.Update(ctx, obj, opts...)
-				},
+			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+				Type:   ConditionTypeRetryCleanup,
+				Status: metav1.ConditionFalse,
+				Reason: retryCleanupCompleteReason,
 			})
-			r := newUnitReconciler(scheme)
-			r.Client = fc
-			r.JobBuilder = NewJobBuilder(fc)
+			replacementJob := retryTestJob(task, buildTaskJobName(task), "retry-adopt-disallowed-job-uid")
+			suspend := true
+			replacementJob.Spec.Suspend = &suspend
+			replacementJob.Annotations = map[string]string{
+				labels.AnnotationRetryTaskGeneration: "0",
+				labels.AnnotationRetryAttempt:        "2",
+			}
+			tt.mutatePolicy(task)
+			r := newUnitReconciler(scheme, task, replacementJob)
 			nn := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
 
-			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); !errors.Is(err, updateErr) {
-				t.Fatalf("first Reconcile() error = %v, want %v", err, updateErr)
-			}
-			var jobs batchv1.JobList
-			if err := r.List(context.Background(), &jobs, client.InNamespace(task.Namespace)); err != nil {
-				t.Fatalf("List(Jobs) error = %v", err)
-			}
-			if len(jobs.Items) != 1 {
-				t.Fatalf("Jobs = %d, want one created replacement", len(jobs.Items))
-			}
-			replacementJob := jobs.Items[0].DeepCopy()
-
-			latest := &corev1alpha1.Task{}
-			if err := r.Get(context.Background(), nn, latest); err != nil {
-				t.Fatalf("Get(Task) error = %v", err)
-			}
-			tt.mutatePolicy(latest)
-			if err := r.Update(context.Background(), latest); err != nil {
-				t.Fatalf("Update(retry policy) error = %v", err)
-			}
-
 			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
-				t.Fatalf("recovery Reconcile() error = %v", err)
+				t.Fatalf("Reconcile() error = %v", err)
 			}
 			recovered := &corev1alpha1.Task{}
 			if err := r.Get(context.Background(), nn, recovered); err != nil {
 				t.Fatalf("Get(recovered Task) error = %v", err)
 			}
-			if recovered.Status.Phase != corev1alpha1.TaskPhaseRunning ||
-				recovered.Status.JobName != replacementJob.Name ||
-				recovered.Status.Attempts != 2 {
-				t.Fatalf("recovered status = %#v, want created replacement adopted", recovered.Status)
+			if recovered.Status.Phase != corev1alpha1.TaskPhasePending || recovered.Status.JobName != "" || recovered.Status.Attempts != 1 {
+				t.Fatalf("recovered status = %#v, want disallowed suspended replacement rejected", recovered.Status)
 			}
-			if _, exists := recovered.Annotations[labels.AnnotationRetryNotBefore]; exists {
-				t.Fatal("retry gate remained after adopting created replacement")
+			if _, exists := recovered.Annotations[labels.AnnotationRetryNotBefore]; !exists {
+				t.Fatal("retry gate was cleared before disallowed retry recovery completed")
 			}
-			if err := r.Get(context.Background(), types.NamespacedName{Name: replacementJob.Name, Namespace: replacementJob.Namespace}, &batchv1.Job{}); err != nil {
-				t.Fatalf("adopted replacement Job is missing: %v", err)
+			if err := r.Get(context.Background(), types.NamespacedName{Name: replacementJob.Name, Namespace: replacementJob.Namespace}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("disallowed suspended replacement still exists: %v", err)
 			}
 		})
 	}
@@ -1545,12 +1523,18 @@ func TestHandlePending_AdoptsReplacementWithoutGateBeforeAdmissionChecks(t *test
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec: corev1alpha1.TaskSpec{
-			Type:    corev1alpha1.TaskTypeContainer,
-			Image:   testBusyboxImage,
-			Command: []string{testRetryGateCommand},
+			Type:        corev1alpha1.TaskTypeContainer,
+			Image:       testBusyboxImage,
+			Command:     []string{testRetryGateCommand},
+			RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 1},
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Attempts: 1},
 	}
+	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+		Type:   ConditionTypeRetryCleanup,
+		Status: metav1.ConditionFalse,
+		Reason: retryCleanupCompleteReason,
+	})
 	replacementJob := retryTestJob(task, buildTaskJobName(task), "retry-adopt-without-gate-job-uid")
 	otherActiveTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-active-task", Namespace: defaultNS, UID: "other-active-task-uid"},
