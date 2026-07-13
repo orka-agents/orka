@@ -955,6 +955,53 @@ test_upgrade() (
   grep -Fq 'legacy-orka-crd-test' "$temp_dir/pre-migration-apply.err" || \
     fail "target Task CRD apply failed for a reason other than the legacy ownership conflict"
 
+  local legacy_runtime_name=legacy-http-runtime
+  kubectl --context "$kube_context" apply -f - >/dev/null <<EOF_LEGACY_RUNTIME
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${legacy_runtime_name}
+  namespace: ${namespace}
+spec:
+  selector:
+    app: ${legacy_runtime_name}
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: ${legacy_runtime_name}
+  namespace: ${namespace}
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://${legacy_runtime_name}.${namespace}.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: ${legacy_runtime_name}-token
+      key: token
+EOF_LEGACY_RUNTIME
+  local agentruntime_version_index agentruntime_default_path
+  agentruntime_version_index=$(kubectl --context "$kube_context" get \
+    customresourcedefinition/agentruntimes.core.orka.ai \
+    -o json | jq -r '.spec.versions | map(.name) | index("v1alpha1") // empty')
+  [[ "$agentruntime_version_index" =~ ^[0-9]+$ ]] || \
+    fail "could not locate AgentRuntime v1alpha1 schema for legacy default fixture"
+  agentruntime_default_path="/spec/versions/${agentruntime_version_index}/schema/openAPIV3Schema/properties/spec/properties/deployment/properties/transportSecurity/default"
+  kubectl --context "$kube_context" patch \
+    customresourcedefinition/agentruntimes.core.orka.ai \
+    --type=json \
+    -p "[{\"op\":\"add\",\"path\":\"${agentruntime_default_path}\",\"value\":\"tls\"}]" \
+    >/dev/null
+  [[ "$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$legacy_runtime_name" \
+    --namespace "$namespace" \
+    -o jsonpath='{.spec.deployment.transportSecurity}')" == "tls" ]] || \
+    fail "legacy AgentRuntime omission was not masked by the simulated read-time default"
+
   upgrade_crds \
     --chart "$target_chart" \
     --kube-context "$kube_context" \
@@ -962,6 +1009,146 @@ test_upgrade() (
     --namespace "$namespace" \
     --yes >/dev/null
   wait_for_all_orka_crds "$kube_context" "after updating the legacy Task type validation"
+  local legacy_runtime_transport legacy_runtime_marker
+  legacy_runtime_transport=$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$legacy_runtime_name" \
+    --namespace "$namespace" \
+    -o jsonpath='{.spec.deployment.transportSecurity}')
+  legacy_runtime_marker=$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$legacy_runtime_name" \
+    --namespace "$namespace" \
+    -o json | jq -r '.metadata.annotations["orka.ai/transport-security-migration"] // ""')
+  if [[ "$legacy_runtime_transport" != "insecure-cluster-local-http" ]]; then
+    [[ -z "$legacy_runtime_transport" && "$legacy_runtime_marker" == "legacy-v1" ]] || \
+      fail "legacy AgentRuntime was neither marked nor backfilled during CRD migration"
+  fi
+  [[ "$(kubectl --context "$kube_context" get \
+    customresourcedefinition/agentruntimes.core.orka.ai \
+    -o json | jq -r '.metadata.annotations["core.orka.ai/agent-runtime-transport-migration"] // ""')" == "legacy-v1-complete" ]] || \
+    fail "AgentRuntime CRD transport migration was not marked complete"
+  kubectl --context "$kube_context" delete \
+    agentruntime.core.orka.ai "$legacy_runtime_name" \
+    service "$legacy_runtime_name" \
+    --namespace "$namespace" \
+    --ignore-not-found >/dev/null
+
+  local prepolicy_runtime_name=prepolicy-http-runtime
+  kubectl --context "$kube_context" apply -f - >/dev/null <<EOF_PREPOLICY_RUNTIME
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${prepolicy_runtime_name}
+  namespace: ${namespace}
+spec:
+  selector:
+    app: ${prepolicy_runtime_name}
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: ${prepolicy_runtime_name}
+  namespace: ${namespace}
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://${prepolicy_runtime_name}.${namespace}.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: ${prepolicy_runtime_name}-token
+      key: token
+EOF_PREPOLICY_RUNTIME
+  local agentruntime_transport_property_path agentruntime_transport_validations_path
+  agentruntime_transport_property_path="/spec/versions/${agentruntime_version_index}/schema/openAPIV3Schema/properties/spec/properties/deployment/properties/transportSecurity"
+  agentruntime_transport_validations_path="/spec/versions/${agentruntime_version_index}/schema/openAPIV3Schema/properties/spec/properties/deployment/x-kubernetes-validations"
+  kubectl --context "$kube_context" annotate \
+    customresourcedefinition/agentruntimes.core.orka.ai \
+    core.orka.ai/agent-runtime-transport-migration- \
+    --overwrite >/dev/null
+  kubectl --context "$kube_context" patch \
+    customresourcedefinition/agentruntimes.core.orka.ai \
+    --type=json \
+    -p "[{\"op\":\"remove\",\"path\":\"${agentruntime_transport_validations_path}\"},{\"op\":\"remove\",\"path\":\"${agentruntime_transport_property_path}\"}]" \
+    >/dev/null
+  upgrade_crds \
+    --chart "$target_chart" \
+    --kube-context "$kube_context" \
+    --release "$fresh_release" \
+    --namespace "$namespace" \
+    --yes >/dev/null
+  local prepolicy_transport prepolicy_marker
+  prepolicy_transport=$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$prepolicy_runtime_name" \
+    --namespace "$namespace" \
+    -o jsonpath='{.spec.deployment.transportSecurity}')
+  prepolicy_marker=$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$prepolicy_runtime_name" \
+    --namespace "$namespace" \
+    -o json | jq -r '.metadata.annotations["orka.ai/transport-security-migration"] // ""')
+  if [[ "$prepolicy_transport" != "insecure-cluster-local-http" ]]; then
+    [[ -z "$prepolicy_transport" && "$prepolicy_marker" == "legacy-v1" ]] || \
+      fail "pre-policy AgentRuntime was neither marked nor backfilled during skipped-version migration"
+  fi
+  kubectl --context "$kube_context" delete \
+    agentruntime.core.orka.ai "$prepolicy_runtime_name" \
+    service "$prepolicy_runtime_name" \
+    --namespace "$namespace" \
+    --ignore-not-found >/dev/null
+
+  local post_migration_runtime_name=post-migration-http-runtime
+  kubectl --context "$kube_context" apply -f - >/dev/null <<EOF_POST_MIGRATION_RUNTIME
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${post_migration_runtime_name}
+  namespace: ${namespace}
+spec:
+  selector:
+    app: ${post_migration_runtime_name}
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: ${post_migration_runtime_name}
+  namespace: ${namespace}
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://${post_migration_runtime_name}.${namespace}.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: ${post_migration_runtime_name}-token
+      key: token
+EOF_POST_MIGRATION_RUNTIME
+  upgrade_crds \
+    --chart "$target_chart" \
+    --kube-context "$kube_context" \
+    --release "$fresh_release" \
+    --namespace "$namespace" \
+    --yes >/dev/null
+  local post_migration_transport post_migration_marker
+  post_migration_transport=$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$post_migration_runtime_name" \
+    --namespace "$namespace" \
+    -o jsonpath='{.spec.deployment.transportSecurity}')
+  post_migration_marker=$(kubectl --context "$kube_context" get \
+    agentruntime.core.orka.ai "$post_migration_runtime_name" \
+    --namespace "$namespace" \
+    -o json | jq -r '.metadata.annotations["orka.ai/transport-security-migration"] // ""')
+  [[ -z "$post_migration_transport" && -z "$post_migration_marker" ]] || \
+    fail "later CRD migration reclassified a post-migration AgentRuntime omission"
+  kubectl --context "$kube_context" delete \
+    agentruntime.core.orka.ai "$post_migration_runtime_name" \
+    service "$post_migration_runtime_name" \
+    --namespace "$namespace" \
+    --ignore-not-found >/dev/null
   actual_task_type_enum=$(kubectl --context "$kube_context" get \
     customresourcedefinition/tasks.core.orka.ai \
     -o json | jq -c '.spec.versions[] | select(.name == "v1alpha1") | .schema.openAPIV3Schema.properties.spec.properties.type.enum')

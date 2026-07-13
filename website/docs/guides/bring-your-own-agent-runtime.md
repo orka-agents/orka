@@ -45,13 +45,17 @@ spec:
     supportsRuntimeSessions: true
 ```
 
-Transport security defaults to `tls`; omit `transportSecurity` only when the
-endpoint is `https://`. The explicit insecure mode above is accepted only for a
-same-namespace Kubernetes Service with a non-empty selector. Direct IPs,
-cross-namespace Services, selectorless Services, and `ExternalName` Services are
-rejected. Use the unambiguous
-`service.namespace.svc.<cluster-domain>` Service FQDN shown above (`cluster.local`
-is the Kubernetes default).
+Set `transportSecurity` explicitly for new manifests. An unmarked omission is
+treated as `tls`; it never opts a new object into plaintext HTTP. For upgrades,
+the supported CRD helper handles schemas that predate the field as well as the
+legacy read-time default, publishes the omission-safe target schema, and then
+marks only pre-transition stored omissions. The controller backfills marked
+HTTPS objects to `tls` or marked HTTP objects to
+`insecure-cluster-local-http` only for a validated same-namespace Kubernetes
+Service with a non-empty selector. Direct IPs, cross-namespace Services,
+selectorless Services, and `ExternalName` Services are rejected. Use the
+unambiguous `service.namespace.svc.<cluster-domain>` Service FQDN shown above
+(`cluster.local` is the Kubernetes default).
 
 The checked-in AgentKit Serve facades report lifecycle/output frames for
 AgentKit-owned observed runs. Do not add `brokeredToolClasses` or

@@ -56,6 +56,8 @@ const (
 	agentRuntimeAuthUseLabel           = "orka.ai/agent-runtime-auth"
 	agentRuntimeAuthRefNameLabel       = "orka.ai/agent-runtime-name"
 	agentRuntimeAuthEndpointAnnotation = "orka.ai/agent-runtime-endpoint"
+	agentRuntimeTransportMigrationAnno = "orka.ai/transport-security-migration"
+	agentRuntimeTransportMigrationV1   = "legacy-v1"
 )
 
 // AgentRuntimeReconciler reconciles AgentRuntime registry entries.
@@ -84,8 +86,60 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	logger.Info("Reconciling AgentRuntime", "agentRuntime", runtime.Name, "mode", runtime.Spec.Deployment.Mode)
+	backfilled, err := r.backfillAgentRuntimeTransportSecurity(ctx, runtime)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if backfilled {
+		logger.Info("Backfilled AgentRuntime transport security",
+			"agentRuntime", runtime.Name,
+			"transportSecurity", runtime.Spec.Deployment.TransportSecurity,
+		)
+		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
 	observed, ready, authRefResourceVersion, message := r.probeAgentRuntime(ctx, runtime)
 	return r.updateAgentRuntimeStatus(ctx, runtime, ready, observed, authRefResourceVersion, message)
+}
+
+func (r *AgentRuntimeReconciler) backfillAgentRuntimeTransportSecurity(
+	ctx context.Context,
+	runtime *corev1alpha1.AgentRuntime,
+) (bool, error) {
+	if runtime == nil || !runtime.DeletionTimestamp.IsZero() ||
+		strings.TrimSpace(runtime.Annotations[agentRuntimeTransportMigrationAnno]) != agentRuntimeTransportMigrationV1 {
+		return false, nil
+	}
+	before := runtime.DeepCopy()
+	if runtime.Spec.Deployment.TransportSecurity != "" {
+		delete(runtime.Annotations, agentRuntimeTransportMigrationAnno)
+		if err := r.Patch(ctx, runtime, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return false, fmt.Errorf("clear AgentRuntime transportSecurity migration marker: %w", err)
+		}
+		return true, nil
+	}
+	security := agentRuntimeSpecTransportSecurity(runtime)
+	_, _, err := validateAgentRuntimeTransportSecurity(runtime.Spec.Deployment.Endpoint, security)
+	if err != nil {
+		return false, nil
+	}
+	if security == corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		if err := validateAgentRuntimeTransportPolicy(
+			ctx,
+			r.apiReader(),
+			runtime.Namespace,
+			runtime.Spec.Deployment.Endpoint,
+			security,
+		); err != nil {
+			return false, nil
+		}
+	}
+
+	runtime.Spec.Deployment.TransportSecurity = security
+	delete(runtime.Annotations, agentRuntimeTransportMigrationAnno)
+	if err := r.Patch(ctx, runtime, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, fmt.Errorf("backfill AgentRuntime transportSecurity: %w", err)
+	}
+	return true, nil
 }
 
 func (r *AgentRuntimeReconciler) probeAgentRuntime(
@@ -98,9 +152,10 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 	if err := r.validateAgentRuntimeEndpointPolicy(ctx, runtime); err != nil {
 		return nil, false, "", err.Error()
 	}
+	transportSecurity := agentRuntimeSpecTransportSecurity(runtime)
 	probeBaseURL, transportSecurity, err := agentRuntimeRequestEndpoint(
 		runtime.Spec.Deployment.Endpoint,
-		runtime.Spec.Deployment.TransportSecurity,
+		transportSecurity,
 	)
 	if err != nil {
 		return nil, false, "", err.Error()
@@ -115,7 +170,7 @@ func (r *AgentRuntimeReconciler) probeAgentRuntime(
 		r.apiReader(),
 		runtime.Namespace,
 		runtime.Spec.Deployment.Endpoint,
-		runtime.Spec.Deployment.TransportSecurity,
+		transportSecurity,
 		runtime.Namespace+"/"+runtime.Name+"/"+strconv.FormatInt(runtime.Generation, 10),
 	)
 	if err != nil {
@@ -246,7 +301,7 @@ func validateAgentRuntimeSpec(runtime *corev1alpha1.AgentRuntime) error {
 	if endpoint == "" {
 		return fmt.Errorf("deployment.endpoint is required for external-endpoint AgentRuntime")
 	}
-	parsed, _, err := validateAgentRuntimeTransportSecurity(endpoint, runtime.Spec.Deployment.TransportSecurity)
+	parsed, _, err := validateAgentRuntimeTransportSecurity(endpoint, agentRuntimeSpecTransportSecurity(runtime))
 	if err != nil {
 		return err
 	}
@@ -272,7 +327,7 @@ func (r *AgentRuntimeReconciler) validateAgentRuntimeEndpointPolicy(ctx context.
 		r.apiReader(),
 		runtime.Namespace,
 		runtime.Spec.Deployment.Endpoint,
-		runtime.Spec.Deployment.TransportSecurity,
+		agentRuntimeSpecTransportSecurity(runtime),
 	)
 }
 
@@ -291,6 +346,28 @@ func effectiveAgentRuntimeTransportSecurity(security corev1alpha1.AgentRuntimeTr
 		return corev1alpha1.AgentRuntimeTransportSecurityTLS
 	}
 	return security
+}
+
+func agentRuntimeNeedsTransportMigration(runtime *corev1alpha1.AgentRuntime) bool {
+	return runtime != nil && runtime.Spec.Deployment.TransportSecurity == "" &&
+		strings.TrimSpace(runtime.Annotations[agentRuntimeTransportMigrationAnno]) == agentRuntimeTransportMigrationV1
+}
+
+func agentRuntimeSpecTransportSecurity(runtime *corev1alpha1.AgentRuntime) corev1alpha1.AgentRuntimeTransportSecurity {
+	if runtime == nil || runtime.Spec.Deployment.TransportSecurity != "" {
+		if runtime == nil {
+			return corev1alpha1.AgentRuntimeTransportSecurityTLS
+		}
+		return runtime.Spec.Deployment.TransportSecurity
+	}
+	if !agentRuntimeNeedsTransportMigration(runtime) {
+		return corev1alpha1.AgentRuntimeTransportSecurityTLS
+	}
+	parsed, err := url.Parse(strings.TrimSpace(runtime.Spec.Deployment.Endpoint))
+	if err == nil && parsed.Scheme == urlSchemeHTTP {
+		return corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+	}
+	return corev1alpha1.AgentRuntimeTransportSecurityTLS
 }
 
 func validateAgentRuntimeTransportSecurity(

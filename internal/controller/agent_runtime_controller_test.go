@@ -912,12 +912,142 @@ func testAgentRuntimeTransportSecurity(endpoint string) corev1alpha1.AgentRuntim
 	return corev1alpha1.AgentRuntimeTransportSecurityTLS
 }
 
+func markLegacyAgentRuntimeTransport(runtime *corev1alpha1.AgentRuntime) {
+	if runtime.Annotations == nil {
+		runtime.Annotations = map[string]string{}
+	}
+	runtime.Annotations[agentRuntimeTransportMigrationAnno] = agentRuntimeTransportMigrationV1
+}
+
+func TestAgentRuntimeReconcilerBackfillsLegacyTransportSecurity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		want     corev1alpha1.AgentRuntimeTransportSecurity
+	}{
+		{name: "https", endpoint: "https://runtime.example.com", want: corev1alpha1.AgentRuntimeTransportSecurityTLS},
+		{name: "safe cluster local http", endpoint: testInsecureAgentRuntimeEndpoint, want: corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime, secret := testAgentRuntimeAndSecret(tc.endpoint)
+			runtime.Spec.Deployment.TransportSecurity = ""
+			markLegacyAgentRuntimeTransport(runtime)
+			objects := []client.Object{runtime, secret}
+			if tc.want == corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+				service, _ := agentRuntimeInsecureServiceBackends(runtime.Namespace, 8080, "10.0.0.2")
+				objects = append(objects, service)
+			}
+			r := newAgentRuntimeUnitReconciler(t, objects...)
+
+			result, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime))
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("Reconcile() result = %#v, want immediate requeue after backfill", result)
+			}
+			updated := &corev1alpha1.AgentRuntime{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+				t.Fatalf("Get(AgentRuntime) error = %v", err)
+			}
+			if updated.Spec.Deployment.TransportSecurity != tc.want {
+				t.Fatalf("transportSecurity = %q, want %q", updated.Spec.Deployment.TransportSecurity, tc.want)
+			}
+			if _, ok := updated.Annotations[agentRuntimeTransportMigrationAnno]; ok {
+				t.Fatalf("migration annotation was not cleared: %#v", updated.Annotations)
+			}
+		})
+	}
+}
+
+func TestAgentRuntimeReconcilerClearsMigrationMarkerForExplicitTransport(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret("https://runtime.example.com")
+	markLegacyAgentRuntimeTransport(runtime)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+
+	result, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile() result = %#v, want requeue after marker cleanup", result)
+	}
+	updated := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+		t.Fatalf("Get(AgentRuntime) error = %v", err)
+	}
+	if updated.Spec.Deployment.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityTLS {
+		t.Fatalf("transportSecurity = %q, want explicit tls preserved", updated.Spec.Deployment.TransportSecurity)
+	}
+	if _, ok := updated.Annotations[agentRuntimeTransportMigrationAnno]; ok {
+		t.Fatalf("migration annotation was not cleared: %#v", updated.Annotations)
+	}
+}
+
+func TestAgentRuntimeReconcilerDoesNotBackfillUnsafeLegacyHTTP(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret("http://runtime.example.com")
+	runtime.Spec.Deployment.TransportSecurity = ""
+	markLegacyAgentRuntimeTransport(runtime)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+		t.Fatalf("Get(AgentRuntime) error = %v", err)
+	}
+	if updated.Spec.Deployment.TransportSecurity != "" {
+		t.Fatalf("transportSecurity = %q, want legacy field left empty", updated.Spec.Deployment.TransportSecurity)
+	}
+	if updated.Annotations[agentRuntimeTransportMigrationAnno] != agentRuntimeTransportMigrationV1 {
+		t.Fatalf("migration annotation = %q, want retained for operator repair", updated.Annotations[agentRuntimeTransportMigrationAnno])
+	}
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "same-namespace") {
+		t.Fatalf("status = %#v, want unsafe HTTP rejected by same-namespace policy", updated.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerDoesNotInferUnmarkedHTTP(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret(testInsecureAgentRuntimeEndpoint)
+	runtime.Spec.Deployment.TransportSecurity = ""
+	service, _ := agentRuntimeInsecureServiceBackends(runtime.Namespace, 8080, "10.0.0.2")
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret, service)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+		t.Fatalf("Get(AgentRuntime) error = %v", err)
+	}
+	if updated.Spec.Deployment.TransportSecurity != "" {
+		t.Fatalf("transportSecurity = %q, want unmarked field left empty", updated.Spec.Deployment.TransportSecurity)
+	}
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "must use https") {
+		t.Fatalf("status = %#v, want unmarked HTTP treated as TLS", updated.Status)
+	}
+}
+
 func TestValidateAgentRuntimeSpecEnforcesTransportSecuritySchemePairing(t *testing.T) {
 	runtime, _ := testAgentRuntimeAndSecret("http://runtime.default.svc.cluster.local:8080")
 
 	runtime.Spec.Deployment.TransportSecurity = ""
-	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), `transportSecurity is "tls"`) {
-		t.Fatalf("validateAgentRuntimeSpec(default tls with http) = %v, want https requirement", err)
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("validateAgentRuntimeSpec(unmarked http) = %v, want TLS rejection", err)
+	}
+	markLegacyAgentRuntimeTransport(runtime)
+	if err := validateAgentRuntimeSpec(runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeSpec(marked legacy http) error = %v", err)
+	}
+	security := agentRuntimeSpecTransportSecurity(runtime)
+	if security != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("marked legacy HTTP security = %q, want inferred insecure mode", security)
+	}
+
+	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityTLS
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("validateAgentRuntimeSpec(explicit tls with http) = %v, want https requirement", err)
 	}
 
 	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
@@ -931,8 +1061,13 @@ func TestValidateAgentRuntimeSpecEnforcesTransportSecuritySchemePairing(t *testi
 	}
 
 	runtime.Spec.Deployment.TransportSecurity = ""
+	delete(runtime.Annotations, agentRuntimeTransportMigrationAnno)
 	if err := validateAgentRuntimeSpec(runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeSpec(default tls with https) error = %v", err)
+		t.Fatalf("validateAgentRuntimeSpec(unmarked https) error = %v", err)
+	}
+	security = agentRuntimeSpecTransportSecurity(runtime)
+	if security != corev1alpha1.AgentRuntimeTransportSecurityTLS {
+		t.Fatalf("unmarked HTTPS security = %q, want tls", security)
 	}
 
 	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
@@ -941,7 +1076,7 @@ func TestValidateAgentRuntimeSpecEnforcesTransportSecuritySchemePairing(t *testi
 	}
 }
 
-func TestAgentRuntimeEndpointPolicyRequiresExplicitSameNamespaceServiceOptIn(t *testing.T) {
+func TestAgentRuntimeEndpointPolicyRequiresSafeSameNamespaceServiceForHTTP(t *testing.T) {
 	runtime, secret := testAgentRuntimeAndSecret("http://runtime.example.com")
 	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
@@ -949,8 +1084,12 @@ func TestAgentRuntimeEndpointPolicyRequiresExplicitSameNamespaceServiceOptIn(t *
 	}
 
 	runtime.Spec.Deployment.TransportSecurity = ""
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), `transportSecurity is "tls"`) {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(http without opt-in) = %v, want tls default rejection", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(unmarked external http) = %v, want TLS rejection", err)
+	}
+	markLegacyAgentRuntimeTransport(runtime)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(marked legacy external http) = %v, want same-namespace Service rejection", err)
 	}
 	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
 
@@ -964,6 +1103,12 @@ func TestAgentRuntimeEndpointPolicyRequiresExplicitSameNamespaceServiceOptIn(t *
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}}}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
 	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
+	runtime.Spec.Deployment.TransportSecurity = ""
+	markLegacyAgentRuntimeTransport(runtime)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(legacy cluster-local) error = %v", err)
+	}
+	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(cluster-local) error = %v", err)
 	}

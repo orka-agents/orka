@@ -32,7 +32,17 @@ the live `agentruntimes.core.orka.ai` schema must accept
 must accept `status.harnessRuntime.transportSecurity`, `backendPodName`,
 `backendPodUID`, and `backendAddress`. The guarded `upgrade-crds` command below
 applies and verifies those schemas from the same packaged chart used for the
-release upgrade.
+release upgrade. For both skipped-version schemas that predate the field and schemas with the
+legacy read-time default, the helper snapshots pre-transition AgentRuntime
+identities into a durable ConfigMap inventory, publishes the omission-safe target
+schema, waits for the serving schema to converge, and then marks only inventoried
+objects whose stored `transportSecurity` is absent. After the controller rolls
+out, it backfills only those marked objects: HTTPS endpoints become `tls`, and
+HTTP endpoints migrate only when they resolve through the validated
+same-namespace selector-backed Service policy. Unmarked omissions remain TLS,
+and unsafe HTTP endpoints remain NotReady and require an operator correction.
+Quiesce AgentRuntime creates and updates while the helper performs this one-time
+mark-and-default-removal transition.
 
 The migration helper requires Bash, Helm, `kubectl`, `jq`, `tar`, `base64`,
 `gzip`, and either `sha256sum` or `shasum`. It supports Helm's standard

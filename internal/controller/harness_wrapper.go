@@ -420,11 +420,27 @@ func (r *TaskReconciler) resolveFrozenAgentRuntimeTarget(
 		}
 		return harnessRuntimeTarget{}, false, fmt.Errorf("read AgentRuntime %q for legacy transport migration: %w", target.RuntimeRefName, err)
 	}
+	_, currentTransportSecurity, err := validateAgentRuntimeTransportSecurity(
+		runtime.Spec.Deployment.Endpoint,
+		agentRuntimeSpecTransportSecurity(runtime),
+	)
+	if err != nil {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime has invalid current AgentRuntime transport: %w", err)
+	}
 	ref := runtime.Spec.ClientAuth.BearerAuthRef
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint ||
-		runtime.Spec.Deployment.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP ||
+		currentTransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP ||
 		strings.TrimSpace(ref.Name) != target.AuthRefName || strings.TrimSpace(ref.Key) != target.AuthRefField {
-		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires current AgentRuntime %q to match the frozen endpoint and auth reference with explicit insecure-cluster-local-http transport opt-in", target.RuntimeRefName)
+		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires current AgentRuntime %q to match the frozen endpoint, transport, and auth reference", target.RuntimeRefName)
+	}
+	if err := validateAgentRuntimeTransportPolicy(
+		ctx,
+		reader,
+		runtime.Namespace,
+		runtime.Spec.Deployment.Endpoint,
+		currentTransportSecurity,
+	); err != nil {
+		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires a valid current AgentRuntime transport policy: %w", err)
 	}
 	if runtime.Status.ObservedGeneration != runtime.Generation || !runtime.Status.Ready {
 		return harnessRuntimeTarget{}, false, fmt.Errorf("legacy HTTP runtime requires current AgentRuntime %q to be Ready at generation %d", target.RuntimeRefName, runtime.Generation)
@@ -571,13 +587,21 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 	if runtime.Spec.Deployment.Mode != corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint {
 		return harnessRuntimeTarget{}, fmt.Errorf("AgentRuntime %q has unsupported deployment.mode %q", runtimeRefName, runtime.Spec.Deployment.Mode)
 	}
+	transportSecurity := agentRuntimeSpecTransportSecurity(runtime)
 	if err := validateAgentRuntimeTransportPolicy(
 		ctx,
 		reader,
 		runtime.Namespace,
 		runtime.Spec.Deployment.Endpoint,
-		runtime.Spec.Deployment.TransportSecurity,
+		transportSecurity,
 	); err != nil {
+		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", runtimeRefName, err)}
+	}
+	_, transportSecurity, err := validateAgentRuntimeTransportSecurity(
+		runtime.Spec.Deployment.Endpoint,
+		transportSecurity,
+	)
+	if err != nil {
 		return harnessRuntimeTarget{}, agentRuntimeDependencyNotReadyError{message: fmt.Sprintf("AgentRuntime %q is not ready: %v", runtimeRefName, err)}
 	}
 	token, authRefResourceVersion, err := r.resolveAgentRuntimeBearerToken(ctx, runtime)
@@ -594,7 +618,7 @@ func (r *TaskReconciler) resolveReadyAgentRuntimeTarget(
 	}
 	target := harnessRuntimeTarget{
 		Endpoint:               strings.TrimSpace(runtime.Spec.Deployment.Endpoint),
-		TransportSecurity:      effectiveAgentRuntimeTransportSecurity(runtime.Spec.Deployment.TransportSecurity),
+		TransportSecurity:      transportSecurity,
 		BearerToken:            token,
 		RuntimeName:            runtimeName,
 		RuntimeRefName:         runtimeRefName,

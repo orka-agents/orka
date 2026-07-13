@@ -13,8 +13,12 @@
 
 ## Transport and client authentication
 
-- `AgentRuntime.spec.deployment.transportSecurity` defaults to `tls`, paired
-  with an `https://` endpoint.
+- Set `AgentRuntime.spec.deployment.transportSecurity` explicitly for new
+  manifests. An unmarked omission is treated as `tls`. The supported CRD
+  migration handles schemas that predate the field and the legacy read-time
+  default, publishes the omission-safe target schema before marking
+  pre-transition stored omissions, and lets the controller backfill marked HTTPS
+  or safe cluster-local HTTP endpoints without weakening new creates.
 - `insecure-cluster-local-http` must be paired with `http://` and is limited to
   a selector-backed, non-`ExternalName` Service in the same namespace as the
   `AgentRuntime`.

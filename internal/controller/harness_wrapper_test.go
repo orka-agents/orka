@@ -1898,12 +1898,14 @@ func TestHarnessWrapperFrozenLegacyShortHTTPTransportMigratesToReadyFQDN(t *test
 	}
 }
 
-func TestHarnessWrapperFrozenLegacyHTTPTransportRequiresExplicitCurrentOptIn(t *testing.T) {
+func TestHarnessWrapperFrozenLegacyHTTPTransportUsesInferredCurrentPolicy(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
 	endpoint := testInsecureAgentRuntimeEndpoint
 	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
 	runtime.Spec.Deployment.TransportSecurity = ""
+	markLegacyAgentRuntimeTransport(runtime)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
 	task.Annotations = map[string]string{
 		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
 		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
@@ -1919,11 +1921,21 @@ func TestHarnessWrapperFrozenLegacyHTTPTransportRequiresExplicitCurrentOptIn(t *
 		AuthRefField:           "token",
 		AuthRefResourceVersion: token.ResourceVersion,
 	}
-	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
 
-	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
-	if !isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "explicit insecure-cluster-local-http") {
-		t.Fatalf("resolveHarnessRuntimeTarget(legacy frozen HTTP without opt-in) error = %v, want explicit opt-in rejection", err)
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(legacy frozen HTTP) error = %v", err)
+	}
+	if target.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("target transportSecurity = %q, want inferred insecure mode", target.TransportSecurity)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	if updated.Status.HarnessRuntime == nil || updated.Status.HarnessRuntime.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("legacy frozen status was not migrated: %#v", updated.Status.HarnessRuntime)
 	}
 }
 

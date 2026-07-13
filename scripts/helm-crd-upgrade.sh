@@ -18,6 +18,15 @@ EXPECTED_CRD_NAMES=(
 EXPECTED_CRD_COUNT=${#EXPECTED_CRD_NAMES[@]}
 CRD_FIELD_MANAGER=orka-helm-crd-upgrade
 CRD_MIGRATION_ANNOTATION=core.orka.ai/crd-migration-id
+AGENT_RUNTIME_TRANSPORT_MIGRATION_ANNOTATION=orka.ai/transport-security-migration
+AGENT_RUNTIME_TRANSPORT_MIGRATION_VALUE=legacy-v1
+AGENT_RUNTIME_TRANSPORT_MIGRATION_STATE_ANNOTATION=core.orka.ai/agent-runtime-transport-migration
+AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_ANNOTATION=core.orka.ai/agent-runtime-transport-migration-inventory
+AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_SHA_ANNOTATION=core.orka.ai/agent-runtime-transport-migration-inventory-sha256
+AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_UID_ANNOTATION=core.orka.ai/agent-runtime-transport-migration-inventory-uid
+AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_PREFIX=orka-agent-runtime-transport-migration-v1
+AGENT_RUNTIME_TRANSPORT_MIGRATION_PENDING=legacy-v1-pending
+AGENT_RUNTIME_TRANSPORT_MIGRATION_COMPLETE=legacy-v1-complete
 
 usage() {
   cat <<'USAGE'
@@ -30,7 +39,13 @@ subsequent Helm command. The helper rejects HELM_KUBE* endpoint or credential
 overrides so Helm cannot target a different cluster than kubectl. It validates
 all nine CRDs with server-side dry
 runs before changing the cluster, exactly replaces each CRD spec, and verifies
-the result. If mutation or verification fails, changed and newly created CRDs
+the result. When the live AgentRuntime schema predates transportSecurity or
+still has the legacy default, the helper snapshots pre-transition AgentRuntime
+identities into a durable inventory, publishes the omission-safe target schema,
+waits for serving-schema convergence, and only then marks stored omissions from
+that inventory. Avoid creating or updating
+AgentRuntime objects while this transition runs. If mutation or
+verification fails, changed and newly created CRDs
 are left in place: automatic schema rollback can invalidate custom resources or
 alter API field ownership. Recovery artifacts and a unique migration marker are
 preserved for manual reconciliation. Use --allow-missing-release only before a
@@ -45,6 +60,268 @@ fail() {
   exit 1
 }
 
+persist_agent_runtime_transport_inventory() {
+  local kube_context=$1
+  local namespace=$2
+  local temp_dir=$3
+  local migration_id=$4
+  local inventory="${temp_dir}/legacy-agentruntime-inventory.json"
+  local inventory_hash inventory_suffix inventory_name inventory_uid existing existing_id persisted
+
+  kubectl --context "$kube_context" get agentruntimes.core.orka.ai --all-namespaces -o json |
+    jq -c '[.items[] | {namespace:.metadata.namespace, name:.metadata.name, uid:.metadata.uid}] | sort_by(.namespace, .name, .uid)' \
+      >"$inventory" || fail "could not snapshot AgentRuntime identities before transport migration"
+  [[ $(wc -c <"$inventory") -le 900000 ]] || \
+    fail "AgentRuntime transport migration inventory exceeds the safe ConfigMap size limit"
+  inventory_hash=$(sha256_file "$inventory")
+  inventory_suffix=$(sha256_text "$migration_id" | cut -c1-16)
+  inventory_name="${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_PREFIX}-${inventory_suffix}"
+
+  existing="${temp_dir}/legacy-agentruntime-inventory-existing.json"
+  kubectl --context "$kube_context" get configmap "$inventory_name" \
+    --namespace "$namespace" --ignore-not-found -o json >"$existing" || \
+    fail "could not inspect the AgentRuntime transport migration inventory ConfigMap"
+  if [[ -s "$existing" ]]; then
+    existing_id=$(jq -r '.metadata.annotations["core.orka.ai/agent-runtime-transport-migration-id"] // ""' "$existing")
+    [[ "$existing_id" == "$migration_id" ]] || \
+      fail "AgentRuntime transport migration inventory ConfigMap name collision"
+  fi
+  kubectl --context "$kube_context" create configmap "$inventory_name" \
+    --namespace "$namespace" \
+    --from-file="inventory.json=${inventory}" \
+    --dry-run=client \
+    -o json |
+    jq --arg migration_id "$migration_id" \
+      '.metadata.annotations = ((.metadata.annotations // {}) + {"core.orka.ai/agent-runtime-transport-migration-id": $migration_id})' |
+    kubectl --context "$kube_context" apply \
+      --server-side \
+      --field-manager="$CRD_FIELD_MANAGER" \
+      -f - >/dev/null || \
+    fail "could not persist the AgentRuntime transport migration inventory"
+  persisted="${temp_dir}/legacy-agentruntime-inventory-persisted.json"
+  kubectl --context "$kube_context" get configmap "$inventory_name" \
+    --namespace "$namespace" -o json >"$persisted" || \
+    fail "could not verify the AgentRuntime transport migration inventory ConfigMap"
+  [[ "$(jq -r '.metadata.annotations["core.orka.ai/agent-runtime-transport-migration-id"] // ""' "$persisted")" == "$migration_id" ]] || \
+    fail "AgentRuntime transport migration inventory ownership annotation mismatch"
+  inventory_uid=$(jq -r '.metadata.uid // ""' "$persisted")
+  [[ -n "$inventory_uid" ]] || fail "AgentRuntime transport migration inventory has no UID"
+  kubectl --context "$kube_context" annotate customresourcedefinition agentruntimes.core.orka.ai \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_STATE_ANNOTATION}=${AGENT_RUNTIME_TRANSPORT_MIGRATION_PENDING}" \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_ANNOTATION}=${namespace}/${inventory_name}" \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_SHA_ANNOTATION}=${inventory_hash}" \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_UID_ANNOTATION}=${inventory_uid}" \
+    --overwrite >/dev/null || \
+    fail "failed to persist AgentRuntime transport migration state"
+  printf '%s\n' "$inventory"
+}
+
+load_agent_runtime_transport_inventory() {
+  local kube_context=$1
+  local crd_json=$2
+  local temp_dir=$3
+  local inventory="${temp_dir}/legacy-agentruntime-inventory.json"
+  local inventory_ref inventory_hash inventory_uid inventory_namespace inventory_name actual_hash persisted_uid
+
+  inventory_ref=$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_ANNOTATION" \
+    '.metadata.annotations[$annotation] // ""' "$crd_json")
+  inventory_hash=$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_SHA_ANNOTATION" \
+    '.metadata.annotations[$annotation] // ""' "$crd_json")
+  inventory_uid=$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_UID_ANNOTATION" \
+    '.metadata.annotations[$annotation] // ""' "$crd_json")
+  case "$inventory_ref" in
+    */*) ;;
+    *) fail "pending AgentRuntime transport migration has no valid inventory reference" ;;
+  esac
+  inventory_namespace=${inventory_ref%%/*}
+  inventory_name=${inventory_ref#*/}
+  [[ -n "$inventory_namespace" && -n "$inventory_name" && -n "$inventory_hash" && -n "$inventory_uid" ]] || \
+    fail "pending AgentRuntime transport migration inventory metadata is incomplete"
+
+  local persisted="${temp_dir}/legacy-agentruntime-inventory-loaded.json"
+  kubectl --context "$kube_context" get configmap "$inventory_name" \
+    --namespace "$inventory_namespace" -o json >"$persisted" || \
+    fail "could not load the AgentRuntime transport migration inventory"
+  persisted_uid=$(jq -r '.metadata.uid // ""' "$persisted")
+  [[ "$persisted_uid" == "$inventory_uid" ]] || fail "AgentRuntime transport migration inventory UID mismatch"
+  jq -j '.data["inventory.json"] // empty' "$persisted" >"$inventory"
+  [[ -s "$inventory" ]] || fail "AgentRuntime transport migration inventory is empty or missing"
+  jq -e 'type == "array" and all(.[]; (.namespace | type) == "string" and (.name | type) == "string" and (.uid | type) == "string")' \
+    "$inventory" >/dev/null || fail "AgentRuntime transport migration inventory is malformed"
+  actual_hash=$(sha256_file "$inventory")
+  [[ "$actual_hash" == "$inventory_hash" ]] || fail "AgentRuntime transport migration inventory digest mismatch"
+  printf '%s\n' "$inventory"
+}
+
+mark_legacy_agent_runtime_transport_security() {
+  local kube_context=$1
+  local temp_dir=$2
+  local inventory=$3
+  local targets="${temp_dir}/legacy-agentruntimes-to-mark.tsv"
+  local current="${temp_dir}/legacy-agentruntime-current.json"
+  local patch="${temp_dir}/legacy-agentruntime-marker-patch.json"
+
+  jq -r '.[] | [.namespace, .name, .uid] | @tsv' "$inventory" >"$targets"
+  local runtime_namespace runtime_name runtime_uid current_uid marked_count=0
+  while IFS=$'\t' read -r runtime_namespace runtime_name runtime_uid; do
+    [[ -n "$runtime_namespace" && -n "$runtime_name" && -n "$runtime_uid" ]] || continue
+    kubectl --context "$kube_context" get agentruntimes.core.orka.ai "$runtime_name" \
+      --namespace "$runtime_namespace" --ignore-not-found -o json >"$current" || \
+      fail "could not read legacy AgentRuntime ${runtime_namespace}/${runtime_name} after default removal"
+    [[ -s "$current" ]] || continue
+    current_uid=$(jq -r '.metadata.uid // ""' "$current")
+    [[ "$current_uid" == "$runtime_uid" ]] || continue
+    [[ "$(jq -r '.spec.deployment.transportSecurity // ""' "$current")" == "" ]] || continue
+    [[ "$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_ANNOTATION" '.metadata.annotations[$annotation] // ""' "$current")" != "$AGENT_RUNTIME_TRANSPORT_MIGRATION_VALUE" ]] || continue
+
+    if jq -e '.metadata.annotations | type == "object"' "$current" >/dev/null; then
+      jq -n \
+        --arg uid "$runtime_uid" \
+        --arg value "$AGENT_RUNTIME_TRANSPORT_MIGRATION_VALUE" '[
+          {op:"test", path:"/metadata/uid", value:$uid},
+          {op:"add", path:"/metadata/annotations/orka.ai~1transport-security-migration", value:$value}
+        ]' >"$patch"
+    else
+      jq -n \
+        --arg uid "$runtime_uid" \
+        --arg key "$AGENT_RUNTIME_TRANSPORT_MIGRATION_ANNOTATION" \
+        --arg value "$AGENT_RUNTIME_TRANSPORT_MIGRATION_VALUE" '[
+          {op:"test", path:"/metadata/uid", value:$uid},
+          {op:"add", path:"/metadata/annotations", value:{($key):$value}}
+        ]' >"$patch"
+    fi
+    if ! kubectl --context "$kube_context" patch agentruntimes.core.orka.ai "$runtime_name" \
+      --namespace "$runtime_namespace" --type=json --patch-file "$patch" >/dev/null; then
+      kubectl --context "$kube_context" get agentruntimes.core.orka.ai "$runtime_name" \
+        --namespace "$runtime_namespace" --ignore-not-found -o json >"$current" || true
+      [[ ! -s "$current" || "$(jq -r '.metadata.uid // ""' "$current")" != "$runtime_uid" ]] && continue
+      fail "could not mark legacy AgentRuntime ${runtime_namespace}/${runtime_name} for transport-security migration"
+    fi
+    marked_count=$((marked_count + 1))
+  done <"$targets"
+
+  while IFS=$'\t' read -r runtime_namespace runtime_name runtime_uid; do
+    [[ -n "$runtime_namespace" && -n "$runtime_name" && -n "$runtime_uid" ]] || continue
+    kubectl --context "$kube_context" get agentruntimes.core.orka.ai "$runtime_name" \
+      --namespace "$runtime_namespace" --ignore-not-found -o json >"$current" || \
+      fail "could not verify legacy AgentRuntime ${runtime_namespace}/${runtime_name}"
+    [[ -s "$current" ]] || continue
+    [[ "$(jq -r '.metadata.uid // ""' "$current")" == "$runtime_uid" ]] || continue
+    if [[ "$(jq -r '.spec.deployment.transportSecurity // ""' "$current")" == "" ]]; then
+      [[ "$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_ANNOTATION" '.metadata.annotations[$annotation] // ""' "$current")" == "$AGENT_RUNTIME_TRANSPORT_MIGRATION_VALUE" ]] || \
+        fail "legacy AgentRuntime ${runtime_namespace}/${runtime_name} is missing its migration marker"
+    fi
+  done <"$targets"
+
+  echo "orka-crd-upgrade: marked ${marked_count} legacy AgentRuntime object(s) for transport-security backfill"
+}
+
+agent_runtime_transport_default_is_tls() {
+  local crd_json=$1
+  jq -e '
+    any(.spec.versions[];
+      .name == "v1alpha1" and
+      (.schema.openAPIV3Schema.properties.spec.properties.deployment.properties.transportSecurity.default // "") == "tls"
+    )
+  ' "$crd_json" >/dev/null
+}
+
+agent_runtime_transport_schema_is_prepolicy() {
+  local crd_json=$1
+  jq -e '
+    any(.spec.versions[];
+      .name == "v1alpha1" and
+      ((.schema.openAPIV3Schema.properties.spec.properties.deployment.properties // {}) |
+        has("transportSecurity") | not)
+    )
+  ' "$crd_json" >/dev/null
+}
+
+validate_target_agent_runtime_transport_schema() {
+  local targets_json=$1
+  jq -e '
+    ([.[] | select(.metadata.name == "agentruntimes.core.orka.ai")]) as $crds |
+    ($crds | length) == 1 and
+    ([ $crds[0].spec.versions[] | select(.name == "v1alpha1") ]) as $versions |
+    ($versions | length) == 1 and
+    ($versions[0].schema.openAPIV3Schema.properties.spec.properties.deployment) as $deployment |
+    ($deployment.properties.transportSecurity.type == "string") and
+    (($deployment.properties.transportSecurity | has("default")) | not) and
+    ([ $deployment["x-kubernetes-validations"][]?.rule ]) as $rules |
+    any($rules[]; contains("!has(self.transportSecurity)") and contains("\u0027tls\u0027")) and
+    any($rules[]; contains("!has(self.transportSecurity)") and contains("\u0027insecure-cluster-local-http\u0027"))
+  ' "$targets_json" >/dev/null || \
+    fail "target AgentRuntime CRD must define transportSecurity without a default and guard both transport validations with has(self.transportSecurity)"
+}
+
+apply_agent_runtime_target_schema_for_transport_migration() {
+  local kube_context=$1
+  local temp_dir=$2
+  local name=agentruntimes.core.orka.ai
+  local snapshot="${temp_dir}/snapshots/${name}.json"
+  local target="${temp_dir}/targets/${name}.json"
+  local patch="${temp_dir}/patches/${name}.json"
+  local expected="${temp_dir}/expected/${name}.json"
+  kubectl --context "$kube_context" get customresourcedefinition "$name" -o json >"$snapshot" || \
+    fail "could not refresh AgentRuntime CRD before transport migration schema update"
+  write_target_patch "$snapshot" "$target" "$patch"
+  kubectl --context "$kube_context" patch customresourcedefinition "$name" \
+    --type=json \
+    --field-manager="$CRD_FIELD_MANAGER" \
+    --patch-file "$patch" \
+    --dry-run=server -o json >"$expected" || \
+    fail "server dry-run rejected target AgentRuntime CRD for transport migration"
+  kubectl --context "$kube_context" patch customresourcedefinition "$name" \
+    --type=json --field-manager="$CRD_FIELD_MANAGER" --patch-file "$patch" -o json \
+    >"${temp_dir}/actual/${name}.json" || \
+    fail "failed to apply target AgentRuntime CRD before marking legacy objects"
+  wait_for_crd_target_ready "$kube_context" "$name" "$expected" "${temp_dir}/actual/${name}.json" || \
+    fail "AgentRuntime serving schema did not publish the omission-safe target schema"
+  kubectl --context "$kube_context" get customresourcedefinition "$name" -o json >"$snapshot" || \
+    fail "could not refresh AgentRuntime CRD after target schema publication"
+}
+
+complete_agent_runtime_transport_migration() {
+  local kube_context=$1
+  local crd_json=$2
+  local inventory_ref inventory_uid inventory_namespace inventory_name current_inventory
+  inventory_ref=$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_ANNOTATION" \
+    '.metadata.annotations[$annotation] // ""' "$crd_json")
+  inventory_uid=$(jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_UID_ANNOTATION" \
+    '.metadata.annotations[$annotation] // ""' "$crd_json")
+
+  case "$inventory_ref" in
+    */*)
+      inventory_namespace=${inventory_ref%%/*}
+      inventory_name=${inventory_ref#*/}
+      current_inventory=$(kubectl --context "$kube_context" get configmap "$inventory_name" \
+        --namespace "$inventory_namespace" --ignore-not-found -o json) || \
+        fail "could not verify AgentRuntime migration inventory ownership before cleanup"
+      if [[ -n "$current_inventory" ]]; then
+        [[ "$(jq -r '.metadata.uid // ""' <<<"$current_inventory")" == "$inventory_uid" ]] || \
+          fail "refusing to delete an AgentRuntime migration inventory ConfigMap with a different UID"
+      fi
+      ;;
+  esac
+
+  kubectl --context "$kube_context" annotate customresourcedefinition agentruntimes.core.orka.ai \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_STATE_ANNOTATION}=${AGENT_RUNTIME_TRANSPORT_MIGRATION_COMPLETE}" \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_ANNOTATION}-" \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_SHA_ANNOTATION}-" \
+    "${AGENT_RUNTIME_TRANSPORT_MIGRATION_INVENTORY_UID_ANNOTATION}-" \
+    --overwrite >/dev/null || fail "failed to mark AgentRuntime transport migration complete"
+  [[ "$(kubectl --context "$kube_context" get customresourcedefinition agentruntimes.core.orka.ai -o json | \
+    jq -r --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_STATE_ANNOTATION" '.metadata.annotations[$annotation] // ""')" == "$AGENT_RUNTIME_TRANSPORT_MIGRATION_COMPLETE" ]] || \
+    fail "AgentRuntime transport migration completion marker was not persisted"
+
+  case "$inventory_ref" in
+    */*)
+      kubectl --context "$kube_context" delete configmap "$inventory_name" \
+        --namespace "$inventory_namespace" --ignore-not-found >/dev/null || true
+      ;;
+  esac
+}
+
 sha256_file() {
   local file=$1
   if command -v sha256sum >/dev/null 2>&1; then
@@ -53,6 +330,17 @@ sha256_file() {
     shasum -a 256 "$file" | awk '{ print $1 }'
   else
     fail "sha256sum or shasum is required to identify the chart artifact"
+  fi
+}
+
+sha256_text() {
+  local value=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$value" | sha256sum | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$value" | shasum -a 256 | awk '{ print $1 }'
+  else
+    fail "sha256sum or shasum is required to identify migration inventory ownership"
   fi
 }
 
@@ -756,6 +1044,7 @@ main() {
   fi
   jq -e --argjson count "$EXPECTED_CRD_COUNT" 'length == $count' \
     "${temp_dir}/targets.json" >/dev/null || fail "normalized target bundle does not contain ${EXPECTED_CRD_COUNT} CRDs"
+  validate_target_agent_runtime_transport_schema "${temp_dir}/targets.json"
   jq -e '
     all(.[];
       all(.spec.versions[];
@@ -819,6 +1108,35 @@ main() {
     fi
   done
 
+  local agent_runtime_transport_transition=false
+  local agent_runtime_transport_default_present=false
+  local agent_runtime_transport_prepolicy=false
+  local agent_runtime_transport_state=""
+  local agent_runtime_transport_snapshot="${temp_dir}/snapshots/agentruntimes.core.orka.ai.json"
+  if [[ -s "$agent_runtime_transport_snapshot" ]]; then
+    if agent_runtime_transport_default_is_tls "$agent_runtime_transport_snapshot"; then
+      agent_runtime_transport_default_present=true
+    fi
+    if agent_runtime_transport_schema_is_prepolicy "$agent_runtime_transport_snapshot"; then
+      agent_runtime_transport_prepolicy=true
+    fi
+    agent_runtime_transport_state=$(jq -r \
+      --arg annotation "$AGENT_RUNTIME_TRANSPORT_MIGRATION_STATE_ANNOTATION" \
+      '.metadata.annotations[$annotation] // ""' "$agent_runtime_transport_snapshot")
+    case "$agent_runtime_transport_state" in
+      ""|"$AGENT_RUNTIME_TRANSPORT_MIGRATION_PENDING"|"$AGENT_RUNTIME_TRANSPORT_MIGRATION_COMPLETE") ;;
+      *) fail "unsupported AgentRuntime transport migration state ${agent_runtime_transport_state}" ;;
+    esac
+    if [[ ( "$agent_runtime_transport_default_present" == true || "$agent_runtime_transport_prepolicy" == true ) && \
+      "$agent_runtime_transport_state" == "$AGENT_RUNTIME_TRANSPORT_MIGRATION_COMPLETE" ]]; then
+      fail "AgentRuntime CRD has a completed transport migration marker but still exposes a pre-migration schema"
+    fi
+    if [[ "$agent_runtime_transport_default_present" == true || "$agent_runtime_transport_prepolicy" == true || \
+      "$agent_runtime_transport_state" == "$AGENT_RUNTIME_TRANSPORT_MIGRATION_PENDING" ]]; then
+      agent_runtime_transport_transition=true
+    fi
+  fi
+
   local permission
   for permission in get list watch; do
     [[ "$(kubectl --context "$kube_context" auth can-i "$permission" customresourcedefinitions.apiextensions.k8s.io --all-namespaces)" == "yes" ]] || \
@@ -831,6 +1149,16 @@ main() {
   if [[ $missing_count -gt 0 ]]; then
     [[ "$(kubectl --context "$kube_context" auth can-i create customresourcedefinitions.apiextensions.k8s.io --all-namespaces)" == "yes" ]] || \
       fail "current identity cannot create CustomResourceDefinitions in context ${kube_context}"
+  fi
+  if [[ "$agent_runtime_transport_transition" == true ]]; then
+    for permission in get list patch; do
+      [[ "$(kubectl --context "$kube_context" auth can-i "$permission" agentruntimes.core.orka.ai --all-namespaces)" == "yes" ]] || \
+        fail "current identity cannot ${permission} AgentRuntime objects in context ${kube_context}"
+    done
+    for permission in get create patch; do
+      [[ "$(kubectl --context "$kube_context" auth can-i "$permission" configmaps --namespace "$namespace")" == "yes" ]] || \
+        fail "current identity cannot ${permission} ConfigMaps in namespace ${namespace} for AgentRuntime migration inventory"
+    done
   fi
 
   for name in "${EXPECTED_CRD_NAMES[@]}"; do
@@ -918,6 +1246,8 @@ Pre-upgrade Orka CRD target:
   sha256:    ${chart_digest}
   migration: ${migration_id}
   resources: ${existing_count} existing, ${missing_count} missing (${EXPECTED_CRD_COUNT} total)
+  legacy AgentRuntime transport transition: ${agent_runtime_transport_transition}
+  legacy AgentRuntime schema predates transportSecurity: ${agent_runtime_transport_prepolicy}
 
 All nine exact patch/create operations passed server-side dry-run. This replaces
 the shared Orka CRD specs for the entire cluster. Coordinate this change if
@@ -944,9 +1274,31 @@ EOF_SUMMARY
   rm -f "$pre_mutation_release_state"
 
   mutation_started=true
+  local agent_runtime_transport_inventory=""
+  local agent_runtime_crd_preapplied=false
   local actual
   local applied_count=0
+  if [[ "$agent_runtime_transport_transition" == true ]]; then
+    if [[ "$agent_runtime_transport_state" == "$AGENT_RUNTIME_TRANSPORT_MIGRATION_PENDING" ]]; then
+      agent_runtime_transport_inventory=$(load_agent_runtime_transport_inventory \
+        "$kube_context" "$agent_runtime_transport_snapshot" "$temp_dir")
+    else
+      agent_runtime_transport_inventory=$(persist_agent_runtime_transport_inventory \
+        "$kube_context" "$namespace" "$temp_dir" "$migration_id")
+    fi
+    apply_agent_runtime_target_schema_for_transport_migration "$kube_context" "$temp_dir"
+    agent_runtime_crd_preapplied=true
+    applied_count=1
+    if [[ $test_fail_after -gt 0 && $applied_count -eq $test_fail_after ]]; then
+      fail "injected test failure after ${applied_count} CRD mutations"
+    fi
+    mark_legacy_agent_runtime_transport_security \
+      "$kube_context" "$temp_dir" "$agent_runtime_transport_inventory"
+  fi
   for name in "${EXPECTED_CRD_NAMES[@]}"; do
+    if [[ "$agent_runtime_crd_preapplied" == true && "$name" == "agentruntimes.core.orka.ai" ]]; then
+      continue
+    fi
     target="${temp_dir}/targets/${name}.json"
     snapshot="${temp_dir}/snapshots/${name}.json"
     patch="${temp_dir}/patches/${name}.json"
@@ -1020,6 +1372,11 @@ EOF_SUMMARY
       ' "$final_current" >/dev/null || \
       fail "CRD ${name} no longer matches this migration response and marker"
   done
+
+  if [[ "$agent_runtime_transport_transition" == true ]]; then
+    complete_agent_runtime_transport_migration \
+      "$kube_context" "${temp_dir}/final-agentruntimes.core.orka.ai.json"
+  fi
 
   migration_complete=true
   echo "All ${EXPECTED_CRD_COUNT} Orka CRDs exactly match ${resolved_name}-${resolved_version} and are Established in ${kube_context}."

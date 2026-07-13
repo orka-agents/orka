@@ -70,8 +70,8 @@ type AgentRuntimeReference struct {
 }
 
 // AgentRuntimeDeploymentSpec configures where Orka reaches the harness runtime.
-// +kubebuilder:validation:XValidation:rule="self.transportSecurity != 'tls' || self.endpoint.startsWith('https://')",message="deployment.endpoint must use https when transportSecurity is tls"
-// +kubebuilder:validation:XValidation:rule="self.transportSecurity != 'insecure-cluster-local-http' || self.endpoint.startsWith('http://')",message="deployment.endpoint must use http when transportSecurity is insecure-cluster-local-http"
+// +kubebuilder:validation:XValidation:rule="!has(self.transportSecurity) || self.transportSecurity != 'tls' || self.endpoint.startsWith('https://')",message="deployment.endpoint must use https when transportSecurity is tls"
+// +kubebuilder:validation:XValidation:rule="!has(self.transportSecurity) || self.transportSecurity != 'insecure-cluster-local-http' || self.endpoint.startsWith('http://')",message="deployment.endpoint must use http when transportSecurity is insecure-cluster-local-http"
 type AgentRuntimeDeploymentSpec struct {
 	// Mode is the deployment mode. The first milestone supports external endpoints only.
 	// +kubebuilder:validation:Required
@@ -83,11 +83,14 @@ type AgentRuntimeDeploymentSpec struct {
 	// +kubebuilder:validation:Pattern=`^https?://[^\s@?#]+$`
 	Endpoint string `json:"endpoint"`
 
-	// TransportSecurity declares the required endpoint transport. It defaults to TLS.
+	// TransportSecurity declares the required endpoint transport. An unmarked
+	// omitted value is treated as TLS. The supported CRD upgrade helper marks
+	// objects created before transport policy existed so the controller can
+	// backfill HTTPS as tls and validated same-namespace HTTP as
+	// insecure-cluster-local-http.
 	// insecure-cluster-local-http is an explicit opt-in limited to a selector-backed,
 	// non-ExternalName Service in the same namespace as the AgentRuntime, addressed
 	// with its service.namespace.svc.<cluster-domain> FQDN.
-	// +kubebuilder:default=tls
 	// +optional
 	TransportSecurity AgentRuntimeTransportSecurity `json:"transportSecurity,omitempty"`
 }

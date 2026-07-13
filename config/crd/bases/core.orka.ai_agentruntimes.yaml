@@ -151,9 +151,12 @@ spec:
                     - external-endpoint
                     type: string
                   transportSecurity:
-                    default: tls
                     description: |-
-                      TransportSecurity declares the required endpoint transport. It defaults to TLS.
+                      TransportSecurity declares the required endpoint transport. An unmarked
+                      omitted value is treated as TLS. The supported CRD upgrade helper marks
+                      objects created before transport policy existed so the controller can
+                      backfill HTTPS as tls and validated same-namespace HTTP as
+                      insecure-cluster-local-http.
                       insecure-cluster-local-http is an explicit opt-in limited to a selector-backed,
                       non-ExternalName Service in the same namespace as the AgentRuntime, addressed
                       with its service.namespace.svc.<cluster-domain> FQDN.
@@ -168,11 +171,12 @@ spec:
                 x-kubernetes-validations:
                 - message: deployment.endpoint must use https when transportSecurity
                     is tls
-                  rule: self.transportSecurity != 'tls' || self.endpoint.startsWith('https://')
+                  rule: '!has(self.transportSecurity) || self.transportSecurity !=
+                    ''tls'' || self.endpoint.startsWith(''https://'')'
                 - message: deployment.endpoint must use http when transportSecurity
                     is insecure-cluster-local-http
-                  rule: self.transportSecurity != 'insecure-cluster-local-http' ||
-                    self.endpoint.startsWith('http://')
+                  rule: '!has(self.transportSecurity) || self.transportSecurity !=
+                    ''insecure-cluster-local-http'' || self.endpoint.startsWith(''http://'')'
             required:
             - clientAuth
             - contractVersion
