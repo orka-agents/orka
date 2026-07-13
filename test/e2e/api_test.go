@@ -203,7 +203,7 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		})
 
 		By("creating a task via POST /api/v1/tasks")
-		taskBody := fmt.Sprintf(`{"name":"%s","type":"container","image":"busybox:latest","command":["echo"],"args":["artifact-source"]}`,
+		taskBody := fmt.Sprintf(`{"name":"%s","type":"container","command":["sleep"],"args":["300"]}`,
 			taskName)
 		req, err := http.NewRequest("POST", apiBaseURL+"/api/v1/tasks", strings.NewReader(taskBody))
 		Expect(err).NotTo(HaveOccurred())
@@ -215,17 +215,28 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		defer resp.Body.Close()
 		Expect(resp.StatusCode).To(Equal(http.StatusCreated))
 
-		By("waiting for task completion")
-		phase := waitForTaskCompletion(taskName, 3*time.Minute)
-		Expect(phase).To(Equal("Succeeded"))
+		By("waiting for the task worker to become active")
+		waitForTaskPhase(taskName, "Running", 3*time.Minute)
+		workerToken := taskWorkerServiceAccountToken(taskName)
 
-		By("uploading an artifact via POST /internal/v1/artifacts/{namespace}/{taskName}/{filename}")
 		uploadURL := fmt.Sprintf("%s/internal/v1/artifacts/%s/%s/%s", apiBaseURL, namespace, taskName, artifactName)
+		// Ordinary internal callers are bound to the active task worker pod;
+		// the controller ServiceAccount stays forbidden even in the same namespace.
+		By("rejecting a controller token on the worker-only artifact upload endpoint")
 		req, err = http.NewRequest("POST", uploadURL, strings.NewReader(artifactContent))
 		Expect(err).NotTo(HaveOccurred())
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "text/plain")
+		resp, err = http.DefaultClient.Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusForbidden))
+		Expect(resp.Body.Close()).To(Succeed())
 
+		By("uploading an artifact as the active task worker")
+		req, err = http.NewRequest("POST", uploadURL, strings.NewReader(artifactContent))
+		Expect(err).NotTo(HaveOccurred())
+		req.Header.Set("Authorization", "Bearer "+workerToken)
+		req.Header.Set("Content-Type", "text/plain")
 		resp, err = http.DefaultClient.Do(req)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
@@ -327,3 +338,30 @@ var _ = Describe("REST API Endpoints", Ordered, func() {
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 })
+
+func taskWorkerServiceAccountToken(taskName string) string {
+	var bearer string
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods",
+			"-l", fmt.Sprintf("orka.ai/task=%s", taskName),
+			"-n", namespace,
+			"-o", "jsonpath={.items[0].metadata.name}",
+		)
+		podName, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		podName = strings.TrimSpace(podName)
+		g.Expect(podName).NotTo(BeEmpty())
+
+		cmd = exec.Command(
+			"kubectl", "exec", podName,
+			"-c", "worker",
+			"-n", namespace,
+			"--", "cat", "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		)
+		rawToken, err := cmd.Output()
+		g.Expect(err).NotTo(HaveOccurred())
+		bearer = strings.TrimSpace(string(rawToken))
+		g.Expect(bearer).NotTo(BeEmpty())
+	}, 2*time.Minute, time.Second).Should(Succeed())
+	return bearer
+}
