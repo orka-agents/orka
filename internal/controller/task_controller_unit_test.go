@@ -3193,14 +3193,17 @@ func TestHandleDeletionRetainsFinalizerUntilDurableStoreCleanupSucceeds(t *testi
 		t.Run(operation, func(t *testing.T) {
 			scheme := newTestScheme()
 			taskName := "del-fail-once-" + strings.ReplaceAll(operation, " ", "-")
+			jobName := taskName + "-job"
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
 					Namespace:  "default",
 					Finalizers: []string{labels.TaskFinalizer},
 				},
+				Status: corev1alpha1.TaskStatus{JobName: jobName},
 			}
-			r := newUnitReconciler(scheme, task)
+			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: task.Namespace}}
+			r := newUnitReconciler(scheme, task, job)
 			backing := r.ResultStore.(*sqlite.Store)
 			cleanupErr := errors.New("injected durable cleanup failure")
 			cleanupStore := &failOnceTaskCleanupStore{
@@ -3228,6 +3231,9 @@ func TestHandleDeletionRetainsFinalizerUntilDurableStoreCleanupSucceeds(t *testi
 			}
 			if !controllerutil.ContainsFinalizer(&persisted, labels.TaskFinalizer) {
 				t.Fatal("task finalizer removed after durable cleanup failure")
+			}
+			if err := r.Get(context.Background(), types.NamespacedName{Namespace: job.Namespace, Name: job.Name}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("Job lookup after durable cleanup failure = %v, want NotFound", err)
 			}
 
 			if _, err := r.handleDeletion(context.Background(), &persisted); err != nil {
@@ -3315,8 +3321,10 @@ func TestHandleDeletionKeepsFinalizerWhenExecutionEventCleanupFails(t *testing.T
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
+		Status: corev1alpha1.TaskStatus{JobName: "del-events-fail-job"},
 	}
-	r := newUnitReconciler(scheme, task)
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: task.Status.JobName, Namespace: task.Namespace}}
+	r := newUnitReconciler(scheme, task, job)
 	r.ExecutionEventStore = failingExecutionEventStore{err: errors.New("store unavailable")}
 
 	_, err := r.handleDeletion(context.Background(), task)
@@ -3325,6 +3333,9 @@ func TestHandleDeletionKeepsFinalizerWhenExecutionEventCleanupFails(t *testing.T
 	}
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		t.Fatal("task finalizer was removed after execution event cleanup failed")
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: job.Namespace, Name: job.Name}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Job lookup after execution event cleanup failure = %v, want NotFound", err)
 	}
 }
 

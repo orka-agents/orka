@@ -529,33 +529,35 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		if err := errors.Join(storeCleanupErrs...); err != nil {
-			return ctrl.Result{}, err
-		}
-
 		// Clean up execution timeline events before allowing a future task with the
 		// same namespace/name to expose stale history.
 		if r.ExecutionEventStore != nil {
 			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
 				log.Error(err, "failed to delete execution events", "task", task.Name)
-				return ctrl.Result{}, err
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting execution events: %w", err))
 			}
 		}
 
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, errors.Join(append(storeCleanupErrs, err)...)
 		}
 		if waitingForJob {
+			if err := errors.Join(storeCleanupErrs...); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to release substrate pool actor leases")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, errors.Join(append(storeCleanupErrs, err)...)
 		}
 		if !releasedPoolLeases {
+			if err := errors.Join(storeCleanupErrs...); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 
@@ -565,6 +567,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
 			}
+		}
+
+		if err := errors.Join(storeCleanupErrs...); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		// Remove finalizer
