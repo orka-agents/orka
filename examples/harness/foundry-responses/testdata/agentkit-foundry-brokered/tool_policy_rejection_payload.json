@@ -2,6 +2,6 @@
   "approved": false,
   "error": {
     "code": "tool_policy_rejected",
-    "message": "writes are disabled"
+    "message": "tool call was rejected by policy"
   }
 }

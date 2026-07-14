@@ -1143,7 +1143,7 @@ func canonicalToolResultOutput(result harness.ToolCallResult) (string, error) {
 		return compactJSON(struct {
 			Approved bool               `json:"approved"`
 			Error    *harness.ErrorInfo `json:"error"`
-		}{Approved: false, Error: result.Error})
+		}{Approved: false, Error: hostedToolError(result.Error)})
 	}
 	if !result.Approved {
 		return compactJSON(struct {
@@ -1173,6 +1173,22 @@ func canonicalToolResultOutput(result harness.ToolCallResult) (string, error) {
 		Approved bool            `json:"approved"`
 		Output   json.RawMessage `json:"output"`
 	}{Approved: true, Output: output})
+}
+
+func hostedToolError(err *harness.ErrorInfo) *harness.ErrorInfo {
+	if err == nil {
+		return nil
+	}
+	switch strings.TrimSpace(err.Code) {
+	case "approval_declined":
+		return &harness.ErrorInfo{Code: "approval_declined", Message: "tool call was not approved"}
+	case "tool_policy_rejected":
+		return &harness.ErrorInfo{Code: "tool_policy_rejected", Message: "tool call was rejected by policy"}
+	case "tool_execution_failed":
+		return &harness.ErrorInfo{Code: "tool_execution_failed", Message: "tool execution failed"}
+	default:
+		return &harness.ErrorInfo{Code: "tool_execution_failed", Message: "tool execution failed"}
+	}
 }
 
 func compactRawJSON(raw json.RawMessage) (json.RawMessage, error) {

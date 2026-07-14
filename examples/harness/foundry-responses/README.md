@@ -86,10 +86,11 @@ The hosted continuation request includes `previous_response_id`, `agent_session_
 
 `function_call_output.output` is always a compact JSON string:
 
-- successful tool result: `{"approved":true,"output":<ToolCallResult.Output>}`
-- declined approval or policy/execution error: `{"approved":false,"error":<ErrorInfo>}`
+- successful object result: `{"approved":true,"output":<ToolCallResult.Output>}`
+- successful array or scalar result: `{"approved":true,"output":{"result":<ToolCallResult.Output>}}`
+- declined approval or policy/execution error: `{"approved":false,"error":<safe ErrorInfo>}`
 
-Approval decline, tool policy rejection, and tool execution failure fixtures live under `testdata/golden/`.
+Object outputs remain unchanged. Arrays and scalars are wrapped under `output.result` so the AgentKit continuation always receives an object-shaped `output`. Error codes are allowlisted and messages are replaced with stable generic text before crossing the hosted-provider boundary. Approval decline, tool policy rejection, and tool execution failure fixtures live under `testdata/golden/`.
 
 ## State, restart, and sessions
 

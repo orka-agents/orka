@@ -258,8 +258,12 @@ expect_verifier_failure \
   "mismatched-write-request"
 expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-partial-idempotency.json \
-  "write execution for escalate-incident is missing idempotency key evidence" \
+  "write execution for escalate-incident is missing execution idempotency key evidence" \
   "partial-idempotency"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-generic-idempotency-only.json \
+  "write execution for dispatch-work-order is missing execution idempotency key evidence" \
+  "generic-idempotency-only"
 expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-truncated-page.json \
   "event JSON is incomplete" \

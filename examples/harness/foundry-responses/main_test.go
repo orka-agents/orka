@@ -924,7 +924,7 @@ func TestResponsesAdapterWriteParksUntilDeclinedApprovalContinue(t *testing.T) {
 	if !ok {
 		t.Fatalf("continuation item = %#v, want object", items[0])
 	}
-	wantOutput := `{"approved":false,"error":{"code":"approval_declined","message":"human declined"}}`
+	wantOutput := `{"approved":false,"error":{"code":"approval_declined","message":"tool call was not approved"}}`
 	if got := item["output"]; got != wantOutput {
 		t.Fatalf("declined output = %#v, want %s", got, wantOutput)
 	}
@@ -1381,7 +1381,7 @@ func TestResponsesAdapterContinuesToolExecutionFailurePayload(t *testing.T) {
 	if !ok {
 		t.Fatalf("continuation item = %#v, want object", items[0])
 	}
-	wantOutput := `{"approved":false,"error":{"code":"tool_execution_failed","message":"downstream failed"}}`
+	wantOutput := `{"approved":false,"error":{"code":"tool_execution_failed","message":"tool execution failed"}}`
 	if got := item["output"]; got != wantOutput {
 		t.Fatalf("failure output = %#v, want %s", got, wantOutput)
 	}
@@ -2820,6 +2820,24 @@ func TestCanonicalToolResultOutputWrapsNonObjectJSON(t *testing.T) {
 				t.Fatalf("canonical output = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCanonicalToolResultErrorUsesSafeHostedEnvelope(t *testing.T) {
+	result := baseToolResult("call-1", true, nil, &harness.ErrorInfo{
+		Code:    "transport_failed",
+		Message: "POST https://tools.internal.example/v1/run: connection refused",
+	})
+	got, err := canonicalToolResultOutput(result)
+	if err != nil {
+		t.Fatalf("canonicalToolResultOutput: %v", err)
+	}
+	want := `{"approved":false,"error":{"code":"tool_execution_failed","message":"tool execution failed"}}`
+	if got != want {
+		t.Fatalf("canonical error output = %s, want %s", got, want)
+	}
+	if strings.Contains(got, "tools.internal.example") || strings.Contains(got, "https://") {
+		t.Fatalf("canonical error output leaked tool URL: %s", got)
 	}
 }
 

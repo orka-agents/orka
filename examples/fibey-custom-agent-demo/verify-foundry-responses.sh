@@ -14,7 +14,7 @@ Expected evidence:
   - read brokered tool request for check-network-telemetry or get-active-incidents
   - write brokered tool request for dispatch-work-order or escalate-incident
   - matching ApprovalRequested and ApprovalApproved events precede write execution
-  - an idempotency key is present in the write execution ledger event
+  - an executionIdempotencyKey is present in the write execution ledger event
   - terminal TaskSucceeded/AgentRuntimeCompleted/TurnCompleted-style event exists
 
 This verifier does not approve tasks and never reads Foundry credentials.
@@ -189,18 +189,18 @@ def seq(event):
     return None
 
 
-def idempotency_value(value):
+def execution_idempotency_value(value):
     if isinstance(value, dict):
         for key, nested in value.items():
-            if key in {"idempotencyKey", "Idempotency-Key"}:
+            if key in {"executionIdempotencyKey", "Execution-Idempotency-Key"}:
                 if isinstance(nested, str) and nested.strip():
                     return nested.strip()
-            found = idempotency_value(nested)
+            found = execution_idempotency_value(nested)
             if found:
                 return found
     elif isinstance(value, list):
         for item in value:
-            found = idempotency_value(item)
+            found = execution_idempotency_value(item)
             if found:
                 return found
     elif isinstance(value, str):
@@ -208,7 +208,7 @@ def idempotency_value(value):
             decoded = json.loads(value)
         except Exception:  # noqa: BLE001
             return ""
-        return idempotency_value(decoded)
+        return execution_idempotency_value(decoded)
     return ""
 
 
@@ -267,7 +267,7 @@ write_exec_events = [e for e in write_events if is_write_execution_start(e)]
 write_start_events = write_exec_events
 terminal_events = [e for e in events if event_type(e) in TERMINAL_TYPES]
 task_terminal_events = [e for e in events if event_type(e) in TASK_TERMINAL_TYPES]
-idempotency_events = [e for e in write_exec_events if idempotency_value(e)]
+execution_idempotency_events = [e for e in write_exec_events if execution_idempotency_value(e)]
 
 failures = []
 if not read_events:
@@ -284,8 +284,8 @@ if write_exec_events:
     for event in write_exec_events:
         write_tool = tool_name(event)
         write_order = seq(event)
-        if not idempotency_value(event):
-            failures.append(f"write execution for {write_tool} is missing idempotency key evidence")
+        if not execution_idempotency_value(event):
+            failures.append(f"write execution for {write_tool} is missing execution idempotency key evidence")
         write_tool_call_id = tool_call_id(event)
         if not write_tool_call_id:
             failures.append(f"write execution for {write_tool} is missing toolCallID")
@@ -327,12 +327,12 @@ if write_exec_events:
         ]
         if matching_declined:
             failures.append(f"write execution for {write_tool} follows ApprovalDeclined")
-if not idempotency_events:
-    failures.append("missing write ToolCallStarted idempotency key evidence")
+if not execution_idempotency_events:
+    failures.append("missing write ToolCallStarted execution idempotency key evidence")
 
 missing_idempotency_tools = sorted(
     tool for tool in {tool_name(event) for event in write_exec_events}
-    if tool not in {tool_name(event) for event in idempotency_events}
+    if tool not in {tool_name(event) for event in execution_idempotency_events}
 )
 if missing_idempotency_tools:
     failures.append(
@@ -347,12 +347,12 @@ for write_tool, count in starts_by_tool.items():
     if count > 1:
         failures.append(f"duplicate write execution starts for {write_tool}")
 
-idempotency_by_tool = {}
-for event in idempotency_events:
-    idempotency_by_tool.setdefault(tool_name(event), set()).add(idempotency_value(event))
-for write_tool, keys in idempotency_by_tool.items():
+execution_idempotency_by_tool = {}
+for event in execution_idempotency_events:
+    execution_idempotency_by_tool.setdefault(tool_name(event), set()).add(execution_idempotency_value(event))
+for write_tool, keys in execution_idempotency_by_tool.items():
     if len(keys) > 1:
-        failures.append(f"multiple write idempotency keys for {write_tool}")
+        failures.append(f"multiple write execution idempotency keys for {write_tool}")
 if not terminal_events:
     failures.append("missing terminal completion event")
 elif write_exec_events:
@@ -383,6 +383,6 @@ print(f"- read events: {len(read_events)}")
 print(f"- write requests: {len(write_request_events)}")
 print(f"- approval requests: {len(approval_request_events)}")
 print(f"- approval decisions: {len(approval_approved_events)}")
-print(f"- idempotency evidence events: {len(idempotency_events)}")
+print(f"- execution idempotency evidence events: {len(execution_idempotency_events)}")
 print(f"- terminal events: {len(terminal_events)}")
 PY
