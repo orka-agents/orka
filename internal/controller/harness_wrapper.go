@@ -1402,7 +1402,9 @@ func harnessWrapperStartTurnErrorIsRetryable(err error) bool {
 		return false
 	}
 	message := err.Error()
-	for _, marker := range []string{"(400)", "(401)", "(403)", "unsupported version", "harness did not accept"} {
+	for _, marker := range []string{
+		"(400)", "(401)", "(403)", "(410)", "unsupported version", "harness did not accept",
+	} {
 		if strings.Contains(message, marker) {
 			return false
 		}

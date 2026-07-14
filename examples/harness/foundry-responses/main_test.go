@@ -216,7 +216,6 @@ func TestResponsesAdapterInterleavedResponsesRetainResponseSpecificSession(t *te
 	var firstResponse responsesResponse
 	firstSession, err := server.postResponses(
 		context.Background(),
-		firstRequest.RuntimeSessionID,
 		responsesRequest{Input: "a"},
 		&firstResponse,
 	)
@@ -226,7 +225,6 @@ func TestResponsesAdapterInterleavedResponsesRetainResponseSpecificSession(t *te
 	var secondResponse responsesResponse
 	secondSession, err := server.postResponses(
 		context.Background(),
-		secondRequest.RuntimeSessionID,
 		responsesRequest{Input: "b"},
 		&secondResponse,
 	)
@@ -435,27 +433,47 @@ func TestResponsesAdapterRejectedResponseDoesNotRetainSession(t *testing.T) {
 	}
 }
 
-func TestResponsesAdapterCancelDuringInitialPostDoesNotRetainSession(t *testing.T) {
+func TestResponsesAdapterCancelDuringInitialPostCancelsHostedRequest(t *testing.T) {
 	received := make(chan struct{})
-	release := make(chan struct{})
+	hostedRequestCancelled := make(chan struct{})
+	releaseHostedResponse := make(chan struct{})
 	var releaseOnce sync.Once
-	releaseFoundry := func() { releaseOnce.Do(func() { close(release) }) }
-	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		select {
-		case <-received:
-		default:
-			close(received)
+	releaseResponse := func() { releaseOnce.Do(func() { close(releaseHostedResponse) }) }
+	var postCount atomic.Int32
+	backendClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if postCount.Add(1) > 1 {
+			return jsonHTTPResponse(r, finalResponsesMessage())
 		}
-		<-release
-		w.Header().Set("x-agent-session-id", "cancelled-session")
-		writeJSON(w, finalResponsesMessage())
-	}))
-	t.Cleanup(foundry.Close)
-	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
-	adapter, server := newTestResponsesAdapterWithServer(t, endpoint, nil)
-	t.Cleanup(releaseFoundry)
+		body, err := ioReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			return nil, err
+		}
+		if got := decoded["agent_session_id"]; got != "existing-session" {
+			return nil, fmt.Errorf("agent_session_id = %#v, want existing-session", got)
+		}
+		close(received)
+		<-r.Context().Done()
+		close(hostedRequestCancelled)
+		// Model a hosted service that accepted the request before client-side
+		// cancellation and later returns success despite the canceled context.
+		<-releaseHostedResponse
+		return jsonHTTPResponseWithSession(r, finalResponsesMessage(), "cancelled-session")
+	})}
+	endpoint := "https://foundry.example/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter, server := newTestResponsesAdapterWithHTTPClient(t, endpoint, nil, backendClient)
+	t.Cleanup(releaseResponse)
 	client := newHarnessClient(t, adapter)
 	request := responsesStartTurnRequest("foundry-cancel-initial")
+	server.mu.Lock()
+	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
+		ID:       "existing-session",
+		LastSeen: time.Now().UTC(),
+	}
+	server.mu.Unlock()
 
 	startErr := make(chan error, 1)
 	go func() {
@@ -470,39 +488,52 @@ func TestResponsesAdapterCancelDuringInitialPostDoesNotRetainSession(t *testing.
 	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
 		t.Fatalf("CancelTurn: %v", err)
 	}
-	second := responsesStartTurnRequest("foundry-after-cancel-initial")
-	second.RuntimeSessionID = request.RuntimeSessionID
-	if _, err := client.StartTurn(context.Background(), second); err == nil ||
-		!strings.Contains(err.Error(), "maximum concurrent turns reached") {
-		t.Fatalf("StartTurn during cancelled in-flight request error = %v, want admission rejection", err)
+	select {
+	case <-hostedRequestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not cancel the initial hosted request context")
 	}
-	releaseFoundry()
+	releaseResponse()
 	select {
 	case err := <-startErr:
 		if err != nil {
 			t.Fatalf("StartTurn after cancellation: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("StartTurn did not finish after releasing Foundry response")
+		t.Fatal("StartTurn did not finish after the late hosted response")
 	}
 
 	server.mu.Lock()
 	turn := server.turns[request.TurnID]
 	_, sessionRetained := server.runtimeSessions[request.RuntimeSessionID]
+	_, sessionQuarantined := server.quarantinedSessions[request.RuntimeSessionID]
 	foundrySessionID := ""
 	if turn != nil {
 		foundrySessionID = turn.foundrySessionID
 	}
 	server.mu.Unlock()
-	if turn == nil || !turn.completed || !hasFrameType(turn.frames, harness.FrameTurnCancelled) {
+	if turn == nil || !turn.completed || !hasFrameType(turn.frames, harness.FrameTurnCancelled) ||
+		hasFrameType(turn.frames, harness.FrameTurnCompleted) {
 		t.Fatalf("turn = %#v, want retained terminal cancellation", turn)
 	}
-	if sessionRetained || foundrySessionID != "" {
+	if sessionRetained || foundrySessionID != "" || !sessionQuarantined {
 		t.Fatalf(
-			"cancelled initial post retained session map=%v turnSession=%q",
+			"cancelled initial post retained session map=%v turnSession=%q quarantined=%v",
 			sessionRetained,
 			foundrySessionID,
+			sessionQuarantined,
 		)
+	}
+
+	quarantined := responsesStartTurnRequest("foundry-quarantined-after-cancel-initial")
+	quarantined.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), quarantined); err == nil ||
+		!strings.Contains(err.Error(), "runtime session unavailable after unconfirmed hosted cancellation") {
+		t.Fatalf("StartTurn with quarantined runtime session error = %v", err)
+	}
+	second := responsesStartTurnRequest("foundry-after-cancel-initial")
+	if _, err := client.StartTurn(context.Background(), second); err != nil {
+		t.Fatalf("StartTurn with a different runtime session after cancellation: %v", err)
 	}
 }
 
@@ -565,6 +596,55 @@ func TestResponsesAdapterInitialPostSurvivesControlDisconnect(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterQuarantineCapacityFailsClosed(t *testing.T) {
+	server := newServer(config{
+		runtimeName:    "foundry-responses-test",
+		adapterBearer:  "adapter-auth-value",
+		endpoint:       "https://foundry.example/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1",
+		foundryAuth:    "foundry-auth-value",
+		requestTimeout: time.Second,
+		stateRetention: time.Minute,
+	}, &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("hosted request should not be attempted after quarantine saturation")
+	})})
+	server.mu.Lock()
+	for i := range maxQuarantinedRuntimeSessions {
+		server.quarantineRuntimeSessionLocked(&turnState{request: responsesStartTurnRequest(fmt.Sprintf("quarantine-%d", i))})
+	}
+	if got := len(server.quarantinedSessions); got != maxQuarantinedRuntimeSessions {
+		server.mu.Unlock()
+		t.Fatalf("quarantine count = %d, want %d", got, maxQuarantinedRuntimeSessions)
+	}
+	if server.quarantineSaturated {
+		server.mu.Unlock()
+		t.Fatal("quarantine saturated before exceeding the bounded tombstone capacity")
+	}
+	server.quarantineRuntimeSessionLocked(&turnState{request: responsesStartTurnRequest("quarantine-overflow")})
+	gotCount := len(server.quarantinedSessions)
+	saturated := server.quarantineSaturated
+	server.mu.Unlock()
+	if gotCount != maxQuarantinedRuntimeSessions || !saturated {
+		t.Fatalf("quarantine count=%d saturated=%v, want bounded saturated state", gotCount, saturated)
+	}
+
+	adapter := httptest.NewServer(server.handler())
+	t.Cleanup(adapter.Close)
+	client := newHarnessClient(t, adapter)
+	afterSaturation := responsesStartTurnRequest("after-quarantine-saturation")
+	if _, err := client.StartTurn(context.Background(), afterSaturation); err == nil ||
+		!strings.Contains(err.Error(), "quarantine capacity exhausted") {
+		t.Fatalf("StartTurn after quarantine saturation error = %v", err)
+	}
+	response, err := http.Get(adapter.URL + readinessPath) //nolint:gosec // Test-only loopback server.
+	if err != nil {
+		t.Fatalf("GET readiness: %v", err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("readiness status = %d, want 503 after quarantine saturation", response.StatusCode)
+	}
+}
+
 func TestResponsesAdapterFoundryRequestContextDetachesAndUsesEarlierTurnDeadline(t *testing.T) {
 	server := newServer(config{requestTimeout: time.Second}, &http.Client{Timeout: time.Second})
 	parent, cancelParent := context.WithCancel(context.Background())
@@ -599,7 +679,7 @@ func TestResponsesAdapterInitialPostHonorsTurnDeadline(t *testing.T) {
 	}))
 	t.Cleanup(foundry.Close)
 	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
-	adapter := newTestResponsesAdapter(t, endpoint, nil)
+	adapter, server := newTestResponsesAdapterWithServer(t, endpoint, nil)
 	client := newHarnessClient(t, adapter)
 	request := responsesStartTurnRequest("foundry-initial-deadline")
 	request.Deadline = time.Now().Add(150 * time.Millisecond)
@@ -615,6 +695,18 @@ func TestResponsesAdapterInitialPostHonorsTurnDeadline(t *testing.T) {
 	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil ||
 		failed.Failed.Reason != foundryInitialUnknown {
 		t.Fatalf("failed frame = %#v, want foundry_initial_unknown", failed)
+	}
+	server.mu.Lock()
+	_, quarantined := server.quarantinedSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if !quarantined {
+		t.Fatal("deadline-uncertain initial request did not quarantine its runtime session")
+	}
+	retry := responsesStartTurnRequest("foundry-initial-deadline-retry")
+	retry.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), retry); err == nil ||
+		!strings.Contains(err.Error(), "runtime session unavailable after unconfirmed hosted cancellation") {
+		t.Fatalf("StartTurn with deadline-quarantined runtime session error = %v", err)
 	}
 }
 
@@ -1024,46 +1116,52 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 	}
 }
 
-func TestResponsesAdapterCancelDuringHostedContinuationWins(t *testing.T) {
+func TestResponsesAdapterCancelDuringHostedContinuationCancelsRequest(t *testing.T) {
 	continuationReceived := make(chan struct{})
-	releaseContinuation := make(chan struct{})
+	hostedRequestCancelled := make(chan struct{})
+	releaseHostedResponse := make(chan struct{})
 	var releaseOnce sync.Once
-	releaseFoundry := func() { releaseOnce.Do(func() { close(releaseContinuation) }) }
-	foundry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	releaseResponse := func() { releaseOnce.Do(func() { close(releaseHostedResponse) }) }
+	backendClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body, err := ioReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "read body", http.StatusBadRequest)
-			return
+			return nil, err
 		}
 		var decoded map[string]any
 		if err := json.Unmarshal(body, &decoded); err != nil {
-			http.Error(w, "decode body", http.StatusBadRequest)
-			return
+			return nil, err
 		}
 		if _, continuing := decoded["previous_response_id"]; !continuing {
-			w.Header().Set("x-agent-session-id", fakeSessionID)
-			writeJSON(w, functionCallResponse("support-ticket-lookup"))
-			return
+			return jsonHTTPResponseWithSession(
+				r,
+				functionCallResponse("support-ticket-lookup"),
+				"existing-session",
+			)
 		}
-		select {
-		case <-continuationReceived:
-		default:
-			close(continuationReceived)
-		}
-		<-releaseContinuation
-		w.Header().Set("x-agent-session-id", "session-after-cancel")
-		writeJSON(w, finalResponsesMessage())
-	}))
-	t.Cleanup(foundry.Close)
-	endpoint := foundry.URL + "/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
-	adapter, server := newTestResponsesAdapterWithServer(
+		close(continuationReceived)
+		<-r.Context().Done()
+		close(hostedRequestCancelled)
+		// Model a hosted continuation that ignores client cancellation and
+		// eventually reports success with a replacement session identifier.
+		<-releaseHostedResponse
+		return jsonHTTPResponseWithSession(r, finalResponsesMessage(), "session-after-cancel")
+	})}
+	endpoint := "https://foundry.example/agents/test-agent/endpoint/protocols/openai/responses?api-version=v1"
+	adapter, server := newTestResponsesAdapterWithHTTPClient(
 		t,
 		endpoint,
 		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+		backendClient,
 	)
-	t.Cleanup(releaseFoundry)
+	t.Cleanup(releaseResponse)
 	client := newHarnessClient(t, adapter)
 	request := brokeredReadRequest("foundry-cancel-continuation")
+	server.mu.Lock()
+	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
+		ID:       "existing-session",
+		LastSeen: time.Now().UTC(),
+	}
+	server.mu.Unlock()
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
@@ -1073,10 +1171,10 @@ func TestResponsesAdapterCancelDuringHostedContinuationWins(t *testing.T) {
 		t.Fatalf("frames = %#v, want tool request", frames)
 	}
 	server.mu.Lock()
-	_, publishedBeforeCompletion := server.runtimeSessions[request.RuntimeSessionID]
+	publishedBeforeCompletion := server.runtimeSessions[request.RuntimeSessionID]
 	server.mu.Unlock()
-	if publishedBeforeCompletion {
-		t.Fatal("pending function call published runtime session before completion")
+	if publishedBeforeCompletion.ID != "existing-session" {
+		t.Fatalf("runtime session before continuation = %#v, want existing session", publishedBeforeCompletion)
 	}
 
 	continueRequest := goldenContinueRequest(request, requested.ToolCallID, json.RawMessage(`{"success":true}`))
@@ -1093,30 +1191,51 @@ func TestResponsesAdapterCancelDuringHostedContinuationWins(t *testing.T) {
 	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
 		t.Fatalf("CancelTurn during continuation: %v", err)
 	}
-	second := responsesStartTurnRequest("foundry-after-cancel-continuation")
-	second.RuntimeSessionID = request.RuntimeSessionID
-	if _, err := client.StartTurn(context.Background(), second); err == nil ||
-		!strings.Contains(err.Error(), "maximum concurrent turns reached") {
-		t.Fatalf("StartTurn during cancelled continuation error = %v, want admission rejection", err)
+	select {
+	case <-hostedRequestCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not cancel the hosted continuation request context")
 	}
-	releaseFoundry()
+	server.mu.Lock()
+	_, publishedAfterCancellation := server.runtimeSessions[request.RuntimeSessionID]
+	_, sessionQuarantined := server.quarantinedSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if publishedAfterCancellation || !sessionQuarantined {
+		t.Fatalf(
+			"runtime session after cancellation published=%v quarantined=%v",
+			publishedAfterCancellation,
+			sessionQuarantined,
+		)
+	}
+	releaseResponse()
 	select {
 	case err := <-continueErr:
 		if err == nil || !strings.Contains(err.Error(), "turn completed while hosted continuation was in flight") {
 			t.Fatalf("ContinueTurn after cancellation error = %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("ContinueTurn did not finish after releasing hosted response")
+		t.Fatal("ContinueTurn did not finish after the late hosted response")
+	}
+
+	quarantined := responsesStartTurnRequest("foundry-quarantined-after-cancel-continuation")
+	quarantined.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), quarantined); err == nil ||
+		!strings.Contains(err.Error(), "runtime session unavailable after unconfirmed hosted cancellation") {
+		t.Fatalf("StartTurn with quarantined runtime session error = %v", err)
+	}
+	second := responsesStartTurnRequest("foundry-after-cancel-continuation")
+	if _, err := client.StartTurn(context.Background(), second); err != nil {
+		t.Fatalf("StartTurn with a different runtime session after cancellation: %v", err)
 	}
 	frames = streamCurrentFrames(t, client, request.TurnID)
 	if !hasFrameType(frames, harness.FrameTurnCancelled) || hasFrameType(frames, harness.FrameTurnCompleted) {
 		t.Fatalf("frames = %#v, want cancellation to win continuation race", frames)
 	}
 	server.mu.Lock()
-	_, publishedAfterCancel := server.runtimeSessions[request.RuntimeSessionID]
+	_, publishedAfterLateResponse := server.runtimeSessions[request.RuntimeSessionID]
 	server.mu.Unlock()
-	if publishedAfterCancel {
-		t.Fatal("cancelled continuation published runtime session")
+	if publishedAfterLateResponse {
+		t.Fatal("late continuation response restored the cancelled runtime session")
 	}
 }
 
@@ -1282,7 +1401,7 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 		toolName:           "support-ticket-lookup",
 		continuationStatus: http.StatusInternalServerError,
 	})
-	adapter := newTestResponsesAdapter(
+	adapter, server := newTestResponsesAdapterWithServer(
 		t,
 		foundry.endpoint(),
 		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
@@ -1323,6 +1442,18 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	if strings.Contains(failed.Failed.Message, foundry.URL) ||
 		strings.Contains(failed.Failed.Message, "HTTP 500") {
 		t.Fatalf("failed frame leaked upstream detail: %#v", failed.Failed)
+	}
+	server.mu.Lock()
+	_, quarantined := server.quarantinedSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if !quarantined {
+		t.Fatal("uncertain continuation failure did not quarantine its runtime session")
+	}
+	retry := responsesStartTurnRequest("foundry-continuation-failure-retry")
+	retry.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), retry); err == nil ||
+		!strings.Contains(err.Error(), "runtime session unavailable after unconfirmed hosted cancellation") {
+		t.Fatalf("StartTurn with continuation-quarantined runtime session error = %v", err)
 	}
 }
 
@@ -1560,7 +1691,6 @@ func TestPostResponsesRejectsOversizedAndTrailingBodies(t *testing.T) {
 			var response responsesResponse
 			_, err := server.postResponses(
 				context.Background(),
-				"runtime-session",
 				responsesRequest{Input: "test"},
 				&response,
 			)
@@ -2882,6 +3012,21 @@ func newTestResponsesAdapterWithServer(
 	classes []harness.BrokeredToolClass,
 ) (*httptest.Server, *server) {
 	t.Helper()
+	return newTestResponsesAdapterWithHTTPClient(
+		t,
+		endpoint,
+		classes,
+		&http.Client{Timeout: time.Second},
+	)
+}
+
+func newTestResponsesAdapterWithHTTPClient(
+	t *testing.T,
+	endpoint string,
+	classes []harness.BrokeredToolClass,
+	backendClient *http.Client,
+) (*httptest.Server, *server) {
+	t.Helper()
 	continuationProof := ""
 	if len(classes) > 0 {
 		continuationProof = testContinuationProof
@@ -2897,10 +3042,42 @@ func newTestResponsesAdapterWithServer(
 		stateRetention:      time.Minute,
 		continuationProof:   continuationProof,
 		brokeredToolClasses: append([]harness.BrokeredToolClass(nil), classes...),
-	}, &http.Client{Timeout: time.Second})
+	}, backendClient)
 	adapter := httptest.NewServer(s.handler())
 	t.Cleanup(adapter.Close)
 	return adapter, s
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func jsonHTTPResponse(r *http.Request, value any) (*http.Response, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(payload)),
+		Request:    r,
+	}, nil
+}
+
+func jsonHTTPResponseWithSession(
+	r *http.Request,
+	value any,
+	sessionID string,
+) (*http.Response, error) {
+	response, err := jsonHTTPResponse(r, value)
+	if err != nil {
+		return nil, err
+	}
+	response.Header.Set("x-agent-session-id", sessionID)
+	return response, nil
 }
 
 func newHarnessClient(t *testing.T, adapter *httptest.Server) *harness.Client {

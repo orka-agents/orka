@@ -26,19 +26,20 @@ import (
 )
 
 const (
-	defaultAddr              = ":8090"
-	defaultAPIVersion        = "v1"
-	defaultRequestTimeout    = 20 * time.Second
-	defaultStateRetention    = 10 * time.Minute
-	defaultReadHeaderTimeout = 5 * time.Second
-	defaultReadTimeout       = 30 * time.Second
-	defaultIdleTimeout       = 60 * time.Second
-	maxFoundryOutputBytes    = 1 << 20
-	maxFoundryBodyBytes      = 4 << 20
-	maxConsumedTurnIDs       = 1024
-	maxBrokeredToolCalls     = 32
-	readinessPath            = "/v1/ready"
-	foundryInitialUnknown    = "foundry_initial_unknown"
+	defaultAddr                   = ":8090"
+	defaultAPIVersion             = "v1"
+	defaultRequestTimeout         = 20 * time.Second
+	defaultStateRetention         = 10 * time.Minute
+	defaultReadHeaderTimeout      = 5 * time.Second
+	defaultReadTimeout            = 30 * time.Second
+	defaultIdleTimeout            = 60 * time.Second
+	maxFoundryOutputBytes         = 1 << 20
+	maxFoundryBodyBytes           = 4 << 20
+	maxConsumedTurnIDs            = 1024
+	maxQuarantinedRuntimeSessions = 1024
+	maxBrokeredToolCalls          = 32
+	readinessPath                 = "/v1/ready"
+	foundryInitialUnknown         = "foundry_initial_unknown"
 
 	envAddr                = "ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR"
 	envRuntimeName         = "ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME"
@@ -77,11 +78,13 @@ type server struct {
 	cfg    config
 	client *http.Client
 
-	mu              sync.Mutex
-	turns           map[harness.HarnessTurnID]*turnState
-	consumedTurns   map[harness.HarnessTurnID]struct{}
-	consumedOrder   []harness.HarnessTurnID
-	runtimeSessions map[harness.RuntimeSessionID]foundrySession
+	mu                  sync.Mutex
+	turns               map[harness.HarnessTurnID]*turnState
+	consumedTurns       map[harness.HarnessTurnID]struct{}
+	consumedOrder       []harness.HarnessTurnID
+	runtimeSessions     map[harness.RuntimeSessionID]foundrySession
+	quarantinedSessions map[harness.RuntimeSessionID]struct{}
+	quarantineSaturated bool
 }
 
 type toolResultDigest [sha256.Size]byte
@@ -100,21 +103,24 @@ type foundrySession struct {
 }
 
 type turnState struct {
-	request              harness.StartTurnRequest
-	initializing         bool
-	responseID           string
-	foundrySessionID     string
-	pendingTools         map[string]string
-	suppressedToolCalls  map[string]struct{}
-	requestedToolCalls   int
-	bufferedResults      map[string]harness.ToolCallResult
-	bufferedDigests      map[string]toolResultDigest
-	submittedDigests     map[string]toolResultDigest
-	frames               []harness.HarnessEventFrame
-	completed            bool
-	continuationInFlight bool
-	frameUpdates         chan struct{}
-	continueMu           sync.Mutex
+	request                   harness.StartTurnRequest
+	initializing              bool
+	responseID                string
+	foundrySessionID          string
+	pendingTools              map[string]string
+	suppressedToolCalls       map[string]struct{}
+	requestedToolCalls        int
+	bufferedResults           map[string]harness.ToolCallResult
+	bufferedDigests           map[string]toolResultDigest
+	submittedDigests          map[string]toolResultDigest
+	frames                    []harness.HarnessEventFrame
+	completed                 bool
+	continuationInFlight      bool
+	hostedRequestSequence     uint64
+	activeHostedRequestID     uint64
+	activeHostedRequestCancel context.CancelFunc
+	frameUpdates              chan struct{}
+	continueMu                sync.Mutex
 }
 
 type responsesRequest struct {
@@ -247,11 +253,12 @@ func newServer(cfg config, client *http.Client) *server {
 		}
 	}
 	return &server{
-		cfg:             cfg,
-		client:          &clientCopy,
-		turns:           map[harness.HarnessTurnID]*turnState{},
-		consumedTurns:   map[harness.HarnessTurnID]struct{}{},
-		runtimeSessions: map[harness.RuntimeSessionID]foundrySession{},
+		cfg:                 cfg,
+		client:              &clientCopy,
+		turns:               map[harness.HarnessTurnID]*turnState{},
+		consumedTurns:       map[harness.HarnessTurnID]struct{}{},
+		runtimeSessions:     map[harness.RuntimeSessionID]foundrySession{},
+		quarantinedSessions: map[harness.RuntimeSessionID]struct{}{},
 	}
 }
 
@@ -272,7 +279,11 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	_, endpointErr := s.responsesEndpoint()
 	configErr := s.cfg.validationError()
-	ready := configErr == nil && s.cfg.adapterBearer != "" && endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
+	s.mu.Lock()
+	quarantineSaturated := s.quarantineSaturated
+	s.mu.Unlock()
+	ready := configErr == nil && s.cfg.adapterBearer != "" && endpointErr == nil &&
+		exactlyOneFoundryAuth(s.cfg) && !quarantineSaturated
 	status := harness.HealthStatusOK
 	msg := "ready"
 	if !ready {
@@ -285,6 +296,9 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		}
 		if endpointErr != nil {
 			parts = append(parts, endpointErr.Error())
+		}
+		if quarantineSaturated {
+			parts = append(parts, "runtime session quarantine capacity exhausted; restart required")
 		}
 		msg = strings.Join(parts, "; ")
 	}
@@ -304,8 +318,11 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, endpointErr := s.responsesEndpoint()
+	s.mu.Lock()
+	quarantineSaturated := s.quarantineSaturated
+	s.mu.Unlock()
 	ready := s.cfg.validationError() == nil && s.cfg.adapterBearer != "" &&
-		endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
+		endpointErr == nil && exactlyOneFoundryAuth(s.cfg) && !quarantineSaturated
 	if !ready {
 		harness.WriteError(w, http.StatusServiceUnavailable, "adapter is not ready")
 		return
@@ -404,6 +421,24 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		harness.WriteError(w, http.StatusConflict, "turn already completed")
 		return
 	}
+	if s.quarantineSaturated {
+		s.mu.Unlock()
+		harness.WriteError(
+			w,
+			http.StatusServiceUnavailable,
+			"adapter unavailable after runtime session quarantine capacity exhausted",
+		)
+		return
+	}
+	if _, quarantined := s.quarantinedSessions[req.RuntimeSessionID]; quarantined {
+		s.mu.Unlock()
+		harness.WriteError(
+			w,
+			http.StatusGone,
+			"runtime session unavailable after unconfirmed hosted cancellation",
+		)
+		return
+	}
 	if s.activeTurnCountLocked() >= 1 {
 		s.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "maximum concurrent turns reached")
@@ -424,20 +459,43 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	ctx, cancel := s.foundryRequestContext(r.Context(), req.Deadline)
+	s.mu.Lock()
+	if turn.completed {
+		turn.initializing = false
+		s.mu.Unlock()
+		cancel()
+		harness.WriteJSON(w, http.StatusAccepted, startTurnResponse(req, eventsPath))
+		return
+	}
+	existingFoundrySessionID := s.runtimeSessions[req.RuntimeSessionID].ID
+	hostedRequestID := s.activateHostedRequestLocked(turn, cancel)
+	s.mu.Unlock()
 	defer cancel()
 	var response responsesResponse
-	initialRequest := responsesRequest{Input: req.Input.Prompt}
-	foundrySessionID, err := s.postResponses(ctx, req.RuntimeSessionID, initialRequest, &response)
+	initialRequest := responsesRequest{
+		Input:          req.Input.Prompt,
+		AgentSessionID: existingFoundrySessionID,
+	}
+	foundrySessionID, err := s.postResponses(ctx, initialRequest, &response)
+	s.mu.Lock()
+	s.clearHostedRequestLocked(turn, hostedRequestID)
 	if err != nil {
-		s.mu.Lock()
 		turn.initializing = false
-		s.appendFailedLocked(
-			turn,
-			foundryInitialUnknown,
-			"initial hosted request failed after submission was attempted; "+
-				"failing closed to avoid a duplicate hosted turn",
-		)
+		s.quarantineRuntimeSessionLocked(turn)
+		completed := turn.completed
+		if !completed {
+			s.appendFailedLocked(
+				turn,
+				foundryInitialUnknown,
+				"initial hosted request failed after submission was attempted; "+
+					"failing closed to avoid a duplicate hosted turn",
+			)
+		}
 		s.mu.Unlock()
+		if completed {
+			harness.WriteJSON(w, http.StatusAccepted, startTurnResponse(req, eventsPath))
+			return
+		}
 		log.Printf(
 			"Foundry hosted Responses initial request failed after submission for turn %q (error type %T)",
 			req.TurnID,
@@ -449,7 +507,6 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 		harness.WriteJSON(w, http.StatusAccepted, startTurnResponse(req, eventsPath))
 		return
 	}
-	s.mu.Lock()
 	if !turn.completed {
 		disposition := s.handleResponsesResponseLocked(turn, response)
 		if disposition != responseRejected {
@@ -614,6 +671,7 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		return
 	}
 	turn.continuationInFlight = true
+	hostedRequestID := s.activateHostedRequestLocked(turn, cancel)
 	s.mu.Unlock()
 	defer func() {
 		cancel()
@@ -627,9 +685,11 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		AgentSessionID:     foundrySessionID,
 		Input:              outputs,
 	}
-	updatedSessionID, err := s.postResponses(ctx, req.RuntimeSessionID, continuation, &response)
+	updatedSessionID, err := s.postResponses(ctx, continuation, &response)
+	s.mu.Lock()
+	s.clearHostedRequestLocked(turn, hostedRequestID)
 	if err != nil {
-		s.mu.Lock()
+		s.quarantineRuntimeSessionLocked(turn)
 		completed := turn.completed
 		if !completed {
 			s.appendFailedLocked(
@@ -652,7 +712,6 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		harness.WriteError(w, http.StatusBadGateway, "hosted continuation failed after submission was attempted")
 		return
 	}
-	s.mu.Lock()
 	if turn.completed {
 		s.mu.Unlock()
 		harness.WriteError(w, http.StatusConflict, "turn completed while hosted continuation was in flight")
@@ -705,8 +764,13 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 		harness.WriteError(w, http.StatusBadRequest, "cancel request does not match started turn")
 		return
 	}
+	var cancelHostedRequest context.CancelFunc
 	s.mu.Lock()
 	if !turn.completed {
+		cancelHostedRequest = turn.activeHostedRequestCancel
+		if cancelHostedRequest != nil {
+			s.quarantineRuntimeSessionLocked(turn)
+		}
 		s.suppressPendingToolCallsLocked(turn)
 		s.clearBufferedToolResultsLocked(turn)
 		s.appendFrameLocked(turn, harness.FrameTurnCancelled, "turn cancelled")
@@ -714,6 +778,9 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 		s.scheduleTurnCleanupLocked(turn)
 	}
 	s.mu.Unlock()
+	if cancelHostedRequest != nil {
+		cancelHostedRequest()
+	}
 	harness.WriteJSON(
 		w,
 		http.StatusAccepted,
@@ -1126,7 +1193,6 @@ func compactJSON(value any) (string, error) {
 
 func (s *server) postResponses(
 	ctx context.Context,
-	runtimeSessionID harness.RuntimeSessionID,
 	body responsesRequest,
 	out *responsesResponse,
 ) (string, error) {
@@ -1137,13 +1203,7 @@ func (s *server) postResponses(
 	if err != nil {
 		return "", err
 	}
-	s.mu.Lock()
-	session := s.runtimeSessions[runtimeSessionID]
-	s.mu.Unlock()
-	sessionID := firstNonBlank(body.AgentSessionID, session.ID)
-	if body.AgentSessionID == "" && sessionID != "" {
-		body.AgentSessionID = sessionID
-	}
+	sessionID := strings.TrimSpace(body.AgentSessionID)
 	// Carry the continuation proof in the body as well as the header, so it
 	// survives hosted-agent gateways (e.g. Foundry) that strip custom request
 	// headers before forwarding to the runtime container. Only on continuations.
@@ -1313,6 +1373,45 @@ func exactlyOneFoundryAuth(cfg config) bool {
 	hasKey := strings.TrimSpace(cfg.foundryAuth) != ""
 	hasBearer := strings.TrimSpace(cfg.authBearer) != ""
 	return hasKey != hasBearer
+}
+
+func (s *server) quarantineRuntimeSessionLocked(turn *turnState) {
+	// A local request failure or cancellation does not prove that Foundry
+	// stopped an already accepted operation. Invalidate and quarantine this
+	// logical runtime session for the adapter process lifetime so no later turn
+	// can overlap with or inherit state from an uncertain hosted outcome.
+	sessionID := turn.request.RuntimeSessionID
+	delete(s.runtimeSessions, sessionID)
+	if s.quarantineSaturated {
+		return
+	}
+	if _, exists := s.quarantinedSessions[sessionID]; exists {
+		return
+	}
+	if len(s.quarantinedSessions) >= maxQuarantinedRuntimeSessions {
+		// Keep memory bounded and fail closed globally until process restart.
+		s.quarantineSaturated = true
+		return
+	}
+	s.quarantinedSessions[sessionID] = struct{}{}
+}
+
+func (s *server) activateHostedRequestLocked(
+	turn *turnState,
+	cancel context.CancelFunc,
+) uint64 {
+	turn.hostedRequestSequence++
+	turn.activeHostedRequestID = turn.hostedRequestSequence
+	turn.activeHostedRequestCancel = cancel
+	return turn.activeHostedRequestID
+}
+
+func (s *server) clearHostedRequestLocked(turn *turnState, requestID uint64) {
+	if turn.activeHostedRequestID != requestID {
+		return
+	}
+	turn.activeHostedRequestID = 0
+	turn.activeHostedRequestCancel = nil
 }
 
 func (s *server) foundryRequestContext(

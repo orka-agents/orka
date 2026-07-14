@@ -2724,6 +2724,11 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 	if harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("start_turn failed (401): unauthorized")) {
 		t.Fatal("expected auth start error to remain terminal")
 	}
+	if harnessWrapperStartTurnErrorIsRetryable(
+		fmt.Errorf("start_turn failed (410): runtime session unavailable after unconfirmed hosted cancellation"),
+	) {
+		t.Fatal("expected quarantined runtime session error to remain terminal")
+	}
 }
 
 func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
