@@ -7,10 +7,12 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +27,11 @@ import (
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
-const maxResultSize = 10 << 20 // 10MB
+const (
+	maxResultSize                        = 10 << 20 // 10MB
+	defaultInternalTranscriptSearchLimit = 10
+	maxInternalTranscriptSearchLimit     = 50
+)
 
 const (
 	harnessWrapperStartedAnnotation = "orka.ai/harness-wrapper-started"
@@ -85,8 +91,7 @@ func (h *InternalHandlers) SubmitResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	// Verify caller namespace matches the URL namespace
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -247,7 +252,7 @@ func (h *InternalHandlers) GetSessionTranscript(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and name are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().authorizedSessionNames(c, namespace, name, ""); err != nil {
 		return err
 	}
 
@@ -286,12 +291,20 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
-
 	if h.sessionStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "session storage not enabled")
+	}
+
+	sessionName := strings.TrimSpace(c.Query("sessionName", ""))
+	excludeSessionName := strings.TrimSpace(c.Query("excludeSessionName", ""))
+	allowedSessions, err := h.internalCallerAuthorizer().authorizedSessionNames(
+		c,
+		namespace,
+		sessionName,
+		excludeSessionName,
+	)
+	if err != nil {
+		return err
 	}
 
 	query := strings.TrimSpace(c.Query("query", ""))
@@ -308,15 +321,15 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		return err
 	}
 
-	results, err := h.sessionStore.SearchTranscript(c.Context(), store.TranscriptSearchFilter{
+	results, err := searchAuthorizedTranscriptResults(c.Context(), h.sessionStore, store.TranscriptSearchFilter{
 		Namespace:          namespace,
 		Query:              query,
-		SessionName:        strings.TrimSpace(c.Query("sessionName", "")),
-		ExcludeSessionName: strings.TrimSpace(c.Query("excludeSessionName", "")),
+		SessionName:        sessionName,
+		ExcludeSessionName: excludeSessionName,
 		Roles:              splitCSV(c.Query("roles", "")),
 		Limit:              limit,
 		MaxSnippetLength:   maxSnippetLength,
-	})
+	}, allowedSessions)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to search transcript: %v", err))
 	}
@@ -324,6 +337,55 @@ func (h *InternalHandlers) SearchTranscript(c fiber.Ctx) error {
 		results = []store.TranscriptSearchResult{}
 	}
 	return c.JSON(results)
+}
+
+func searchAuthorizedTranscriptResults(
+	ctx context.Context,
+	sessionStore store.SessionStore,
+	filter store.TranscriptSearchFilter,
+	allowedSessions map[string]struct{},
+) ([]store.TranscriptSearchResult, error) {
+	if filter.SessionName != "" {
+		return sessionStore.SearchTranscript(ctx, filter)
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultInternalTranscriptSearchLimit
+	}
+	if limit > maxInternalTranscriptSearchLimit {
+		limit = maxInternalTranscriptSearchLimit
+	}
+	sessionNames := make([]string, 0, len(allowedSessions))
+	for sessionName := range allowedSessions {
+		if sessionName != filter.ExcludeSessionName {
+			sessionNames = append(sessionNames, sessionName)
+		}
+	}
+	sort.Strings(sessionNames)
+
+	results := make([]store.TranscriptSearchResult, 0, limit)
+	for _, sessionName := range sessionNames {
+		sessionFilter := filter
+		sessionFilter.SessionName = sessionName
+		sessionFilter.ExcludeSessionName = ""
+		sessionFilter.Limit = limit
+		sessionResults, err := sessionStore.SearchTranscript(ctx, sessionFilter)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, sessionResults...)
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].CreatedAt.Equal(results[j].CreatedAt) {
+			return results[i].MessageID > results[j].MessageID
+		}
+		return results[i].CreatedAt.After(results[j].CreatedAt)
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
 }
 
 func parseOptionalNonNegativeQueryInt(raw, name string) (int, error) {
@@ -347,7 +409,7 @@ func (h *InternalHandlers) SubmitPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -392,7 +454,7 @@ func (h *InternalHandlers) GetPlan(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
+	if _, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName); err != nil {
 		return err
 	}
 
@@ -420,10 +482,6 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
-
 	if h.messageStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
 	}
@@ -440,6 +498,15 @@ func (h *InternalHandlers) SendMessage(c fiber.Ctx) error {
 
 	if req.FromTask == "" || req.ToTask == "" || req.Content == "" || req.ParentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "fromTask, toTask, parentTask, and content are required")
+	}
+	if err := h.internalCallerAuthorizer().verifyMessageSender(
+		c,
+		namespace,
+		req.FromTask,
+		req.ToTask,
+		req.ParentTask,
+	); err != nil {
+		return err
 	}
 
 	msg := &store.Message{
@@ -468,10 +535,6 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace and taskName are required")
 	}
 
-	if err := h.internalCallerAuthorizer().verifyNamespace(c, namespace); err != nil {
-		return err
-	}
-
 	if h.messageStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "messaging not enabled")
 	}
@@ -479,6 +542,9 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 	parentTask := c.Query("parentTask")
 	if parentTask == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "parentTask query parameter is required")
+	}
+	if err := h.internalCallerAuthorizer().verifyMessageInbox(c, namespace, taskName, parentTask); err != nil {
+		return err
 	}
 
 	markRead := c.Query("markRead", queryTrue) == queryTrue
@@ -488,6 +554,10 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get messages: %v", err))
 	}
+	// Message rows are name-keyed, while live access above is UID-bound. Task
+	// finalization deletes both task and parent messages before removing the
+	// finalizer, so Kubernetes cannot admit a same-name Task generation that
+	// inherits queued rows from the prior generation.
 
 	if messages == nil {
 		messages = []store.Message{}

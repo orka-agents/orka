@@ -32,6 +32,7 @@ var log = logf.Log.WithName("api-server")
 type ServerConfig struct {
 	Port                      int
 	MetricsPort               int
+	APIReader                 client.Reader
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	OIDC                      OIDCConfig
@@ -102,6 +103,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 
 	server.handlers = NewHandlers(HandlersConfig{
 		Client:                    c,
+		APIReader:                 config.APIReader,
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,

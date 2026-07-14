@@ -5,11 +5,35 @@ on:
     branches:
       - main
     paths:
+      - "api/**"
       - "charts/orka/**"
+      - "cmd/main.go"
+      - "config/crd/bases/**"
+      - "config/rbac/role.yaml"
+      - "go.mod"
+      - "internal/controller/*_controller.go"
+      - "Makefile"
+      - "README.md"
+      - "scripts/helm-chart.sh"
+      - "scripts/helm-crd-upgrade.sh"
+      - "testdata/helm-crd-upgrade/**"
+      - "website/docs/getting-started.md"
       - ".github/workflows/helm-chart.yml"
   pull_request:
     paths:
+      - "api/**"
       - "charts/orka/**"
+      - "cmd/main.go"
+      - "config/crd/bases/**"
+      - "config/rbac/role.yaml"
+      - "go.mod"
+      - "internal/controller/*_controller.go"
+      - "Makefile"
+      - "README.md"
+      - "scripts/helm-chart.sh"
+      - "scripts/helm-crd-upgrade.sh"
+      - "testdata/helm-crd-upgrade/**"
+      - "website/docs/getting-started.md"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:
 
@@ -22,18 +46,71 @@ concurrency:
 
 jobs:
   validate:
-    name: Lint and package Helm chart
+    name: Helm ${{ matrix.helm_version }} (${{ matrix.helm_driver }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - helm_version: v3.18.6
+            helm_sha256: 3f43c0aa57243852dd542493a0f54f1396c0bc8ec7296bbb2c01e802010819ce
+            helm_driver: secret
+            kind_image: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
+          - helm_version: v3.18.6
+            helm_sha256: 3f43c0aa57243852dd542493a0f54f1396c0bc8ec7296bbb2c01e802010819ce
+            helm_driver: configmap
+            kind_image: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
+          - helm_version: v4.2.2
+            helm_sha256: 9adafecab4d406853bba163a70e9f104f47dbbf65ce24b7653bae7e36150bcb6
+            helm_driver: secret
+            kind_image: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
+          - helm_version: v4.2.2
+            helm_sha256: 9adafecab4d406853bba163a70e9f104f47dbbf65ce24b7653bae7e36150bcb6
+            helm_driver: configmap
+            kind_image: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
+    env:
+      HELM_DRIVER: ${{ matrix.helm_driver }}
+      HELM_SHA256: ${{ matrix.helm_sha256 }}
+      HELM_VERSION: ${{ matrix.helm_version }}
+      KIND_CLUSTER: orka-helm-crd-upgrade
+      KIND_IMAGE: ${{ matrix.kind_image }}
+      KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+      KIND_VERSION: v0.31.0
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Show Helm version
-        run: helm version
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install pinned Helm
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o helm.tgz \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum --check --strict
+          tar -xzf helm.tgz
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf helm.tgz linux-amd64
+          helm version
+          jq --version
+
+      - name: Verify generated chart inputs
+        run: |
+          make manifests
+          if [[ -n "$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac/role.yaml charts/orka/crds)" ]]; then
+            echo "Generated CRDs or their Helm chart mirror are stale." >&2
+            git status --short --untracked-files=all -- config/crd/bases config/rbac/role.yaml charts/orka/crds
+            exit 1
+          fi
+
+      - name: Check chart reliability invariants
+        run: scripts/helm-chart.sh check
 
       - name: Lint chart
         run: helm lint charts/orka
@@ -43,21 +120,70 @@ jobs:
           mkdir -p .cr-release-packages
           helm package charts/orka --destination .cr-release-packages
 
-  publish:
-    name: Publish Helm chart repository
-    needs: validate
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+      - name: Install kind
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o ./kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  ./kind" | sha256sum --check --strict
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+
+      - name: Test Helm CRD upgrade migration
+        run: |
+          set -euo pipefail
+          trap 'kind delete cluster --name "${KIND_CLUSTER}" || true' EXIT
+          kind create cluster --name "${KIND_CLUSTER}" --image "${KIND_IMAGE}" --wait 90s
+          scripts/helm-chart.sh test-upgrade \
+            --kind-cluster "${KIND_CLUSTER}" \
+            --kube-context "kind-${KIND_CLUSTER}"
+
+  bash-3-2:
+    name: Bash 3.2 syntax
+    runs-on: macos-15
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Show Helm version
-        run: helm version
+      - name: Verify Bash 3.2 compatibility
+        run: |
+          /bin/bash --version | head -n 1
+          /bin/bash --version | head -n 1 | grep -F 'version 3.2.'
+          /bin/bash -n scripts/helm-chart.sh scripts/helm-crd-upgrade.sh
+          /bin/bash scripts/helm-chart.sh --help >/dev/null
+          /bin/bash scripts/helm-crd-upgrade.sh --help >/dev/null
+
+  publish:
+    name: Publish Helm chart repository
+    needs:
+      - bash-3-2
+      - validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      HELM_SHA256: 9adafecab4d406853bba163a70e9f104f47dbbf65ce24b7653bae7e36150bcb6
+      HELM_VERSION: v4.2.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Helm
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o helm.tgz \
+            "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum --check --strict
+          tar -xzf helm.tgz
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf helm.tgz linux-amd64
+          helm version
 
       - name: Lint chart
         run: helm lint charts/orka

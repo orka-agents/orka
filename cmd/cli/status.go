@@ -9,7 +9,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,7 +22,7 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show system overview (health, tasks, agents)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := newClientFromCmd(cmd)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
 
 			fmt.Println("Orka Status")
@@ -31,6 +30,9 @@ func newStatusCmd() *cobra.Command {
 
 			healthy, healthErr := c.HealthCheck(ctx)
 			if healthErr != nil {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				fmt.Printf("  Health:  ✗ Unreachable (%v)\n", healthErr)
 			} else if healthy {
 				fmt.Println("  Health:  ✓ Healthy")
@@ -40,6 +42,9 @@ func newStatusCmd() *cobra.Command {
 
 			ready, readyErr := c.ReadyCheck(ctx)
 			if readyErr != nil {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				fmt.Printf("  Ready:   ✗ Unreachable (%v)\n", readyErr)
 			} else if ready {
 				fmt.Println("  Ready:   ✓ Ready")
@@ -48,15 +53,18 @@ func newStatusCmd() *cobra.Command {
 			}
 
 			if healthErr != nil {
-				fmt.Fprintln(os.Stderr, "\nCannot reach the server. Skipping task and agent queries.")
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "\nCannot reach the server. Skipping task and agent queries.")
 				return nil
 			}
 
 			fmt.Println()
 
-			tasks, err := c.ListTasks(ctx, client.ListTasksOptions{Limit: 100})
+			tasks, err := c.ListAllTasks(ctx, client.ListTasksOptions{Namespace: c.Namespace, Limit: 100})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Tasks:   ✗ Error (%v)\n", err)
+				if contextErr := ctx.Err(); contextErr != nil {
+					return contextErr
+				}
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  Tasks:   ✗ Error (%v)\n", err)
 			} else {
 				counts := map[string]int{
 					"Pending": 0, "Running": 0, "Succeeded": 0, "Failed": 0, "Scheduled": 0,
@@ -91,9 +99,12 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Println()
 
-			agents, err := c.ListAgents(ctx, client.ListOptions{})
+			agents, err := c.ListAgents(ctx, client.ListOptions{Namespace: c.Namespace})
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Agents:  ✗ Error (%v)\n", err)
+				if contextErr := ctx.Err(); contextErr != nil {
+					return contextErr
+				}
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  Agents:  ✗ Error (%v)\n", err)
 			} else {
 				fmt.Printf("  Agents:    %d\n", len(agents))
 			}

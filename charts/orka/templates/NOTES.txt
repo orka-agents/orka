@@ -3,6 +3,73 @@ Orka has been installed.
 Controller: {{ include "orka.fullname" . }}-controller
 Namespace:  {{ .Release.Namespace }}
 
+CRD lifecycle:
+  Helm installs the nine files under crds/ only on a fresh install (unless
+  --skip-crds is used). Helm does not install or update them during upgrade,
+  and the CRDs are retained when a release is uninstalled.
+
+  Before every future upgrade, migrate CRDs from one local packaged target
+  chart and pass that exact same archive to helm upgrade. From a source
+  checkout:
+
+      (
+        set -euo pipefail
+
+        TARGET_CONTEXT="${TARGET_CONTEXT:?set TARGET_CONTEXT}"
+        WORK_DIR="$(mktemp -d)"
+        KEEP_WORK_DIR=false
+        cleanup_work_dir() {
+          status=$?
+          trap - EXIT
+          if [[ "$KEEP_WORK_DIR" == true ]]; then
+            echo "Target chart and work files preserved at $WORK_DIR" >&2
+          else
+            rm -rf "$WORK_DIR"
+          fi
+          exit "$status"
+        }
+        trap cleanup_work_dir EXIT
+
+        helm package charts/orka --destination "$WORK_DIR"
+        TARGET_CHARTS=("$WORK_DIR"/orka-*.tgz)
+        test "${#TARGET_CHARTS[@]}" -eq 1
+        TARGET_CHART="${TARGET_CHARTS[0]}"
+        test -f "$TARGET_CHART"
+
+        KEEP_WORK_DIR=true
+  scripts/helm-chart.sh upgrade-crds \
+          --chart "$TARGET_CHART" \
+          --kube-context "$TARGET_CONTEXT" \
+          --release {{ .Release.Name }} \
+          --namespace {{ .Release.Namespace }}
+
+        helm upgrade {{ .Release.Name }} "$TARGET_CHART" \
+          --namespace {{ .Release.Namespace }} \
+          --kube-context "$TARGET_CONTEXT" \
+          --wait
+        KEEP_WORK_DIR=false
+      )
+
+  The jq-based helper rejects HELM_KUBE* endpoint or credential overrides,
+  reads Helm release storage through the explicit kubectl context, requires a
+  deployed or failed latest release, server-preflights all nine operations,
+  exactly replaces and verifies every
+  target spec, and leaves partial changes in place with
+  recovery artifacts and a unique migration marker on failure. Automatic schema
+  rollback is intentionally avoided because it can invalidate custom resources
+  or alter field ownership.
+
+  Without a source checkout, obtain scripts/helm-crd-upgrade.sh separately from
+  a trusted Orka source release or vendored platform tooling. Treat the target
+  chart archive as data only; never execute code extracted from it.
+
+  If this release is later uninstalled while CRDs are retained, migrate those
+  CRDs before a replacement install by adding --allow-missing-release to the
+  helper command, then run helm install with --skip-crds and the same archive.
+
+  Always use the same explicit --kube-context. CRDs are cluster-scoped;
+  coordinate upgrades when multiple Orka releases share this cluster.
+
 {{- if not .Values.store.persistence.enabled }}
 
 ⚠️  STORAGE WARNING: SQLite store is using ephemeral storage (emptyDir).

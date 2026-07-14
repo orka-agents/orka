@@ -196,6 +196,157 @@ func TestServerCancelEmitsCancellation(t *testing.T) {
 	}
 }
 
+func TestServerCancelDuringWorkspacePreparationReleasesNextTurn(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/blocked/") {
+			select {
+			case requestStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(750 * time.Millisecond):
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"result": `{"version":1,"summary":"ready"}`,
+		})
+	}))
+	defer controller.Close()
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = testEchoCommand
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := validWrapperStartTurnRequest()
+	first.Input.Env = priorTaskTurnEnv("blocked", controller.URL)
+	if _, err := client.StartTurn(context.Background(), first); err != nil {
+		t.Fatalf("StartTurn(first): %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prior-task request did not start")
+	}
+
+	cancelStarted := time.Now()
+	if _, err := client.CancelTurn(context.Background(), harness.CancelTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        first.Namespace,
+		TaskName:         first.TaskName,
+		SessionName:      first.SessionName,
+		RuntimeSessionID: first.RuntimeSessionID,
+		TurnID:           first.TurnID,
+		CorrelationID:    first.CorrelationID,
+		Reason:           "test",
+	}); err != nil {
+		t.Fatalf("CancelTurn(first): %v", err)
+	}
+
+	second := validWrapperStartTurnRequest()
+	second.TurnID = "turn-after-preparation-cancel"
+	second.CorrelationID = "corr-after-preparation-cancel"
+	second.Input.Env = priorTaskTurnEnv("ready", controller.URL)
+	admissionDeadline := time.Now().Add(500 * time.Millisecond)
+	var admissionErr error
+	var admittedAt time.Time
+	for time.Now().Before(admissionDeadline) {
+		_, admissionErr = client.StartTurn(context.Background(), second)
+		if admissionErr == nil {
+			admittedAt = time.Now()
+			break
+		}
+		if !strings.Contains(admissionErr.Error(), "409") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if admissionErr != nil {
+		_ = collectWrapperFrames(t, client, first.TurnID, 0)
+		t.Fatalf("next turn was not admitted within 500ms after cancellation: %v", admissionErr)
+	}
+	if elapsed := admittedAt.Sub(cancelStarted); elapsed >= 500*time.Millisecond {
+		t.Fatalf("next turn admission took %s, want under 500ms", elapsed)
+	}
+	firstFrames := collectWrapperFrames(t, client, first.TurnID, 0)
+	firstLast := firstFrames[len(firstFrames)-1]
+	if firstLast.Type != harness.FrameTurnCancelled {
+		t.Fatalf("first terminal frame = %#v, want cancelled", firstLast)
+	}
+	secondFrames := collectWrapperFrames(t, client, second.TurnID, 0)
+	if last := secondFrames[len(secondFrames)-1]; last.Type != harness.FrameTurnCompleted {
+		t.Fatalf("second terminal frame = %#v, want completed", last)
+	}
+}
+
+func TestServerDeadlineDuringWorkspacePreparationReportsTimeout(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case requestStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(1200 * time.Millisecond):
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"result": `{"version":1,"summary":"ready"}`,
+		})
+	}))
+	defer controller.Close()
+
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = testEchoCommand
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := validWrapperStartTurnRequest()
+	request.Deadline = time.Now().UTC().Add(400 * time.Millisecond)
+	request.Input.Env = priorTaskTurnEnv("blocked", controller.URL)
+	startedAt := time.Now()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prior-task request did not start")
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	if elapsed := time.Since(startedAt); elapsed >= 900*time.Millisecond {
+		t.Fatalf("deadline outcome took %s, want under 900ms", elapsed)
+	}
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnFailed || last.Failed == nil ||
+		last.Failed.Reason != "timeout" || !last.Failed.Retryable {
+		t.Fatalf("terminal frame = %#v, want retryable timeout", last)
+	}
+}
+
+func priorTaskTurnEnv(taskName, controllerURL string) []harness.TurnEnvVar {
+	return []harness.TurnEnvVar{
+		{Name: workerenv.PriorTask, Value: taskName},
+		{Name: workerenv.PriorTaskNamespace, Value: "default"},
+		{Name: workerenv.ControllerURL, Value: controllerURL},
+	}
+}
+
 func TestServerRejectsUnsafeTurnPath(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true

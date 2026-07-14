@@ -46,7 +46,14 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@set -e; \
+	tmp_dir="$$(mktemp -d config/crd/bases.XXXXXX)"; \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config="$$tmp_dir"; \
+	rm -rf config/crd/bases; \
+	mv "$$tmp_dir" config/crd/bases; \
+	trap - EXIT
+	./scripts/helm-chart.sh sync
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -68,49 +75,54 @@ vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: manifests generate fmt vet setup-envtest test-e2e-cluster-safety ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
+# Exact pre-existing clusters may be reused, but cleanup never deletes a cluster this E2E state did not create.
 KIND_CLUSTER ?= orka-test-e2e
+KEEP_CLUSTER ?= 0
+E2E_KIND_CONFIG ?= test/e2e/kind-config.yaml
+E2E_CLUSTER_STATE_DIR ?= $(abspath $(LOCALBIN)/e2e-kind-state/$(KIND_CLUSTER))
+E2E_CLUSTER_LOCK_ROOT ?=
+E2E_CLUSTER_HELPER ?= ./scripts/e2e-kind-cluster.sh
+E2E_RECURSIVE_MAKE ?= make
 E2E_GO_TEST_TIMEOUT ?= 30m
 E2E_GINKGO_FOCUS ?=
 E2E_GINKGO_FOCUS_ARG = $(if $(E2E_GINKGO_FOCUS),-ginkgo.focus="$(E2E_GINKGO_FOCUS)",)
+E2E_CLUSTER_ENV = KIND="$(KIND)" KUBECTL="$(KUBECTL)" KIND_CLUSTER="$(KIND_CLUSTER)" KEEP_CLUSTER="$(KEEP_CLUSTER)" E2E_KIND_CONFIG="$(E2E_KIND_CONFIG)" E2E_CLUSTER_STATE_DIR="$(E2E_CLUSTER_STATE_DIR)" E2E_CLUSTER_LOCK_ROOT="$(E2E_CLUSTER_LOCK_ROOT)" E2E_GO_TEST_TIMEOUT="$(E2E_GO_TEST_TIMEOUT)" E2E_GINKGO_FOCUS="$(E2E_GINKGO_FOCUS)" IMG="$(IMG)" AI_WORKER_IMG="$(AI_WORKER_IMG)" GENERAL_WORKER_IMG="$(GENERAL_WORKER_IMG)" HARNESS_WRAPPER_IMG="$(HARNESS_WRAPPER_IMG)"
+
+.PHONY: test-e2e-cluster-safety
+test-e2e-cluster-safety: ## Run deterministic E2E Kind targeting safety tests
+	./scripts/e2e-kind-cluster_test.sh
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) --config test/e2e/kind-config.yaml ;; \
-	esac
+setup-test-e2e: ## Set up an exact Kind cluster target with an isolated kubeconfig
+	@$(E2E_CLUSTER_ENV) "$(E2E_CLUSTER_HELPER)" setup --create
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
-	$(MAKE) cleanup-test-e2e
+test-e2e: ## Run the e2e tests against an isolated exact Kind target.
+	@$(E2E_CLUSTER_ENV) "$(E2E_CLUSTER_HELPER)" run --create --cleanup -- "$(E2E_RECURSIVE_MAKE)" _test-e2e-scoped
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+cleanup-test-e2e: ## Tear down only a Kind cluster created by this e2e setup
+	@$(E2E_CLUSTER_ENV) "$(E2E_CLUSTER_HELPER)" cleanup
 
 .PHONY: test-e2e-setup-only
-test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and build all images without running tests.
-	@echo "Loading images into Kind cluster '$(KIND_CLUSTER)'..."
-	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
+test-e2e-setup-only: ## Set up Kind cluster and build/load all images without running tests.
+	@$(E2E_CLUSTER_ENV) "$(E2E_CLUSTER_HELPER)" setup-images -- "$(E2E_RECURSIVE_MAKE)" docker-build-all
 
 .PHONY: test-e2e-run-only
-test-e2e-run-only: manifests generate fmt vet ## Run e2e tests without rebuilding images (for fast iteration).
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
+test-e2e-run-only: ## Run e2e tests against an existing exact Kind target without rebuilding images.
+	@$(E2E_CLUSTER_ENV) "$(E2E_CLUSTER_HELPER)" run --reuse-only -- "$(E2E_RECURSIVE_MAKE)" _test-e2e-scoped
+
+.PHONY: _test-e2e-scoped
+_test-e2e-scoped: manifests generate fmt vet
+	@test "$${E2E_KIND_TARGET_READY:-}" = "1" || { \
+		echo "Refusing to run e2e tests without validated isolated Kind targeting."; \
+		exit 1; \
+	}
+	go test -tags=e2e ./test/e2e/ -timeout $(E2E_GO_TEST_TIMEOUT) -v -ginkgo.v $(E2E_GINKGO_FOCUS_ARG)
 
 .PHONY: lint
 lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter

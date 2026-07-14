@@ -831,6 +831,7 @@ func main() {
 	// Start REST API server
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		Port:                      apiPort,
+		APIReader:                 mgr.GetAPIReader(),
 		WatchNamespace:            watchNamespace,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 		OIDC: api.OIDCConfig{

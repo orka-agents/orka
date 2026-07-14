@@ -2,6 +2,7 @@ package cliwrapper
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -402,6 +403,71 @@ func TestAgentConfigFromTurnDisjointAllowlistsRemainDenyAll(t *testing.T) {
 	}
 	if len(cfg.AllowedTools) != 0 {
 		t.Fatalf("AllowedTools = %#v, want empty intersection", cfg.AllowedTools)
+	}
+}
+
+func TestPrepareTurnContextCancelledBeforeFilesystemPreparation(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(t.TempDir(), "skills")
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	turn := &TurnContext{
+		SkillsRoot: skillsRoot,
+		Metadata: map[string]string{
+			turnMetadataSkillsFiles: `{"review/SKILL.md":"# review"}`,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := PrepareTurnContext(ctx, turn, root, artifactDir)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PrepareTurnContext() error = %v, want context canceled", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".orka-artifacts")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("artifact link was materialized after cancellation: stat error = %v", err)
+	}
+	if _, err := os.Stat(skillsRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("skills were materialized after cancellation: stat error = %v", err)
+	}
+}
+
+func TestPrepareTurnContextMaterializesNormalWorkspaceContext(t *testing.T) {
+	t.Setenv(workerenv.PriorTask, "")
+	t.Setenv("ORKA_SECURITY_REVIEW_SLICE_JSON", "")
+	root := t.TempDir()
+	skillsRoot := filepath.Join(t.TempDir(), "skills")
+	artifactDir := filepath.Join(t.TempDir(), "artifacts")
+	turn := &TurnContext{
+		Prompt:     "review this",
+		SkillsRoot: skillsRoot,
+		Metadata: map[string]string{
+			turnMetadataSkillsFiles: `{"review/SKILL.md":"# review"}`,
+		},
+	}
+
+	cfg, err := PrepareTurnContext(context.Background(), turn, root, artifactDir)
+	if err != nil {
+		t.Fatalf("PrepareTurnContext() error = %v", err)
+	}
+	if cfg == nil || cfg.Prompt != "review this" {
+		t.Fatalf("PrepareTurnContext() config = %#v, want prompt preserved", cfg)
+	}
+	data, err := os.ReadFile(filepath.Join(skillsRoot, "review", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read materialized skill: %v", err)
+	}
+	if string(data) != "# review" {
+		t.Fatalf("materialized skill = %q", data)
+	}
+	linkTarget, err := os.Readlink(filepath.Join(root, ".orka-artifacts"))
+	if err != nil {
+		t.Fatalf("read artifact link: %v", err)
+	}
+	if filepath.Clean(linkTarget) != filepath.Clean(artifactDir) {
+		t.Fatalf("artifact link target = %q, want %q", linkTarget, artifactDir)
+	}
+	if !containsEnv(turn.Env, workerenv.SkillsDir+"="+skillsRoot) {
+		t.Fatalf("turn env = %#v, want skills root", turn.Env)
 	}
 }
 

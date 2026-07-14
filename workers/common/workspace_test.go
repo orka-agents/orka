@@ -7,13 +7,16 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,12 +26,15 @@ import (
 
 const (
 	workspaceTestFeatureBranch = "feature-branch"
+	workspaceTestMainBranch    = "main"
+	workspaceTestWindowsGOOS   = "windows"
+	workspaceTestObserveDelay  = 1200 * time.Millisecond
 )
 
 func TestPrepareWorkspace_NoOp(t *testing.T) {
 	// When ORKA_PRIOR_TASK is not set, PrepareWorkspace should be a no-op
 	os.Unsetenv("ORKA_PRIOR_TASK") //nolint:errcheck
-	err := PrepareWorkspace("/tmp/test")
+	err := PrepareWorkspace(context.Background(), "/tmp/test")
 	if err != nil {
 		t.Errorf("expected no error when ORKA_PRIOR_TASK not set, got: %v", err)
 	}
@@ -37,7 +43,7 @@ func TestPrepareWorkspace_NoOp(t *testing.T) {
 func TestPrepareWorkspace_MissingControllerURL(t *testing.T) {
 	t.Setenv("ORKA_PRIOR_TASK", "task-1")
 	t.Setenv("ORKA_CONTROLLER_URL", "")
-	err := PrepareWorkspace("/tmp/test")
+	err := PrepareWorkspace(context.Background(), "/tmp/test")
 	if err == nil {
 		t.Fatal("expected error when ORKA_CONTROLLER_URL is empty")
 	}
@@ -56,7 +62,7 @@ func TestPrepareWorkspace_NoDiffInResult(t *testing.T) {
 	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "default")
 	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
-	err := PrepareWorkspace("/tmp/test")
+	err := PrepareWorkspace(context.Background(), "/tmp/test")
 	if err != nil {
 		t.Errorf("expected no error when diff is empty, got: %v", err)
 	}
@@ -106,7 +112,7 @@ func TestPreparePullRequestReviewContextWritesIgnoredDiffFiles(t *testing.T) {
 
 	sourceDir := t.TempDir()
 	runGitWS(t, sourceDir, "init")
-	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
 	runGitWS(t, sourceDir, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
@@ -121,7 +127,7 @@ func TestPreparePullRequestReviewContextWritesIgnoredDiffFiles(t *testing.T) {
 	runGitWS(t, sourceDir, "add", ".")
 	runGitWS(t, sourceDir, "commit", "-m", "base")
 	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
@@ -136,7 +142,11 @@ func TestPreparePullRequestReviewContextWritesIgnoredDiffFiles(t *testing.T) {
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{PRBaseBranch: "main"}); err != nil {
+	if err := PreparePullRequestReviewContext(
+		context.Background(),
+		cloneDir,
+		&AgentConfig{PRBaseBranch: workspaceTestMainBranch},
+	); err != nil {
 		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
 	}
 
@@ -175,7 +185,7 @@ func TestPreparePullRequestReviewContextFetchesBaseFromTrustedRepo(t *testing.T)
 
 	sourceDir := t.TempDir()
 	runGitWS(t, sourceDir, "init")
-	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
 	runGitWS(t, sourceDir, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
@@ -184,7 +194,7 @@ func TestPreparePullRequestReviewContextFetchesBaseFromTrustedRepo(t *testing.T)
 	runGitWS(t, sourceDir, "add", ".")
 	runGitWS(t, sourceDir, "commit", "-m", "base")
 	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, baseBareDir)
-	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, baseBareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
@@ -200,8 +210,8 @@ func TestPreparePullRequestReviewContextFetchesBaseFromTrustedRepo(t *testing.T)
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+forkBareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
-		PRBaseBranch: "main",
+	if err := PreparePullRequestReviewContext(context.Background(), cloneDir, &AgentConfig{
+		PRBaseBranch: workspaceTestMainBranch,
 		PRBaseRepo:   "file://" + baseBareDir,
 	}); err != nil {
 		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
@@ -231,7 +241,7 @@ func TestPreparePullRequestReviewContextDeepensBaseSHAForStalePR(t *testing.T) {
 
 	sourceDir := t.TempDir()
 	runGitWS(t, sourceDir, "init")
-	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
 	runGitWS(t, sourceDir, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
@@ -249,7 +259,7 @@ func TestPreparePullRequestReviewContextDeepensBaseSHAForStalePR(t *testing.T) {
 	runGitWS(t, sourceDir, "remote", "add", "fork", forkBareDir)
 	runGitWS(t, sourceDir, "push", "fork", workspaceTestFeatureBranch)
 
-	runGitWS(t, sourceDir, "checkout", "main")
+	runGitWS(t, sourceDir, "checkout", workspaceTestMainBranch)
 	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nbase branch moved\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -257,15 +267,15 @@ func TestPreparePullRequestReviewContextDeepensBaseSHAForStalePR(t *testing.T) {
 	runGitWS(t, sourceDir, "commit", "-m", "advance base")
 	baseSHA := strings.TrimSpace(runGitOutputWS(t, sourceDir, "rev-parse", "HEAD"))
 	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, baseBareDir)
-	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, baseBareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	cloneDir := filepath.Join(t.TempDir(), "fork-clone")
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+forkBareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
-		PRBaseBranch: "main",
+	if err := PreparePullRequestReviewContext(context.Background(), cloneDir, &AgentConfig{
+		PRBaseBranch: workspaceTestMainBranch,
 		PRBaseRepo:   "file://" + baseBareDir,
 		PRBaseSHA:    baseSHA,
 	}); err != nil {
@@ -290,7 +300,7 @@ func TestPreparePullRequestReviewContextFallsBackToBaseBranchWhenBaseSHAFetchFai
 
 	sourceDir := t.TempDir()
 	runGitWS(t, sourceDir, "init")
-	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
 	runGitWS(t, sourceDir, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
@@ -299,7 +309,7 @@ func TestPreparePullRequestReviewContextFallsBackToBaseBranchWhenBaseSHAFetchFai
 	runGitWS(t, sourceDir, "add", ".")
 	runGitWS(t, sourceDir, "commit", "-m", "base")
 	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
@@ -314,8 +324,8 @@ func TestPreparePullRequestReviewContextFallsBackToBaseBranchWhenBaseSHAFetchFai
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
-		PRBaseBranch: "main",
+	if err := PreparePullRequestReviewContext(context.Background(), cloneDir, &AgentConfig{
+		PRBaseBranch: workspaceTestMainBranch,
 		PRBaseSHA:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}); err != nil {
 		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
@@ -345,7 +355,7 @@ func TestPreparePullRequestReviewContextTruncatesLargeDiff(t *testing.T) {
 
 	sourceDir := t.TempDir()
 	runGitWS(t, sourceDir, "init")
-	runGitWS(t, sourceDir, "checkout", "-b", "main")
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
 	runGitWS(t, sourceDir, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
@@ -354,7 +364,7 @@ func TestPreparePullRequestReviewContextTruncatesLargeDiff(t *testing.T) {
 	runGitWS(t, sourceDir, "add", ".")
 	runGitWS(t, sourceDir, "commit", "-m", "base")
 	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, sourceDir, "push", gitOriginRemote, "main")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
@@ -370,7 +380,11 @@ func TestPreparePullRequestReviewContextTruncatesLargeDiff(t *testing.T) {
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{PRBaseBranch: "main"}); err != nil {
+	if err := PreparePullRequestReviewContext(
+		context.Background(),
+		cloneDir,
+		&AgentConfig{PRBaseBranch: workspaceTestMainBranch},
+	); err != nil {
 		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
 	}
 
@@ -401,7 +415,7 @@ func TestPrepareWorkspace_HTTPError(t *testing.T) {
 	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "default")
 	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
-	err := PrepareWorkspace("/tmp/test")
+	err := PrepareWorkspace(context.Background(), "/tmp/test")
 	if err == nil {
 		t.Fatal("expected error for HTTP 500")
 	}
@@ -461,7 +475,7 @@ func TestPrepareWorkspace_WithDiff(t *testing.T) {
 	t.Setenv("ORKA_PRIOR_TASK_NAMESPACE", "default")
 	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
-	err = PrepareWorkspace(dir)
+	err = PrepareWorkspace(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("PrepareWorkspace failed: %v", err)
 	}
@@ -493,7 +507,7 @@ func TestPrepareWorkspace_NamespaceFallback(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAMESPACE", "fallback-ns") // fallback
 	t.Setenv("ORKA_CONTROLLER_URL", server.URL)
 
-	err := PrepareWorkspace("/tmp/test")
+	err := PrepareWorkspace(context.Background(), "/tmp/test")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -705,7 +719,7 @@ func TestFinalizeResult_PushBranchWithRemote(t *testing.T) {
 
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
-	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, dir, "config", "user.email", "test@test.com")
 	runGitWS(t, dir, "config", "user.name", "Test")
 	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
@@ -714,7 +728,7 @@ func TestFinalizeResult_PushBranchWithRemote(t *testing.T) {
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestMainBranch)
 
 	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -795,7 +809,7 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiff(t *testing.T) 
 
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
-	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, dir, "config", "user.email", "test@test.com")
 	runGitWS(t, dir, "config", "user.name", "Test")
 	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
@@ -804,14 +818,14 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiff(t *testing.T) 
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, dir, "checkout", "-b", workspaceTestFeatureBranch)
 	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestFeatureBranch)
 
 	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 	t.Setenv(requirePushBranchEnvVar, "true")
 	t.Setenv(workerenv.AllowEmptyPushBranch, "true")
-	t.Setenv(workerenv.PRBaseBranch, "main")
+	t.Setenv(workerenv.PRBaseBranch, workspaceTestMainBranch)
 
 	data, err := FinalizeResult(dir, "already up to date")
 	if err != nil {
@@ -835,7 +849,7 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffRejectsStaleHea
 
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
-	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, dir, "config", "user.email", "test@test.com")
 	runGitWS(t, dir, "config", "user.name", "Test")
 	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
@@ -844,19 +858,19 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffRejectsStaleHea
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, dir, "checkout", "-b", workspaceTestFeatureBranch)
 	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestFeatureBranch)
 
-	runGitWS(t, dir, "checkout", "main")
+	runGitWS(t, dir, "checkout", workspaceTestMainBranch)
 	runGitWS(t, dir, "commit", "--allow-empty", "-m", "advance base")
-	runGitWS(t, dir, "push", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, dir, "checkout", workspaceTestFeatureBranch)
 
 	t.Setenv("ORKA_PUSH_BRANCH", workspaceTestFeatureBranch)
 	t.Setenv(requirePushBranchEnvVar, "true")
 	t.Setenv(workerenv.AllowEmptyPushBranch, "true")
-	t.Setenv(workerenv.PRBaseBranch, "main")
+	t.Setenv(workerenv.PRBaseBranch, workspaceTestMainBranch)
 
 	_, err := FinalizeResult(dir, "stale branch")
 	if err == nil {
@@ -873,7 +887,7 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffPushesAdvancedH
 
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
-	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, dir, "config", "user.email", "test@test.com")
 	runGitWS(t, dir, "config", "user.name", "Test")
 	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
@@ -882,7 +896,7 @@ func TestFinalizeResult_RequirePushBranchAllowsEmptyWorkspaceDiffPushesAdvancedH
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestMainBranch)
 	runGitWS(t, dir, "commit", "--allow-empty", "-m", "advance head")
 	advancedHead := strings.TrimSpace(runGitOutputWS(t, dir, "rev-parse", "HEAD"))
 
@@ -959,7 +973,7 @@ func TestPushChanges_WithRemote(t *testing.T) {
 	// Create a working repo with a remote
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
-	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, dir, "config", "user.email", "test@test.com")
 	runGitWS(t, dir, "config", "user.name", "Test")
 	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
@@ -968,7 +982,7 @@ func TestPushChanges_WithRemote(t *testing.T) {
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestMainBranch)
 
 	// Make a change
 	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
@@ -1009,7 +1023,7 @@ func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
 	// Create a working repo with a remote
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
-	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "checkout", "-b", workspaceTestMainBranch)
 	runGitWS(t, dir, "config", "user.email", "test@test.com")
 	runGitWS(t, dir, "config", "user.name", "Test")
 	if err := os.WriteFile(dir+"/file.txt", []byte("content\n"), 0o644); err != nil {
@@ -1018,7 +1032,7 @@ func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
 	runGitWS(t, dir, "add", ".")
 	runGitWS(t, dir, "commit", "-m", "initial")
 	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
-	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, workspaceTestMainBranch)
 
 	if err := os.WriteFile(dir+"/new.txt", []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1059,6 +1073,275 @@ func runGitOutputWS(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 	return string(out)
+}
+
+func TestPrepareWorkspaceCancellationStopsGitApplyDescendants(t *testing.T) {
+	if runtime.GOOS == workspaceTestWindowsGOOS {
+		t.Skip("delayed git fixture requires a Unix shell")
+	}
+
+	result := StructuredResult{Version: 1, Summary: "patch", Diff: "delayed patch"}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"result": string(resultJSON)})
+	}))
+	defer server.Close()
+
+	fixtureDir := t.TempDir()
+	startedPath := filepath.Join(fixtureDir, "started")
+	survivedPath := filepath.Join(fixtureDir, "survived")
+	gitPath := filepath.Join(fixtureDir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+case " $* " in
+  *" apply --check "*)
+    (printf started > %q; sleep 1; printf survived > %q) &
+    child=$!
+    wait "$child"
+    ;;
+esac
+exit 0
+`, startedPath, survivedPath)
+	if err := os.WriteFile(gitPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(workerenv.PriorTask, "task-1")
+	t.Setenv(workerenv.PriorTaskNamespace, "default")
+	t.Setenv(workerenv.ControllerURL, server.URL)
+
+	workDir := t.TempDir()
+	assertWorkspacePreparationCancellation(t, startedPath, survivedPath, func(ctx context.Context) error {
+		return PrepareWorkspace(ctx, workDir)
+	})
+	if _, err := os.Stat(filepath.Join(workDir, ".orka-prior.patch")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary prior-task patch remained after cancellation: stat error = %v", err)
+	}
+}
+
+func TestPreparePullRequestReviewContextCancellationStopsDelayedRemote(t *testing.T) {
+	if runtime.GOOS == workspaceTestWindowsGOOS {
+		t.Skip("delayed upload-pack fixture requires a Unix shell")
+	}
+
+	cloneDir := newWorkspaceReviewClone(t, false)
+
+	fixtureDir := t.TempDir()
+	startedPath := filepath.Join(fixtureDir, "started")
+	survivedPath := filepath.Join(fixtureDir, "survived")
+	uploadPackPath := filepath.Join(fixtureDir, "delayed-upload-pack.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+(printf started > %q; sleep 1; printf survived > %q) &
+child=$!
+wait "$child"
+exec git-upload-pack "$@"
+`, startedPath, survivedPath)
+	if err := os.WriteFile(uploadPackPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, cloneDir, "config", "remote.origin.uploadpack", uploadPackPath)
+
+	assertWorkspacePreparationCancellation(t, startedPath, survivedPath, func(ctx context.Context) error {
+		return PreparePullRequestReviewContext(ctx, cloneDir, &AgentConfig{PRBaseBranch: workspaceTestMainBranch})
+	})
+}
+
+func TestPreparePullRequestReviewContextCancellationStopsReviewCommandDescendants(t *testing.T) {
+	if runtime.GOOS == workspaceTestWindowsGOOS {
+		t.Skip("external diff fixture requires a Unix shell")
+	}
+
+	cloneDir := newWorkspaceReviewClone(t, true)
+	fixtureDir := t.TempDir()
+	startedPath := filepath.Join(fixtureDir, "started")
+	survivedPath := filepath.Join(fixtureDir, "survived")
+	diffPath := filepath.Join(fixtureDir, "delayed-diff.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+(printf started > %q; sleep 1; printf survived > %q) &
+child=$!
+wait "$child"
+exit 0
+`, startedPath, survivedPath)
+	if err := os.WriteFile(diffPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, cloneDir, "config", "diff.orka-stall.command", diffPath)
+
+	assertWorkspacePreparationCancellation(t, startedPath, survivedPath, func(ctx context.Context) error {
+		return PreparePullRequestReviewContext(ctx, cloneDir, &AgentConfig{PRBaseBranch: workspaceTestMainBranch})
+	})
+}
+
+func assertWorkspacePreparationCancellation(
+	t *testing.T,
+	startedPath, survivedPath string,
+	prepare func(context.Context) error,
+) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- prepare(ctx)
+	}()
+
+	waitForWorkspaceTestFile(t, startedPath, 2*time.Second)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("workspace preparation error = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workspace preparation did not return after cancellation")
+	}
+
+	time.Sleep(workspaceTestObserveDelay)
+	if _, err := os.Stat(survivedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace preparation descendant survived cancellation: stat error = %v", err)
+	}
+}
+
+func TestPreparePullRequestReviewContextPropagatesProbeCancellation(t *testing.T) {
+	if runtime.GOOS == workspaceTestWindowsGOOS {
+		t.Skip("delayed git fixture requires a Unix shell")
+	}
+
+	tests := []struct {
+		name       string
+		scriptBody func(startedPath, survivedPath, fixtureDir string) string
+	}{
+		{
+			name: "fallback base branch fetch",
+			scriptBody: func(startedPath, survivedPath, _ string) string {
+				return fmt.Sprintf(`case " $* " in
+  *" fetch --no-auto-maintenance --depth=1 "*) exit 1 ;;
+  *" cat-file -e "*) exit 1 ;;
+  *" fetch --no-auto-maintenance origin +refs/heads/"*)
+    (printf started > %q; sleep 1; printf survived > %q) &
+    child=$!
+    wait "$child"
+    ;;
+esac
+exit 0
+`, startedPath, survivedPath)
+			},
+		},
+		{
+			name: "commit existence",
+			scriptBody: func(startedPath, survivedPath, _ string) string {
+				return fmt.Sprintf(`case " $* " in
+  *" fetch --no-auto-maintenance --depth=1 "*) exit 1 ;;
+  *" cat-file -e "*)
+    (printf started > %q; sleep 1; printf survived > %q) &
+    child=$!
+    wait "$child"
+    ;;
+esac
+exit 0
+`, startedPath, survivedPath)
+			},
+		},
+		{
+			name: "final merge base",
+			scriptBody: func(startedPath, survivedPath, fixtureDir string) string {
+				countPath := filepath.Join(fixtureDir, "merge-base-count")
+				return fmt.Sprintf(`case " $* " in
+  *" merge-base "*)
+    count=$(cat %q 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%%s' "$count" > %q
+    if [ "$count" -lt 5 ]; then exit 1; fi
+    (printf started > %q; sleep 1; printf survived > %q) &
+    child=$!
+    wait "$child"
+    ;;
+esac
+exit 0
+`, countPath, countPath, startedPath, survivedPath)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixtureDir := t.TempDir()
+			startedPath := filepath.Join(fixtureDir, "started")
+			survivedPath := filepath.Join(fixtureDir, "survived")
+			gitPath := filepath.Join(fixtureDir, "git")
+			script := "#!/bin/sh\n" + tt.scriptBody(startedPath, survivedPath, fixtureDir)
+			if err := os.WriteFile(gitPath, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			workDir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(workDir, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			assertWorkspacePreparationCancellation(t, startedPath, survivedPath, func(ctx context.Context) error {
+				return PreparePullRequestReviewContext(ctx, workDir, &AgentConfig{
+					PRBaseBranch: workspaceTestMainBranch,
+					PRBaseSHA:    strings.Repeat("a", 40),
+				})
+			})
+		})
+	}
+}
+
+func newWorkspaceReviewClone(t *testing.T, configureExternalDiff bool) string {
+	t.Helper()
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	sourceDir := t.TempDir()
+	runGitWS(t, sourceDir, "init")
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestMainBranch)
+	runGitWS(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitWS(t, sourceDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if configureExternalDiff {
+		attributesPath := filepath.Join(sourceDir, ".gitattributes")
+		if err := os.WriteFile(attributesPath, []byte("README.md diff=orka-stall\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "base")
+	runGitWS(t, sourceDir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestMainBranch)
+	runGitWS(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	runGitWS(t, sourceDir, "checkout", "-b", workspaceTestFeatureBranch)
+	if err := os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("base\nfeature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, sourceDir, "add", ".")
+	runGitWS(t, sourceDir, "commit", "-m", "feature")
+	runGitWS(t, sourceDir, "push", gitOriginRemote, workspaceTestFeatureBranch)
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runGitWS(t, t.TempDir(),
+		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
+	)
+	return cloneDir
+}
+
+func waitForWorkspaceTestFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("file %s was not created within %s", path, timeout)
 }
 
 func TestSafeGitBranchNameRejectsOptionLikeBranch(t *testing.T) {

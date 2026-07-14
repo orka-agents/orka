@@ -107,3 +107,10 @@ Create release-scoped static worker ClusterRoleBinding names.
 {{- define "orka.containerWorkerClusterRoleBindingName" -}}
 {{- printf "%s-container-worker-rolebinding" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
+
+{{/*
+Create the in-cluster controller callback URL used by worker Jobs.
+*/}}
+{{- define "orka.controllerURL" -}}
+{{- printf "http://%s.%s.svc:%v" (include "orka.fullname" .) .Release.Namespace .Values.service.port }}
+{{- end }}

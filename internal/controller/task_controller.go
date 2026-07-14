@@ -59,6 +59,11 @@ const (
 	failedMountEventStaleAfter                    = 2 * time.Minute
 	podLogLimitBytes                              = int64(5 << 20)
 	stdoutResultLogLimitBytes                     = int64(15 << 20)
+	terminalResultCollectionMaxAttempts           = 3
+	terminalResultCollectionRetryDelay            = time.Second
+	terminalResultCollectionAttemptsAnnotation    = "orka.ai/terminal-result-collection-attempts"
+	terminalResultCollectionExecutionAnnotation   = "orka.ai/terminal-result-collection-execution"
+	terminalResultCollectionRetryAtAnnotation     = "orka.ai/terminal-result-collection-retry-at"
 	maxResolvedApprovalsJSONForWorkerEnvBytes     = 32 * 1024
 	maxRecentResolvedApprovalsForWorkerEnv        = 32
 	maxResolvedApprovalWorkerEnvFieldBytes        = 512
@@ -78,6 +83,24 @@ const (
 	// ConditionTypeWaitingForApproval indicates a running task is parked on a human approval.
 	ConditionTypeWaitingForApproval = "WaitingForApproval"
 
+	// ConditionTypeRetryCleanup records the durable claim that authorizes
+	// destructive cleanup of one failed attempt before a replacement can start.
+	ConditionTypeRetryCleanup = "RetryCleanup"
+
+	// ConditionTypeTerminalTransition records a durable terminal-transition
+	// claim while the Task remains in its prior routable phase for crash recovery.
+	ConditionTypeTerminalTransition = "TerminalTransition"
+
+	// ConditionTypeTerminalResultCollection records that terminal result
+	// collection completed, including the valid case where no result was emitted.
+	// It prevents destructive cleanup from making a resumed transition unable to
+	// distinguish "no result" from "result source was already deleted".
+	ConditionTypeTerminalResultCollection = "TerminalResultCollection"
+
+	// ConditionTypeJobStart serializes retry Job unsuspension against terminal
+	// claims so a terminal-owned Task cannot start new work.
+	ConditionTypeJobStart = "JobStart"
+
 	// jobCreationVisibilityGracePeriod avoids failing a task when the controller cache
 	// has not observed the Job immediately after create.
 	jobCreationVisibilityGracePeriod = 30 * time.Second
@@ -89,6 +112,16 @@ const (
 	managedLabelValue      = scheduledRunLabelValue
 
 	workerRBACReconcileFailedReason = "WorkerRBACReconcileFailed"
+	jobOwnerKind                    = "Job"
+	retryTaskOwnerKind              = "Task"
+	legacyJobNameLabel              = "job-name"
+	retryCleanupStatePending        = "pending"
+	retryCleanupCompleteReason      = "RetryCleanupComplete"
+	taskSucceededReason             = "TaskSucceeded"
+	taskFailedReason                = "TaskFailed"
+	taskCancelledReason             = "TaskCancelled"
+	jobStartedReason                = "JobStarted"
+	jobStartClaimedReason           = "JobStartClaimed"
 )
 
 // TaskReconciler reconciles a Task object
@@ -274,6 +307,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
+	if _, _, claimed := claimedTerminalTransition(task); claimed {
+		return r.resumeClaimedTerminalTransition(ctx, task)
+	}
+
 	// Initialize status if empty
 	if task.Status.Phase == "" {
 		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
@@ -442,11 +479,24 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		// Clean up result data from store
-		if task.Status.ResultRef != nil && task.Status.ResultRef.Available && r.ResultStore != nil {
+		cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task deleted")
+		if cancelErr != nil {
+			log.Error(cancelErr, "failed to persist or request deleted harness runtime turn cancellation")
+			return ctrl.Result{}, cancelErr
+		}
+		if !cancelled {
+			log.Info("waiting to cancel deleted harness runtime turn", "retryAfter", retryAfter)
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
+		}
+
+		var storeCleanupErrs []error
+
+		// Result deletion is idempotent and must not depend on status advertisement:
+		// a result may have been persisted immediately before the status write failed.
+		if r.ResultStore != nil {
 			if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete result from store", "task", task.Name)
-				// Continue with finalizer removal anyway
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting result from store: %w", err))
 			}
 		}
 
@@ -454,6 +504,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.ArtifactStore != nil {
 			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete artifacts", "task", task.Name)
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting artifacts: %w", err))
 			}
 		}
 
@@ -461,7 +512,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.PlanStore != nil {
 			if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete plan state", "task", task.Name)
-				// Continue with finalizer removal anyway
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting plan state: %w", err))
 			}
 		}
 
@@ -469,10 +520,12 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.MessageStore != nil {
 			if err := r.MessageStore.DeleteTaskMessages(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete task messages", "task", task.Name)
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting task messages: %w", err))
 			}
 			// If this is a coordinator, clean up all children's messages
 			if err := r.MessageStore.DeleteParentMessages(ctx, task.Namespace, task.Name); err != nil {
 				log.Error(err, "failed to delete parent messages", "task", task.Name)
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting parent messages: %w", err))
 			}
 		}
 
@@ -481,36 +534,30 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 		if r.ExecutionEventStore != nil {
 			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
 				log.Error(err, "failed to delete execution events", "task", task.Name)
-				return ctrl.Result{}, err
+				storeCleanupErrs = append(storeCleanupErrs, fmt.Errorf("deleting execution events: %w", err))
 			}
-		}
-
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task deleted"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel deleted harness runtime turn", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel deleted harness runtime turn")
 		}
 
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, errors.Join(append(storeCleanupErrs, err)...)
 		}
 		if waitingForJob {
+			if err := errors.Join(storeCleanupErrs...); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to release substrate pool actor leases")
-			return ctrl.Result{}, err
+			return ctrl.Result{}, errors.Join(append(storeCleanupErrs, err)...)
 		}
 		if !releasedPoolLeases {
+			if err := errors.Join(storeCleanupErrs...); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 
@@ -520,6 +567,10 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				log.Error(err, "failed to release session lock")
 				// Continue with finalizer removal anyway
 			}
+		}
+
+		if err := errors.Join(storeCleanupErrs...); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		// Remove finalizer
@@ -539,6 +590,14 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 // handlePending handles Tasks in Pending phase
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if result, handled, err := r.handleRetryNotBefore(ctx, task); err != nil || handled {
+		return result, err
+	}
+
+	if result, handled, err := r.adoptRetryReplacementIfPresent(ctx, task); err != nil || handled {
+		return result, err
+	}
 
 	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
 		log.Error(err, "failed to clear durable approval decision nudge")
@@ -734,12 +793,12 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 	}
 
 	if err := r.SessionManager.AcquireLock(ctx, task); err != nil {
-		if strings.Contains(err.Error(), "already locked") {
+		if errors.Is(err, store.ErrConflict) || strings.Contains(err.Error(), "already locked") {
 			session, getErr := r.SessionManager.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
 			if getErr != nil {
 				return ctrl.Result{}, getErr, true
 			}
-			if session.ActiveTask == task.Name {
+			if r.SessionManager.ownsLock(session, task) {
 				return ctrl.Result{}, nil, false
 			}
 			if session.ActiveTask == "" {
@@ -1148,26 +1207,75 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 
 // createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
+	retryGate, result, proceed, err := r.prepareTaskJobCreation(ctx, task)
+	if err != nil || !proceed {
+		return result, err
+	}
+
+	job, reservedPoolActor, result, proceed, err := r.buildTaskJobForCreation(ctx, task, agent, provider)
+	if err != nil || !proceed {
+		return result, err
+	}
+
+	job, jobCreated, result, proceed, err := r.createOrAdoptTaskJob(ctx, task, retryGate, job, reservedPoolActor)
+	if err != nil || !proceed {
+		return result, err
+	}
+
+	return r.persistTaskJobCreation(ctx, task, retryGate, job, jobCreated, reservedPoolActor)
+}
+
+func (r *TaskReconciler) prepareTaskJobCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (*retryGateExpectation, ctrl.Result, bool, error) {
 	log := logf.FromContext(ctx)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 
 	latest := &corev1alpha1.Task{}
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
-		return ctrl.Result{}, err
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return nil, ctrl.Result{}, false, err
 	}
 	if !canStartTaskJob(latest.Status.Phase) {
 		task.Status = latest.Status
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
-		return ctrl.Result{}, nil
+		return nil, ctrl.Result{}, false, nil
 	}
 
-	// Ensure worker ServiceAccount and RBAC exist in the task namespace
+	var retryGate *retryGateExpectation
+	if _, exists := latest.Annotations[labels.AnnotationRetryNotBefore]; exists {
+		if result, handled, err := r.handleRetryNotBefore(ctx, latest); err != nil || handled {
+			return nil, result, false, err
+		}
+		expected, exists := retryGateExpectationFromTask(latest)
+		if !exists {
+			return nil, ctrl.Result{RequeueAfter: time.Second}, false, nil
+		}
+		retryGate = &expected
+	}
+	*task = *latest.DeepCopy()
+	return retryGate, ctrl.Result{}, true, nil
+}
+
+func (r *TaskReconciler) buildTaskJobForCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	provider *corev1alpha1.Provider,
+) (*batchv1.Job, bool, ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+
+	// Worker RBAC reconciliation is best-effort because existing RBAC may still
+	// be sufficient for the Job to run.
 	if err := r.ensureWorkerRBAC(ctx, task.Namespace); err != nil {
 		log.Error(err, "failed to ensure worker RBAC")
 		if r.Recorder != nil {
 			r.Recorder.Eventf(task, corev1.EventTypeWarning, workerRBACReconcileFailedReason,
 				"failed to ensure worker RBAC in namespace %q: %v", task.Namespace, err)
 		}
-		// Non-fatal: continue with job creation, it may still work
 	}
 
 	workspaceRequest, err := r.resolveExecutionWorkspaceRequest(ctx, task)
@@ -1175,23 +1283,25 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Error(err, "failed to resolve execution workspace")
 		if statusErr := r.markExecutionWorkspaceValidationFailed(ctx, task, err); statusErr != nil {
 			log.Error(statusErr, "failed to update execution workspace validation status")
-			return ctrl.Result{}, statusErr
+			return nil, false, ctrl.Result{}, false, statusErr
 		}
-		return r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("failed to resolve execution workspace: %v", err))
+		return nil, false, result, false, failErr
 	}
+
 	reservedPoolActor := false
 	if workspaceRequest != nil && workspaceRequest.PoolName != "" {
 		reserved, err := r.reserveSubstratePoolActor(ctx, task, workspaceRequest)
 		if err != nil {
 			log.Error(err, "failed to reserve substrate pool actor")
-			return ctrl.Result{}, err
+			return nil, false, ctrl.Result{}, false, err
 		}
 		if !reserved {
 			log.Info("all substrate pool actors are busy",
 				"pool", workspaceRequest.PoolName,
 				"poolNamespace", workspaceRequest.PoolNamespace,
 			)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			return nil, false, ctrl.Result{RequeueAfter: 5 * time.Second}, false, nil
 		}
 		reservedPoolActor = true
 	}
@@ -1201,84 +1311,636 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		resolvedApprovalsJSON, err = r.resolvedApprovalsJSONForTask(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to derive resolved approvals")
-			if reservedPoolActor {
-				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-					return ctrl.Result{}, releaseErr
-				}
+			if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+				return nil, false, ctrl.Result{}, false, releaseErr
 			}
-			return ctrl.Result{}, err
+			return nil, false, ctrl.Result{}, false, err
 		}
 	}
 
-	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{
 		ExecutionWorkspace:    workspaceRequest,
 		ResolvedApprovalsJSON: resolvedApprovalsJSON,
 	})
 	if err != nil {
 		log.Error(err, "failed to build Job")
-		if reservedPoolActor {
-			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-				return ctrl.Result{}, releaseErr
-			}
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
 		}
-		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
+		return nil, false, result, false, failErr
 	}
 
-	// Set owner reference
 	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
 		log.Error(err, "failed to set owner reference")
-		if reservedPoolActor {
-			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-				return ctrl.Result{}, releaseErr
-			}
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
 		}
-		return ctrl.Result{}, err
+		return nil, false, ctrl.Result{}, false, err
 	}
 
-	// Create the Job
-	if err := r.Create(ctx, job); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			// Job already exists, update status
-			task.Status.JobName = job.Name
-		} else {
-			log.Error(err, "failed to create Job")
-			if reservedPoolActor {
-				if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
-					return ctrl.Result{}, releaseErr
-				}
-			}
-			return r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", err))
+	return job, reservedPoolActor, ctrl.Result{}, true, nil
+}
+
+func (r *TaskReconciler) releaseTaskJobPoolActorReservation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	reservedPoolActor bool,
+) error {
+	if !reservedPoolActor {
+		return nil
+	}
+	return r.releaseSubstratePoolActorLeases(ctx, task)
+}
+
+func (r *TaskReconciler) createOrAdoptTaskJob(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retryGate *retryGateExpectation,
+	job *batchv1.Job,
+	reservedPoolActor bool,
+) (*batchv1.Job, bool, ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+	if retryGate != nil {
+		allowed, err := r.retryTaskJobCreationStillAllowed(ctx, task, *retryGate)
+		if err != nil {
+			return nil, false, ctrl.Result{}, false, err
 		}
-	} else {
+		if !allowed {
+			log.Info("skipping retry Job creation because the retry gate is no longer current")
+			if releaseErr := r.releaseUnusedTaskJobPoolActorReservation(ctx, task, job, reservedPoolActor); releaseErr != nil {
+				return nil, false, ctrl.Result{}, false, releaseErr
+			}
+			return nil, false, ctrl.Result{RequeueAfter: time.Second}, false, nil
+		}
+		suspend := true
+		job.Spec.Suspend = &suspend
+		if job.Annotations == nil {
+			job.Annotations = map[string]string{}
+		}
+		job.Annotations[labels.AnnotationRetryTaskGeneration] = strconv.FormatInt(task.Generation, 10)
+		job.Annotations[labels.AnnotationRetryAttempt] = strconv.FormatInt(int64(retryGate.attempts+1), 10)
+	}
+
+	createErr := r.Create(ctx, job)
+	if createErr == nil {
 		task.Status.JobName = job.Name
+		return job, true, ctrl.Result{}, true, nil
 	}
 
-	// Update status to Running
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	existing := &batchv1.Job{}
+	getErr := reader.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing)
+	if getErr != nil {
+		if !apierrors.IsNotFound(getErr) {
+			return nil, false, ctrl.Result{}, false, getErr
+		}
+		if apierrors.IsAlreadyExists(createErr) || !jobCreateFailureIsDefinitive(createErr) {
+			log.Error(createErr, "Job create outcome is unknown; retrying without failing the Task", "job", job.Name)
+			return nil, false, ctrl.Result{}, false, fmt.Errorf("creating Job %s/%s has unknown outcome: %w", job.Namespace, job.Name, createErr)
+		}
+
+		log.Error(createErr, "failed to create Job")
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
+		}
+		result, failErr := r.failTask(ctx, task, fmt.Sprintf("failed to create job: %v", createErr))
+		return nil, false, result, false, failErr
+	}
+	if !retryJobControlledByTask(existing, task) {
+		if releaseErr := r.releaseTaskJobPoolActorReservation(ctx, task, reservedPoolActor); releaseErr != nil {
+			return nil, false, ctrl.Result{}, false, releaseErr
+		}
+		return nil, false, ctrl.Result{}, false, fmt.Errorf(
+			"existing Job %s/%s is not controlled by Task %s/%s",
+			existing.Namespace,
+			existing.Name,
+			task.Namespace,
+			task.Name,
+		)
+	}
+	if !existing.DeletionTimestamp.IsZero() {
+		return nil, false, ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	}
+	if retryGate != nil && !retryReplacementMatchesTask(existing, task) {
+		deleted, deleteErr := r.deleteStaleRetryReplacement(ctx, task, existing)
+		if deleteErr != nil {
+			return nil, false, ctrl.Result{}, false, deleteErr
+		}
+		if !deleted {
+			return nil, false, ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+		}
+		return nil, false, ctrl.Result{RequeueAfter: time.Second}, false, nil
+	}
+
+	task.Status.JobName = existing.Name
+	return existing, false, ctrl.Result{}, true, nil
+}
+
+func (r *TaskReconciler) releaseUnusedTaskJobPoolActorReservation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	job *batchv1.Job,
+	reservedPoolActor bool,
+) error {
+	if !reservedPoolActor || task == nil || job == nil {
+		return nil
+	}
+	if task.Status.Phase == corev1alpha1.TaskPhaseRunning && task.Status.JobName == job.Name {
+		return nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	existing := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, existing); err == nil {
+		if retryJobControlledByTask(existing, task) {
+			return nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	return r.releaseSubstratePoolActorLeases(ctx, task)
+}
+
+func jobCreateFailureIsDefinitive(err error) bool {
+	return apierrors.IsBadRequest(err) ||
+		apierrors.IsForbidden(err) ||
+		apierrors.IsInvalid(err) ||
+		apierrors.IsMethodNotSupported(err) ||
+		apierrors.IsNotAcceptable(err) ||
+		apierrors.IsRequestEntityTooLargeError(err) ||
+		apierrors.IsUnauthorized(err) ||
+		apierrors.IsUnsupportedMediaType(err)
+}
+
+func (r *TaskReconciler) persistTaskJobCreation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retryGate *retryGateExpectation,
+	job *batchv1.Job,
+	_ bool,
+	reservedPoolActor bool,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	jobName := task.Status.JobName
+
 	now := metav1.Now()
 	task.Status.Phase = corev1alpha1.TaskPhaseRunning
 	task.Status.StartTime = &now
 	task.Status.Attempts++
 
-	if s := trace.SpanFromContext(ctx); s.IsRecording() {
-		s.AddEvent("phase.transition", trace.WithAttributes(
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.AddEvent("phase.transition", trace.WithAttributes(
 			attribute.String("task.phase", string(corev1alpha1.TaskPhaseRunning)),
 		))
 	}
 
-	attempts := task.Status.Attempts
-	jobName := task.Status.JobName
+	transitionedToRunning, err := r.updateTaskJobRunningStatus(ctx, task, retryGate, job, jobName, task.Status.Attempts, now)
+	if err != nil {
+		log.Error(err, "failed to update status")
+		return ctrl.Result{}, err
+	}
+	if retryGate != nil && !transitionedToRunning {
+		if cleanupErr := r.deleteUntrackedRetryReplacement(ctx, task, *retryGate, job); cleanupErr != nil {
+			return ctrl.Result{}, cleanupErr
+		}
+		if reservedPoolActor && task.Status.JobName != job.Name {
+			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+				return ctrl.Result{}, releaseErr
+			}
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if transitionedToRunning {
+		started, startErr := r.ensureTaskJobStarted(ctx, task, job)
+		if startErr != nil {
+			return ctrl.Result{}, startErr
+		}
+		if !started {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if retryGate != nil {
+			cleared, clearErr := r.clearTrackedRetryGate(ctx, task, job)
+			if clearErr != nil {
+				return ctrl.Result{}, clearErr
+			}
+			if !cleared {
+				if cleanupErr := r.deleteUntrackedRetryReplacement(ctx, task, *retryGate, job); cleanupErr != nil {
+					return ctrl.Result{}, cleanupErr
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+		r.recordTaskJobStartedEvents(ctx, task, jobName)
+	}
+
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+func (r *TaskReconciler) ensureTaskJobStarted(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (bool, error) { //nolint:gocyclo // Durable claim, provenance validation, unsuspend, and recovery are one state transition.
+	if task == nil || job == nil {
+		return false, nil
+	}
+	jobStartClaimed := meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeJobStart)
+	isRetryJob := jobHasRetryProvenance(job)
+	if (job.Spec.Suspend == nil || !*job.Spec.Suspend) && !jobStartClaimed && !isRetryJob {
+		return true, nil
+	}
+	if (job.Spec.Suspend == nil || !*job.Spec.Suspend) && !jobStartClaimed && jobStartValidated(task, job) {
+		return true, nil
+	}
+
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latestJob := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, latestJob); err != nil {
+		if apierrors.IsNotFound(err) {
+			if jobStartClaimed {
+				if completeErr := r.completeTaskJobStart(ctx, task, job, "JobUnavailable", "tracked Job is unavailable"); completeErr != nil {
+					return false, completeErr
+				}
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	if !latestJob.DeletionTimestamp.IsZero() {
+		if jobStartClaimed {
+			if err := r.completeTaskJobStart(ctx, task, latestJob, "JobDeleting", "tracked Job is deleting"); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+
+	claimed, err := r.claimTaskJobStart(ctx, task, latestJob)
+	if err != nil {
+		return false, err
+	}
+	if !claimed {
+		if meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeJobStart) {
+			if completeErr := r.completeTaskJobStart(ctx, task, latestJob, "JobStale", "claimed retry Job identity changed"); completeErr != nil {
+				return false, completeErr
+			}
+		}
+		if retryJobControlledByTask(latestJob, task) {
+			if _, deleteErr := r.deleteStaleRetryReplacement(ctx, task, latestJob); deleteErr != nil {
+				return false, deleteErr
+			}
+		}
+		return false, nil
+	}
+
+	currentJob := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, currentJob); err != nil {
+		if apierrors.IsNotFound(err) {
+			if completeErr := r.completeTaskJobStart(ctx, task, job, "JobUnavailable", "tracked Job is unavailable"); completeErr != nil {
+				return false, completeErr
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	if currentJob.UID != latestJob.UID || !retryJobControlledByTask(currentJob, task) {
+		if completeErr := r.completeTaskJobStart(ctx, task, currentJob, "JobStale", "tracked retry Job provenance is stale"); completeErr != nil {
+			return false, completeErr
+		}
+		if retryJobControlledByTask(currentJob, task) {
+			if _, deleteErr := r.deleteStaleRetryReplacement(ctx, task, currentJob); deleteErr != nil {
+				return false, deleteErr
+			}
+			return false, nil
+		}
+		return false, fmt.Errorf("tracked Job name %s/%s was replaced by an uncontrolled Job", currentJob.Namespace, currentJob.Name)
+	}
+	if !jobStartClaimMatches(task, currentJob) {
+		if completeErr := r.completeTaskJobStart(ctx, task, currentJob, "JobStale", "tracked retry Job provenance is stale"); completeErr != nil {
+			return false, completeErr
+		}
+		if _, deleteErr := r.deleteStaleRetryReplacement(ctx, task, currentJob); deleteErr != nil {
+			return false, deleteErr
+		}
+		return false, nil
+	}
+	stillCurrent, err := r.taskJobStartClaimStillCurrent(ctx, task, currentJob)
+	if err != nil {
+		return false, err
+	}
+	if !stillCurrent {
+		if !task.DeletionTimestamp.IsZero() && retryJobControlledByTask(currentJob, task) {
+			if completeErr := r.completeTaskJobStart(ctx, task, currentJob, "TaskDeleting", "Task deletion superseded Job start"); completeErr != nil {
+				return false, completeErr
+			}
+			if _, deleteErr := r.deleteStaleRetryReplacement(ctx, task, currentJob); deleteErr != nil {
+				return false, deleteErr
+			}
+		}
+		return false, nil
+	}
+	if currentJob.Spec.Suspend != nil && *currentJob.Spec.Suspend {
+		patch := client.MergeFromWithOptions(currentJob.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		suspend := false
+		currentJob.Spec.Suspend = &suspend
+		if err := r.Patch(ctx, currentJob, patch); err != nil {
+			return false, err
+		}
+	}
+	*job = *currentJob.DeepCopy()
+	if err := r.completeTaskJobStart(ctx, task, currentJob, "JobStarted", "retry Job unsuspended"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *TaskReconciler) taskJobStartClaimStillCurrent(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return false, err
+	}
+	expectedUID := task.UID
+	*task = *latest.DeepCopy()
+	return latest.UID == expectedUID &&
+		latest.DeletionTimestamp.IsZero() &&
+		!meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeTerminalTransition) &&
+		!meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeRetryCleanup) &&
+		jobStartClaimMatches(latest, job), nil
+}
+
+func (r *TaskReconciler) claimTaskJobStart(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	claimed := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		claimed = false
+		if !latest.DeletionTimestamp.IsZero() ||
+			latest.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			latest.Status.JobName != job.Name ||
+			meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeTerminalTransition) ||
+			meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeRetryCleanup) {
+			return nil
+		}
+		if meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeJobStart) {
+			claimed = jobStartClaimMatches(latest, job)
+			return nil
+		}
+		if !retryJobControlledByTask(job, latest) || !retryTrackedJobEligibleToStart(job, latest) {
+			return nil
+		}
+		generation, ok := retryJobGeneration(job)
+		if !ok {
+			return nil
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeJobStart,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: generation,
+			LastTransitionTime: metav1.Now(),
+			Reason:             jobStartClaimedReason,
+			Message:            jobStartIdentity(job),
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		claimed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return claimed, nil
+}
+
+func (r *TaskReconciler) completeTaskJobStart(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	job *batchv1.Job,
+	reason string,
+	message string,
+) error {
+	if job == nil {
+		return nil
+	}
+	jobName := job.Name
+	expectedTaskUID := task.UID
+	expectedClaim := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobStart)
+	if expectedClaim == nil || expectedClaim.Status != metav1.ConditionTrue {
+		return nil
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		if latest.UID != expectedTaskUID || latest.Status.Phase != corev1alpha1.TaskPhaseRunning || latest.Status.JobName != jobName {
+			return nil
+		}
+		condition := meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobStart)
+		if condition == nil || condition.Status != metav1.ConditionTrue ||
+			condition.Reason != expectedClaim.Reason ||
+			condition.Message != expectedClaim.Message ||
+			condition.ObservedGeneration != expectedClaim.ObservedGeneration {
+			return nil
+		}
+		observedGeneration := latest.Generation
+		conditionMessage := message
+		if reason == jobStartedReason {
+			if generation, ok := retryJobGeneration(job); ok {
+				observedGeneration = generation
+			}
+			conditionMessage = jobStartIdentity(job)
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeJobStart,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: observedGeneration,
+			LastTransitionTime: metav1.Now(),
+			Reason:             reason,
+			Message:            conditionMessage,
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return nil
+}
+
+func jobHasRetryProvenance(job *batchv1.Job) bool {
+	return job != nil && (strings.TrimSpace(job.Annotations[labels.AnnotationRetryAttempt]) != "" ||
+		strings.TrimSpace(job.Annotations[labels.AnnotationRetryTaskGeneration]) != "")
+}
+
+func jobStartValidated(task *corev1alpha1.Task, job *batchv1.Job) bool {
+	if !retryTrackedJobIdentityMatches(job, task) || !retryJobControlledByTask(job, task) {
+		return false
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobStart)
+	generation, ok := retryJobGeneration(job)
+	return condition != nil &&
+		condition.Status == metav1.ConditionFalse &&
+		condition.Reason == jobStartedReason &&
+		ok &&
+		condition.ObservedGeneration == generation &&
+		condition.Message == jobStartIdentity(job)
+}
+
+func jobStartClaimMatches(task *corev1alpha1.Task, job *batchv1.Job) bool {
+	if !retryTrackedJobIdentityMatches(job, task) || !retryJobControlledByTask(job, task) {
+		return false
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobStart)
+	generation, ok := retryJobGeneration(job)
+	return condition != nil &&
+		condition.Status == metav1.ConditionTrue &&
+		condition.Reason == jobStartClaimedReason &&
+		ok &&
+		condition.ObservedGeneration == generation &&
+		condition.Message == jobStartIdentity(job)
+}
+
+func retryJobGeneration(job *batchv1.Job) (int64, bool) {
+	if job == nil {
+		return 0, false
+	}
+	generation, err := strconv.ParseInt(strings.TrimSpace(job.Annotations[labels.AnnotationRetryTaskGeneration]), 10, 64)
+	return generation, err == nil
+}
+
+func retryJobAttempt(job *batchv1.Job) (int32, bool) {
+	if job == nil {
+		return 0, false
+	}
+	attempt, err := strconv.ParseInt(strings.TrimSpace(job.Annotations[labels.AnnotationRetryAttempt]), 10, 32)
+	return int32(attempt), err == nil
+}
+
+func jobStartIdentity(job *batchv1.Job) string {
+	if job == nil {
+		return ""
+	}
+	if job.UID != "" {
+		return "uid:" + string(job.UID)
+	}
+	return "name:" + job.Namespace + "/" + job.Name + "@" + job.ResourceVersion
+}
+
+func (r *TaskReconciler) clearTrackedRetryGate(ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	cleared := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		cleared = false
+		if _, exists := latest.Annotations[labels.AnnotationRetryNotBefore]; !exists {
+			cleared = true
+			return nil
+		}
+		if !jobStartValidated(latest, job) && !legacyTrackedRetryJob(latest, job) {
+			return nil
+		}
+		delete(latest.Annotations, labels.AnnotationRetryNotBefore)
+		delete(latest.Annotations, labels.AnnotationRetryJobUID)
+		delete(latest.Annotations, labels.AnnotationRetryCleanupState)
+		if err := r.Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		cleared = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return cleared, nil
+}
+
+func legacyTrackedRetryJob(task *corev1alpha1.Task, job *batchv1.Job) bool {
+	return task != nil &&
+		job != nil &&
+		!jobHasRetryProvenance(job) &&
+		(job.Spec.Suspend == nil || !*job.Spec.Suspend) &&
+		task.Status.Phase == corev1alpha1.TaskPhaseRunning &&
+		task.Status.JobName == job.Name &&
+		retryJobControlledByTask(job, task)
+}
+
+func (r *TaskReconciler) updateTaskJobRunningStatus(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	retryGate *retryGateExpectation,
+	job *batchv1.Job,
+	jobName string,
+	attempts int32,
+	now metav1.Time,
+) (bool, error) {
+	if retryGate != nil {
+		return r.updateRetryTaskRunningStatus(ctx, task, *retryGate, true, jobName, attempts, now)
+	}
+
 	transitionedToRunning := false
-	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+	err := r.updateStatusWithRetry(ctx, task, func(latest *corev1alpha1.Task) {
 		transitionedToRunning = false
-		if !canStartTaskJob(t.Status.Phase) {
+		if !canStartTaskJob(latest.Status.Phase) {
 			return
 		}
-		t.Status.Phase = corev1alpha1.TaskPhaseRunning
-		t.Status.StartTime = &now
-		t.Status.Attempts = attempts
-		t.Status.JobName = jobName
-		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+		latest.Status.Phase = corev1alpha1.TaskPhaseRunning
+		latest.Status.StartTime = &now
+		latest.Status.Attempts = attempts
+		latest.Status.JobName = jobName
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeRetryCleanup,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             "RetryAttemptStarted",
+			Message:            "retry attempt is running",
+		})
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeJobCreated,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: now,
@@ -1286,28 +1948,25 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			Message:            fmt.Sprintf("Job %s created", job.Name),
 		})
 		transitionedToRunning = true
-	}); err != nil {
-		log.Error(err, "failed to update status")
-		return ctrl.Result{}, err
-	}
-	if transitionedToRunning {
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskJobCreated,
-			execevents.ExecutionEventSeverityInfo,
-			fmt.Sprintf("Job %s created", jobName),
-		)
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskStarted,
-			execevents.ExecutionEventSeverityInfo,
-			fmt.Sprintf("Task started with Job %s", jobName),
-		)
-	}
+	})
+	return transitionedToRunning, err
+}
 
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+func (r *TaskReconciler) recordTaskJobStartedEvents(ctx context.Context, task *corev1alpha1.Task, jobName string) {
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskJobCreated,
+		execevents.ExecutionEventSeverityInfo,
+		fmt.Sprintf("Job %s created", jobName),
+	)
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskStarted,
+		execevents.ExecutionEventSeverityInfo,
+		fmt.Sprintf("Task started with Job %s", jobName),
+	)
 }
 
 func (r *TaskReconciler) reserveSubstratePoolActor(
@@ -1587,16 +2246,14 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				return result, err
 			}
 			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task timed out"); cancelErr != nil {
-				if isAgentRuntimeDependencyNotReady(cancelErr) {
-					if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-						return ctrl.Result{}, waitErr
-					} else if shouldWait {
-						log.Info("waiting to cancel timed-out harness runtime turn", "error", cancelErr)
-						return ctrl.Result{RequeueAfter: time.Second}, nil
-					}
-				}
-				log.Error(cancelErr, "failed to cancel timed-out harness runtime turn")
+			cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task timed out")
+			if cancelErr != nil {
+				log.Error(cancelErr, "failed to persist or request timed-out harness runtime turn cancellation")
+				return ctrl.Result{}, cancelErr
+			}
+			if !cancelled {
+				log.Info("waiting to cancel timed-out harness runtime turn", "retryAfter", retryAfter)
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
 			}
 			return r.failTask(ctx, task, "task timed out")
 		}
@@ -1663,6 +2320,23 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	if meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeJobStart) && task.Status.JobName != "" {
+		trackedJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: task.Status.JobName, Namespace: task.Namespace}}
+		started, err := r.ensureTaskJobStarted(ctx, task, trackedJob)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !started {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if jobHasRetryProvenance(trackedJob) {
+			if _, err := r.clearTrackedRetryGate(ctx, task, trackedJob); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	// Get the Job
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{
@@ -1693,12 +2367,26 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 					return result, err
 				}
 			}
-			if r.isWithinJobCreationVisibilityGracePeriod(task) {
+			if strings.TrimSpace(task.Annotations[labels.AnnotationRetryNotBefore]) == "" && r.isWithinJobCreationVisibilityGracePeriod(task) {
 				log.Info("job not found shortly after creation, waiting for cache visibility",
 					"job", task.Status.JobName,
 					"startTime", task.Status.StartTime,
 				)
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
+			if r.APIReader != nil {
+				authoritativeJob := &batchv1.Job{}
+				authoritativeErr := r.APIReader.Get(ctx, types.NamespacedName{
+					Name:      task.Status.JobName,
+					Namespace: task.Namespace,
+				}, authoritativeJob)
+				if authoritativeErr == nil {
+					log.Info("job missing from cache but present in API, waiting for cache visibility", "job", task.Status.JobName)
+					return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+				}
+				if !apierrors.IsNotFound(authoritativeErr) {
+					return ctrl.Result{}, authoritativeErr
+				}
 			}
 			if r.shouldRetry(task) {
 				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
@@ -1712,6 +2400,32 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	}
 
 	// Check Job status
+	if (job.Spec.Suspend != nil && *job.Spec.Suspend) ||
+		meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeJobStart) ||
+		(jobHasRetryProvenance(job) && !jobStartValidated(task, job)) {
+		started, err := r.ensureTaskJobStarted(ctx, task, job)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !started {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		if jobHasRetryProvenance(job) {
+			if _, err := r.clearTrackedRetryGate(ctx, task, job); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if jobHasRetryProvenance(job) {
+		if _, gatePresent := task.Annotations[labels.AnnotationRetryNotBefore]; gatePresent {
+			if _, err := r.clearTrackedRetryGate(ctx, task, job); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+	}
+
 	if job.Status.Succeeded > 0 {
 		// Check if this is an autonomous task that should continue iterating
 		if r.isAutonomousTask(ctx, task) {
@@ -2002,7 +2716,7 @@ func podBelongsToJob(pod *corev1.Pod, jobName string) bool {
 		}
 	}
 	for _, owner := range pod.OwnerReferences {
-		if owner.Kind == "Job" {
+		if owner.Kind == jobOwnerKind {
 			hasJobIdentity = true
 			if owner.Name == jobName {
 				return true
@@ -2040,18 +2754,25 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
-	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		if cancelErr := r.cancelHarnessWrapperTurn(ctx, task, "task cancelled"); cancelErr != nil {
-			if isAgentRuntimeDependencyNotReady(cancelErr) {
-				if shouldWait, waitErr := r.waitForHarnessCancelDependency(ctx, task); waitErr != nil {
-					return ctrl.Result{}, waitErr
-				} else if shouldWait {
-					log.Info("waiting to cancel harness runtime turn for cancelled task", "error", cancelErr)
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-			}
-			log.Error(cancelErr, "failed to cancel harness runtime turn for cancelled task")
+	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled || taskHasHarnessWrapperCancellationState(task) {
+		cancelled, retryAfter, cancelErr := r.ensureHarnessWrapperTurnCancelled(ctx, task, "task cancelled")
+		if cancelErr != nil {
+			log.Error(cancelErr, "failed to persist or request terminal harness runtime turn cancellation")
+			return ctrl.Result{}, cancelErr
 		}
+		if !cancelled {
+			log.Info("waiting to cancel harness runtime turn for terminal task", "retryAfter", retryAfter)
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
+		}
+	}
+
+	waitingForReplacement, err := r.cleanupTerminalRetryReplacement(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to clean up untracked terminal retry replacement")
+		return ctrl.Result{}, err
+	}
+	if waitingForReplacement {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
@@ -2156,6 +2877,53 @@ func (r *TaskReconciler) cleanupTerminalTaskJob(ctx context.Context, task *corev
 	return holdsPoolActor, nil
 }
 
+func (r *TaskReconciler) cleanupTerminalRetryReplacement(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil || task.UID == "" {
+		return false, nil
+	}
+	replacementJobName := buildTaskJobName(task)
+	if replacementJobName == "" || replacementJobName == task.Status.JobName {
+		return false, nil
+	}
+
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	replacement := &batchv1.Job{}
+	key := types.NamespacedName{Name: replacementJobName, Namespace: task.Namespace}
+	if err := reader.Get(ctx, key, replacement); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting terminal retry replacement Job %q: %w", replacementJobName, err)
+	}
+	if !retryJobControlledByTask(replacement, task) {
+		return false, nil
+	}
+	if !replacement.DeletionTimestamp.IsZero() {
+		return true, nil
+	}
+
+	propagationPolicy := metav1.DeletePropagationForeground
+	deleteOptions := deleteCurrentObjectPreconditions(replacement)
+	deleteOptions = append(deleteOptions, &client.DeleteOptions{PropagationPolicy: &propagationPolicy})
+	if err := r.Delete(ctx, replacement, deleteOptions...); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting terminal retry replacement Job %q: %w", replacement.Name, err)
+	}
+	remaining := &batchv1.Job{}
+	if err := reader.Get(ctx, key, remaining); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("confirming deletion of terminal retry replacement Job %q: %w", replacement.Name, err)
+	}
+	if replacement.UID != "" && remaining.UID != replacement.UID {
+		return true, nil
+	}
+	return true, nil
+}
+
 func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, task *corev1alpha1.Task) error {
 	if task.Labels[labels.LabelScheduledRun] != scheduledRunLabelValue {
 		return nil
@@ -2181,83 +2949,122 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	return nil
 }
 
-// completeTask marks a task as completed
+// completeTask claims and finalizes a terminal transition.
 func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Task, phase corev1alpha1.TaskPhase, message string) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	if executionEventTypeForTaskPhase(phase) == "" {
+		return ctrl.Result{}, fmt.Errorf("task completion phase %q is not terminal", phase)
+	}
 
-	now := metav1.Now()
-	task.Status.Phase = phase
-	task.Status.CompletionTime = &now
-	task.Status.Message = message
+	expected := taskExecutionExpectationFromTask(task)
+	claimed, err := r.claimTaskTerminalTransition(ctx, task, expected, phase, message)
+	if err != nil {
+		log.Error(err, "failed to claim terminal transition")
+		return ctrl.Result{}, err
+	}
+	if !claimed {
+		log.Info(
+			"skipping stale task completion because the execution is no longer current",
+			"expectedPhase", expected.phase,
+			"expectedAttempts", expected.attempts,
+			"expectedJob", expected.jobName,
+			"currentPhase", task.Status.Phase,
+			"currentAttempts", task.Status.Attempts,
+			"currentJob", task.Status.JobName,
+		)
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 
 	if s := trace.SpanFromContext(ctx); s.IsRecording() {
-		s.AddEvent("phase.transition", trace.WithAttributes(
+		s.AddEvent("phase.transition.claimed", trace.WithAttributes(
 			attribute.String("task.phase", string(phase)),
 		))
 	}
 
-	// Collect result from Job output
-	if err := r.collectResult(ctx, task); err != nil {
-		log.Error(err, "failed to collect result")
-		// Continue anyway, result collection is best-effort
-	}
-
-	// Update session if configured
-	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
-		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
-			log.Error(err, "failed to append session messages")
-			// Continue anyway
+	// The durable claim above is the linearization point. Terminal routing is
+	// delayed until the required finalization work below has run, so a crash or
+	// transient error leaves the Task in its prior phase with a resumable claim.
+	if !meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeTerminalResultCollection) {
+		if terminalResultCollectionAttempts(task) < terminalResultCollectionMaxAttempts {
+			if retryAfter := terminalResultCollectionRetryAfter(task, time.Now()); retryAfter > 0 {
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
+			}
+			if err := r.collectResult(ctx, task); err != nil {
+				collectionErr := err
+				var sourceErr *terminalResultSourceError
+				if !errors.As(collectionErr, &sourceErr) {
+					log.Error(collectionErr, "failed to collect result")
+					return ctrl.Result{}, collectionErr
+				}
+				attempt, retryAfter, shouldRetry, current, prepareErr := r.prepareTerminalResultCollectionRetry(
+					ctx,
+					task,
+					expected,
+					phase,
+					time.Now().UTC(),
+					sourceErr.permanent,
+				)
+				if prepareErr != nil {
+					return ctrl.Result{}, errors.Join(collectionErr, prepareErr)
+				}
+				if !current {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				if shouldRetry {
+					log.Error(sourceErr, "retrying terminal result source collection", "attempt", attempt)
+					return ctrl.Result{RequeueAfter: retryAfter}, nil
+				}
+				log.Error(
+					collectionErr,
+					"continuing terminal transition without best-effort result",
+					"attempt", attempt,
+					"permanent", sourceErr.permanent,
+				)
+			}
+		}
+		checkpointed, err := r.markTerminalResultCollectionComplete(ctx, task, expected, phase)
+		if err != nil {
+			log.Error(err, "failed to checkpoint terminal result collection")
+			return ctrl.Result{}, err
+		}
+		if !checkpointed {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	}
-	// Release session lock regardless of Append setting
-	if task.Spec.SessionRef != nil {
-		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
-			log.Error(err, "failed to release session lock")
-		}
+	cleanupResult, cleaned, err := r.cleanupClaimedTerminalExecution(ctx, task, phase)
+	if err != nil {
+		log.Error(err, "failed to clean up terminal-owned execution")
+		return ctrl.Result{}, err
 	}
-
-	// Clean up plan state on completion (best-effort)
+	if !cleaned {
+		return cleanupResult, nil
+	}
+	if err := r.finalizeTaskSession(ctx, task); err != nil {
+		log.Error(err, "failed to finalize task session")
+		return ctrl.Result{}, err
+	}
 	if r.PlanStore != nil {
 		if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 			log.Error(err, "failed to delete plan state on completion")
 		}
 	}
 
-	conditionStatus := metav1.ConditionTrue
-	reason := "TaskSucceeded"
-	switch phase {
-	case corev1alpha1.TaskPhaseFailed:
-		conditionStatus = metav1.ConditionFalse
-		reason = "TaskFailed"
-	case corev1alpha1.TaskPhaseCancelled:
-		conditionStatus = metav1.ConditionFalse
-		reason = "TaskCancelled"
+	now := metav1.Now()
+	if task.Spec.AgentRef != nil {
+		if err := r.updateAgentLastUsed(ctx, task.Namespace, task.Spec.AgentRef.Name, now); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "failed to update agent LastUsed")
+		}
 	}
 
-	resultRef := task.Status.ResultRef
-	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-		t.Status.Phase = phase
-		t.Status.CompletionTime = &now
-		t.Status.Message = message
-		t.Status.ResultRef = resultRef
-		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeWaitingForApproval,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: now,
-			Reason:             reason,
-			Message:            "task is terminal",
-		})
-		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeComplete,
-			Status:             conditionStatus,
-			LastTransitionTime: now,
-			Reason:             reason,
-			Message:            message,
-		})
-	}); err != nil {
-		log.Error(err, "failed to update completion status")
+	finalized, err := r.finalizeClaimedTerminalTransition(ctx, task, expected, phase, message, now)
+	if err != nil {
+		log.Error(err, "failed to finalize terminal transition")
 		return ctrl.Result{}, err
 	}
+	if !finalized {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
 	terminalEventErr := r.recordTaskLifecycleEvent(
 		ctx,
 		task,
@@ -2265,18 +3072,445 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		executionEventSeverityForTaskPhase(phase),
 		message,
 	)
-
-	// Update the Agent's LastUsed timestamp so TTL tracking works
-	if task.Spec.AgentRef != nil {
-		if err := r.updateAgentLastUsed(ctx, task.Namespace, task.Spec.AgentRef.Name, now); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "failed to update agent LastUsed")
-		}
-	}
 	if terminalEventErr != nil {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-
 	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+func terminalResultCollectionAttempts(task *corev1alpha1.Task) int {
+	if !terminalResultCollectionStateMatchesTask(task) {
+		return 0
+	}
+	attempts, err := strconv.Atoi(strings.TrimSpace(task.Annotations[terminalResultCollectionAttemptsAnnotation]))
+	if err != nil || attempts < 0 {
+		return 0
+	}
+	return attempts
+}
+
+func terminalResultCollectionRetryAfter(task *corev1alpha1.Task, now time.Time) time.Duration {
+	if !terminalResultCollectionStateMatchesTask(task) {
+		return 0
+	}
+	retryAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[terminalResultCollectionRetryAtAnnotation]))
+	if err != nil || !retryAt.After(now) {
+		return 0
+	}
+	return min(retryAt.Sub(now), terminalResultCollectionRetryDelay)
+}
+
+func terminalResultCollectionExecutionKey(expected taskExecutionExpectation) string {
+	payload := strings.Join([]string{
+		string(expected.taskUID),
+		string(expected.phase),
+		strconv.FormatInt(int64(expected.attempts), 10),
+		expected.jobName,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
+}
+
+func terminalResultCollectionStateMatchesTask(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return strings.TrimSpace(task.Annotations[terminalResultCollectionExecutionAnnotation]) ==
+		terminalResultCollectionExecutionKey(taskExecutionExpectationFromTask(task))
+}
+
+func (r *TaskReconciler) prepareTerminalResultCollectionRetry(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	phase corev1alpha1.TaskPhase,
+	now time.Time,
+	exhaust bool,
+) (attempt int, retryAfter time.Duration, shouldRetry, executionCurrent bool, err error) {
+	_, reason := terminalTransitionDetails(phase)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var current *corev1alpha1.Task
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		attempt = 0
+		retryAfter = 0
+		shouldRetry = false
+		executionCurrent = false
+		if !taskExecutionMatches(latest, expected) {
+			return nil
+		}
+		claim := meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeTerminalTransition)
+		if claim == nil || claim.Status != metav1.ConditionTrue || claim.Reason != reason {
+			return nil
+		}
+		executionCurrent = true
+		if exhaust {
+			attempt = terminalResultCollectionMaxAttempts
+			if err := r.patchTerminalResultCollectionState(ctx, latest, expected, attempt, ""); err != nil {
+				return err
+			}
+			current = latest
+			return nil
+		}
+		if retryAfter = terminalResultCollectionRetryAfter(latest, now); retryAfter > 0 {
+			attempt = terminalResultCollectionAttempts(latest)
+			shouldRetry = true
+			return nil
+		}
+		attempt = terminalResultCollectionAttempts(latest) + 1
+		if attempt >= terminalResultCollectionMaxAttempts {
+			attempt = terminalResultCollectionMaxAttempts
+			if err := r.patchTerminalResultCollectionState(ctx, latest, expected, attempt, ""); err != nil {
+				return err
+			}
+			current = latest
+			return nil
+		}
+		retryAt := now.Add(terminalResultCollectionRetryDelay)
+		if err := r.patchTerminalResultCollectionState(ctx, latest, expected, attempt, retryAt.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		current = latest
+		retryAfter = terminalResultCollectionRetryDelay
+		shouldRetry = true
+		return nil
+	})
+	if err != nil {
+		return 0, 0, false, false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return attempt, retryAfter, shouldRetry, executionCurrent, nil
+}
+
+func (r *TaskReconciler) patchTerminalResultCollectionState(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	attempts int,
+	retryAt string,
+) error {
+	patch := client.MergeFromWithOptions(task.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[terminalResultCollectionExecutionAnnotation] = terminalResultCollectionExecutionKey(expected)
+	task.Annotations[terminalResultCollectionAttemptsAnnotation] = strconv.Itoa(attempts)
+	if retryAt == "" {
+		delete(task.Annotations, terminalResultCollectionRetryAtAnnotation)
+	} else {
+		task.Annotations[terminalResultCollectionRetryAtAnnotation] = retryAt
+	}
+	return r.Patch(ctx, task, patch)
+}
+
+func (r *TaskReconciler) markTerminalResultCollectionComplete(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	phase corev1alpha1.TaskPhase,
+) (bool, error) {
+	_, reason := terminalTransitionDetails(phase)
+	resultRef := task.Status.ResultRef
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	checkpointed := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		checkpointed = false
+		if !taskExecutionMatches(latest, expected) {
+			return nil
+		}
+		claim := meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeTerminalTransition)
+		if claim == nil || claim.Status != metav1.ConditionTrue || claim.Reason != reason {
+			return nil
+		}
+		if resultRef != nil {
+			latest.Status.ResultRef = &corev1alpha1.ResultReference{Available: resultRef.Available}
+		}
+		checkpointReason := "NoResult"
+		checkpointMessage := "terminal result collection completed without a result"
+		if resultRef != nil && resultRef.Available {
+			checkpointReason = "ResultAvailable"
+			checkpointMessage = "terminal result collection completed with a stored result"
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeTerminalResultCollection,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             checkpointReason,
+			Message:            checkpointMessage,
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		checkpointed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return checkpointed, nil
+}
+
+func (r *TaskReconciler) cleanupClaimedTerminalExecution(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	phase corev1alpha1.TaskPhase,
+) (ctrl.Result, bool, error) {
+	terminalTask := task.DeepCopy()
+	terminalTask.Status.Phase = phase
+	waitingForReplacement, err := r.cleanupTerminalRetryReplacement(ctx, terminalTask)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if waitingForReplacement {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	}
+	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, terminalTask)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if waitingForJob {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	}
+	releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, terminalTask)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if !releasedPoolLeases {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, false, nil
+	}
+	return ctrl.Result{}, true, nil
+}
+
+func (r *TaskReconciler) finalizeTaskSession(ctx context.Context, task *corev1alpha1.Task) error {
+	if task.Spec.SessionRef == nil || r.SessionManager == nil {
+		return nil
+	}
+	return r.SessionManager.FinalizeTask(ctx, task, r.ResultStore)
+}
+
+type taskExecutionExpectation struct {
+	taskUID  types.UID
+	phase    corev1alpha1.TaskPhase
+	attempts int32
+	jobName  string
+}
+
+func taskExecutionExpectationFromTask(task *corev1alpha1.Task) taskExecutionExpectation {
+	if task == nil {
+		return taskExecutionExpectation{}
+	}
+	return taskExecutionExpectation{
+		taskUID:  task.UID,
+		phase:    task.Status.Phase,
+		attempts: task.Status.Attempts,
+		jobName:  task.Status.JobName,
+	}
+}
+
+func taskExecutionMatches(task *corev1alpha1.Task, expected taskExecutionExpectation) bool {
+	return task != nil &&
+		task.UID == expected.taskUID &&
+		task.Status.Phase == expected.phase &&
+		task.Status.Attempts == expected.attempts &&
+		task.Status.JobName == expected.jobName
+}
+
+func terminalTransitionDetails(phase corev1alpha1.TaskPhase) (metav1.ConditionStatus, string) {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded:
+		return metav1.ConditionTrue, taskSucceededReason
+	case corev1alpha1.TaskPhaseFailed:
+		return metav1.ConditionFalse, taskFailedReason
+	case corev1alpha1.TaskPhaseCancelled:
+		return metav1.ConditionFalse, taskCancelledReason
+	default:
+		return metav1.ConditionUnknown, ""
+	}
+}
+
+func terminalTransitionPhase(reason string) corev1alpha1.TaskPhase {
+	switch reason {
+	case taskSucceededReason:
+		return corev1alpha1.TaskPhaseSucceeded
+	case taskFailedReason:
+		return corev1alpha1.TaskPhaseFailed
+	case taskCancelledReason:
+		return corev1alpha1.TaskPhaseCancelled
+	default:
+		return ""
+	}
+}
+
+func claimedTerminalTransition(task *corev1alpha1.Task) (*metav1.Condition, corev1alpha1.TaskPhase, bool) {
+	if task == nil || executionEventTypeForTaskPhase(task.Status.Phase) != "" {
+		return nil, "", false
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeTerminalTransition)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		return nil, "", false
+	}
+	phase := terminalTransitionPhase(condition.Reason)
+	return condition, phase, phase != ""
+}
+
+func (r *TaskReconciler) resumeClaimedTerminalTransition(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	condition, phase, ok := claimedTerminalTransition(task)
+	if !ok {
+		return ctrl.Result{}, nil
+	}
+	return r.completeTask(ctx, task, phase, condition.Message)
+}
+
+func (r *TaskReconciler) claimTaskTerminalTransition(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	phase corev1alpha1.TaskPhase,
+	message string,
+) (bool, error) {
+	_, reason := terminalTransitionDetails(phase)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	claimed := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		claimed = false
+		if executionEventTypeForTaskPhase(expected.phase) != "" || !taskExecutionMatches(latest, expected) {
+			return nil
+		}
+		if meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeRetryCleanup) {
+			return nil
+		}
+		if meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeJobStart) {
+			return nil
+		}
+		if existing := meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeTerminalTransition); existing != nil && existing.Status == metav1.ConditionTrue {
+			claimed = existing.Reason == reason && existing.Message == message
+			return nil
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeTerminalTransition,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             reason,
+			Message:            message,
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		claimed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return claimed, nil
+}
+
+func (r *TaskReconciler) finalizeClaimedTerminalTransition(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	phase corev1alpha1.TaskPhase,
+	message string,
+	now metav1.Time,
+) (bool, error) {
+	conditionStatus, reason := terminalTransitionDetails(phase)
+	resultRef := task.Status.ResultRef
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	finalized := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		finalized = false
+		if !taskExecutionMatches(latest, expected) {
+			return nil
+		}
+		claim := meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeTerminalTransition)
+		if claim == nil || claim.Status != metav1.ConditionTrue || claim.Reason != reason || claim.Message != message {
+			return nil
+		}
+		latest.Status.Phase = phase
+		latest.Status.CompletionTime = &now
+		latest.Status.Message = message
+		if resultRef != nil {
+			latest.Status.ResultRef = &corev1alpha1.ResultReference{Available: resultRef.Available}
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeTerminalTransition,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            "terminal transition finalized",
+		})
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeWaitingForApproval,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            "task is terminal",
+		})
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeComplete,
+			Status:             conditionStatus,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            message,
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		finalized = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return finalized, nil
 }
 
 func (r *TaskReconciler) updateAgentLastUsed(ctx context.Context, namespace, name string, at metav1.Time) error {
@@ -2297,6 +3531,13 @@ func (r *TaskReconciler) failTask(ctx context.Context, task *corev1alpha1.Task, 
 
 // shouldRetry checks if the task should be retried
 func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
+	return taskShouldRetry(task)
+}
+
+func taskShouldRetry(task *corev1alpha1.Task) bool {
+	if task == nil {
+		return false
+	}
 	if task.Spec.RetryPolicy == nil {
 		return false
 	}
@@ -2306,94 +3547,1132 @@ func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
 	return task.Status.Attempts <= task.Spec.RetryPolicy.MaxRetries
 }
 
-// retryTask creates a new Job for a retry attempt
+func (r *TaskReconciler) handleRetryNotBefore(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if task == nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	notBefore, retryDisallowedExpected, err := r.preparePendingRetryGate(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		return ctrl.Result{}, true, nil
+	}
+	if _, exists := task.Annotations[labels.AnnotationRetryNotBefore]; !exists {
+		return ctrl.Result{}, false, nil
+	}
+	cleanupState, cleanupStateSet := task.Annotations[labels.AnnotationRetryCleanupState]
+	if meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeRetryCleanup) {
+		result, completed, cleanupErr := r.finishRetryCleanup(ctx, task)
+		if cleanupErr != nil {
+			return ctrl.Result{}, true, cleanupErr
+		}
+		if !completed {
+			return result, true, nil
+		}
+		notBefore = retryNotBeforeTime(task, notBefore)
+	}
+	if retryDisallowedExpected != nil {
+		return r.handleDisallowedRetryGate(ctx, task, *retryDisallowedExpected)
+	}
+
+	if !retryCleanupComplete(task) && !cleanupStateSet && notBefore.After(time.Now()) {
+		return ctrl.Result{RequeueAfter: retryRequeueAfter(notBefore)}, true, nil
+	}
+	if !retryCleanupComplete(task) && (cleanupState == retryCleanupStatePending || !cleanupStateSet) {
+		claimed, claimErr := r.claimRetryCleanup(ctx, task)
+		if claimErr != nil {
+			return ctrl.Result{}, true, claimErr
+		}
+		if !claimed {
+			return ctrl.Result{RequeueAfter: time.Second}, true, nil
+		}
+		result, completed, cleanupErr := r.finishRetryCleanup(ctx, task)
+		if cleanupErr != nil {
+			return ctrl.Result{}, true, cleanupErr
+		}
+		if !completed {
+			return result, true, nil
+		}
+		notBefore = retryNotBeforeTime(task, notBefore)
+	}
+	if notBefore.After(time.Now()) {
+		return ctrl.Result{RequeueAfter: retryRequeueAfter(notBefore)}, true, nil
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func (r *TaskReconciler) preparePendingRetryGate(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (time.Time, *retryGateExpectation, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var (
+		current         *corev1alpha1.Task
+		notBefore       time.Time
+		retryDisallowed *retryGateExpectation
+	)
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		notBefore = time.Time{}
+		retryDisallowed = nil
+		if latest.Status.Phase != corev1alpha1.TaskPhasePending {
+			return nil
+		}
+		rawValue, exists := latest.Annotations[labels.AnnotationRetryNotBefore]
+		if !exists {
+			return nil
+		}
+		if !r.shouldRetry(latest) {
+			if expected, ok := retryGateExpectationFromTask(latest); ok {
+				retryDisallowed = &expected
+			}
+			return nil
+		}
+		parsed, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(rawValue))
+		changed := false
+		if state, exists := latest.Annotations[labels.AnnotationRetryCleanupState]; exists && state != retryCleanupStatePending && !retryCleanupComplete(latest) {
+			latest.Annotations[labels.AnnotationRetryCleanupState] = retryCleanupStatePending
+			changed = true
+		}
+		if parseErr != nil || parsed.IsZero() {
+			parsed = time.Now().Add(r.calculateRetryDelay(latest)).UTC()
+			latest.Annotations[labels.AnnotationRetryNotBefore] = parsed.Format(time.RFC3339Nano)
+			changed = true
+		}
+		if changed {
+			if err := r.Update(ctx, latest); err != nil {
+				return err
+			}
+			current = latest
+		}
+		notBefore = parsed
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return notBefore, retryDisallowed, nil
+}
+
+func (r *TaskReconciler) handleDisallowedRetryGate(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected retryGateExpectation,
+) (ctrl.Result, bool, error) {
+	if result, adopted, err := r.adoptRetryReplacementIfPresent(ctx, task); err != nil || adopted {
+		return result, true, err
+	}
+	resumed, err := r.resumeRetrySourceAfterPolicyDisallowed(ctx, task, expected)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if !resumed {
+		return ctrl.Result{RequeueAfter: time.Second}, true, nil
+	}
+	return ctrl.Result{RequeueAfter: time.Second}, true, nil
+}
+
+func retryNotBeforeTime(task *corev1alpha1.Task, fallback time.Time) time.Time {
+	if task == nil {
+		return fallback
+	}
+	raw := strings.TrimSpace(task.Annotations[labels.AnnotationRetryNotBefore])
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed
+	}
+	return fallback
+}
+
+func (r *TaskReconciler) resumeRetrySourceAfterPolicyDisallowed(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected retryGateExpectation,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	resumed := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		resumed = false
+		if !retryGateMatchesTask(latest, expected) || r.shouldRetry(latest) {
+			return nil
+		}
+		latest.Status.Phase = corev1alpha1.TaskPhaseRunning
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		resumed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return resumed, nil
+}
+
+func (r *TaskReconciler) adoptRetryReplacementIfPresent(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return ctrl.Result{}, false, err
+	}
+	*task = *latest.DeepCopy()
+	if latest.Status.Phase != corev1alpha1.TaskPhasePending {
+		return ctrl.Result{}, false, nil
+	}
+	expected, exists := retryGateExpectationFromTask(latest)
+	if !exists {
+		expected = retryGateExpectation{
+			taskUID:  latest.UID,
+			attempts: latest.Status.Attempts,
+			jobName:  latest.Status.JobName,
+		}
+	}
+
+	replacementJobName := buildTaskJobName(latest)
+	if replacementJobName == expected.jobName {
+		return ctrl.Result{}, false, nil
+	}
+	replacement := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: replacementJobName, Namespace: latest.Namespace}, replacement); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, false, nil
+		}
+		return ctrl.Result{}, false, err
+	}
+	if !retryJobControlledByTask(replacement, latest) {
+		return ctrl.Result{}, true, fmt.Errorf("retry replacement Job %q is not controlled by Task %s/%s", replacement.Name, latest.Namespace, latest.Name)
+	}
+	if !replacement.DeletionTimestamp.IsZero() {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, true, nil
+	}
+	if !retryReplacementMatchesTask(replacement, latest) {
+		deleted, err := r.deleteStaleRetryReplacement(ctx, latest, replacement)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		if !deleted {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, true, nil
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, true, nil
+	}
+
+	now := metav1.Now()
+	transitioned, err := r.updateRetryTaskRunningStatus(
+		ctx,
+		latest,
+		expected,
+		exists,
+		replacement.Name,
+		expected.attempts+1,
+		now,
+	)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	*task = *latest.DeepCopy()
+	if !transitioned {
+		if cleanupErr := r.deleteUntrackedRetryReplacement(ctx, latest, expected, replacement); cleanupErr != nil {
+			return ctrl.Result{}, true, cleanupErr
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, true, nil
+	}
+	started, err := r.ensureTaskJobStarted(ctx, latest, replacement)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if !started {
+		return ctrl.Result{RequeueAfter: time.Second}, true, nil
+	}
+	if exists {
+		cleared, clearErr := r.clearTrackedRetryGate(ctx, latest, replacement)
+		if clearErr != nil {
+			return ctrl.Result{}, true, clearErr
+		}
+		if !cleared {
+			if cleanupErr := r.deleteUntrackedRetryReplacement(ctx, latest, expected, replacement); cleanupErr != nil {
+				return ctrl.Result{}, true, cleanupErr
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, true, nil
+		}
+	}
+
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		latest,
+		execevents.ExecutionEventTypeTaskJobCreated,
+		execevents.ExecutionEventSeverityInfo,
+		fmt.Sprintf("Job %s created", replacement.Name),
+	)
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		latest,
+		execevents.ExecutionEventTypeTaskStarted,
+		execevents.ExecutionEventSeverityInfo,
+		fmt.Sprintf("Task started with Job %s", replacement.Name),
+	)
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, true, nil
+}
+
+func retryReplacementMatchesTask(replacement *batchv1.Job, task *corev1alpha1.Task) bool {
+	if replacement == nil || task == nil || task.Status.Phase != corev1alpha1.TaskPhasePending || !retryCleanupComplete(task) {
+		return false
+	}
+	if !jobHasRetryProvenance(replacement) {
+		return replacement.Spec.Suspend == nil || !*replacement.Spec.Suspend
+	}
+	return retryJobProvenanceMatches(replacement, task, task.Status.Attempts+1)
+}
+
+func retryTrackedJobEligibleToStart(job *batchv1.Job, task *corev1alpha1.Task) bool {
+	if !retryTrackedJobIdentityMatches(job, task) {
+		return false
+	}
+	_, generationOK := retryJobGeneration(job)
+	return generationOK
+}
+
+func retryTrackedJobIdentityMatches(job *batchv1.Job, task *corev1alpha1.Task) bool {
+	if job == nil || task == nil || task.Status.Phase != corev1alpha1.TaskPhaseRunning || task.Status.JobName != job.Name {
+		return false
+	}
+	attempt, ok := retryJobAttempt(job)
+	return ok && attempt == task.Status.Attempts
+}
+
+func retryJobProvenanceMatches(job *batchv1.Job, task *corev1alpha1.Task, expectedAttempt int32) bool {
+	if job == nil || task == nil || !task.DeletionTimestamp.IsZero() || !retryAttemptAllowed(task, expectedAttempt) {
+		return false
+	}
+	generation, ok := retryJobGeneration(job)
+	if !ok || generation != task.Generation {
+		return false
+	}
+	attempt, ok := retryJobAttempt(job)
+	return ok && attempt == expectedAttempt
+}
+
+func retryAttemptAllowed(task *corev1alpha1.Task, attempt int32) bool {
+	return task != nil && task.Spec.RetryPolicy != nil && attempt > 1 && attempt <= task.Spec.RetryPolicy.MaxRetries+1
+}
+
+func (r *TaskReconciler) deleteStaleRetryReplacement(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	replacement *batchv1.Job,
+) (bool, error) {
+	if !retryJobControlledByTask(replacement, task) {
+		return false, fmt.Errorf("stale retry replacement Job %s/%s is not controlled by Task %s/%s", replacement.Namespace, replacement.Name, task.Namespace, task.Name)
+	}
+	propagationPolicy := metav1.DeletePropagationForeground
+	deleteOptions := deleteCurrentObjectPreconditions(replacement)
+	deleteOptions = append(deleteOptions, &client.DeleteOptions{PropagationPolicy: &propagationPolicy})
+	if err := r.Delete(ctx, replacement, deleteOptions...); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("deleting stale retry replacement Job %q: %w", replacement.Name, err)
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	remaining := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}, remaining); err != nil {
+		if apierrors.IsNotFound(err) {
+			if releaseErr := r.releaseSubstratePoolActorLeases(ctx, task); releaseErr != nil {
+				return false, releaseErr
+			}
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+func (r *TaskReconciler) ensureRetryNotBefore(ctx context.Context, task *corev1alpha1.Task) (time.Time, error) {
+	expectedUID := task.UID
+	expectedJobName := task.Status.JobName
+	expectedAttempts := task.Status.Attempts
+	expectedJobUID, err := r.retryTaskJobUID(ctx, task, expectedJobName)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var (
+		current   *corev1alpha1.Task
+		notBefore time.Time
+	)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		if latest.UID != expectedUID ||
+			latest.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			latest.Status.JobName != expectedJobName ||
+			latest.Status.Attempts != expectedAttempts {
+			return nil
+		}
+		if !r.shouldRetry(latest) {
+			return nil
+		}
+
+		if raw := strings.TrimSpace(latest.Annotations[labels.AnnotationRetryNotBefore]); raw != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil && !parsed.IsZero() &&
+				(latest.Status.StartTime == nil || parsed.After(latest.Status.StartTime.Time)) {
+				needsUpdate := false
+				if latest.Annotations[labels.AnnotationRetryCleanupState] != retryCleanupStatePending && !retryCleanupComplete(latest) {
+					latest.Annotations[labels.AnnotationRetryCleanupState] = retryCleanupStatePending
+					needsUpdate = true
+				}
+				if _, exists := latest.Annotations[labels.AnnotationRetryJobUID]; !exists {
+					latest.Annotations[labels.AnnotationRetryJobUID] = string(expectedJobUID)
+					needsUpdate = true
+				}
+				if needsUpdate {
+					if err := r.Update(ctx, latest); err != nil {
+						return err
+					}
+					current = latest
+				}
+				notBefore = parsed
+				return nil
+			}
+		}
+
+		if latest.Annotations == nil {
+			latest.Annotations = map[string]string{}
+		}
+		proposed := time.Now().Add(r.calculateRetryDelay(latest)).UTC()
+		latest.Annotations[labels.AnnotationRetryNotBefore] = proposed.Format(time.RFC3339Nano)
+		latest.Annotations[labels.AnnotationRetryJobUID] = string(expectedJobUID)
+		latest.Annotations[labels.AnnotationRetryCleanupState] = retryCleanupStatePending
+		if err := r.Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		notBefore = proposed
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return notBefore, nil
+}
+
+type retryGateExpectation struct {
+	taskUID       types.UID
+	generation    int64
+	attempts      int32
+	jobName       string
+	notBefore     string
+	jobUID        string
+	jobUIDPresent bool
+	cleanupState  string
+	cleanupSet    bool
+}
+
+func retryGateExpectationFromTask(task *corev1alpha1.Task) (retryGateExpectation, bool) {
+	if task == nil {
+		return retryGateExpectation{}, false
+	}
+	notBefore, exists := task.Annotations[labels.AnnotationRetryNotBefore]
+	if !exists {
+		return retryGateExpectation{}, false
+	}
+	jobUID, jobUIDPresent := task.Annotations[labels.AnnotationRetryJobUID]
+	cleanupState, cleanupSet := task.Annotations[labels.AnnotationRetryCleanupState]
+	return retryGateExpectation{
+		taskUID:       task.UID,
+		generation:    task.Generation,
+		attempts:      task.Status.Attempts,
+		jobName:       task.Status.JobName,
+		notBefore:     notBefore,
+		jobUID:        jobUID,
+		jobUIDPresent: jobUIDPresent,
+		cleanupState:  cleanupState,
+		cleanupSet:    cleanupSet,
+	}, true
+}
+
+func (r *TaskReconciler) retryTaskJobCreationStillAllowed(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected retryGateExpectation,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return false, err
+	}
+	*task = *latest.DeepCopy()
+	return r.retryGateAllowsJobCreation(latest, expected), nil
+}
+
+func (r *TaskReconciler) retryGateAllowsJobCreation(task *corev1alpha1.Task, expected retryGateExpectation) bool {
+	return task != nil &&
+		task.DeletionTimestamp.IsZero() &&
+		task.Generation == expected.generation &&
+		retryGateMatchesTask(task, expected) &&
+		retryCleanupComplete(task) &&
+		!meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeTerminalTransition) &&
+		r.shouldRetry(task)
+}
+
+func retryCleanupComplete(task *corev1alpha1.Task) bool {
+	if task == nil {
+		return false
+	}
+	condition := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeRetryCleanup)
+	return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == retryCleanupCompleteReason
+}
+
+func retryGateMatchesTask(task *corev1alpha1.Task, expected retryGateExpectation) bool {
+	if task == nil ||
+		task.UID != expected.taskUID ||
+		task.Status.Phase != corev1alpha1.TaskPhasePending ||
+		task.Status.Attempts != expected.attempts ||
+		task.Status.JobName != expected.jobName {
+		return false
+	}
+	if task.Annotations[labels.AnnotationRetryNotBefore] != expected.notBefore {
+		return false
+	}
+	jobUID, jobUIDPresent := task.Annotations[labels.AnnotationRetryJobUID]
+	if jobUIDPresent != expected.jobUIDPresent || jobUID != expected.jobUID {
+		return false
+	}
+	cleanupState, cleanupSet := task.Annotations[labels.AnnotationRetryCleanupState]
+	return cleanupSet == expected.cleanupSet && cleanupState == expected.cleanupState
+}
+
+func (r *TaskReconciler) updateRetryTaskRunningStatus(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected retryGateExpectation,
+	requireGate bool,
+	jobName string,
+	attempts int32,
+	now metav1.Time,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	transitioned := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		transitioned = false
+		if requireGate {
+			if !r.retryGateAllowsJobCreation(latest, expected) {
+				return nil
+			}
+		} else {
+			if latest.UID != expected.taskUID ||
+				latest.Status.Phase != corev1alpha1.TaskPhasePending ||
+				latest.Status.Attempts != expected.attempts ||
+				latest.Status.JobName != expected.jobName ||
+				meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeTerminalTransition) ||
+				meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeJobStart) {
+				return nil
+			}
+			if _, exists := latest.Annotations[labels.AnnotationRetryNotBefore]; exists {
+				return nil
+			}
+		}
+		latest.Status.Phase = corev1alpha1.TaskPhaseRunning
+		latest.Status.StartTime = &now
+		latest.Status.Attempts = attempts
+		latest.Status.JobName = jobName
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeRetryCleanup,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             "RetryAttemptStarted",
+			Message:            "retry attempt is running",
+		})
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeJobCreated,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: now,
+			Reason:             "JobCreated",
+			Message:            fmt.Sprintf("Job %s created", jobName),
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		transitioned = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return transitioned, nil
+}
+
+func retryRequeueAfter(notBefore time.Time) time.Duration {
+	delay := time.Until(notBefore)
+	if delay <= 0 {
+		return time.Millisecond
+	}
+	return delay
+}
+
+// retryTask durably schedules a new Job for a retry attempt.
 func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// Calculate backoff delay
-	delay := r.calculateRetryDelay(task)
-	oldJobName := task.Status.JobName
-	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
+	// The gate and retry-cleanup claim must exist before deleting the old Job or
+	// task-scoped outputs. The status condition is the linearization point that
+	// prevents a stale reconcile from cleaning a cancelled or newer attempt.
+	notBefore, err := r.ensureRetryNotBefore(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to persist retry backoff")
+		return ctrl.Result{}, err
+	}
+	if notBefore.IsZero() {
+		return ctrl.Result{}, nil
+	}
+	claimed, err := r.claimRetryCleanup(ctx, task)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if holdsPoolActor {
-		waitingForJob, err := r.cleanupRetryTaskJob(ctx, task, oldJobName)
-		if err != nil {
-			log.Error(err, "failed to delete old Job for pooled retry")
-			return ctrl.Result{}, err
-		}
-		if waitingForJob {
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-		}
-		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to release substrate pool actor leases for retry")
-			return ctrl.Result{}, err
-		}
-		if !releasedPoolLeases {
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
+	if !claimed {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	// Reset to pending for retry before deleting the old Job so a transient
-	// NotFound from asynchronous Job deletion does not fail the task.
-	if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-		t.Status.Phase = corev1alpha1.TaskPhasePending
-		t.Status.JobName = ""
-		t.Status.Message = ""
-		t.Status.CompletionTime = nil
-		t.Status.ResultRef = nil
-	}); err != nil {
-		log.Error(err, "failed to update status for retry")
+	cleanupResult, completed, err := r.finishRetryCleanup(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to finish prior-attempt cleanup for retry")
 		return ctrl.Result{}, err
 	}
+	if !completed {
+		return cleanupResult, nil
+	}
 
-	// Delete the old Job after clearing the running status.
-	if oldJobName != "" && !holdsPoolActor {
-		job := &batchv1.Job{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      oldJobName,
-			Namespace: task.Namespace,
-		}, job)
-		if err == nil {
-			propagationPolicy := metav1.DeletePropagationBackground
-			if err := r.Delete(ctx, job, &client.DeleteOptions{
-				PropagationPolicy: &propagationPolicy,
-			}); err != nil && !apierrors.IsNotFound(err) {
-				log.Error(err, "failed to delete old Job for retry")
+	if task.Status.Phase != corev1alpha1.TaskPhasePending {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	return ctrl.Result{RequeueAfter: retryRequeueAfter(notBefore)}, nil
+}
+
+func (r *TaskReconciler) claimRetryCleanup(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	expected := taskExecutionExpectationFromTask(task)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	claimed := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		claimed = false
+		if !taskExecutionMatches(latest, expected) ||
+			(latest.Status.Phase != corev1alpha1.TaskPhaseRunning && latest.Status.Phase != corev1alpha1.TaskPhasePending) ||
+			strings.TrimSpace(latest.Annotations[labels.AnnotationRetryNotBefore]) == "" {
+			return nil
+		}
+		if meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeTerminalTransition) {
+			return nil
+		}
+		if meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeJobStart) {
+			return nil
+		}
+		cleanupState := latest.Annotations[labels.AnnotationRetryCleanupState]
+		if retryCleanupComplete(latest) {
+			claimed = true
+			return nil
+		}
+		if meta.IsStatusConditionTrue(latest.Status.Conditions, ConditionTypeRetryCleanup) {
+			claimed = cleanupState == retryCleanupStatePending || (latest.Status.Phase == corev1alpha1.TaskPhasePending && cleanupState == "")
+			return nil
+		}
+		if !r.shouldRetry(latest) {
+			return nil
+		}
+		if cleanupState != retryCleanupStatePending && (latest.Status.Phase != corev1alpha1.TaskPhasePending || cleanupState != "") {
+			return nil
+		}
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeRetryCleanup,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "RetryCleanupClaimed",
+			Message:            fmt.Sprintf("cleanup claimed for attempt %d Job %s", latest.Status.Attempts, latest.Status.JobName),
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		claimed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return claimed, nil
+}
+
+func (r *TaskReconciler) finishRetryCleanup(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return ctrl.Result{}, false, err
+	}
+	*task = *latest.DeepCopy()
+	if retryCleanupComplete(latest) {
+		return ctrl.Result{}, true, nil
+	}
+	expectedExecution := taskExecutionExpectationFromTask(latest)
+	expectedGate, ok := retryGateExpectationFromTask(latest)
+	if !ok || !r.retryCleanupClaimMatches(latest, expectedExecution, expectedGate) {
+		return ctrl.Result{RequeueAfter: time.Second}, false, nil
+	}
+
+	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, latest)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	waitingForJob, err := r.cleanupRetryTaskJob(
+		ctx,
+		latest,
+		latest.Status.JobName,
+		types.UID(latest.Annotations[labels.AnnotationRetryJobUID]),
+		holdsPoolActor,
+	)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if waitingForJob {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, false, nil
+	}
+	if holdsPoolActor {
+		releasedPoolLeases, err := r.releaseSubstratePoolActorLeasesAfterTerminalCleanup(ctx, latest)
+		if err != nil {
+			return ctrl.Result{}, false, err
+		}
+		if !releasedPoolLeases {
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, false, nil
+		}
+	}
+
+	stillCurrent, err := r.retryCleanupClaimStillCurrent(ctx, latest, expectedExecution, expectedGate)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	if !stillCurrent {
+		return ctrl.Result{RequeueAfter: time.Second}, false, nil
+	}
+	if err := r.clearRetryAttemptOutputs(ctx, latest); err != nil {
+		return ctrl.Result{}, false, err
+	}
+	completed, err := r.markRetryCleanupComplete(ctx, latest, expectedExecution, expectedGate)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+	*task = *latest.DeepCopy()
+	return ctrl.Result{RequeueAfter: time.Second}, completed, nil
+}
+
+func (r *TaskReconciler) retryCleanupClaimMatches(
+	task *corev1alpha1.Task,
+	expectedExecution taskExecutionExpectation,
+	expectedGate retryGateExpectation,
+) bool {
+	if task == nil ||
+		!taskExecutionMatches(task, expectedExecution) ||
+		task.Annotations[labels.AnnotationRetryNotBefore] != expectedGate.notBefore ||
+		meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeTerminalTransition) ||
+		!meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeRetryCleanup) {
+		return false
+	}
+	jobUID, jobUIDPresent := task.Annotations[labels.AnnotationRetryJobUID]
+	if jobUIDPresent != expectedGate.jobUIDPresent || jobUID != expectedGate.jobUID {
+		return false
+	}
+	cleanupState, cleanupSet := task.Annotations[labels.AnnotationRetryCleanupState]
+	if cleanupSet != expectedGate.cleanupSet || cleanupState != expectedGate.cleanupState {
+		return false
+	}
+	return task.Status.Phase == corev1alpha1.TaskPhaseRunning || task.Status.Phase == corev1alpha1.TaskPhasePending
+}
+
+func (r *TaskReconciler) retryCleanupClaimStillCurrent(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expectedExecution taskExecutionExpectation,
+	expectedGate retryGateExpectation,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+		return false, err
+	}
+	*task = *latest.DeepCopy()
+	return r.retryCleanupClaimMatches(latest, expectedExecution, expectedGate), nil
+}
+
+func (r *TaskReconciler) markRetryCleanupComplete(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expectedExecution taskExecutionExpectation,
+	expectedGate retryGateExpectation,
+) (bool, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	completed := false
+	var current *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		completed = false
+		if !r.retryCleanupClaimMatches(latest, expectedExecution, expectedGate) {
+			return nil
+		}
+		if latest.Status.Phase == corev1alpha1.TaskPhaseRunning {
+			latest.Status.Phase = corev1alpha1.TaskPhasePending
+			latest.Status.Message = ""
+			latest.Status.CompletionTime = nil
+		}
+		latest.Status.ResultRef = nil
+		meta.RemoveStatusCondition(&latest.Status.Conditions, ConditionTypeTerminalResultCollection)
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeRetryCleanup,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             retryCleanupCompleteReason,
+			Message:            "prior attempt cleanup completed",
+		})
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		current = latest
+		completed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return completed, nil
+}
+
+func (r *TaskReconciler) clearRetryAttemptOutputs(ctx context.Context, task *corev1alpha1.Task) error {
+	var cleanupErrs []error
+	if r.ResultStore != nil {
+		if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("deleting prior-attempt result: %w", err))
+		}
+	}
+	if r.ArtifactStore != nil {
+		if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("deleting prior-attempt artifacts: %w", err))
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func (r *TaskReconciler) retryTaskJobUID(ctx context.Context, task *corev1alpha1.Task, jobName string) (types.UID, error) {
+	if task == nil || jobName == "" {
+		return "", nil
+	}
+
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	job := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return retryTaskPodJobUID(ctx, reader, task.Namespace, task.Name, jobName)
+		}
+		return "", fmt.Errorf("getting retry source Job %q: %w", jobName, err)
+	}
+	if !retryJobControlledByTask(job, task) {
+		if job.UID != "" {
+			return "", fmt.Errorf("retry source Job %q is not controlled by Task %s/%s", jobName, task.Namespace, task.Name)
+		}
+		return "", nil
+	}
+	return job.UID, nil
+}
+
+func retryTaskPodJobUID(ctx context.Context, reader client.Reader, namespace, taskName, jobName string) (types.UID, error) {
+	jobUIDs := map[types.UID]struct{}{}
+	for _, jobNameLabel := range []string{batchv1.JobNameLabel, legacyJobNameLabel} {
+		var pods corev1.PodList
+		if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+			return "", fmt.Errorf("listing Pods for missing retry source Job %q: %w", jobName, err)
+		}
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			if pod.Labels[labels.LabelTask] != "" && pod.Labels[labels.LabelTask] != labels.SelectorValue(taskName) {
+				continue
+			}
+			for _, owner := range pod.OwnerReferences {
+				if owner.Kind == jobOwnerKind && owner.Name == jobName && owner.UID != "" && owner.Controller != nil && *owner.Controller {
+					jobUIDs[owner.UID] = struct{}{}
+				}
 			}
 		}
 	}
-
-	return ctrl.Result{RequeueAfter: delay}, nil
+	if len(jobUIDs) > 1 {
+		return "", fmt.Errorf("multiple active Job UIDs found for retry source Job %q", jobName)
+	}
+	for jobUID := range jobUIDs {
+		return jobUID, nil
+	}
+	return "", nil
 }
 
-func (r *TaskReconciler) cleanupRetryTaskJob(ctx context.Context, task *corev1alpha1.Task, jobName string) (bool, error) {
+func retryJobControlledByTask(job *batchv1.Job, task *corev1alpha1.Task) bool {
+	if job == nil || task == nil || task.UID == "" {
+		return false
+	}
+	owner := metav1.GetControllerOf(job)
+	return owner != nil &&
+		owner.APIVersion == corev1alpha1.GroupVersion.String() &&
+		owner.Kind == retryTaskOwnerKind &&
+		owner.Name == task.Name &&
+		owner.UID == task.UID
+}
+
+func (r *TaskReconciler) deleteUntrackedRetryReplacement(
+	ctx context.Context,
+	currentTask *corev1alpha1.Task,
+	expected retryGateExpectation,
+	replacement *batchv1.Job,
+) error {
+	if replacement == nil || currentTask == nil {
+		return nil
+	}
+	if currentTask != nil && currentTask.UID == expected.taskUID && currentTask.Status.JobName == replacement.Name {
+		return nil
+	}
+
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	currentJob := &batchv1.Job{}
+	if err := reader.Get(ctx, types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}, currentJob); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if replacement.UID != "" && currentJob.UID != replacement.UID {
+		return nil
+	}
+	if replacement.UID == "" && replacement.ResourceVersion != "" && currentJob.ResourceVersion != replacement.ResourceVersion {
+		return nil
+	}
+	expectedOwner := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name:      currentTask.Name,
+		Namespace: currentTask.Namespace,
+		UID:       expected.taskUID,
+	}}
+	if !retryJobControlledByTask(currentJob, expectedOwner) {
+		return nil
+	}
+
+	propagationPolicy := metav1.DeletePropagationForeground
+	deleteOptions := deleteCurrentObjectPreconditions(currentJob)
+	deleteOptions = append(deleteOptions, &client.DeleteOptions{PropagationPolicy: &propagationPolicy})
+	if err := r.Delete(ctx, currentJob, deleteOptions...); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting untracked retry replacement Job %q: %w", currentJob.Name, err)
+	}
+	return nil
+}
+
+func (r *TaskReconciler) cleanupRetryTaskJob(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	jobName string,
+	expectedJobUID types.UID,
+	holdsPoolActor bool,
+) (bool, error) {
 	if jobName == "" {
 		return false, nil
 	}
 
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
 	job := &batchv1.Job{}
-	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
+	err := reader.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, job)
+	if err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("getting retry task Job %q: %w", jobName, err)
 	}
+	jobWasMissing := apierrors.IsNotFound(err)
+	if err == nil {
+		legacyUnidentifiedJob := expectedJobUID == "" && job.UID == ""
+		jobMatchesRetrySource := legacyUnidentifiedJob || (retryJobControlledByTask(job, task) &&
+			(expectedJobUID == "" || job.UID == expectedJobUID))
+		if jobMatchesRetrySource {
+			propagationPolicy := metav1.DeletePropagationForeground
+			deleteOptions := &client.DeleteOptions{
+				PropagationPolicy: &propagationPolicy,
+			}
+			if job.UID != "" {
+				uid := job.UID
+				deleteOptions.Preconditions = &metav1.Preconditions{UID: &uid}
+			}
+			if err := r.Delete(ctx, job, deleteOptions); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("deleting retry task Job %q: %w", jobName, err)
+			}
+			if holdsPoolActor {
+				return true, nil
+			}
+			remaining := &batchv1.Job{}
+			if err := reader.Get(ctx, types.NamespacedName{Name: jobName, Namespace: task.Namespace}, remaining); err == nil {
+				if legacyUnidentifiedJob || (remaining.UID == job.UID && retryJobControlledByTask(remaining, task)) {
+					return true, nil
+				}
+				if !retryJobDefinitivelyTerminal(remaining) || !remaining.DeletionTimestamp.IsZero() {
+					return true, nil
+				}
+				jobWasMissing = true
+			} else if apierrors.IsNotFound(err) {
+				jobWasMissing = true
+			} else {
+				return false, fmt.Errorf("confirming deletion of retry task Job %q: %w", jobName, err)
+			}
+		} else {
+			// A same-name Job with a missing or mismatched durable UID cannot be
+			// safely deleted as the retry source. Treat any live Job/Pod as a
+			// blocker so the controller never overlaps active attempts.
+			if !retryJobDefinitivelyTerminal(job) || !job.DeletionTimestamp.IsZero() {
+				return true, nil
+			}
+			jobWasMissing = true
+		}
+	}
+	if jobWasMissing {
+		activePodsRemain, err := retryTaskActivePodsRemain(
+			ctx,
+			reader,
+			task.Namespace,
+			task.Name,
+			jobName,
+		)
+		if err != nil {
+			return false, err
+		}
+		if activePodsRemain {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
-	holdsPoolActor, err := r.taskHasSubstratePoolActorLeases(ctx, task)
-	if err != nil {
-		return false, err
+func retryJobDefinitivelyTerminal(job *batchv1.Job) bool {
+	if job == nil {
+		return false
 	}
-	propagationPolicy := metav1.DeletePropagationBackground
-	if holdsPoolActor {
-		propagationPolicy = metav1.DeletePropagationForeground
+	for _, condition := range job.Status.Conditions {
+		if condition.Status == corev1.ConditionTrue && (condition.Type == batchv1.JobComplete || condition.Type == batchv1.JobFailed) {
+			return true
+		}
 	}
-	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagationPolicy}); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("deleting retry task Job %q: %w", jobName, err)
+	return false
+}
+
+func retryTaskActivePodsRemain(
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
+	taskName string,
+	jobName string,
+) (bool, error) {
+	for _, jobNameLabel := range []string{batchv1.JobNameLabel, legacyJobNameLabel} {
+		var pods corev1.PodList
+		if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+			return false, fmt.Errorf("listing Pods for missing retry task Job %q: %w", jobName, err)
+		}
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+				continue
+			}
+			if pod.Labels[labels.LabelTask] != "" && pod.Labels[labels.LabelTask] != labels.SelectorValue(taskName) {
+				continue
+			}
+			for _, owner := range pod.OwnerReferences {
+				if owner.Kind == jobOwnerKind && owner.Name == jobName && owner.Controller != nil && *owner.Controller {
+					return true, nil
+				}
+			}
+		}
 	}
-	return holdsPoolActor, nil
+	return false, nil
 }
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
@@ -2425,6 +4704,26 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 	}
 
 	return delay
+}
+
+type terminalResultSourceError struct {
+	err       error
+	permanent bool
+}
+
+func (e *terminalResultSourceError) Error() string {
+	return e.err.Error()
+}
+
+func (e *terminalResultSourceError) Unwrap() error {
+	return e.err
+}
+
+func newTerminalResultSourceError(err error, permanent bool) error {
+	if err == nil {
+		return nil
+	}
+	return &terminalResultSourceError{err: err, permanent: permanent}
 }
 
 // collectResult collects the task result from the Job's output
@@ -2463,7 +4762,7 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		}
 		stdoutPayload, ok, decodeErr := extractStdoutTaskResult(logs)
 		if decodeErr != nil {
-			return decodeErr
+			return newTerminalResultSourceError(decodeErr, true)
 		}
 		if !ok {
 			return nil
@@ -2535,22 +4834,26 @@ func stdoutResultPodLogOptions() corev1.PodLogOptions {
 
 func (r *TaskReconciler) readPodLogsWithOptions(ctx context.Context, task *corev1alpha1.Task, opts corev1.PodLogOptions, appendTruncatedMarker bool) (string, error) {
 	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList,
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.List(ctx, podList,
 		client.InNamespace(task.Namespace),
 		client.MatchingLabels{"job-name": task.Status.JobName},
 	); err != nil {
-		return "", fmt.Errorf("listing pods: %w", err)
+		return "", newTerminalResultSourceError(fmt.Errorf("listing pods: %w", err), false)
 	}
 
 	if len(podList.Items) == 0 {
-		return "", fmt.Errorf("no pods found for job %s", task.Status.JobName)
+		return "", newTerminalResultSourceError(fmt.Errorf("no pods found for job %s", task.Status.JobName), false)
 	}
 
 	pod := podList.Items[len(podList.Items)-1]
 	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &opts)
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return "", fmt.Errorf("streaming logs: %w", err)
+		return "", newTerminalResultSourceError(fmt.Errorf("streaming logs: %w", err), false)
 	}
 	defer stream.Close() //nolint:errcheck
 
@@ -2560,7 +4863,7 @@ func (r *TaskReconciler) readPodLogsWithOptions(ctx context.Context, task *corev
 	}
 	data, err := io.ReadAll(io.LimitReader(stream, limit))
 	if err != nil {
-		return "", fmt.Errorf("reading logs: %w", err)
+		return "", newTerminalResultSourceError(fmt.Errorf("reading logs: %w", err), false)
 	}
 
 	if appendTruncatedMarker && int64(len(data)) == limit {
@@ -3058,13 +5361,18 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	if now.Sub(scheduledTime) > time.Duration(deadlineSeconds)*time.Second {
 		log.Info("Missed schedule beyond deadline, skipping", "scheduledTime", scheduledTime, "deadline", deadlineSeconds)
 		r.Recorder.Eventf(task, "Warning", "MissedSchedule", "Missed scheduled run at %s (deadline %ds exceeded)", scheduledTime.Format(time.RFC3339), deadlineSeconds)
-		// Advance to next schedule time
+		// Consume this occurrence so a later reconcile cannot select it again.
 		next := sched.Next(now)
+		lastSchedule := metav1.NewTime(scheduledTime)
 		nextSchedule := metav1.NewTime(next)
+		lastScheduleCopy := lastSchedule
 		nextScheduleCopy := nextSchedule
-		_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+			t.Status.LastScheduleTime = &lastScheduleCopy
 			t.Status.NextScheduleTime = &nextScheduleCopy
-		})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 	}
 
@@ -3081,11 +5389,16 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 				childList.Items[i].Status.Phase == corev1alpha1.TaskPhaseRunning {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
+				lastSchedule := metav1.NewTime(scheduledTime)
 				nextSchedule := metav1.NewTime(next)
+				lastScheduleCopy := lastSchedule
 				nextScheduleCopy := nextSchedule
-				_ = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+					t.Status.LastScheduleTime = &lastScheduleCopy
 					t.Status.NextScheduleTime = &nextScheduleCopy
-				})
+				}); err != nil {
+					return ctrl.Result{}, err
+				}
 				return ctrl.Result{RequeueAfter: time.Until(next)}, nil
 			}
 		}

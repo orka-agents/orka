@@ -11,7 +11,10 @@ import (
 	"strings"
 )
 
-const maxErrorBodyBytes = 1024
+const (
+	maxErrorBodyBytes         = 1024
+	maxResponseBodyDrainBytes = 64 << 10
+)
 
 type Client interface {
 	Health(ctx context.Context, req ActorRequest) error
@@ -152,7 +155,7 @@ func (c HTTPClient) do(ctx context.Context, req ActorRequest, method, relPath st
 	if err != nil {
 		return &Error{Reason: ErrorReasonRequestFailed, Message: "daemon request failed", Retryable: true, Cause: err}
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer drainAndCloseResponseBody(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		message := fmt.Sprintf("daemon returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
@@ -165,6 +168,14 @@ func (c HTTPClient) do(ctx context.Context, req ActorRequest, method, relPath st
 		return &Error{Reason: ErrorReasonDecodeResponse, Message: "failed to decode response", Cause: err}
 	}
 	return nil
+}
+
+func drainAndCloseResponseBody(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	_, _ = io.CopyN(io.Discard, body, maxResponseBodyDrainBytes)
+	_ = body.Close()
 }
 
 func (c HTTPClient) resolve(relPath string) (string, error) {

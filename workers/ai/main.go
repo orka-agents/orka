@@ -317,7 +317,7 @@ func run() (err error) {
 	}
 
 	// Write result to controller via HTTP
-	if err := writeResult(result); err != nil {
+	if err := writeResult(ctx, result); err != nil {
 		return fmt.Errorf("failed to write result: %w", err)
 	}
 	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeResultSubmitted,
@@ -326,22 +326,9 @@ func run() (err error) {
 		common.WithEventContent(eventContent(map[string]any{"resultLength": len(result)})),
 	)
 
-	// Upload any artifacts the agent wrote
-	if err := common.UploadArtifacts(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadFailed, 0,
-			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker artifact upload failed"),
-			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
-		)
-		// Don't fail the task if artifact upload fails
-	} else {
-		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted, 0,
-			common.WithEventTaskName(taskName),
-			common.WithEventSummary("AI worker artifact upload completed"),
-			common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
-		)
+	// Upload any artifacts the agent wrote.
+	if err := uploadAIArtifacts(ctx, eventRecorder, taskName); err != nil {
+		return err
 	}
 
 	fmt.Printf("Task %s/%s completed successfully%s\n", taskNamespace, taskName, transactionLogFields)
@@ -968,23 +955,9 @@ func executeAgentLoopWithEvents(
 
 		resp, err := provider.Complete(stepCtx, req)
 		if err != nil && llm.IsContextTooLongErr(err) {
-			tokenEstimate := 0
-			for _, m := range messages {
-				tokenEstimate += len(m.Content) / 4
-			}
-			beforeCount := len(messages)
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
-			req.Messages = messages
-			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
-				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-				common.WithEventSummary("model context truncated after provider context limit error"),
-				common.WithEventContent(eventContent(map[string]any{
-					"iteration":          iteration + 1,
-					"messageCountBefore": beforeCount,
-					"messageCountAfter":  len(messages),
-				})),
+			resp, messages, err = retryCompletionAfterContextOverflow(
+				stepCtx, provider, req, err, eventRecorder, iteration,
 			)
-			resp, err = provider.Complete(stepCtx, req)
 		}
 		if err != nil {
 			errType := aiWorkerErrorType(err)
@@ -1171,6 +1144,44 @@ func executeAgentLoopWithEvents(
 	return "", fmt.Errorf("max iterations reached without completion")
 }
 
+func retryCompletionAfterContextOverflow(
+	ctx context.Context,
+	provider llm.Provider,
+	req *llm.CompletionRequest,
+	overflowErr error,
+	eventRecorder common.EventRecorder,
+	iteration int,
+) (*llm.CompletionResponse, []llm.Message, error) {
+	beforeSize, err := llm.EstimateCompletionRequestSize(req)
+	if err != nil {
+		return nil, req.Messages, overflowErr
+	}
+	retryReq, err := llm.TruncateCompletionRequest(req, beforeSize.EstimatedTokens/2)
+	if err != nil {
+		return nil, req.Messages, overflowErr
+	}
+	afterSize, err := llm.EstimateCompletionRequestSize(retryReq)
+	if err != nil || afterSize.SerializedBytes >= beforeSize.SerializedBytes {
+		return nil, req.Messages, overflowErr
+	}
+
+	common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
+		common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+		common.WithEventSummary("model context truncated after provider context limit error"),
+		common.WithEventContent(eventContent(map[string]any{
+			"iteration":             iteration + 1,
+			"messageCountBefore":    len(req.Messages),
+			"messageCountAfter":     len(retryReq.Messages),
+			"requestBytesBefore":    beforeSize.SerializedBytes,
+			"requestBytesAfter":     afterSize.SerializedBytes,
+			"estimatedTokensBefore": beforeSize.EstimatedTokens,
+			"estimatedTokensAfter":  afterSize.EstimatedTokens,
+		})),
+	)
+	resp, retryErr := provider.Complete(ctx, retryReq)
+	return resp, retryReq.Messages, retryErr
+}
+
 func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {
 	if len(coordinationEnv.ApprovalRequiredTools) > 0 {
 		return true
@@ -1228,6 +1239,29 @@ func advertisedToolNames(llmTools []llm.Tool) map[string]struct{} {
 	return names
 }
 
+func uploadAIArtifacts(ctx context.Context, eventRecorder common.EventRecorder, taskName string) error {
+	err := common.UploadArtifactsContext(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("artifact upload canceled: %w", ctxErr)
+		}
+		fmt.Fprintf(os.Stderr, "warning: artifact upload failed: %v\n", err)
+		common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeArtifactUploadFailed,
+			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+			common.WithEventTaskName(taskName),
+			common.WithEventSummary("AI worker artifact upload failed"),
+			common.WithEventContent(eventContent(map[string]any{"artifact": "all", "error": err.Error()})),
+		)
+		return ctx.Err()
+	}
+	common.RecordEvent(ctx, eventRecorder, events.ExecutionEventTypeArtifactUploadCompleted,
+		common.WithEventTaskName(taskName),
+		common.WithEventSummary("AI worker artifact upload completed"),
+		common.WithEventContent(eventContent(map[string]any{"artifact": "all"})),
+	)
+	return ctx.Err()
+}
+
 func eventContent(values map[string]any) json.RawMessage {
 	data, err := json.Marshal(values)
 	if err != nil {
@@ -1249,8 +1283,8 @@ func firstNonBlankOriginal(values ...string) string {
 }
 
 // writeResult submits the result to the controller via HTTP POST.
-func writeResult(result string) error {
-	return common.SubmitResult([]byte(result))
+func writeResult(ctx context.Context, result string) error {
+	return common.SubmitResultContext(ctx, []byte(result))
 }
 
 func workerSecretReadAuthorizer(

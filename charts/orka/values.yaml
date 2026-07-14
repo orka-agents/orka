@@ -161,6 +161,11 @@ workers:
       tag: latest
       pullPolicy: IfNotPresent
 
+  general:
+    image:
+      repository: ghcr.io/orka-agents/orka/general-worker
+      tag: latest
+
   harnessWrapper:
     image:
       repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
@@ -216,12 +221,10 @@ rbac:
   # Create RBAC resources
   create: true
 
-# CRD configuration
-crds:
-  # Install CRDs
-  install: true
-  # Keep CRDs on chart uninstall
-  keep: true
+# CRDs are packaged under charts/orka/crds and follow Helm's standard CRD lifecycle:
+# installed on initial install unless --skip-crds is used, never installed or updated by
+# helm upgrade, and retained when the release is uninstalled. Before every upgrade,
+# run the exact packaged target chart's guarded CRD migration; see charts/orka/README.md.
 
 # Security context for pods
 podSecurityContext:

@@ -103,3 +103,18 @@ func TestSafeTransactionContextPreservesAllowedAgentsAndEmptyAllowLists(t *testi
 		}
 	}
 }
+
+func TestTaskTransactionFromContextTokenPersistsSecretConstraint(t *testing.T) {
+	tx := taskTransactionFromContextToken(&ContextToken{
+		TransactionContext: map[string]any{
+			"secret": "git-credentials",
+		},
+	})
+
+	if tx == nil {
+		t.Fatal("taskTransactionFromContextToken returned nil")
+	}
+	if got := tx.Context["secret"]; got != "git-credentials" {
+		t.Fatalf("transaction context secret = %q, want git-credentials", got)
+	}
+}

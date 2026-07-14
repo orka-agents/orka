@@ -774,6 +774,150 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceProvi
 	}
 }
 
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsOmittedAutonomousApprovalTool(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	body := CreateTaskRequest{
+		Name:      "autonomous-tools-denied",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAI,
+		AgentRef:  &corev1alpha1.AgentReference{Name: agent.Name},
+		Prompt:    "coordinate this incident",
+	}
+	allowedTools := withoutToolNames(contextTokenTaskCreateEffectiveAITools(body, agent), "request_approval")
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": allowedTools,
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, body)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	allowToken := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": contextTokenTaskCreateEffectiveAITools(body, agent),
+		},
+	})
+	resp = postCreateTaskWithContextToken(t, app, allowToken, body)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "denied request must not create the Task")
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationAllowsAutonomousApprovalTool(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "coordinator", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+		},
+	}
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, agent)
+	body := CreateTaskRequest{
+		Name:      "autonomous-tools-allowed",
+		Namespace: "default",
+		Type:      corev1alpha1.TaskTypeAI,
+		AgentRef:  &corev1alpha1.AgentReference{Name: agent.Name},
+		Prompt:    "coordinate this incident",
+	}
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": contextTokenTaskCreateEffectiveAITools(body, agent),
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, body)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsOmittedChildMessagingTools(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	body := CreateTaskRequest{
+		Name:      "child-messaging-denied",
+		Namespace: "default",
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		Type:   corev1alpha1.TaskTypeAI,
+		Prompt: "report to the parent",
+	}
+	allowedTools := withoutToolNames(contextTokenTaskCreateEffectiveAITools(body, nil), "send_message", "check_messages")
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": allowedTools,
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, body)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	allowToken := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": contextTokenTaskCreateEffectiveAITools(body, nil),
+		},
+	})
+	resp = postCreateTaskWithContextToken(t, app, allowToken, body)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "denied request must not create the Task")
+}
+
+func TestHandlers_CreateTask_ContextTokenAuthorizationAllowsChildMessagingTools(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	body := CreateTaskRequest{
+		Name:      "child-messaging-allowed",
+		Namespace: "default",
+		Metadata: MetadataRequest{
+			Labels: map[string]string{labels.LabelParentTask: "parent-task"},
+		},
+		Type:   corev1alpha1.TaskTypeAI,
+		Prompt: "report to the parent",
+	}
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeTaskCreate,
+		"tctx": map[string]any{
+			"namespace":    "default",
+			"allowedTools": contextTokenTaskCreateEffectiveAITools(body, nil),
+		},
+	})
+
+	resp := postCreateTaskWithContextToken(t, app, token, body)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func withoutToolNames(tools []string, omitted ...string) []string {
+	omit := make(map[string]struct{}, len(omitted))
+	for _, tool := range omitted {
+		omit[tool] = struct{}{}
+	}
+	filtered := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if _, found := omit[tool]; !found {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
 func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsEffectiveAITools(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
@@ -2403,13 +2547,17 @@ func TestParseDuration(t *testing.T) {
 func TestNewHandlers(t *testing.T) {
 	scheme := runtime.NewScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "test-ns"})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: apiReader, WatchNamespace: "test-ns"})
 	if handlers == nil {
 		t.Fatal("NewHandlers returned nil")
 	}
 	if handlers.watchNamespace != "test-ns" {
 		t.Errorf("watchNamespace = %s, want test-ns", handlers.watchNamespace)
+	}
+	if handlers.apiReader != apiReader {
+		t.Error("apiReader was not configured")
 	}
 }
 

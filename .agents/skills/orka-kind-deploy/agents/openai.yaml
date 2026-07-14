@@ -1,4 +1,4 @@
 interface:
   display_name: "Orka Kind Deploy"
-  short_description: "Rebuild and deploy Orka to kind"
-  default_prompt: "Use $orka-kind-deploy to rebuild all Orka images, load them into the active kind cluster, and roll out the controller."
+  short_description: "Safely rebuild and deploy Orka to kind"
+  default_prompt: "Use $orka-kind-deploy with the repo-scoped kindctl kubeconfig to rebuild all Orka images, load them into the existing exact kind cluster, render without mutating the worktree, and verify controller plus harness-wrapper rollouts."

@@ -805,17 +805,17 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 
 // --- writeResult tests ---
 
-func TestWriteResult_ServerError(t *testing.T) {
+func TestWriteResult_PermanentHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
 
 	t.Setenv("ORKA_RESULT_ENDPOINT", server.URL)
 
-	err := writeResult("test result")
-	if err == nil {
-		t.Fatal("expected error for server error response")
+	err := writeResult(context.Background(), "test result")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("writeResult() error = %v, want HTTP 401", err)
 	}
 }
 

@@ -3,15 +3,24 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -20,6 +29,8 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/harness/harnesstest"
 )
+
+const testAgentRuntimeClusterDomain = "cluster.local"
 
 func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
@@ -46,6 +57,236 @@ func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {
 	cond := meta.FindStatusCondition(updated.Status.Conditions, agentRuntimeReadyCondition)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Fatalf("Ready condition = %#v, want true", cond)
+	}
+}
+
+func TestAgentRuntimeReconcilerOmitsBearerFromDiscoveryProbes(t *testing.T) {
+	backend := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL())
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+
+	var discoveryAuthSeen atomic.Bool
+	var authenticatedProbeSeen atomic.Bool
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case harness.HealthPath, harness.CapabilitiesPath:
+			if r.Header.Get("Authorization") != "" {
+				discoveryAuthSeen.Store(true)
+			}
+		default:
+			if strings.HasPrefix(r.URL.Path, harness.TurnsPath) && r.Header.Get("Authorization") == "Bearer x" {
+				authenticatedProbeSeen.Store(true)
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(front.URL)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if !updated.Status.Ready {
+		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
+	}
+	if discoveryAuthSeen.Load() {
+		t.Fatal("health/capabilities received bearer authentication")
+	}
+	if !authenticatedProbeSeen.Load() {
+		t.Fatal("authenticated turn probes did not receive bearer authentication")
+	}
+}
+
+func TestAgentRuntimeReconcilerPinsAuthenticatedInsecureProbeToValidatedPod(t *testing.T) {
+	backend := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL())
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+
+	var authenticatedHost atomic.Value
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer x" {
+			authenticatedHost.Store(r.Host)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+	frontURL, err := url.Parse(front.URL)
+	if err != nil {
+		t.Fatalf("parse front URL: %v", err)
+	}
+	port, err := strconv.Atoi(frontURL.Port())
+	if err != nil {
+		t.Fatalf("parse front port: %v", err)
+	}
+	endpoint := fmt.Sprintf("http://fibey-agentkit.default.svc.cluster.local:%d", port)
+	runtime, secret := testAgentRuntimeAndSecret(endpoint)
+	service, pods := agentRuntimeInsecureServiceBackends(runtime.Namespace, int32(port), "127.0.0.1")
+	objects := []client.Object{runtime, secret, service, pods[0]}
+	r := newAgentRuntimeUnitReconciler(t, objects...)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if !updated.Status.Ready {
+		t.Fatalf("Ready = false, message=%q", updated.Status.Message)
+	}
+	host, _ := authenticatedHost.Load().(string)
+	wantHost := strings.TrimPrefix(endpoint, "http://")
+	if host != wantHost {
+		t.Fatalf("authenticated probe Host = %q, want Service authority %q", host, wantHost)
+	}
+}
+
+func TestResolveAgentRuntimeInsecureDialAddressDistributesStableKeys(t *testing.T) {
+	service, pods := agentRuntimeInsecureServiceBackends("default", 8080, "10.0.0.41", "10.0.0.42")
+	r := newAgentRuntimeUnitReconciler(t, service, pods[0], pods[1])
+	endpoint := "http://fibey-agentkit.default.svc.cluster.local:8080"
+	seen := map[string]struct{}{}
+	for i := range 100 {
+		key := fmt.Sprintf("task-%d", i)
+		address, err := resolveAgentRuntimeInsecureDialAddress(
+			context.Background(),
+			r.apiReader(),
+			"default",
+			endpoint,
+			corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+			key,
+		)
+		if err != nil {
+			t.Fatalf("resolveAgentRuntimeInsecureDialAddress(%q) error = %v", key, err)
+		}
+		again, err := resolveAgentRuntimeInsecureDialAddress(
+			context.Background(),
+			r.apiReader(),
+			"default",
+			endpoint,
+			corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+			key,
+		)
+		if err != nil || again != address {
+			t.Fatalf("selection for %q was not stable: first=%q second=%q err=%v", key, address, again, err)
+		}
+		seen[address] = struct{}{}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("selected backends = %#v, want both Ready replicas", seen)
+	}
+}
+
+func TestResolveAgentRuntimeInsecureBackendHonorsServiceIPFamily(t *testing.T) {
+	service, pods := agentRuntimeInsecureServiceBackends("default", 8080, "10.0.0.42")
+	service.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv6Protocol}
+	pods[0].Status.PodIPs = []corev1.PodIP{{IP: "10.0.0.42"}, {IP: "fd00::42"}}
+	r := newAgentRuntimeUnitReconciler(t, service, pods[0])
+	endpoint := "http://fibey-agentkit.default.svc.cluster.local:8080"
+
+	backend, err := resolveAgentRuntimeInsecureBackend(
+		context.Background(),
+		r.apiReader(),
+		"default",
+		endpoint,
+		corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		"task-dual-stack",
+	)
+	if err != nil {
+		t.Fatalf("resolveAgentRuntimeInsecureBackend() error = %v", err)
+	}
+	if backend.DialAddress != "[fd00::42]:8080" {
+		t.Fatalf("DialAddress = %q, want IPv6 address selected by Service family", backend.DialAddress)
+	}
+	validated, err := validateAgentRuntimeInsecureBackend(
+		context.Background(),
+		r.apiReader(),
+		"default",
+		endpoint,
+		corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		backend,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("validateAgentRuntimeInsecureBackend() error = %v", err)
+	}
+	if validated != backend {
+		t.Fatalf("validated backend = %#v, want %#v", validated, backend)
+	}
+}
+
+func TestAgentRuntimePodTargetPortResolvesRestartableInitContainer(t *testing.T) {
+	restartAlways := corev1.ContainerRestartPolicyAlways
+	pod := &corev1.Pod{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "app"}},
+		InitContainers: []corev1.Container{{
+			Name:          "runtime-sidecar",
+			RestartPolicy: &restartAlways,
+			Ports: []corev1.ContainerPort{{
+				Name:          "runtime-http",
+				Protocol:      corev1.ProtocolTCP,
+				ContainerPort: 18080,
+			}},
+		}},
+	}}
+	servicePort := &corev1.ServicePort{
+		Port:       8080,
+		TargetPort: intstr.FromString("runtime-http"),
+	}
+
+	port, ok := agentRuntimePodTargetPort(pod, servicePort)
+	if !ok || port != 18080 {
+		t.Fatalf("agentRuntimePodTargetPort() = (%d, %t), want (18080, true)", port, ok)
+	}
+	pod.Spec.InitContainers[0].RestartPolicy = nil
+	if port, ok := agentRuntimePodTargetPort(pod, servicePort); ok {
+		t.Fatalf("non-restartable init container unexpectedly resolved named port %d", port)
+	}
+}
+
+func TestAgentRuntimeReconcilerRejectsRedirectingEndpoint(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		harness.WriteError(w, http.StatusInternalServerError, "redirect should not be followed")
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	runtime, secret := testAgentRuntimeAndSecret(redirector.URL)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	var updated corev1alpha1.AgentRuntime
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), &updated); err != nil {
+		t.Fatalf("Get AgentRuntime: %v", err)
+	}
+	if updated.Status.Ready {
+		t.Fatalf("Ready = true, want false for redirecting endpoint")
+	}
+	if !strings.Contains(updated.Status.Message, "redirects are not allowed") {
+		t.Fatalf("Message = %q, want redirect rejection", updated.Status.Message)
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("redirect target requests = %d, want 0", got)
 	}
 }
 
@@ -581,15 +822,22 @@ func reconcileRequestFor(obj client.Object) ctrl.Request {
 func newAgentRuntimeUnitReconciler(t *testing.T, objs ...client.Object) *AgentRuntimeReconciler {
 	t.Helper()
 	previousAllowLoopback := agentRuntimeAllowInsecureLoopbackForTests
+	previousClusterDomain := agentRuntimeClusterDomainForTests
 	agentRuntimeAllowInsecureLoopbackForTests = true
-	t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = previousAllowLoopback })
+	if previousClusterDomain == "" {
+		agentRuntimeClusterDomainForTests = testAgentRuntimeClusterDomain
+	}
+	t.Cleanup(func() {
+		agentRuntimeAllowInsecureLoopbackForTests = previousAllowLoopback
+		agentRuntimeClusterDomainForTests = previousClusterDomain
+	})
 	scheme := newTestScheme()
 	fc := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.AgentRuntime{}).
 		WithObjects(objs...).
 		Build()
-	return &AgentRuntimeReconciler{Client: fc, Scheme: scheme}
+	return &AgentRuntimeReconciler{Client: fc, APIReader: fc, Scheme: scheme}
 }
 
 func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
@@ -600,8 +848,9 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
-				Mode:     corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
-				Endpoint: endpoint,
+				Mode:              corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
+				Endpoint:          endpoint,
+				TransportSecurity: testAgentRuntimeTransportSecurity(endpoint),
 			},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{BearerAuthRef: corev1alpha1.AgentRuntimeBearerAuthReference{
 				Name: "fibey-agentkit-harness-token",
@@ -621,35 +870,261 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 	return runtime, secret
 }
 
-func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T) {
+func agentRuntimeInsecureServiceBackends(namespace string, port int32, podIPs ...string) (*corev1.Service, []*corev1.Pod) {
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit", Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "fibey-agentkit"},
+			Ports: []corev1.ServicePort{{
+				Name:     "http",
+				Protocol: corev1.ProtocolTCP,
+				Port:     port,
+			}},
+		},
+	}
+	pods := make([]*corev1.Pod, 0, len(podIPs))
+	for i, podIP := range podIPs {
+		pods = append(pods, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("fibey-agentkit-%d", i),
+				Namespace: namespace,
+				UID:       types.UID(fmt.Sprintf("fibey-agentkit-%d-uid", i)),
+				Labels:    map[string]string{"app": "fibey-agentkit"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Image: "runtime:test"}}},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: podIP,
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				}},
+			},
+		})
+	}
+	return service, pods
+}
+
+func testAgentRuntimeTransportSecurity(endpoint string) corev1alpha1.AgentRuntimeTransportSecurity {
+	if strings.HasPrefix(strings.TrimSpace(endpoint), "http://") {
+		return corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+	}
+	return corev1alpha1.AgentRuntimeTransportSecurityTLS
+}
+
+func markLegacyAgentRuntimeTransport(runtime *corev1alpha1.AgentRuntime) {
+	if runtime.Annotations == nil {
+		runtime.Annotations = map[string]string{}
+	}
+	runtime.Annotations[agentRuntimeTransportMigrationAnno] = agentRuntimeTransportMigrationV1
+}
+
+func TestAgentRuntimeReconcilerBackfillsLegacyTransportSecurity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		want     corev1alpha1.AgentRuntimeTransportSecurity
+	}{
+		{name: "https", endpoint: "https://runtime.example.com", want: corev1alpha1.AgentRuntimeTransportSecurityTLS},
+		{name: "safe cluster local http", endpoint: testInsecureAgentRuntimeEndpoint, want: corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime, secret := testAgentRuntimeAndSecret(tc.endpoint)
+			runtime.Spec.Deployment.TransportSecurity = ""
+			markLegacyAgentRuntimeTransport(runtime)
+			objects := []client.Object{runtime, secret}
+			if tc.want == corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+				service, _ := agentRuntimeInsecureServiceBackends(runtime.Namespace, 8080, "10.0.0.2")
+				objects = append(objects, service)
+			}
+			r := newAgentRuntimeUnitReconciler(t, objects...)
+
+			result, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime))
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if result.RequeueAfter <= 0 {
+				t.Fatalf("Reconcile() result = %#v, want immediate requeue after backfill", result)
+			}
+			updated := &corev1alpha1.AgentRuntime{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+				t.Fatalf("Get(AgentRuntime) error = %v", err)
+			}
+			if updated.Spec.Deployment.TransportSecurity != tc.want {
+				t.Fatalf("transportSecurity = %q, want %q", updated.Spec.Deployment.TransportSecurity, tc.want)
+			}
+			if _, ok := updated.Annotations[agentRuntimeTransportMigrationAnno]; ok {
+				t.Fatalf("migration annotation was not cleared: %#v", updated.Annotations)
+			}
+		})
+	}
+}
+
+func TestAgentRuntimeReconcilerClearsMigrationMarkerForExplicitTransport(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret("https://runtime.example.com")
+	markLegacyAgentRuntimeTransport(runtime)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+
+	result, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("Reconcile() result = %#v, want requeue after marker cleanup", result)
+	}
+	updated := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+		t.Fatalf("Get(AgentRuntime) error = %v", err)
+	}
+	if updated.Spec.Deployment.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityTLS {
+		t.Fatalf("transportSecurity = %q, want explicit tls preserved", updated.Spec.Deployment.TransportSecurity)
+	}
+	if _, ok := updated.Annotations[agentRuntimeTransportMigrationAnno]; ok {
+		t.Fatalf("migration annotation was not cleared: %#v", updated.Annotations)
+	}
+}
+
+func TestAgentRuntimeReconcilerDoesNotBackfillUnsafeLegacyHTTP(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret("http://runtime.example.com")
+	runtime.Spec.Deployment.TransportSecurity = ""
+	markLegacyAgentRuntimeTransport(runtime)
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+		t.Fatalf("Get(AgentRuntime) error = %v", err)
+	}
+	if updated.Spec.Deployment.TransportSecurity != "" {
+		t.Fatalf("transportSecurity = %q, want legacy field left empty", updated.Spec.Deployment.TransportSecurity)
+	}
+	if updated.Annotations[agentRuntimeTransportMigrationAnno] != agentRuntimeTransportMigrationV1 {
+		t.Fatalf("migration annotation = %q, want retained for operator repair", updated.Annotations[agentRuntimeTransportMigrationAnno])
+	}
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "same-namespace") {
+		t.Fatalf("status = %#v, want unsafe HTTP rejected by same-namespace policy", updated.Status)
+	}
+}
+
+func TestAgentRuntimeReconcilerDoesNotInferUnmarkedHTTP(t *testing.T) {
+	runtime, secret := testAgentRuntimeAndSecret(testInsecureAgentRuntimeEndpoint)
+	runtime.Spec.Deployment.TransportSecurity = ""
+	service, _ := agentRuntimeInsecureServiceBackends(runtime.Namespace, 8080, "10.0.0.2")
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret, service)
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequestFor(runtime)); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updated := &corev1alpha1.AgentRuntime{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(runtime), updated); err != nil {
+		t.Fatalf("Get(AgentRuntime) error = %v", err)
+	}
+	if updated.Spec.Deployment.TransportSecurity != "" {
+		t.Fatalf("transportSecurity = %q, want unmarked field left empty", updated.Spec.Deployment.TransportSecurity)
+	}
+	if updated.Status.Ready || !strings.Contains(updated.Status.Message, "must use https") {
+		t.Fatalf("status = %#v, want unmarked HTTP treated as TLS", updated.Status)
+	}
+}
+
+func TestValidateAgentRuntimeSpecEnforcesTransportSecuritySchemePairing(t *testing.T) {
+	runtime, _ := testAgentRuntimeAndSecret("http://runtime.default.svc.cluster.local:8080")
+
+	runtime.Spec.Deployment.TransportSecurity = ""
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("validateAgentRuntimeSpec(unmarked http) = %v, want TLS rejection", err)
+	}
+	markLegacyAgentRuntimeTransport(runtime)
+	if err := validateAgentRuntimeSpec(runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeSpec(marked legacy http) error = %v", err)
+	}
+	security := agentRuntimeSpecTransportSecurity(runtime)
+	if security != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("marked legacy HTTP security = %q, want inferred insecure mode", security)
+	}
+
+	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityTLS
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("validateAgentRuntimeSpec(explicit tls with http) = %v, want https requirement", err)
+	}
+
+	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+	if err := validateAgentRuntimeSpec(runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeSpec(insecure http) error = %v", err)
+	}
+
+	runtime.Spec.Deployment.Endpoint = "https://runtime.example.com"
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "must use http") {
+		t.Fatalf("validateAgentRuntimeSpec(insecure https) = %v, want http requirement", err)
+	}
+
+	runtime.Spec.Deployment.TransportSecurity = ""
+	delete(runtime.Annotations, agentRuntimeTransportMigrationAnno)
+	if err := validateAgentRuntimeSpec(runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeSpec(unmarked https) error = %v", err)
+	}
+	security = agentRuntimeSpecTransportSecurity(runtime)
+	if security != corev1alpha1.AgentRuntimeTransportSecurityTLS {
+		t.Fatalf("unmarked HTTPS security = %q, want tls", security)
+	}
+
+	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
+	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("validateAgentRuntimeSpec(credentials) = %v, want credentials rejection", err)
+	}
+}
+
+func TestAgentRuntimeEndpointPolicyRequiresSafeSameNamespaceServiceForHTTP(t *testing.T) {
 	runtime, secret := testAgentRuntimeAndSecret("http://runtime.example.com")
 	r := newAgentRuntimeUnitReconciler(t, runtime, secret)
-	if err := validateAgentRuntimeSpec(runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeSpec() error = %v", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(external http with opt-in) = %v, want same-namespace Service requirement", err)
 	}
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy() = %v, want https requirement", err)
+
+	runtime.Spec.Deployment.TransportSecurity = ""
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(unmarked external http) = %v, want TLS rejection", err)
 	}
+	markLegacyAgentRuntimeTransport(runtime)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(marked legacy external http) = %v, want same-namespace Service rejection", err)
+	}
+	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
+
 	runtime.Spec.Deployment.Endpoint = "http://127.0.0.1:8080"
 	agentRuntimeAllowInsecureLoopbackForTests = false
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(loopback) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(loopback) = %v, want same-namespace Service requirement", err)
 	}
 	agentRuntimeAllowInsecureLoopbackForTests = true
+
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}}}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service)
 	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
+	runtime.Spec.Deployment.TransportSecurity = ""
+	markLegacyAgentRuntimeTransport(runtime)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(legacy cluster-local) error = %v", err)
+	}
+	runtime.Spec.Deployment.TransportSecurity = corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP
 	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
 		t.Fatalf("validateAgentRuntimeEndpointPolicy(cluster-local) error = %v", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://runtime:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(short-service) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(short-service) = %v, want qualified same-namespace Service requirement", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://runtime.default:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(service-namespace) error = %v", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(service-namespace) = %v, want rooted Service FQDN requirement", err)
 	}
+	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(partial Service DNS) = %v, want rooted Service FQDN requirement", err)
+	}
+
 	selectorlessService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "selectorless-runtime", Namespace: "default"}}
 	externalNameService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-runtime", Namespace: "default"},
@@ -657,36 +1132,89 @@ func TestAgentRuntimeEndpointPolicyRejectsInsecureExternalEndpoint(t *testing.T)
 	}
 	r = newAgentRuntimeUnitReconciler(t, runtime, secret, service, selectorlessService, externalNameService)
 	runtime.Spec.Deployment.Endpoint = "http://selectorless-runtime.default.svc.cluster.local:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(selectorless service) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "non-empty selector") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(selectorless service) = %v, want selector requirement", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://external-runtime.default.svc.cluster.local:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(externalName) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "ExternalName") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(externalName) = %v, want ExternalName rejection", err)
 	}
-	runtime.Spec.Deployment.Endpoint = "http://missing:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(missing short service) = %v, want https requirement", err)
+	runtime.Spec.Deployment.Endpoint = "http://missing.default.svc.cluster.local:8080"
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "to exist") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(missing service) = %v, want Service existence requirement", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://runtime.dev:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(namespace-like external) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(other namespace) = %v, want same-namespace rejection", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://runtime.svc.attacker.com"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-looking external) = %v, want https requirement", err)
-	}
-	runtime.Spec.Deployment.Endpoint = "http://runtime.default.svc.attacker.com"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-extra-label external) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(svc-looking external) = %v, want same-namespace rejection", err)
 	}
 	runtime.Spec.Deployment.Endpoint = "http://10.0.0.5:8080"
-	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "https") {
-		t.Fatalf("validateAgentRuntimeEndpointPolicy(private IP) = %v, want https requirement", err)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), "same-namespace") {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(private IP) = %v, want same-namespace rejection", err)
 	}
-	runtime.Spec.Deployment.Endpoint = "https://user:pass@runtime.example.com"
-	if err := validateAgentRuntimeSpec(runtime); err == nil || !strings.Contains(err.Error(), "credentials") {
-		t.Fatalf("validateAgentRuntimeSpec(credentials) = %v, want credentials rejection", err)
+}
+
+func TestAgentRuntimeRequestEndpointPreservesAuthorityForInsecureServiceDNS(t *testing.T) {
+	previousClusterDomain := agentRuntimeClusterDomainForTests
+	agentRuntimeClusterDomainForTests = testAgentRuntimeClusterDomain
+	t.Cleanup(func() { agentRuntimeClusterDomainForTests = previousClusterDomain })
+	got, security, err := agentRuntimeRequestEndpoint(
+		"http://runtime.default.svc.cluster.local:8080/harness",
+		corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+	)
+	if err != nil {
+		t.Fatalf("agentRuntimeRequestEndpoint() error = %v", err)
+	}
+	if security != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("security = %q, want insecure mode", security)
+	}
+	if got != "http://runtime.default.svc.cluster.local:8080/harness" {
+		t.Fatalf("request endpoint = %q, want configured HTTP authority preserved", got)
+	}
+}
+
+func TestAgentRuntimeEndpointPolicyUsesConfiguredClusterDomain(t *testing.T) {
+	previousClusterDomain := agentRuntimeClusterDomainForTests
+	agentRuntimeClusterDomainForTests = "corp.internal"
+	t.Cleanup(func() { agentRuntimeClusterDomainForTests = previousClusterDomain })
+	runtime, secret := testAgentRuntimeAndSecret("http://runtime.default.svc.corp.internal:8080")
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "runtime"}},
+	}
+	r := newAgentRuntimeUnitReconciler(t, runtime, secret, service)
+	if err := r.validateAgentRuntimeEndpointPolicy(context.Background(), runtime); err != nil {
+		t.Fatalf("validateAgentRuntimeEndpointPolicy(custom cluster domain) error = %v", err)
+	}
+}
+
+func TestDiscoverAgentRuntimeClusterDomain(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		searchLine string
+		want       string
+	}{
+		{name: "ordinary namespace", searchLine: "search orka-system.svc.corp.internal svc.corp.internal corp.internal\n", want: "corp.internal"},
+		{name: "namespace named svc", searchLine: "search svc.svc.cluster.local svc.cluster.local cluster.local\n", want: "cluster.local"},
+		{name: "cluster domain starts with svc", searchLine: "search orka-system.svc.svc.corp svc.svc.corp svc.corp\n", want: "svc.corp"},
+		{name: "overlapping suffix candidates", searchLine: "search orka-system.svc.svc.corp svc.svc.corp svc.corp corp\n", want: ""},
+		{name: "unrelated search domains", searchLine: "search corp.example example\n", want: ""},
+		{name: "tuple split across directives", searchLine: "search tenant.svc.evil.example\nsearch svc.evil.example evil.example\n", want: ""},
+		{name: "conflicting tuples", searchLine: "search ns.svc.cluster.local svc.cluster.local cluster.local\nsearch ns.svc.evil.example svc.evil.example evil.example\n", want: ""},
+		{name: "conflicting tuples on one line", searchLine: "search ns.svc.evil.example svc.evil.example evil.example ns.svc.cluster.local svc.cluster.local cluster.local\n", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolvConf := filepath.Join(t.TempDir(), "resolv.conf")
+			if err := os.WriteFile(resolvConf, []byte(tc.searchLine), 0o600); err != nil {
+				t.Fatalf("write resolv.conf: %v", err)
+			}
+			if got := discoverAgentRuntimeClusterDomain(resolvConf); got != tc.want {
+				t.Fatalf("cluster domain = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

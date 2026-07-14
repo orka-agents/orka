@@ -255,8 +255,9 @@ func agentRuntimeExternalRuntime(name, endpoint, secretName string) map[string]a
 		"spec": map[string]any{
 			"contractVersion": "orka.harness.v1",
 			"deployment": map[string]any{
-				"mode":     "external-endpoint",
-				"endpoint": endpoint,
+				"mode":              "external-endpoint",
+				"endpoint":          endpoint,
+				"transportSecurity": "insecure-cluster-local-http",
 			},
 			"clientAuth": map[string]any{
 				"bearerTokenSecretRef": map[string]any{
@@ -324,10 +325,11 @@ func assertTaskHarnessRuntimeStatus(taskName, runtimeName, endpoint, authRefName
 		var task struct {
 			Status struct {
 				HarnessRuntime struct {
-					RuntimeRefName  string `json:"runtimeRefName"`
-					ContractVersion string `json:"contractVersion"`
-					Endpoint        string `json:"endpoint"`
-					AuthRefName     string `json:"authRefName"`
+					RuntimeRefName    string `json:"runtimeRefName"`
+					ContractVersion   string `json:"contractVersion"`
+					Endpoint          string `json:"endpoint"`
+					TransportSecurity string `json:"transportSecurity"`
+					AuthRefName       string `json:"authRefName"`
 				} `json:"harnessRuntime"`
 			} `json:"status"`
 		}
@@ -335,6 +337,7 @@ func assertTaskHarnessRuntimeStatus(taskName, runtimeName, endpoint, authRefName
 		g.Expect(task.Status.HarnessRuntime.RuntimeRefName).To(Equal(runtimeName))
 		g.Expect(task.Status.HarnessRuntime.ContractVersion).To(Equal("orka.harness.v1"))
 		g.Expect(task.Status.HarnessRuntime.Endpoint).To(Equal(endpoint))
+		g.Expect(task.Status.HarnessRuntime.TransportSecurity).To(Equal("insecure-cluster-local-http"))
 		g.Expect(task.Status.HarnessRuntime.AuthRefName).To(Equal(authRefName))
 	}, 30*time.Second, time.Second).Should(Succeed())
 }

@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -307,6 +308,36 @@ func TestProviderReconcile_NotFound(t *testing.T) {
 	}
 }
 
+func TestProviderReconcileSkipsUnchangedStatusUpdate(t *testing.T) {
+	scheme := newProviderScheme()
+	provider := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "stable-provider", Namespace: "default"},
+	}
+	countingClient := &statusUpdateCountingClient{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&corev1alpha1.Provider{}).
+			WithObjects(provider).
+			Build(),
+	}
+	reconciler := &ProviderReconciler{Client: countingClient, Scheme: scheme}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("first Reconcile() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after first reconcile = %d, want 1", countingClient.statusUpdateCount)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second Reconcile() error = %v", err)
+	}
+	if countingClient.statusUpdateCount != 1 {
+		t.Fatalf("status updates after second reconcile = %d, want no additional update", countingClient.statusUpdateCount)
+	}
+}
+
 // ---------- updateStatus ----------
 
 func TestProviderUpdateStatus(t *testing.T) {
@@ -389,4 +420,26 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+type statusUpdateCountingClient struct {
+	client.Client
+	statusUpdateCount int
+}
+
+func (c *statusUpdateCountingClient) Status() client.SubResourceWriter {
+	return &statusUpdateCountingWriter{
+		SubResourceWriter: c.Client.Status(),
+		statusUpdateCount: &c.statusUpdateCount,
+	}
+}
+
+type statusUpdateCountingWriter struct {
+	client.SubResourceWriter
+	statusUpdateCount *int
+}
+
+func (w *statusUpdateCountingWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	(*w.statusUpdateCount)++
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }

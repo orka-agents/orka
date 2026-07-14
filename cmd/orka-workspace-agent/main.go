@@ -347,6 +347,7 @@ func (s *workspaceAgentServer) runExec(
 	defer cancel()
 	startedAt := time.Now().UTC()
 	cmd := exec.CommandContext(ctx, req.Command[0], req.Command[1:]...)
+	configureExecCommand(cmd)
 	cmd.Dir = normalized.workDir
 	cmd.Env = mergeEnv(commandBaseEnv(os.Environ()), req.Env)
 	if len(req.Stdin) > 0 {
@@ -357,12 +358,15 @@ func (s *workspaceAgentServer) runExec(
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := cmd.Run()
+	cleanupExecDescendants(cmd)
 	finishedAt := time.Now().UTC()
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			exitCode = 124
+		} else if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
 		} else if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
@@ -392,9 +396,6 @@ func (s *workspaceAgentServer) loadExecution(id string) (execResponse, bool) {
 	defer s.mu.Unlock()
 	s.evictCompletedExecutionsLocked(time.Now().UTC())
 	resp, ok := s.executions[id]
-	if ok && !resp.Running {
-		delete(s.executions, id)
-	}
 	return resp, ok
 }
 

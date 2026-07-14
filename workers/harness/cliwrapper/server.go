@@ -412,7 +412,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	preparedWorkspace, err := prepareTurnWorkspace(ctx, turnCtx)
 	restoreWorkspaceEnv()
 	if err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		appendWorkspacePreparationFailure(s, turn, ctx, err)
 		return
 	}
 	defer preparedWorkspace.cleanup()
@@ -431,7 +431,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	agentCfg, err := PrepareTurnContext(ctx, &turnCtx, preparedWorkspace.rootDir, turnArtifactsDir)
 	restoreChildIdentity()
 	if err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		appendWorkspacePreparationFailure(s, turn, ctx, err)
 		return
 	}
 	if err := ensureWorkspaceArtifactsLinkForTurn(

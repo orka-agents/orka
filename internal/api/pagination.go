@@ -9,6 +9,9 @@ package api
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/gofiber/fiber/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
@@ -47,4 +50,14 @@ func ParsePagination(limitStr, continueToken string) (*Pagination, error) {
 	}
 
 	return p, nil
+}
+
+func paginationListError(resource string, err error) error {
+	if apierrors.IsResourceExpired(err) {
+		return fiber.NewError(fiber.StatusGone, fmt.Sprintf("%s continue cursor expired; restart the list", resource))
+	}
+	if apierrors.IsBadRequest(err) {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid %s continue cursor", resource))
+	}
+	return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list %s: %v", resource, err))
 }

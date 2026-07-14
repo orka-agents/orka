@@ -583,6 +583,49 @@ func harnessBrokeredToolResultRef(task *corev1alpha1.Task, idempotencyKey string
 	return strings.TrimSpace(task.Name) + "-brokered-" + hex.EncodeToString(sum[:])[:24]
 }
 
+func (r *TaskReconciler) scanHarnessBrokeredToolEvents(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	eventTypes []string,
+	visit func(store.ExecutionEvent) bool,
+) error {
+	afterSeq := int64(0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("read brokered tool ledger: %w", err)
+		}
+		listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+			Namespace:  task.Namespace,
+			StreamType: store.ExecutionEventStreamTypeTask,
+			StreamID:   task.Name,
+			EventTypes: eventTypes,
+			AfterSeq:   afterSeq,
+			Limit:      store.MaxExecutionEventLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("read brokered tool ledger: %w", err)
+		}
+		if len(listed) == 0 {
+			return nil
+		}
+
+		nextAfterSeq := afterSeq
+		for _, event := range listed {
+			if event.Seq <= nextAfterSeq {
+				return fmt.Errorf("read brokered tool ledger: pagination did not advance beyond seq %d (received seq %d)", nextAfterSeq, event.Seq)
+			}
+			nextAfterSeq = event.Seq
+			if !visit(event) {
+				return nil
+			}
+		}
+		afterSeq = nextAfterSeq
+		if len(listed) < store.MaxExecutionEventLimit {
+			return nil
+		}
+	}
+}
+
 func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -593,47 +636,61 @@ func (r *TaskReconciler) hasUnresolvedHarnessBrokeredToolExecution(
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
 		return false, nil
 	}
-	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace:  task.Namespace,
-		StreamID:   task.Name,
-		EventTypes: []string{events.ExecutionEventTypeToolCallStarted, events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed},
-	})
-	if err != nil {
-		return false, fmt.Errorf("read brokered tool ledger: %w", err)
-	}
 	started := false
-	for _, event := range listed {
-		if event.ToolCallID != frame.ToolCallID {
-			continue
-		}
-		var payload struct {
-			Brokered         bool   `json:"brokered"`
-			IdempotencyKey   string `json:"idempotencyKey"`
-			TargetArgsDigest string `json:"targetArgsDigest,omitempty"`
-			ExecutionState   string `json:"executionState,omitempty"`
-		}
-		if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
-			continue
-		}
-		if event.ToolName != frame.ToolName {
-			return true, nil
-		}
-		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
-			if event.Type == events.ExecutionEventTypeToolCallStarted && payload.ExecutionState == "started" {
-				return true, nil
+	unresolved := false
+	err := r.scanHarnessBrokeredToolEvents(
+		ctx,
+		task,
+		[]string{events.ExecutionEventTypeToolCallStarted, events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed},
+		func(event store.ExecutionEvent) bool {
+			if event.ToolCallID != frame.ToolCallID {
+				return true
 			}
-			continue
-		}
-		switch event.Type {
-		case events.ExecutionEventTypeToolCallStarted:
-			if payload.ExecutionState == "started" {
-				started = true
+			var payload struct {
+				Brokered         bool   `json:"brokered"`
+				IdempotencyKey   string `json:"idempotencyKey"`
+				TargetArgsDigest string `json:"targetArgsDigest,omitempty"`
+				ExecutionState   string `json:"executionState,omitempty"`
 			}
-		case events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed:
-			started = false
-		}
+			if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
+				return true
+			}
+			if event.ToolName != frame.ToolName {
+				unresolved = true
+				return false
+			}
+			if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
+				if event.Type == events.ExecutionEventTypeToolCallStarted && payload.ExecutionState == "started" {
+					unresolved = true
+					return false
+				}
+				return true
+			}
+			switch event.Type {
+			case events.ExecutionEventTypeToolCallStarted:
+				if payload.ExecutionState == "started" {
+					started = true
+				}
+			case events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed:
+				started = false
+			}
+			return true
+		},
+	)
+	if err != nil {
+		return false, err
 	}
-	return started, nil
+	return unresolved || started, nil
+}
+
+type harnessBrokeredToolResultPayload struct {
+	Brokered         bool               `json:"brokered"`
+	IdempotencyKey   string             `json:"idempotencyKey"`
+	TargetArgsDigest string             `json:"targetArgsDigest,omitempty"`
+	Approved         *bool              `json:"approved,omitempty"`
+	ToolResultRef    string             `json:"toolResultRef,omitempty"`
+	ToolResult       json.RawMessage    `json:"toolResult,omitempty"`
+	ToolError        *harness.ErrorInfo `json:"toolError,omitempty"`
 }
 
 func (r *TaskReconciler) previousHarnessBrokeredToolResult(
@@ -646,107 +703,137 @@ func (r *TaskReconciler) previousHarnessBrokeredToolResult(
 	if r == nil || r.ExecutionEventStore == nil || task == nil {
 		return harness.ToolCallResult{}, false, nil
 	}
-	listed, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
-		Namespace:  task.Namespace,
-		StreamID:   task.Name,
-		EventTypes: []string{events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed},
-	})
+	var selectedEvent store.ExecutionEvent
+	var selectedPayload harnessBrokeredToolResultPayload
+	found := false
+	err := r.scanHarnessBrokeredToolEvents(
+		ctx,
+		task,
+		[]string{events.ExecutionEventTypeToolCallCompleted, events.ExecutionEventTypeToolCallFailed},
+		func(event store.ExecutionEvent) bool {
+			if event.ToolCallID != frame.ToolCallID {
+				return true
+			}
+			var payload harnessBrokeredToolResultPayload
+			if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
+				return true
+			}
+
+			toolChanged := event.ToolName != frame.ToolName
+			argsChanged := payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest
+			if !toolChanged && !argsChanged && len(payload.ToolResult) == 0 && payload.ToolResultRef == "" && payload.ToolError == nil && event.Type != events.ExecutionEventTypeToolCallCompleted {
+				return true
+			}
+			selectedEvent = event
+			selectedPayload = payload
+			found = true
+			return true
+		},
+	)
 	if err != nil {
-		return harness.ToolCallResult{}, false, fmt.Errorf("read brokered tool ledger: %w", err)
+		return harness.ToolCallResult{}, false, err
 	}
-	for i := len(listed) - 1; i >= 0; i-- {
-		event := listed[i]
-		if event.ToolCallID != frame.ToolCallID {
-			continue
-		}
-		var payload struct {
-			Brokered         bool               `json:"brokered"`
-			IdempotencyKey   string             `json:"idempotencyKey"`
-			TargetArgsDigest string             `json:"targetArgsDigest,omitempty"`
-			Approved         *bool              `json:"approved,omitempty"`
-			ToolResultRef    string             `json:"toolResultRef,omitempty"`
-			ToolResult       json.RawMessage    `json:"toolResult,omitempty"`
-			ToolError        *harness.ErrorInfo `json:"toolError,omitempty"`
-		}
-		if err := json.Unmarshal(event.Content, &payload); err != nil || !payload.Brokered || payload.IdempotencyKey != idempotencyKey {
-			continue
-		}
-		if event.ToolName != frame.ToolName {
-			result := harness.ToolCallResult{
-				Version:          harness.ProtocolVersion,
-				RuntimeSessionID: frame.RuntimeSessionID,
-				TurnID:           frame.TurnID,
-				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
-				IdempotencyKey:   idempotencyKey,
-				Approved:         false,
-				Error:            &harness.ErrorInfo{Code: "tool_call_id_reused", Message: "brokered tool call id was reused for a different tool"},
-			}
-			return result, true, nil
-		}
-		if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
-			result := harness.ToolCallResult{
-				Version:          harness.ProtocolVersion,
-				RuntimeSessionID: frame.RuntimeSessionID,
-				TurnID:           frame.TurnID,
-				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
-				IdempotencyKey:   idempotencyKey,
-				Approved:         false,
-				Error:            &harness.ErrorInfo{Code: "tool_call_arguments_changed", Message: "brokered tool call arguments changed after a result was recorded"},
-			}
-			return result, true, nil
-		}
-		approved := true
-		if payload.Approved != nil {
-			approved = *payload.Approved
-		}
-		if len(payload.ToolResult) == 0 && payload.ToolResultRef != "" {
-			if r.ResultStore == nil {
-				result := harness.ToolCallResult{
-					Version:          harness.ProtocolVersion,
-					RuntimeSessionID: frame.RuntimeSessionID,
-					TurnID:           frame.TurnID,
-					ToolCallID:       strings.TrimSpace(frame.ToolCallID),
-					IdempotencyKey:   idempotencyKey,
-					Approved:         false,
-					Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result store is unavailable"},
-				}
-				return result, true, nil
-			}
-			stored, err := r.ResultStore.GetResult(ctx, task.Namespace, payload.ToolResultRef)
-			if err != nil {
-				result := harness.ToolCallResult{
-					Version:          harness.ProtocolVersion,
-					RuntimeSessionID: frame.RuntimeSessionID,
-					TurnID:           frame.TurnID,
-					ToolCallID:       strings.TrimSpace(frame.ToolCallID),
-					IdempotencyKey:   idempotencyKey,
-					Approved:         false,
-					Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result is unavailable"},
-				}
-				return result, true, nil
-			}
-			payload.ToolResult = json.RawMessage(stored)
-		}
+	if !found {
+		return harness.ToolCallResult{}, false, nil
+	}
+	return r.replayHarnessBrokeredToolResult(ctx, task, frame, idempotencyKey, argsDigest, selectedEvent, selectedPayload)
+}
+
+func (r *TaskReconciler) replayHarnessBrokeredToolResult(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	frame harness.HarnessEventFrame,
+	idempotencyKey string,
+	argsDigest string,
+	event store.ExecutionEvent,
+	payload harnessBrokeredToolResultPayload,
+) (harness.ToolCallResult, bool, error) {
+	if event.ToolName != frame.ToolName {
 		result := harness.ToolCallResult{
 			Version:          harness.ProtocolVersion,
 			RuntimeSessionID: frame.RuntimeSessionID,
 			TurnID:           frame.TurnID,
 			ToolCallID:       strings.TrimSpace(frame.ToolCallID),
 			IdempotencyKey:   idempotencyKey,
-			Approved:         approved,
-			Output:           payload.ToolResult,
-			Error:            payload.ToolError,
-		}
-		if len(result.Output) == 0 && result.Error == nil {
-			if event.Type == events.ExecutionEventTypeToolCallCompleted {
-				result.Output = json.RawMessage(`{"success":true,"replayed":true}`)
-			} else {
-				continue
-			}
+			Approved:         false,
+			Error:            &harness.ErrorInfo{Code: "tool_call_id_reused", Message: "brokered tool call id was reused for a different tool"},
 		}
 		return result, true, nil
 	}
-	return harness.ToolCallResult{}, false, nil
+	if payload.TargetArgsDigest != "" && argsDigest != "" && payload.TargetArgsDigest != argsDigest {
+		result := harness.ToolCallResult{
+			Version:          harness.ProtocolVersion,
+			RuntimeSessionID: frame.RuntimeSessionID,
+			TurnID:           frame.TurnID,
+			ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+			IdempotencyKey:   idempotencyKey,
+			Approved:         false,
+			Error:            &harness.ErrorInfo{Code: "tool_call_arguments_changed", Message: "brokered tool call arguments changed after a result was recorded"},
+		}
+		return result, true, nil
+	}
+	approved := true
+	if payload.Approved != nil {
+		approved = *payload.Approved
+	}
+	if len(payload.ToolResult) == 0 && payload.ToolResultRef != "" {
+		if r.ResultStore == nil {
+			result := harness.ToolCallResult{
+				Version:          harness.ProtocolVersion,
+				RuntimeSessionID: frame.RuntimeSessionID,
+				TurnID:           frame.TurnID,
+				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+				IdempotencyKey:   idempotencyKey,
+				Approved:         false,
+				Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result store is unavailable"},
+			}
+			return result, true, nil
+		}
+		stored, err := r.ResultStore.GetResult(ctx, task.Namespace, payload.ToolResultRef)
+		if err != nil {
+			result := harness.ToolCallResult{
+				Version:          harness.ProtocolVersion,
+				RuntimeSessionID: frame.RuntimeSessionID,
+				TurnID:           frame.TurnID,
+				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+				IdempotencyKey:   idempotencyKey,
+				Approved:         false,
+				Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result is unavailable"},
+			}
+			return result, true, nil
+		}
+		if len(stored) == 0 && event.Type == events.ExecutionEventTypeToolCallFailed && payload.ToolError == nil {
+			result := harness.ToolCallResult{
+				Version:          harness.ProtocolVersion,
+				RuntimeSessionID: frame.RuntimeSessionID,
+				TurnID:           frame.TurnID,
+				ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+				IdempotencyKey:   idempotencyKey,
+				Approved:         false,
+				Error:            &harness.ErrorInfo{Code: "tool_result_replay_unavailable", Message: "brokered tool result is unavailable"},
+			}
+			return result, true, nil
+		}
+		payload.ToolResult = json.RawMessage(stored)
+	}
+	result := harness.ToolCallResult{
+		Version:          harness.ProtocolVersion,
+		RuntimeSessionID: frame.RuntimeSessionID,
+		TurnID:           frame.TurnID,
+		ToolCallID:       strings.TrimSpace(frame.ToolCallID),
+		IdempotencyKey:   idempotencyKey,
+		Approved:         approved,
+		Output:           payload.ToolResult,
+		Error:            payload.ToolError,
+	}
+	if len(result.Output) == 0 && result.Error == nil {
+		if event.Type == events.ExecutionEventTypeToolCallCompleted {
+			result.Output = json.RawMessage(`{"success":true,"replayed":true}`)
+		} else {
+			return harness.ToolCallResult{}, false, nil
+		}
+	}
+	return result, true, nil
 }
 
 func brokeredToolEventContent(result harness.ToolCallResult, extra map[string]any) map[string]any {

@@ -78,6 +78,122 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
+### Upgrade
+
+Helm installs files under `crds/` only on a fresh install; an ordinary
+`helm upgrade` does not create or update them. Package the target chart once,
+run its guarded CRD migration, and use that exact archive for the release
+upgrade:
+
+```bash
+TARGET_CONTEXT="replace-with-context"
+
+(
+  set -euo pipefail
+
+  WORK_DIR="$(mktemp -d)"
+  KEEP_WORK_DIR=false
+  cleanup_work_dir() {
+    status=$?
+    trap - EXIT
+    if [[ "$KEEP_WORK_DIR" == true ]]; then
+      echo "Target chart and work files preserved at $WORK_DIR" >&2
+    else
+      rm -rf "$WORK_DIR"
+    fi
+    exit "$status"
+  }
+  trap cleanup_work_dir EXIT
+
+  helm package charts/orka --destination "$WORK_DIR"
+  TARGET_CHARTS=("$WORK_DIR"/orka-*.tgz)
+  test "${#TARGET_CHARTS[@]}" -eq 1
+  TARGET_CHART="${TARGET_CHARTS[0]}"
+  test -f "$TARGET_CHART"
+
+  KEEP_WORK_DIR=true
+  scripts/helm-chart.sh upgrade-crds \
+    --chart "$TARGET_CHART" \
+    --kube-context "$TARGET_CONTEXT" \
+    --release orka \
+    --namespace orka-system
+
+  helm upgrade orka "$TARGET_CHART" \
+    --namespace orka-system \
+    --kube-context "$TARGET_CONTEXT" \
+    --wait
+  KEEP_WORK_DIR=false
+)
+```
+
+The helper requires `jq`, rejects `HELM_KUBE*` endpoint or credential overrides,
+reads Helm release storage through the explicit kubectl context, requires the
+latest release status to be `deployed` or `failed`, and server-preflights all nine
+exact patch/create operations before mutation. It rechecks Helm state before and
+after mutation, then verifies target generation, accepted names, and served API
+discovery for every CRD. If
+mutation or verification fails, partial changes and recovery artifacts are left
+in place with a unique migration marker; automatic schema
+rollback is intentionally avoided because it can invalidate custom resources or
+alter field ownership. CRDs are cluster-scoped, shared by all Orka releases, and
+retained on uninstall. Users without a source checkout should follow the
+[validated portable workflow](charts/orka/README.md#validated-portable-workflow),
+which uses a separately trusted migrator and treats the target archive as data
+only.
+
+#### Reinstall with retained CRDs
+
+If the prior Helm release was uninstalled but any Orka CRDs remain, migrate them
+**before** installing the replacement release. The missing-release mode is an
+explicit opt-in and refuses a cluster with neither a release nor existing Orka
+CRDs:
+
+```bash
+TARGET_CONTEXT="replace-with-context"
+
+(
+  set -euo pipefail
+
+  TARGET_CONTEXT="${TARGET_CONTEXT:?set TARGET_CONTEXT}"
+
+  WORK_DIR="$(mktemp -d)"
+  KEEP_WORK_DIR=false
+  cleanup_work_dir() {
+    status=$?
+    trap - EXIT
+    if [[ "$KEEP_WORK_DIR" == true ]]; then
+      echo "Target chart and work files preserved at $WORK_DIR" >&2
+    else
+      rm -rf "$WORK_DIR"
+    fi
+    exit "$status"
+  }
+  trap cleanup_work_dir EXIT
+
+  helm package charts/orka --destination "$WORK_DIR"
+  TARGET_CHARTS=("$WORK_DIR"/orka-*.tgz)
+  test "${#TARGET_CHARTS[@]}" -eq 1
+  TARGET_CHART="${TARGET_CHARTS[0]}"
+  test -f "$TARGET_CHART"
+
+  KEEP_WORK_DIR=true
+  scripts/helm-chart.sh upgrade-crds \
+    --chart "$TARGET_CHART" \
+    --kube-context "$TARGET_CONTEXT" \
+    --release orka \
+    --namespace orka-system \
+    --allow-missing-release
+
+  helm install orka "$TARGET_CHART" \
+    --skip-crds \
+    --namespace orka-system \
+    --create-namespace \
+    --kube-context "$TARGET_CONTEXT" \
+    --wait
+  KEEP_WORK_DIR=false
+)
+```
+
 ### Set Up a Provider
 
 ```bash

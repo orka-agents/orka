@@ -485,6 +485,23 @@ type HarnessRuntimeStatus struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// TransportSecurity is the AgentRuntime transport policy selected when the turn started.
+	// Empty is interpreted as tls for compatibility with tasks created before this field existed.
+	// +optional
+	TransportSecurity AgentRuntimeTransportSecurity `json:"transportSecurity,omitempty"`
+
+	// BackendPodName is the selector-matched Pod chosen for an insecure cluster-local HTTP turn.
+	// +optional
+	BackendPodName string `json:"backendPodName,omitempty"`
+
+	// BackendPodUID is the immutable UID of BackendPodName.
+	// +optional
+	BackendPodUID string `json:"backendPodUID,omitempty"`
+
+	// BackendAddress is the non-secret Pod IP and target port pinned for the turn.
+	// +optional
+	BackendAddress string `json:"backendAddress,omitempty"`
+
 	// RuntimeGeneration is the AgentRuntime generation selected when the turn started.
 	// +optional
 	RuntimeGeneration int64 `json:"runtimeGeneration,omitempty"`

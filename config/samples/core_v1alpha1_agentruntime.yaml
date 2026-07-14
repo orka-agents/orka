@@ -15,6 +15,7 @@ spec:
   deployment:
     mode: external-endpoint
     endpoint: http://sample-http-runtime.default.svc.cluster.local:8080
+    transportSecurity: insecure-cluster-local-http
   clientAuth:
     bearerTokenSecretRef:
       name: sample-http-runtime-token

@@ -97,6 +97,15 @@ func NewFakeHarnessServer(config FakeHarnessConfig) *FakeHarnessServer {
 
 func (s *FakeHarnessServer) URL() string { return s.server.URL }
 
+func (s *FakeHarnessServer) TurnCount() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.turns)
+}
+
 func (s *FakeHarnessServer) Close() {
 	if s != nil && s.server != nil {
 		s.server.Close()

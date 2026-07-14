@@ -40,6 +40,7 @@ spec:
   deployment:
     mode: external-endpoint
     endpoint: http://sample-http-runtime.default.svc.cluster.local:8080
+    transportSecurity: insecure-cluster-local-http
   clientAuth:
     bearerTokenSecretRef:
       name: sample-http-runtime-token
@@ -59,6 +60,18 @@ spec:
     runtimeRef:
       name: sample-http-runtime
 ```
+
+Set `spec.deployment.transportSecurity` explicitly for new manifests. An
+unmarked omission is treated as `tls`, so HTTP still requires the explicit
+`insecure-cluster-local-http` opt-in. During the supported CRD upgrade, the
+migration helper handles schemas that predate the field as well as the legacy
+read-time default, publishes the omission-safe target schema, and then marks only
+pre-transition stored omissions. The new controller backfills marked `https://`
+endpoints to `tls` and marked
+`http://` endpoints only when they name a selector-backed, non-`ExternalName`
+Service in the same namespace. External, cross-namespace, selectorless, and
+direct-IP HTTP endpoints remain rejected. Orka revalidates the Service before
+fresh and already-planned task dispatches.
 
 ## Quick Start
 

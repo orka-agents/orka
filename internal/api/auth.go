@@ -140,6 +140,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	}
 
 	tokenExtractor := AuthTokenExtractor{Sources: cfg.TokenSources}
+	jwtVerifier := newJWTVerifier()
 
 	return func(ctx fiber.Ctx) error {
 		contextToken, profile, ok, err := extractContextTokenCandidate(ctx, cfg.ContextTokens)
@@ -150,7 +151,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 
 		var userInfo *UserInfo
 		if ok {
-			userInfo, err = authenticateContextToken(ctx.Context(), contextToken, profile)
+			userInfo, err = authenticateContextTokenWithVerifier(ctx.Context(), contextToken, profile, jwtVerifier)
 		} else {
 			bearerContextToken, bearerErr := isUnconfiguredBearerContextToken(ctx, cfg.ContextTokens)
 			if bearerErr != nil {
@@ -174,7 +175,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 				return fiber.NewError(fiber.StatusUnauthorized, "missing authorization header")
 			}
 
-			userInfo, err = authenticateToken(ctx.Context(), c, token, cfg)
+			userInfo, err = authenticateTokenWithVerifier(ctx.Context(), c, token, cfg, jwtVerifier)
 		}
 		if err != nil {
 			log.Error(err, "token validation failed")
@@ -189,13 +190,17 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 }
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
+	return authenticateTokenWithVerifier(ctx, c, token, cfg, processJWTVerifier)
+}
+
+func authenticateTokenWithVerifier(ctx context.Context, c client.Client, token string, cfg AuthConfig, verifier *jwtVerifier) (*UserInfo, error) {
 	if !cfg.OIDC.Enabled() {
 		return validateToken(ctx, c, token)
 	}
 
 	parsedOIDC, oidcErr := parseOIDCTokenCandidate(token, cfg.OIDC)
 	if oidcErr == nil {
-		userInfo, oidcErr := validateParsedOIDCToken(ctx, parsedOIDC, cfg.OIDC)
+		userInfo, oidcErr := validateParsedOIDCTokenWithVerifier(ctx, parsedOIDC, cfg.OIDC, verifier)
 		if oidcErr == nil {
 			return userInfo, nil
 		}
@@ -215,8 +220,8 @@ func authenticateToken(ctx context.Context, c client.Client, token string, cfg A
 	return nil, fmt.Errorf("OIDC validation skipped: %w; TokenReview validation failed: %v", oidcErr, tokenReviewErr)
 }
 
-func authenticateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*UserInfo, error) {
-	contextToken, err := validateContextToken(ctx, token, profile)
+func authenticateContextTokenWithVerifier(ctx context.Context, token string, profile ContextTokenProfileConfig, verifier *jwtVerifier) (*UserInfo, error) {
+	contextToken, err := validateContextTokenWithVerifier(ctx, token, profile, verifier)
 	if err != nil {
 		metrics.RecordContextTokenAuth(profile.Name, "failure")
 		return nil, err

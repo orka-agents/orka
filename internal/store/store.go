@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrNotFound is returned when a requested resource does not exist.
@@ -65,6 +66,15 @@ type SessionStore interface {
 
 	// Token tracking
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
+}
+
+// SessionTurnCommitter reserves chat turns and atomically commits transcript
+// messages with their token usage. expectedMessageCount is an optimistic guard
+// for the session revision owned by turnID. expiresAt bounds crash recovery.
+type SessionTurnCommitter interface {
+	AcquireChatTurn(ctx context.Context, session *SessionRecord, turnID string, expiresAt time.Time) error
+	ReleaseChatTurn(ctx context.Context, namespace, name, turnID string) error
+	CommitSessionTurn(ctx context.Context, session *SessionRecord, turnID string, expectedMessageCount int, messages []SessionMessage, inputTokens, outputTokens int) error
 }
 
 // MemoryStore handles durable namespace-scoped memory persistence.

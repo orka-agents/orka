@@ -18,6 +18,7 @@ import (
 
 	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	"github.com/gofiber/fiber/v3"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -35,6 +36,28 @@ const (
 )
 
 var kontxtRequiredClaims = []string{"sub", "exp", "iat", "txn", "scope", "req_wl"}
+
+var contextTokenStringAuthorizationClaims = [...]string{
+	"namespace",
+	"taskType",
+	"taskName",
+	"task",
+	"agent",
+	"repo",
+	"branch",
+	"ref",
+	"configMap",
+	"secret",
+	"provider",
+	"model",
+}
+
+var contextTokenStringListAuthorizationClaims = [...]string{
+	"allowedAgents",
+	"allowedTools",
+	"allowedProviders",
+	"allowedModels",
+}
 
 // TokenHeaderConfig describes one HTTP header location from which a token can be extracted.
 type TokenHeaderConfig struct {
@@ -244,6 +267,10 @@ func extractTokenFromHeaderValue(value string, header TokenHeaderConfig) (string
 }
 
 func validateContextToken(ctx context.Context, token string, profile ContextTokenProfileConfig) (*ContextToken, error) {
+	return validateContextTokenWithVerifier(ctx, token, profile, processJWTVerifier)
+}
+
+func validateContextTokenWithVerifier(ctx context.Context, token string, profile ContextTokenProfileConfig, verifier *jwtVerifier) (*ContextToken, error) {
 	if profile.Name == "" {
 		return nil, errors.New("missing context-token profile name")
 	}
@@ -265,19 +292,10 @@ func validateContextToken(ctx context.Context, token string, profile ContextToke
 		return nil, fmt.Errorf("invalid JWT type %q", parsed.Header.Type)
 	}
 
-	jwksURL := profile.JWKSURL
-	if jwksURL == "" {
-		discovered, err := discoverOIDCJWKSURL(ctx, profile.Issuer)
-		if err != nil {
-			return nil, err
-		}
-		jwksURL = discovered
-	}
-
-	verified, err := verifyParsedJWT(ctx, parsed, jwtVerificationConfig{
+	verified, err := verifier.verifyParsedJWTWithDiscovery(ctx, parsed, jwtVerificationConfig{
 		Issuer:         profile.Issuer,
 		Audience:       profile.Audience,
-		JWKSURL:        jwksURL,
+		JWKSURL:        profile.JWKSURL,
 		RequiredClaims: profile.RequiredClaims,
 	})
 	if err != nil {
@@ -287,6 +305,9 @@ func validateContextToken(ctx context.Context, token string, profile ContextToke
 	claimsMap, err := decodeContextTokenClaimsMap(verified.RawClaims)
 	if err != nil {
 		return nil, fmt.Errorf("parse context-token claims map: %w", err)
+	}
+	if err := validateContextTokenAuthorizationClaims(claimsMap); err != nil {
+		return nil, err
 	}
 	if err := validateRequiredContextTokenClaims(claimsMap, profile.RequiredClaims); err != nil {
 		return nil, err
@@ -321,6 +342,45 @@ func decodeContextTokenClaimsMap(raw json.RawMessage) (map[string]any, error) {
 		return nil, err
 	}
 	return claims, nil
+}
+
+func validateContextTokenAuthorizationClaims(claims map[string]any) error {
+	rawContext, ok := claims["tctx"]
+	if !ok || rawContext == nil {
+		return nil
+	}
+	transactionContext, ok := rawContext.(map[string]any)
+	if !ok {
+		return errors.New(`invalid context-token claim "tctx": expected an object`)
+	}
+
+	for _, name := range contextTokenStringAuthorizationClaims {
+		value, present := transactionContext[name]
+		if !present {
+			continue
+		}
+		stringValue, valid := value.(string)
+		if !valid || strings.TrimSpace(stringValue) == "" {
+			return fmt.Errorf("invalid context-token tctx claim %q: expected a non-empty string", name)
+		}
+	}
+
+	for _, name := range contextTokenStringListAuthorizationClaims {
+		if _, present := transactionContext[name]; !present {
+			continue
+		}
+		if _, valid := contextStringList(transactionContext, name); !valid {
+			return fmt.Errorf("invalid context-token tctx claim %q: expected a non-empty string or a string list", name)
+		}
+	}
+
+	if secret, present := transactionContext["secret"].(string); present {
+		if validationErrors := utilvalidation.IsDNS1123Subdomain(secret); len(validationErrors) > 0 {
+			return fmt.Errorf("invalid context-token tctx claim %q: expected a valid Kubernetes Secret name: %s", "secret", strings.Join(validationErrors, "; "))
+		}
+	}
+
+	return nil
 }
 
 func validateRequiredContextTokenClaims(claims map[string]any, required []string) error {

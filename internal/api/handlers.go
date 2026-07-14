@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -32,7 +33,14 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-const queryTrue = "true"
+const (
+	queryTrue = "true"
+
+	defaultTaskLogStreamHeartbeatEvery = 15 * time.Second
+	taskLogStreamInitialBufferBytes    = 64 * 1024
+	taskLogStreamMaxLineBytes          = 1024 * 1024
+	taskLogStreamScannerBufferBytes    = taskLogStreamMaxLineBytes + 2
+)
 
 // Handlers contains all API handlers
 //
@@ -81,6 +89,7 @@ func toolSpecHTTPURL(tool *corev1alpha1.Tool) string {
 
 type Handlers struct {
 	client                    client.Client
+	apiReader                 client.Reader
 	clientset                 kubernetes.Interface
 	watchNamespace            string
 	enforceNamespaceIsolation bool
@@ -102,6 +111,7 @@ type Handlers struct {
 // HandlersConfig holds configuration for creating Handlers.
 type HandlersConfig struct {
 	Client                    client.Client
+	APIReader                 client.Reader
 	WatchNamespace            string
 	EnforceNamespaceIsolation bool
 	ContextTokenAuthorization ContextTokenAuthorizationConfig
@@ -120,8 +130,13 @@ type HandlersConfig struct {
 
 // NewHandlers creates a new Handlers instance
 func NewHandlers(cfg HandlersConfig) *Handlers {
+	apiReader := cfg.APIReader
+	if apiReader == nil {
+		apiReader = cfg.Client
+	}
 	return &Handlers{
 		client:                    cfg.Client,
+		apiReader:                 apiReader,
 		clientset:                 cfg.KubeClient,
 		watchNamespace:            cfg.WatchNamespace,
 		enforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
@@ -520,6 +535,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 	continueToken := c.Query("continue", "")
 
 	opts := &client.ListOptions{}
+	listReader := h.apiReader
 
 	// Apply namespace filter with smart defaults
 	namespace, err := h.resolveNamespace(c, explicitNS)
@@ -537,6 +553,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 		if continueToken != "" {
 			return fiber.NewError(fiber.StatusBadRequest, "continue cannot be used with limit=0")
 		}
+		listReader = h.client
 	} else {
 		pagination, err := ParsePagination(limit, continueToken)
 		if err != nil {
@@ -548,8 +565,8 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 
 	taskList := &corev1alpha1.TaskList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, taskList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
+	if err := listReader.List(ctx, taskList, opts); err != nil {
+		return paginationListError("tasks", err)
 	}
 	filteredList := false
 	if h.contextTokenAuthorization.Enabled() {
@@ -709,28 +726,70 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	follow := c.Query("follow") == queryTrue
 
 	if follow {
-		streamCtx, streamCancel := context.WithCancel(context.Background())
+		// SendStreamWriter outlives the Fiber handler, so the Kubernetes stream
+		// must not permanently inherit Fiber's recyclable request context. Mirror
+		// request cancellation only while the upstream stream is being established,
+		// then hand ownership to explicit deadlines plus heartbeat/write failure
+		// detection below. A bare post-handoff cancellation cannot be retained:
+		// Fiber uses that same signal when it recycles the handler context.
+		streamBaseCtx := context.WithoutCancel(ctx)
+		var streamCtx context.Context
+		var streamCancel context.CancelFunc
+		if deadline, ok := ctx.Deadline(); ok {
+			streamCtx, streamCancel = context.WithDeadline(streamBaseCtx, deadline)
+		} else {
+			streamCtx, streamCancel = context.WithCancel(streamBaseCtx)
+		}
+		stopSetupCancellation := context.AfterFunc(ctx, streamCancel)
 		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
 		if err != nil {
+			_ = stopSetupCancellation()
 			streamCancel()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+				errors.Is(streamCtx.Err(), context.DeadlineExceeded) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
+		}
+		if !stopSetupCancellation() || ctx.Err() != nil || streamCtx.Err() != nil {
+			streamCancel()
+			_ = stream.Close()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
+				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
+			}
+			return nil
 		}
 
 		c.Set("Content-Type", "text/event-stream")
 		c.Set("Cache-Control", "no-cache")
 		c.Set("Connection", "keep-alive")
+		c.Set("X-Accel-Buffering", "no")
 
-		return c.SendStreamWriter(func(w *bufio.Writer) {
-			defer streamCancel()
-			defer func() { _ = stream.Close() }()
-			scanner := bufio.NewScanner(stream)
-			for scanner.Scan() {
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
-				if err := w.Flush(); err != nil {
-					return
-				}
+		heartbeatEvery := h.eventStreamHeartbeatEvery
+		if heartbeatEvery <= 0 {
+			heartbeatEvery = defaultTaskLogStreamHeartbeatEvery
+		}
+
+		streamNamespace := strings.Clone(namespace)
+		streamPodName := strings.Clone(podName)
+		streamErr := c.SendStreamWriter(func(w *bufio.Writer) {
+			defer func() {
+				streamCancel()
+				_ = stream.Close()
+			}()
+			if err := streamTaskLogsSSE(streamCtx, w, stream, heartbeatEvery); err != nil {
+				log.Error(err, "failed to read task log stream", "namespace", streamNamespace, "pod", streamPodName)
 			}
 		})
+		if streamErr != nil {
+			streamCancel()
+			_ = stream.Close()
+		}
+		return streamErr
 	}
 
 	// Non-follow mode: return the last N lines
@@ -754,6 +813,97 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"logs": string(logBytes),
 	})
+}
+
+type taskLogScanResult struct {
+	line string
+	err  error
+}
+
+func streamTaskLogsSSE(
+	ctx context.Context,
+	w *bufio.Writer,
+	stream io.Reader,
+	heartbeatEvery time.Duration,
+) error {
+	results := make(chan taskLogScanResult)
+	go func() {
+		defer close(results)
+		scanner := bufio.NewScanner(stream)
+		scanner.Buffer(make([]byte, taskLogStreamInitialBufferBytes), taskLogStreamScannerBufferBytes)
+		for scanner.Scan() {
+			if len(scanner.Bytes()) > taskLogStreamMaxLineBytes {
+				select {
+				case results <- taskLogScanResult{err: taskLogLineTooLongError()}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			select {
+			case results <- taskLogScanResult{line: scanner.Text()}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil && ctx.Err() == nil {
+			if errors.Is(err, bufio.ErrTooLong) {
+				err = taskLogLineTooLongError()
+			}
+			select {
+			case results <- taskLogScanResult{err: err}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(heartbeatEvery)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case result, ok := <-results:
+			if !ok {
+				return nil
+			}
+			if result.err != nil {
+				_ = writeTaskLogStreamErrorSSE(w, result.err)
+				return result.err
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", result.line); err != nil {
+				return nil
+			}
+			if err := w.Flush(); err != nil {
+				return nil
+			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return nil
+			}
+			if err := w.Flush(); err != nil {
+				return nil
+			}
+		}
+	}
+}
+
+func taskLogLineTooLongError() error {
+	return fmt.Errorf("task log line exceeds %d bytes", taskLogStreamMaxLineBytes)
+}
+
+func writeTaskLogStreamErrorSSE(w *bufio.Writer, streamErr error) error {
+	data, err := json.Marshal(struct {
+		Error string `json:"error"`
+	}{
+		Error: fmt.Sprintf("failed to read task logs: %v", streamErr),
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", data); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 // GetTaskResult gets the result of a task
@@ -932,64 +1082,57 @@ func (h *Handlers) ListTools(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "listTools", h.contextTokenAuthorization.ToolReadScopes); err != nil {
 		return err
 	}
-	limit := c.Query("limit", "100")
-	continueToken := c.Query("continue", "")
 
-	opts := &client.ListOptions{Namespace: namespace}
-
-	// Apply pagination
-	pagination, err := ParsePagination(limit, continueToken)
+	pagination, err := ParsePagination(c.Query("limit", "100"), c.Query("continue", ""))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	opts.Limit = pagination.Limit
-	opts.Continue = pagination.Continue
-
-	toolList := &corev1alpha1.ToolList{}
-	ctx := c.Context()
-	if err := h.client.List(ctx, toolList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tools: %v", err))
+	builtins, err := h.allowedBuiltinTools(c)
+	if err != nil {
+		return err
+	}
+	filteredNames, filteredMode := h.filteredCustomToolNames(c)
+	mode := toolCursorModeKubernetes
+	if filteredMode {
+		mode = toolCursorModeFiltered
+	}
+	cursor, err := decodeToolListCursor(
+		pagination.Continue,
+		h.toolListCursorScope(c, namespace, builtins, mode),
+		mode,
+		len(builtins),
+		len(filteredNames),
+	)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 
-	// Add built-in tools to the response
-	toolItems := make([]fiber.Map, 0, len(toolList.Items)+len(builtinToolsList))
-	for _, tool := range builtinToolsList {
-		name, _ := tool["name"].(string)
-		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", name)
-		if err != nil {
-			return err
-		}
-		if allowed {
-			toolItems = append(toolItems, tool)
-		}
+	pageLimit := pagination.Limit
+	if pageLimit < 1 {
+		return fiber.NewError(fiber.StatusBadRequest, "limit is outside the supported range")
+	}
+	if pageLimit > MaxLimit {
+		pageLimit = MaxLimit
+	}
+	if pageLimit > math.MaxInt {
+		return fiber.NewError(fiber.StatusBadRequest, "limit exceeds the supported integer range")
+	}
+	pageSize := int(pageLimit)
+	toolItems := make([]fiber.Map, 0, pageSize)
+	for cursor.BuiltinOffset < len(builtins) && len(toolItems) < pageSize {
+		toolItems = append(toolItems, builtins[cursor.BuiltinOffset])
+		cursor.BuiltinOffset++
 	}
 
-	for _, tool := range toolList.Items {
-		allowed, err := contextTokenAllowsToolMetadata(c, h.contextTokenAuthorization, "listTools", tool.Name)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			continue
-		}
-		toolItems = append(toolItems, fiber.Map{
-			"name":        tool.Name,
-			"namespace":   tool.Namespace,
-			"builtin":     false,
-			"description": tool.Spec.Description,
-			"available":   tool.Status.Available,
-			"url":         toolSpecHTTPURL(&tool),
-		})
+	var response ListResponse
+	if filteredMode {
+		response, err = h.filteredToolListPage(c, namespace, pageSize, builtins, filteredNames, cursor, toolItems)
+	} else {
+		response, err = h.kubernetesToolListPage(c, namespace, pageSize, builtins, cursor, toolItems)
 	}
-
-	response := ListResponse{
-		Items: toolItems,
-		Metadata: ListMeta{
-			Continue:           toolList.Continue,
-			RemainingItemCount: toolList.RemainingItemCount,
-		},
+	if err != nil {
+		return err
 	}
-
 	return c.JSON(response)
 }
 
@@ -1052,8 +1195,8 @@ func (h *Handlers) ListAgents(c fiber.Ctx) error {
 
 	agentList := &corev1alpha1.AgentList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, agentList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list agents: %v", err))
+	if err := h.apiReader.List(ctx, agentList, opts); err != nil {
+		return paginationListError("agents", err)
 	}
 	if h.contextTokenAuthorization.Enabled() {
 		filtered := agentList.Items[:0]
@@ -1283,8 +1426,8 @@ func (h *Handlers) ListSkills(c fiber.Ctx) error {
 
 	skillList := &corev1alpha1.SkillList{}
 	ctx := c.Context()
-	if err := h.client.List(ctx, skillList, opts); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list skills: %v", err))
+	if err := h.apiReader.List(ctx, skillList, opts); err != nil {
+		return paginationListError("skills", err)
 	}
 
 	skills := make([]fiber.Map, 0, len(skillList.Items))

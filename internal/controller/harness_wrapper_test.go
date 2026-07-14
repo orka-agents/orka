@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
@@ -28,6 +33,12 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 	"github.com/orka-agents/orka/workers/harness/cliwrapper"
+)
+
+const (
+	testInsecureAgentRuntimeEndpoint = "http://fibey-agentkit.default.svc.cluster.local:8080"
+	testSecondRuntimePodName         = "fibey-agentkit-1"
+	testSecondRuntimePodIP           = "10.0.0.43"
 )
 
 func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
@@ -141,7 +152,7 @@ func TestHarnessWrapperTaskRunsAgainstRuntimeRefAgentRuntime(t *testing.T) {
 
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, server.URL())
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
 
 	updated := runHarnessWrapperTaskToCompletion(t, r, task)
@@ -153,6 +164,79 @@ func TestHarnessWrapperTaskRunsAgainstRuntimeRefAgentRuntime(t *testing.T) {
 	}
 	if got := updated.Annotations[harnessWrapperContractAnno]; got != "orka.harness.v1" {
 		t.Fatalf("contract annotation = %q, want orka.harness.v1", got)
+	}
+	if updated.Status.HarnessRuntime == nil || updated.Status.HarnessRuntime.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("HarnessRuntime.TransportSecurity = %#v, want insecure mode frozen in status", updated.Status.HarnessRuntime)
+	}
+}
+
+func TestHarnessWrapperPlannedRuntimeRefRestoresFrozenStatusBeforeStart(t *testing.T) {
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	defer server.Close()
+	_, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL(), "http://"))
+	if err != nil {
+		t.Fatalf("parse fake server address: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse fake server port: %v", err)
+	}
+
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := fmt.Sprintf("http://fibey-agentkit.default.svc.cluster.local:%d", port)
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: runtime.Name, Namespace: task.Namespace},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": runtime.Name},
+			Ports:    []corev1.ServicePort{{Protocol: corev1.ProtocolTCP, Port: int32(port)}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit-plan", Namespace: task.Namespace, UID: types.UID("fibey-agentkit-plan-uid"), Labels: map[string]string{"app": runtime.Name}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Image: "runtime:test"}}},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "127.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("first handlePending() error = %v", err)
+	}
+	if server.TurnCount() != 0 {
+		t.Fatalf("turn count after planning = %d, want 0", server.TurnCount())
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, current); err != nil {
+		t.Fatalf("Get(planned Task) error = %v", err)
+	}
+	current.Status.HarnessRuntime = nil
+	if err := r.Status().Update(context.Background(), current); err != nil {
+		t.Fatalf("clear HarnessRuntime status: %v", err)
+	}
+
+	if _, err := r.handlePending(context.Background(), current); err != nil {
+		t.Fatalf("second handlePending() error = %v", err)
+	}
+	if server.TurnCount() != 0 {
+		t.Fatalf("turn count before frozen status repair = %d, want 0", server.TurnCount())
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, current); err != nil {
+		t.Fatalf("Get(repaired Task) error = %v", err)
+	}
+	if current.Status.HarnessRuntime == nil || current.Status.HarnessRuntime.BackendPodUID != string(pod.UID) {
+		t.Fatalf("HarnessRuntime status was not repaired before start: %#v", current.Status.HarnessRuntime)
+	}
+
+	if _, err := r.handlePending(context.Background(), current); err != nil {
+		t.Fatalf("third handlePending() error = %v", err)
+	}
+	if server.TurnCount() != 1 {
+		t.Fatalf("turn count after repaired start = %d, want 1", server.TurnCount())
 	}
 }
 
@@ -276,7 +360,7 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, runtimeServer.URL)
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, runtimeServer.URL)
 	runtime.Status.ObservedCapabilities.ProviderKind = string(harness.ProviderKindRemote)
 	runtime.Status.ObservedCapabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{
 		corev1alpha1.AgentRuntimeToolExecutionModeObserved,
@@ -936,12 +1020,13 @@ func TestHarnessWrapperBrokeredRunningTaskFailsClosedWhenAgentMissing(t *testing
 	task.Annotations[harnessWrapperCorrelationIDAnno] = string(task.UID)
 	task.Annotations[harnessWrapperLastFrameSeqAnno] = "0"
 	task.Annotations[harnessWrapperMetadataAnno] = `{"runtime":"fibey-agentkit","runtimeRef":"fibey-agentkit","toolExecutionMode":"brokered"}`
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, server.URL())
 	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
 		RuntimeRefName:         runtime.Name,
 		RuntimeName:            runtime.Name,
 		ContractVersion:        harness.ProtocolVersion,
 		Endpoint:               runtime.Spec.Deployment.Endpoint,
+		TransportSecurity:      runtime.Spec.Deployment.TransportSecurity,
 		RuntimeGeneration:      runtime.Generation,
 		AuthRefName:            token.Name,
 		AuthRefField:           "token",
@@ -1145,7 +1230,7 @@ func TestHarnessWrapperBrokeredContinueFailureRetriesToolRequest(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, runtimeServer.URL)
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, runtimeServer.URL)
 	runtime.Status.ObservedCapabilities.ToolExecutionModes = []corev1alpha1.AgentRuntimeToolExecutionMode{
 		corev1alpha1.AgentRuntimeToolExecutionModeObserved,
 		corev1alpha1.AgentRuntimeToolExecutionModeBrokered,
@@ -1198,7 +1283,7 @@ func TestHarnessWrapperRuntimeRefUsesObservedRuntimeName(t *testing.T) {
 
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, server.URL())
 	runtime.Status.ObservedCapabilities.RuntimeName = "agentkit-fibey-runtime"
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
 
@@ -1217,14 +1302,14 @@ func TestHarnessWrapperRuntimeRefFreezesEndpointForRunningTurn(t *testing.T) {
 
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL())
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, server.URL())
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
 	running := runHarnessWrapperTaskToRunning(t, r, task)
 	var changed corev1alpha1.AgentRuntime
 	if err := r.Get(context.Background(), types.NamespacedName{Name: "fibey-agentkit", Namespace: task.Namespace}, &changed); err != nil {
 		t.Fatalf("get runtime: %v", err)
 	}
-	changed.Spec.Deployment.Endpoint = "http://127.0.0.1:1"
+	changed.Spec.Deployment.Endpoint = "https://127.0.0.1:1"
 	changed.Generation = 2
 	changed.Status.Ready = false
 	changed.Status.ObservedGeneration = 1
@@ -1257,7 +1342,7 @@ func TestHarnessWrapperRuntimeRefNotReadyWaitsBeforeStartTurn(t *testing.T) {
 
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, server.URL)
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, server.URL)
 	runtime.Status.Ready = false
 	runtime.Status.Message = "probe failed"
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
@@ -1284,7 +1369,7 @@ func TestHarnessWrapperRuntimeRefNotReadyWaitsBeforeStartTurn(t *testing.T) {
 func TestHarnessWrapperRuntimeRefStaleGenerationWaitsBeforeStartTurn(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://127.0.0.1:1")
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, "https://127.0.0.1:1")
 	runtime.Generation = 2
 	runtime.Status.ObservedGeneration = 1
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
@@ -1309,7 +1394,7 @@ func TestHarnessWrapperBuiltInRuntimeIgnoresRuntimeRefAnnotation(t *testing.T) {
 	t.Setenv(harnessWrapperEndpointEnv, "http://wrapper.example.invalid")
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{harnessWrapperRuntimeRefAnno: "fibey-agentkit"}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://custom.example.invalid")
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, "https://custom.example.invalid")
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
 
 	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
@@ -1330,7 +1415,7 @@ func TestHarnessWrapperBuiltInRuntimeIgnoresRuntimeRefAnnotation(t *testing.T) {
 func TestHarnessWrapperFrozenRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://custom.example.invalid")
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, "https://custom.example.invalid")
 	runtime.Status.ObservedAuthRefResourceVersion = "1"
 	token.ResourceVersion = "2"
 	task.Annotations = map[string]string{
@@ -1342,7 +1427,8 @@ func TestHarnessWrapperFrozenRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
 		RuntimeRefName:         "fibey-agentkit",
 		RuntimeName:            "fibey-agentkit",
 		ContractVersion:        "orka.harness.v1",
-		Endpoint:               "http://custom.example.invalid",
+		Endpoint:               "https://custom.example.invalid",
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityTLS,
 		RuntimeGeneration:      1,
 		AuthRefName:            "fibey-agentkit-token",
 		AuthRefField:           "token",
@@ -1359,7 +1445,7 @@ func TestHarnessWrapperFrozenRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
 func TestHarnessWrapperRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
-	runtime, token := harnessWrapperReadyAgentRuntime(task.Namespace, "http://custom.example.invalid")
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, "https://custom.example.invalid")
 	runtime.Status.ObservedAuthRefResourceVersion = "1"
 	token.ResourceVersion = "2"
 	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token)
@@ -1367,6 +1453,517 @@ func TestHarnessWrapperRuntimeRefWaitsForAuthRevalidation(t *testing.T) {
 	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
 	if !isAgentRuntimeDependencyNotReady(err) {
 		t.Fatalf("resolveHarnessRuntimeTarget() error = %v, want dependency-not-ready after auth Secret version changed", err)
+	}
+}
+
+func TestHarnessWrapperRuntimeRefRevalidatesInsecureServiceBeforeDispatch(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(valid Service) error = %v", err)
+	}
+	if target.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("TransportSecurity = %q, want insecure mode", target.TransportSecurity)
+	}
+	if target.DialAddress != "10.0.0.42:18080" {
+		t.Fatalf("DialAddress = %q, want pinned Pod backend", target.DialAddress)
+	}
+
+	currentService := service.DeepCopy()
+	currentService.Spec.Selector = nil
+	r.APIReader = newUnitReconciler(newTestScheme(), runtime.DeepCopy(), token.DeepCopy(), currentService, pod.DeepCopy()).Client
+
+	_, err = r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if !isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "non-empty selector") {
+		t.Fatalf("resolveHarnessRuntimeTarget(selector removed) error = %v, want dependency-not-ready selector rejection", err)
+	}
+}
+
+func TestHarnessWrapperFrozenRuntimeRefRevalidatesInsecureServicePolicy(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+	if _, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent); err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(valid frozen Service) error = %v", err)
+	}
+
+	currentService := service.DeepCopy()
+	currentService.Spec.Type = corev1.ServiceTypeExternalName
+	currentService.Spec.ExternalName = "runtime.example.com"
+	currentService.Spec.Selector = nil
+	r.APIReader = newUnitReconciler(newTestScheme(), runtime.DeepCopy(), token.DeepCopy(), currentService, pod.DeepCopy()).Client
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if !isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "ExternalName") {
+		t.Fatalf("resolveHarnessRuntimeTarget(frozen Service changed) error = %v, want dependency-not-ready ExternalName rejection", err)
+	}
+}
+
+func TestHarnessWrapperStartedTurnKeepsPinnedBackendAcrossReplicaChanges(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, firstPod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	secondPod := firstPod.DeepCopy()
+	secondPod.Name = testSecondRuntimePodName
+	secondPod.UID = types.UID("fibey-agentkit-1-uid")
+	secondPod.Status.PodIP = testSecondRuntimePodIP
+	selectionReader := newUnitReconciler(newTestScheme(), runtime.DeepCopy(), token.DeepCopy(), service.DeepCopy(), firstPod.DeepCopy(), secondPod.DeepCopy()).Client
+	selected, err := resolveAgentRuntimeInsecureBackend(
+		context.Background(),
+		selectionReader,
+		task.Namespace,
+		endpoint,
+		corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		agentRuntimeTaskBackendSelectionKey(task, runtime.Name),
+	)
+	if err != nil {
+		t.Fatalf("resolveAgentRuntimeInsecureBackend() error = %v", err)
+	}
+	pinnedPod := firstPod
+	if selected.PodName == firstPod.Name {
+		pinnedPod = secondPod
+	}
+	pinned := agentRuntimeBackend{
+		PodName:     pinnedPod.Name,
+		PodUID:      string(pinnedPod.UID),
+		DialAddress: pinnedPod.Status.PodIP + ":18080",
+	}
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+		harnessWrapperStartedAnno:       scheduledRunLabelValue,
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		BackendPodName:         pinned.PodName,
+		BackendPodUID:          pinned.PodUID,
+		BackendAddress:         pinned.DialAddress,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, firstPod, secondPod)
+
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget() error = %v", err)
+	}
+	if target.BackendPodName != pinned.PodName || target.BackendPodUID != pinned.PodUID || target.DialAddress != pinned.DialAddress {
+		t.Fatalf("started turn moved backends: target=%#v pinned=%#v", target, pinned)
+	}
+
+	unreadyFirst := firstPod.DeepCopy()
+	unreadySecond := secondPod.DeepCopy()
+	unreadyPinned := unreadyFirst
+	if pinned.PodName == secondPod.Name {
+		unreadyPinned = unreadySecond
+	}
+	unreadyPinned.Status.Conditions[0].Status = corev1.ConditionFalse
+	r.APIReader = newUnitReconciler(
+		newTestScheme(),
+		runtime.DeepCopy(),
+		token.DeepCopy(),
+		service.DeepCopy(),
+		unreadyFirst,
+		unreadySecond,
+	).Client
+	target, err = r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(unready pinned Pod) error = %v", err)
+	}
+	if target.BackendPodName != pinned.PodName || target.BackendPodUID != pinned.PodUID || target.DialAddress != pinned.DialAddress {
+		t.Fatalf("NotReady pinned Pod changed backends: target=%#v pinned=%#v", target, pinned)
+	}
+
+	terminatingFirst := firstPod.DeepCopy()
+	terminatingSecond := secondPod.DeepCopy()
+	terminatingPinned := terminatingFirst
+	if pinned.PodName == secondPod.Name {
+		terminatingPinned = terminatingSecond
+	}
+	now := metav1.Now()
+	terminatingPinned.DeletionTimestamp = &now
+	terminatingPinned.Finalizers = []string{"test.orka.ai/hold"}
+	r.APIReader = newUnitReconciler(
+		newTestScheme(),
+		runtime.DeepCopy(),
+		token.DeepCopy(),
+		service.DeepCopy(),
+		terminatingFirst,
+		terminatingSecond,
+	).Client
+	_, err = r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err == nil || isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "pinned backend was lost") {
+		t.Fatalf("resolveHarnessRuntimeTarget(terminating pinned Pod) error = %v, want fail-closed backend loss", err)
+	}
+}
+
+func TestHarnessWrapperPlannedTurnDoesNotRepinUnavailableBackend(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	_, pinnedPod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	otherPod := pinnedPod.DeepCopy()
+	otherPod.Name = testSecondRuntimePodName
+	otherPod.UID = types.UID("fibey-agentkit-1-uid")
+	otherPod.Status.PodIP = testSecondRuntimePodIP
+	otherPod.Status.Conditions[0].Status = corev1.ConditionTrue
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		BackendPodName:         pinnedPod.Name,
+		BackendPodUID:          string(pinnedPod.UID),
+		BackendAddress:         pinnedPod.Status.PodIP + ":18080",
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, otherPod)
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err == nil || isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "pinned backend was lost") {
+		t.Fatalf("resolveHarnessRuntimeTarget(missing planned backend) error = %v, want fail-closed without repin", err)
+	}
+}
+
+func TestHarnessWrapperPlannedTurnWaitsForPinnedBackendReadiness(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pinnedPod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	pinnedPod.Status.Conditions[0].Status = corev1.ConditionFalse
+	otherPod := pinnedPod.DeepCopy()
+	otherPod.Name = testSecondRuntimePodName
+	otherPod.UID = types.UID("fibey-agentkit-1-uid")
+	otherPod.Status.PodIP = testSecondRuntimePodIP
+	otherPod.Status.Conditions[0].Status = corev1.ConditionTrue
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		BackendPodName:         pinnedPod.Name,
+		BackendPodUID:          string(pinnedPod.UID),
+		BackendAddress:         pinnedPod.Status.PodIP + ":18080",
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pinnedPod, otherPod)
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if !isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "not Ready for turn start") {
+		t.Fatalf("resolveHarnessRuntimeTarget(NotReady planned backend) error = %v, want readiness wait without repin", err)
+	}
+	turnID := harness.HarnessTurnID(task.Annotations[harnessWrapperTurnIDAnnotation])
+	task.Annotations[harnessWrapperStartAttemptedAnno] = string(turnID)
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(start-attempt recovery) error = %v", err)
+	}
+	if target.BackendPodUID != string(pinnedPod.UID) {
+		t.Fatalf("start-attempt recovery moved backend: %#v", target)
+	}
+	delete(task.Annotations, harnessWrapperStartAttemptedAnno)
+	if err := appendMappedHarnessFrame(context.Background(), r.ExecutionEventStore, task, harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameTurnStarted,
+		RuntimeSessionID: harness.RuntimeSessionID(task.Annotations[harnessWrapperRuntimeAnnotation]),
+		TurnID:           turnID,
+		CorrelationID:    task.Annotations[harnessWrapperCorrelationIDAnno],
+		Seq:              1,
+		CreatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append persisted frame: %v", err)
+	}
+	target, err = r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(journal recovery) error = %v", err)
+	}
+	if target.BackendPodUID != string(pinnedPod.UID) {
+		t.Fatalf("journal recovery moved backend: %#v", target)
+	}
+}
+
+func TestHarnessWrapperStartedLegacyTurnWithoutBackendFailsClosed(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+		harnessWrapperStartedAnno:       scheduledRunLabelValue,
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err == nil || isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), "cannot be safely resumed") {
+		t.Fatalf("resolveHarnessRuntimeTarget(started legacy turn) error = %v, want fatal unknown-backend outcome", err)
+	}
+}
+
+func TestHarnessWrapperFrozenLegacyHTTPTransportBackfillsFromReadyRuntime(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(legacy frozen HTTP) error = %v", err)
+	}
+	if target.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("TransportSecurity = %q, want insecure mode", target.TransportSecurity)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	if updated.Status.HarnessRuntime == nil || updated.Status.HarnessRuntime.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("legacy transport was not backfilled: %#v", updated.Status.HarnessRuntime)
+	}
+}
+
+func TestHarnessWrapperFrozenStatusBackfillFailureIsRetryable(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+	base, ok := r.Client.(ctrlclient.WithWatch)
+	if !ok {
+		t.Fatal("unit client does not implement client.WithWatch")
+	}
+	writeErr := errors.New("injected frozen status write failure")
+	fc := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c ctrlclient.Client, subResourceName string, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+			if _, ok := obj.(*corev1alpha1.Task); ok && subResourceName == "status" {
+				return writeErr
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+	r.Client = fc
+	r.APIReader = fc
+
+	_, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if !isAgentRuntimeDependencyNotReady(err) || !strings.Contains(err.Error(), writeErr.Error()) {
+		t.Fatalf("resolveHarnessRuntimeTarget(status write failure) error = %v, want retryable dependency error", err)
+	}
+}
+
+func TestHarnessWrapperFrozenLegacyShortHTTPTransportMigratesToReadyFQDN(t *testing.T) {
+	for _, frozenEndpoint := range []string{
+		"http://fibey-agentkit.default:8080/harness",
+		"http://fibey-agentkit.default.svc:8080/harness",
+	} {
+		t.Run(frozenEndpoint, func(t *testing.T) {
+			task, agent := harnessWrapperTaskAndAgent()
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+			currentEndpoint := testInsecureAgentRuntimeEndpoint + "/harness"
+			runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, currentEndpoint)
+			service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+			task.Annotations = map[string]string{
+				harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+				harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+				harnessWrapperCorrelationIDAnno: string(task.UID),
+			}
+			task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+				RuntimeRefName:         runtime.Name,
+				RuntimeName:            runtime.Name,
+				ContractVersion:        string(runtime.Spec.ContractVersion),
+				Endpoint:               frozenEndpoint,
+				RuntimeGeneration:      runtime.Generation,
+				AuthRefName:            token.Name,
+				AuthRefField:           "token",
+				AuthRefResourceVersion: "legacy-resource-version",
+			}
+			r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+			target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+			if err != nil {
+				t.Fatalf("resolveHarnessRuntimeTarget(legacy short HTTP) error = %v", err)
+			}
+			if target.Endpoint != currentEndpoint || target.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+				t.Fatalf("migrated target = %#v, want endpoint %q with insecure mode", target, currentEndpoint)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+				t.Fatalf("Get(Task) error = %v", err)
+			}
+			if updated.Status.HarnessRuntime == nil || updated.Status.HarnessRuntime.Endpoint != currentEndpoint ||
+				updated.Status.HarnessRuntime.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+				t.Fatalf("legacy short endpoint was not migrated: %#v", updated.Status.HarnessRuntime)
+			}
+		})
+	}
+}
+
+func TestHarnessWrapperFrozenLegacyHTTPTransportUsesInferredCurrentPolicy(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	runtime.Spec.Deployment.TransportSecurity = ""
+	markLegacyAgentRuntimeTransport(runtime)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	task.Annotations = map[string]string{
+		harnessWrapperTurnIDAnnotation:  string(harnessWrapperTurnID(task, 1)),
+		harnessWrapperRuntimeAnnotation: string(harnessWrapperRuntimeSessionID(task, runtime.Name)),
+		harnessWrapperCorrelationIDAnno: string(task.UID),
+	}
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, runtime, token, service, pod)
+
+	target, err := r.resolveHarnessRuntimeTarget(context.Background(), task, agent)
+	if err != nil {
+		t.Fatalf("resolveHarnessRuntimeTarget(legacy frozen HTTP) error = %v", err)
+	}
+	if target.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("target transportSecurity = %q, want inferred insecure mode", target.TransportSecurity)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get(Task) error = %v", err)
+	}
+	if updated.Status.HarnessRuntime == nil || updated.Status.HarnessRuntime.TransportSecurity != corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		t.Fatalf("legacy frozen status was not migrated: %#v", updated.Status.HarnessRuntime)
+	}
+}
+
+func TestLegacyFrozenAgentRuntimeEndpointMatchesNormalizesDefaultHTTPPortAndRootPath(t *testing.T) {
+	previousClusterDomain := agentRuntimeClusterDomainForTests
+	agentRuntimeClusterDomainForTests = testAgentRuntimeClusterDomain
+	t.Cleanup(func() { agentRuntimeClusterDomainForTests = previousClusterDomain })
+
+	if !legacyFrozenAgentRuntimeEndpointMatches(
+		"http://fibey-agentkit.default",
+		"http://fibey-agentkit.default.svc.cluster.local:80/",
+		"default",
+	) {
+		t.Fatal("equivalent default HTTP port and root path were not normalized")
+	}
+	if legacyFrozenAgentRuntimeEndpointMatches(
+		"http://fibey-agentkit.default:81/",
+		"http://fibey-agentkit.default.svc.cluster.local:80/",
+		"default",
+	) {
+		t.Fatal("different effective ports unexpectedly matched")
+	}
+	if legacyFrozenAgentRuntimeEndpointMatches(
+		"http://fibey-agentkit.default/one",
+		"http://fibey-agentkit.default.svc.cluster.local/two",
+		"default",
+	) {
+		t.Fatal("different paths unexpectedly matched")
 	}
 }
 
@@ -1892,15 +2489,28 @@ func attachHarnessWrapperRuntimeSecret(task *corev1alpha1.Task, agent *corev1alp
 	}
 }
 
-func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
+func harnessWrapperReadyAgentRuntime(t *testing.T, namespace, endpoint string) (*corev1alpha1.AgentRuntime, *corev1.Secret) {
+	t.Helper()
+	previousClusterDomain := agentRuntimeClusterDomainForTests
+	if previousClusterDomain == "" {
+		agentRuntimeClusterDomainForTests = testAgentRuntimeClusterDomain
+	}
+	t.Cleanup(func() { agentRuntimeClusterDomainForTests = previousClusterDomain })
+	transportSecurity := testAgentRuntimeTransportSecurity(endpoint)
+	if transportSecurity == corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP {
+		previousAllowLoopback := agentRuntimeAllowInsecureLoopbackForTests
+		agentRuntimeAllowInsecureLoopbackForTests = true
+		t.Cleanup(func() { agentRuntimeAllowInsecureLoopbackForTests = previousAllowLoopback })
+	}
 	const name = "fibey-agentkit"
 	runtime := &corev1alpha1.AgentRuntime{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Generation: 1},
 		Spec: corev1alpha1.AgentRuntimeRegistrySpec{
 			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
 			Deployment: corev1alpha1.AgentRuntimeDeploymentSpec{
-				Mode:     corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
-				Endpoint: endpoint,
+				Mode:              corev1alpha1.AgentRuntimeDeploymentModeExternalEndpoint,
+				Endpoint:          endpoint,
+				TransportSecurity: transportSecurity,
 			},
 			ClientAuth: corev1alpha1.AgentRuntimeClientAuth{BearerAuthRef: corev1alpha1.AgentRuntimeBearerAuthReference{
 				Name: name + "-token",
@@ -1926,6 +2536,39 @@ func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.
 		Data:       map[string][]byte{"token": []byte("x")},
 	}
 	return runtime, secret
+}
+
+func harnessWrapperInsecureServiceBackend(namespace string) (*corev1.Service, *corev1.Pod) {
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit", Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "fibey-agentkit"},
+			Ports: []corev1.ServicePort{{
+				Name:       "http",
+				Protocol:   corev1.ProtocolTCP,
+				Port:       8080,
+				TargetPort: intstr.FromInt32(18080),
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fibey-agentkit-0",
+			Namespace: namespace,
+			UID:       types.UID("fibey-agentkit-0-uid"),
+			Labels:    map[string]string{"app": "fibey-agentkit"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Image: "runtime:test"}}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.42",
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}},
+		},
+	}
+	return service, pod
 }
 
 func hasExecutionEventType(eventsList []store.ExecutionEvent, typ string) bool {
@@ -2617,6 +3260,18 @@ func TestHarnessWrapperRuntimeSessionIdentityUsesUIDWithoutExplicitSession(t *te
 	}
 	if got := harnessWrapperRuntimeSessionID(task, string(corev1alpha1.AgentRuntimeClaude)); got != identity.ID {
 		t.Fatalf("compat runtime session id = %q, want identity id %q", got, identity.ID)
+	}
+	otherTask := task.DeepCopy()
+	otherTask.Name = "other-task"
+	otherTask.UID = types.UID("uid-other-task")
+	firstKey := agentRuntimeTaskBackendSelectionKey(task, string(corev1alpha1.AgentRuntimeClaude))
+	secondKey := agentRuntimeTaskBackendSelectionKey(otherTask, string(corev1alpha1.AgentRuntimeClaude))
+	if firstKey != secondKey || firstKey != string(identity.ID) {
+		t.Fatalf("shared-session backend keys = (%q, %q), want runtime session %q", firstKey, secondKey, identity.ID)
+	}
+	otherTask.Annotations = map[string]string{harnessWrapperRuntimeAnnotation: "frozen-runtime-session"}
+	if got := agentRuntimeTaskBackendSelectionKey(otherTask, "ignored-runtime"); got != "frozen-runtime-session" {
+		t.Fatalf("frozen backend key = %q, want persisted runtime session", got)
 	}
 }
 

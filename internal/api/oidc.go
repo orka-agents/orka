@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"regexp"
 	"strings"
 )
@@ -55,34 +54,25 @@ type oidcRealmAccess struct {
 	Roles stringList `json:"roles,omitempty"`
 }
 
-type oidcDiscoveryDocument struct {
-	JWKSURI string `json:"jwks_uri"`
-}
-
 var errOIDCAuthorization = errors.New("OIDC authorization failed")
 
 func validateOIDCToken(ctx context.Context, token string, cfg OIDCConfig) (*UserInfo, error) {
+	return validateOIDCTokenWithVerifier(ctx, token, cfg, processJWTVerifier)
+}
+
+func validateOIDCTokenWithVerifier(ctx context.Context, token string, cfg OIDCConfig, verifier *jwtVerifier) (*UserInfo, error) {
 	parsed, err := parseOIDCTokenCandidate(token, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return validateParsedOIDCToken(ctx, parsed, cfg)
+	return validateParsedOIDCTokenWithVerifier(ctx, parsed, cfg, verifier)
 }
 
-func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCConfig) (*UserInfo, error) {
-	jwksURL := cfg.JWKSURL
-	if jwksURL == "" {
-		discovered, err := discoverOIDCJWKSURL(ctx, cfg.Issuer)
-		if err != nil {
-			return nil, err
-		}
-		jwksURL = discovered
-	}
-
-	verified, err := verifyParsedJWT(ctx, parsed, jwtVerificationConfig{
+func validateParsedOIDCTokenWithVerifier(ctx context.Context, parsed *parsedJWT, cfg OIDCConfig, verifier *jwtVerifier) (*UserInfo, error) {
+	verified, err := verifier.verifyParsedJWTWithDiscovery(ctx, parsed, jwtVerificationConfig{
 		Issuer:   cfg.Issuer,
 		Audience: cfg.Audience,
-		JWKSURL:  jwksURL,
+		JWKSURL:  cfg.JWKSURL,
 	})
 	if err != nil {
 		return nil, err
@@ -180,38 +170,4 @@ func userInfoFromOIDCClaims(claims oidcClaims, cfg OIDCConfig) *UserInfo {
 		Issuer:    claims.Issuer,
 		Roles:     roles,
 	}
-}
-
-func discoverOIDCJWKSURL(ctx context.Context, issuer string) (string, error) {
-	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
-
-	var discovery oidcDiscoveryDocument
-	if err := getJSON(ctx, discoveryURL, &discovery); err != nil {
-		return "", fmt.Errorf("fetch OIDC discovery document: %w", err)
-	}
-	if discovery.JWKSURI == "" {
-		return "", errors.New("OIDC discovery document missing jwks_uri")
-	}
-	return discovery.JWKSURI, nil
-}
-
-func getJSON(ctx context.Context, url string, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, authHTTPTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
 }

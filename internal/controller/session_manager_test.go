@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,38 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+type sessionManagerResultReadStore struct {
+	reads int
+	err   error
+}
+
+func (s *sessionManagerResultReadStore) SaveResult(context.Context, string, string, []byte) error {
+	return nil
+}
+
+func (s *sessionManagerResultReadStore) GetResult(context.Context, string, string) ([]byte, error) {
+	s.reads++
+	return nil, s.err
+}
+
+func (s *sessionManagerResultReadStore) DeleteResult(context.Context, string, string) error {
+	return nil
+}
+
+type sessionManagerNotFoundFinalizerStore struct {
+	store.SessionStore
+}
+
+func (sessionManagerNotFoundFinalizerStore) FinalizeTaskSession(context.Context, string, string, string, string, []store.SessionMessage) error {
+	return store.ErrNotFound
+}
+
+type sessionManagerFallbackStore struct {
+	store.SessionStore
+}
 
 func setupSessionManager() (*SessionManager, *sqlite.Store) {
 	db, err := sqlite.NewDB(":memory:")
@@ -32,6 +64,87 @@ func TestNewSessionManager(t *testing.T) {
 	sm, _ := setupSessionManager()
 	if sm == nil {
 		t.Fatal("NewSessionManager returned nil")
+	}
+}
+
+func TestSessionManager_FinalizeTaskDeletedSessionSkipsResultRead(t *testing.T) {
+	sm, _ := setupSessionManager()
+	readErr := errors.New("result should not be read for a deleted session")
+	resultStore := &sessionManagerResultReadStore{err: readErr}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: "default", UID: types.UID("task-uid")},
+		Spec: corev1alpha1.TaskSpec{
+			Prompt:     "question",
+			SessionRef: &corev1alpha1.SessionReference{Name: "deleted-session", Append: true},
+		},
+		Status: corev1alpha1.TaskStatus{ResultRef: &corev1alpha1.ResultReference{Available: true}},
+	}
+
+	if err := sm.FinalizeTask(context.Background(), task, resultStore); err != nil {
+		t.Fatalf("FinalizeTask() error = %v", err)
+	}
+	if resultStore.reads != 0 {
+		t.Fatalf("deleted session triggered %d result reads", resultStore.reads)
+	}
+}
+
+func TestSessionManager_FinalizeTaskIgnoresConcurrentSessionDeletion(t *testing.T) {
+	_, ss := setupSessionManager()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: "default", UID: types.UID("task-uid")},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: "deleted-during-finalize"},
+		},
+	}
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace:     task.Namespace,
+		Name:          task.Spec.SessionRef.Name,
+		SessionType:   taskSessionType,
+		ActiveTask:    task.Name,
+		ActiveTaskUID: string(task.UID),
+	}))
+	sm := NewSessionManager(sessionManagerNotFoundFinalizerStore{SessionStore: ss})
+
+	if err := sm.FinalizeTask(context.Background(), task, ss); err != nil {
+		t.Fatalf("FinalizeTask() error = %v, want missing-session no-op", err)
+	}
+}
+
+func TestSessionManager_FinalizeTaskFallbackRejectsSameNameDifferentUID(t *testing.T) {
+	_, ss := setupSessionManager()
+	currentUID := "current-task-uid"
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace:     "default",
+		Name:          "reused-session",
+		SessionType:   taskSessionType,
+		ActiveTask:    testTask,
+		ActiveTaskUID: currentUID,
+	}))
+	sm := NewSessionManager(sessionManagerFallbackStore{SessionStore: ss})
+	staleTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: "default", UID: types.UID("stale-task-uid")},
+		Spec: corev1alpha1.TaskSpec{
+			Prompt:     "stale prompt",
+			SessionRef: &corev1alpha1.SessionReference{Name: "reused-session", Append: true},
+		},
+	}
+
+	if err := sm.FinalizeTask(context.Background(), staleTask, ss); err != nil {
+		t.Fatalf("FinalizeTask() error = %v", err)
+	}
+	messages, err := ss.LoadTranscript(context.Background(), staleTask.Namespace, staleTask.Spec.SessionRef.Name, 0)
+	if err != nil {
+		t.Fatalf("LoadTranscript() error = %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("stale Task appended fallback transcript messages: %#v", messages)
+	}
+	session, err := ss.GetSession(context.Background(), staleTask.Namespace, staleTask.Spec.SessionRef.Name)
+	if err != nil {
+		t.Fatalf("GetSession() error = %v", err)
+	}
+	if session.ActiveTaskUID != currentUID {
+		t.Fatalf("stale Task changed current session owner: %#v", session)
 	}
 }
 
@@ -170,6 +283,38 @@ func TestSessionManager_IsLocked_LockedBySelf(t *testing.T) {
 	}
 	if locked {
 		t.Error("IsLocked() should return false when locked by self")
+	}
+}
+
+func TestSessionManager_IsLocked_SameNameDifferentTaskUID(t *testing.T) {
+	sm, ss := setupSessionManager()
+	ctx := context.Background()
+
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
+		Namespace:     "default",
+		Name:          "test-session",
+		SessionType:   "task",
+		ActiveTask:    testTask,
+		ActiveTaskUID: "old-task-uid",
+	}))
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testTask,
+			Namespace: "default",
+			UID:       types.UID("new-task-uid"),
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: "test-session"},
+		},
+	}
+
+	locked, err := sm.IsLocked(ctx, task)
+	if err != nil {
+		t.Fatalf("IsLocked() error = %v", err)
+	}
+	if !locked {
+		t.Fatal("IsLocked() should reject a same-name lock owned by a different Task UID")
 	}
 }
 

@@ -21,6 +21,9 @@ require_cmd() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
+script_path="${script_dir}/$(basename "${BASH_SOURCE[0]}")"
+e2e_kind_helper="${script_dir}/e2e-kind-cluster.sh"
+e2e_kind_scoped_arg="--e2e-kind-scoped"
 
 kind_cluster="${KIND_CLUSTER:-orka-live-github-label-trigger-e2e}"
 orka_namespace="${ORKA_NAMESPACE:-orka-system}"
@@ -36,10 +39,141 @@ label_name="agent:implement"
 webhook_secret=""
 api_pf_pid=""
 task_name=""
-work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-github-label-trigger-e2e.XXXXXX")"
-api_pf_log="${work_dir}/api-port-forward.log"
+work_dir=""
+api_pf_log=""
 manager_kustomization="${repo_root}/config/manager/kustomization.yaml"
-manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
+manager_kustomization_backup=""
+
+initialize_work_dir() {
+  work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/live-github-label-trigger-e2e.XXXXXX")" ||
+    die "failed to create temporary work directory"
+  api_pf_log="${work_dir}/api-port-forward.log"
+  manager_kustomization_backup="${work_dir}/manager-kustomization.yaml.bak"
+}
+
+hash_text() {
+  local value="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${value}" | sha256sum | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+    return
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    printf '%s' "${value}" | openssl dgst -sha256 | awk '{print $NF}'
+    return
+  fi
+
+  die "no SHA-256 tool available (need sha256sum, shasum, or openssl)"
+}
+
+validate_scoped_target() {
+  local expected_context="kind-${kind_cluster}"
+  local state_dir="${E2E_CLUSTER_STATE_DIR:-}"
+  local lock_root="${E2E_CLUSTER_LOCK_ROOT:-}"
+  local operation_token="${E2E_KIND_OPERATION_TOKEN:-}"
+  local lock_dir
+  local current_context
+  local current_cluster
+  local identity_material
+  local server
+  local certificate_authority_data
+  local fingerprint
+  local state_fingerprint
+
+  [[ "${E2E_KIND_TARGET_READY:-}" == "1" ]] ||
+    die "refusing to run outside e2e-kind-cluster.sh run: target is not ready"
+  [[ -n "${KUBECONFIG:-}" && "${KUBECONFIG}" != *:* ]] ||
+    die "refusing to run without one isolated KUBECONFIG"
+  [[ -n "${state_dir}" && -n "${lock_root}" && -n "${operation_token}" ]] ||
+    die "refusing to run without helper state and operation lock metadata"
+  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] ||
+    die "helper state directory is missing or unsafe"
+  [[ "${E2E_KIND_EXPECTED_CONTEXT:-}" == "${expected_context}" ]] ||
+    die "helper expected context does not match ${expected_context}"
+  [[ "${E2E_KIND_EXPECTED_CLUSTER:-}" == "${expected_context}" ]] ||
+    die "helper expected cluster does not match ${expected_context}"
+  [[ "${KUBECONFIG}" == "${state_dir}/target.kubeconfig" ]] ||
+    die "KUBECONFIG is not the helper-owned target kubeconfig"
+  [[ -f "${KUBECONFIG}" && ! -L "${KUBECONFIG}" ]] ||
+    die "helper-owned target kubeconfig is missing or unsafe"
+
+  local state_file
+  for state_file in cluster context kubeconfig fingerprint status; do
+    [[ -f "${state_dir}/${state_file}" && ! -L "${state_dir}/${state_file}" ]] ||
+      die "helper state is missing safe ${state_file} metadata"
+  done
+  [[ "$(<"${state_dir}/cluster")" == "${kind_cluster}" ]] ||
+    die "helper state cluster does not match ${kind_cluster}"
+  [[ "$(<"${state_dir}/context")" == "${expected_context}" ]] ||
+    die "helper state context does not match ${expected_context}"
+  [[ "$(<"${state_dir}/kubeconfig")" == "${KUBECONFIG}" ]] ||
+    die "helper state kubeconfig does not match KUBECONFIG"
+  [[ "$(<"${state_dir}/status")" == "ready" ]] ||
+    die "helper target state is not ready"
+
+  lock_dir="${lock_root}/kind-${kind_cluster}.operation"
+  [[ -d "${lock_dir}" && ! -L "${lock_dir}" ]] ||
+    die "helper operation lock is not held"
+  [[ -f "${lock_dir}/token" && ! -L "${lock_dir}/token" ]] ||
+    die "helper operation lock token is missing or unsafe"
+  [[ "$(<"${lock_dir}/token")" == "${operation_token}" ]] ||
+    die "helper operation lock token does not match"
+  [[ -f "${lock_dir}/state_dir" && ! -L "${lock_dir}/state_dir" ]] ||
+    die "helper operation lock state metadata is missing or unsafe"
+  [[ "$(<"${lock_dir}/state_dir")" == "${state_dir}" ]] ||
+    die "helper operation lock targets different state"
+
+  current_context="$(kubectl --kubeconfig "${KUBECONFIG}" config current-context)" ||
+    die "failed to read scoped Kubernetes context"
+  current_cluster="$(kubectl --kubeconfig "${KUBECONFIG}" config view --minify -o 'jsonpath={.contexts[0].context.cluster}')" ||
+    die "failed to read scoped Kubernetes cluster"
+  [[ "${current_context}" == "${expected_context}" ]] ||
+    die "scoped Kubernetes context ${current_context} does not match ${expected_context}"
+  [[ "${current_cluster}" == "${expected_context}" ]] ||
+    die "scoped Kubernetes cluster ${current_cluster} does not match ${expected_context}"
+
+  identity_material="$(kubectl --kubeconfig "${KUBECONFIG}" config view --raw --minify -o 'jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.certificate-authority-data}')" ||
+    die "failed to read scoped Kubernetes target identity"
+  server="${identity_material%%$'\n'*}"
+  [[ "${identity_material}" == *$'\n'* ]] ||
+    die "scoped Kubernetes target identity is incomplete"
+  certificate_authority_data="${identity_material#*$'\n'}"
+  [[ -n "${server}" && -n "${certificate_authority_data}" ]] ||
+    die "scoped Kubernetes target identity is incomplete"
+  fingerprint="$(hash_text "${identity_material}")"
+  state_fingerprint="$(<"${state_dir}/fingerprint")"
+  [[ "${fingerprint}" == "${state_fingerprint}" ]] ||
+    die "scoped Kubernetes target identity does not match helper state"
+}
+
+run_under_e2e_kind_helper() {
+  [[ -x "${e2e_kind_helper}" ]] || die "missing executable E2E Kind helper: ${e2e_kind_helper}"
+  log "Running live GitHub label trigger e2e through isolated Kind helper"
+  exec env KIND_CLUSTER="${kind_cluster}" \
+    "${e2e_kind_helper}" run --create --cleanup -- \
+    "${script_path}" "${e2e_kind_scoped_arg}" "$@"
+}
+
+preflight() {
+  require_cmd make
+  require_cmd go
+  require_cmd docker
+  require_cmd kind
+  require_cmd kubectl
+  require_cmd curl
+  require_cmd jq
+  require_cmd python3
+
+  if [[ ! "${target_number}" =~ ^[0-9]+$ || "${target_number}" -le 0 ]]; then
+    die "GITHUB_LABEL_TRIGGER_TARGET_NUMBER must be a positive integer"
+  fi
+  normalize_repo_url "${target_repo_url}" >/dev/null
+  [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
+}
 
 redact() {
   local text
@@ -119,8 +253,9 @@ on_exit() {
   kubectl delete agent "${agent_name}" -n default --ignore-not-found=true >/dev/null 2>&1 || true
 
   restore_manager_kustomization
-  make cleanup-test-e2e KIND_CLUSTER="${kind_cluster}" >/dev/null 2>&1 || true
-  rm -rf "${work_dir}" >/dev/null 2>&1 || true
+  if [[ -n "${work_dir}" ]]; then
+    rm -rf "${work_dir}" >/dev/null 2>&1 || true
+  fi
 
   if [[ "${status}" -ne 0 ]]; then
     log "Live GitHub label trigger e2e failed"
@@ -322,19 +457,9 @@ print("sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest())
 PY
 }
 
-main() {
-  require_cmd make
-  require_cmd go
-  require_cmd docker
-  require_cmd kind
-  require_cmd kubectl
-  require_cmd curl
-  require_cmd jq
-  require_cmd python3
-
-  if [[ ! "${target_number}" =~ ^[0-9]+$ || "${target_number}" -le 0 ]]; then
-    die "GITHUB_LABEL_TRIGGER_TARGET_NUMBER must be a positive integer"
-  fi
+run_e2e() {
+  preflight
+  validate_scoped_target
 
   webhook_secret="${ORKA_GITHUB_WEBHOOK_SECRET:-}"
   if [[ -z "${webhook_secret}" ]]; then
@@ -345,15 +470,15 @@ main() {
   IFS=$'\t' read -r repo_full repo_html repo_clone < <(normalize_repo_url "${target_repo_url}")
 
   cd "${repo_root}"
-  [[ -f "${manager_kustomization}" ]] || die "missing ${manager_kustomization}"
-  cp "${manager_kustomization}" "${manager_kustomization_backup}"
+  initialize_work_dir
+  if ! cp "${manager_kustomization}" "${manager_kustomization_backup}"; then
+    rm -rf "${work_dir}" >/dev/null 2>&1 || true
+    die "failed to back up ${manager_kustomization}"
+  fi
 
-  trap 'status=$?; on_exit "${status}"; exit "${status}"' EXIT
+  trap 'status=$?; trap - EXIT; on_exit "${status}"; exit "${status}"' EXIT
 
-  log "Creating or reusing Kind cluster ${kind_cluster}"
-  run make setup-test-e2e KIND_CLUSTER="${kind_cluster}"
-  run kubectl config use-context "kind-${kind_cluster}"
-
+  log "Using validated Kind cluster ${kind_cluster}"
   log "Building manager image ${manager_image}"
   run make docker-build IMG="${manager_image}"
 
@@ -450,6 +575,15 @@ main() {
   jq -e --arg task "${task_name}" '.status == "duplicate" and .taskName == $task' "${duplicate_response}" >/dev/null
 
   log "Live GitHub label trigger e2e passed"
+}
+
+main() {
+  if [[ "${1:-}" != "${e2e_kind_scoped_arg}" ]]; then
+    preflight
+    run_under_e2e_kind_helper "$@"
+  fi
+  shift
+  run_e2e "$@"
 }
 
 main "$@"
