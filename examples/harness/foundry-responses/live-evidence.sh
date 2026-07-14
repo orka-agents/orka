@@ -260,7 +260,11 @@ def error_marker_is_set(value):
 def has_direct_error(value):
     if not isinstance(value, dict):
         return False
-    return error_marker_is_set(value.get("error")) or error_marker_is_set(value.get("errorCode"))
+    return (
+        error_marker_is_set(value.get("error"))
+        or error_marker_is_set(value.get("errorCode"))
+        or error_marker_is_set(value.get("toolError"))
+    )
 
 
 def safe_content(value):

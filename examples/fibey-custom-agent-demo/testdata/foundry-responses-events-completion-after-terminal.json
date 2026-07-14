@@ -59,22 +59,24 @@
         "approvalID": "approval-1",
         "brokeredClass": "write",
         "executionState": "started",
-        "idempotencyKey": "approval-1"
+        "idempotencyKey": "approval-1",
+        "executionIdempotencyKey": "approval-1"
       },
       "toolCallID": "write-call-1"
     },
     {
       "seq": 7,
+      "eventType": "AgentRuntimeCompleted"
+    },
+    {
+      "seq": 8,
       "eventType": "ToolCallCompleted",
       "toolName": "dispatch-work-order",
       "toolCallID": "write-call-1",
       "content": {
-        "approved": true
+        "approved": true,
+        "executionIdempotencyKey": "approval-1"
       }
-    },
-    {
-      "seq": 8,
-      "eventType": "AgentRuntimeCompleted"
     },
     {
       "seq": 9,

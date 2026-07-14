@@ -15,6 +15,7 @@ Expected evidence:
   - write brokered tool request for dispatch-work-order or escalate-incident
   - matching ApprovalRequested and ApprovalApproved events precede write execution
   - an executionIdempotencyKey is present in the write execution ledger event
+  - matching ToolCallCompleted events exist for each brokered read and write execution
   - terminal TaskSucceeded/AgentRuntimeCompleted/TurnCompleted-style event exists
 
 This verifier does not approve tasks and never reads Foundry credentials.
@@ -247,6 +248,22 @@ def is_harness_tool_request(event):
     )
 
 
+def matching_tool_events(source, candidates, before_order=None):
+    source_tool = tool_name(source)
+    source_call_id = tool_call_id(source)
+    source_order = seq(source)
+    if not source_tool or not source_call_id or source_order is None:
+        return []
+    return [
+        candidate for candidate in candidates
+        if tool_name(candidate) == source_tool
+        and tool_call_id(candidate) == source_call_id
+        and seq(candidate) is not None
+        and seq(candidate) > source_order
+        and (before_order is None or seq(candidate) < before_order)
+    ]
+
+
 ordered_events = []
 for index, event in enumerate(events, start=1):
     if isinstance(event, dict) and seq(event) is None:
@@ -265,8 +282,11 @@ approval_approved_events = [e for e in events if event_type(e) == "ApprovalAppro
 approval_declined_events = [e for e in events if event_type(e) == "ApprovalDeclined"]
 write_exec_events = [e for e in write_events if is_write_execution_start(e)]
 write_start_events = write_exec_events
+tool_completed_events = [e for e in events if event_type(e) == "ToolCallCompleted"]
+tool_failed_events = [e for e in events if event_type(e) == "ToolCallFailed"]
 terminal_events = [e for e in events if event_type(e) in TERMINAL_TYPES]
 task_terminal_events = [e for e in events if event_type(e) in TASK_TERMINAL_TYPES]
+first_terminal_order = min((seq(event) for event in terminal_events), default=None)
 execution_idempotency_events = [e for e in write_exec_events if execution_idempotency_value(e)]
 
 failures = []
@@ -280,12 +300,22 @@ if not approval_approved_events:
     failures.append("missing ApprovalApproved event")
 if not write_exec_events:
     failures.append("missing write ToolCallStarted event after approval")
+for event in read_events:
+    read_tool = tool_name(event)
+    if matching_tool_events(event, tool_failed_events, first_terminal_order):
+        failures.append(f"read tool call for {read_tool} has matching ToolCallFailed")
+    elif not matching_tool_events(event, tool_completed_events, first_terminal_order):
+        failures.append(f"read tool call for {read_tool} is missing ToolCallCompleted")
 if write_exec_events:
     for event in write_exec_events:
         write_tool = tool_name(event)
         write_order = seq(event)
         if not execution_idempotency_value(event):
             failures.append(f"write execution for {write_tool} is missing execution idempotency key evidence")
+        if matching_tool_events(event, tool_failed_events, first_terminal_order):
+            failures.append(f"write execution for {write_tool} has matching ToolCallFailed")
+        elif not matching_tool_events(event, tool_completed_events, first_terminal_order):
+            failures.append(f"write execution for {write_tool} is missing ToolCallCompleted")
         write_tool_call_id = tool_call_id(event)
         if not write_tool_call_id:
             failures.append(f"write execution for {write_tool} is missing toolCallID")
@@ -384,5 +414,6 @@ print(f"- write requests: {len(write_request_events)}")
 print(f"- approval requests: {len(approval_request_events)}")
 print(f"- approval decisions: {len(approval_approved_events)}")
 print(f"- execution idempotency evidence events: {len(execution_idempotency_events)}")
+print(f"- completed tool calls: {len(tool_completed_events)}")
 print(f"- terminal events: {len(terminal_events)}")
 PY

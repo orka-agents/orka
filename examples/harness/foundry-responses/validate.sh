@@ -265,6 +265,14 @@ expect_verifier_failure \
   "write execution for dispatch-work-order is missing execution idempotency key evidence" \
   "generic-idempotency-only"
 expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-failure-after-start.json \
+  "write execution for dispatch-work-order has matching ToolCallFailed" \
+  "failure-after-start"
+expect_verifier_failure \
+  examples/fibey-custom-agent-demo/testdata/foundry-responses-events-completion-after-terminal.json \
+  "write execution for dispatch-work-order is missing ToolCallCompleted" \
+  "completion-after-terminal"
+expect_verifier_failure \
   examples/fibey-custom-agent-demo/testdata/foundry-responses-events-truncated-page.json \
   "event JSON is incomplete" \
   "truncated-event-page"

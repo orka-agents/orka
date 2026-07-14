@@ -59,17 +59,21 @@
         "approvalID": "approval-1",
         "brokeredClass": "write",
         "executionState": "started",
-        "idempotencyKey": "approval-1"
+        "idempotencyKey": "approval-1",
+        "executionIdempotencyKey": "approval-1"
       },
       "toolCallID": "write-call-1"
     },
     {
       "seq": 7,
-      "eventType": "ToolCallCompleted",
+      "eventType": "ToolCallFailed",
       "toolName": "dispatch-work-order",
       "toolCallID": "write-call-1",
       "content": {
-        "approved": true
+        "approved": false,
+        "toolError": {
+          "code": "tool_execution_failed"
+        }
       }
     },
     {
