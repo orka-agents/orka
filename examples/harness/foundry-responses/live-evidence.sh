@@ -72,6 +72,7 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "error: $1 is required" >&2; exit 2; }
 }
 
+require_cmd awk
 require_cmd kubectl
 require_cmd orka
 require_cmd python3
@@ -86,11 +87,15 @@ runtime_tmp=""
 events_tmp=""
 approvals_tmp=""
 pods_tmp=""
+log_scan_tmp=""
+log_pipe_dir=""
 cleanup() {
   [[ -z "${runtime_tmp:-}" ]] || rm -f "$runtime_tmp"
   [[ -z "${events_tmp:-}" ]] || rm -f "$events_tmp"
   [[ -z "${approvals_tmp:-}" ]] || rm -f "$approvals_tmp"
   [[ -z "${pods_tmp:-}" ]] || rm -f "$pods_tmp"
+  [[ -z "${log_scan_tmp:-}" ]] || rm -f "$log_scan_tmp"
+  [[ -z "${log_pipe_dir:-}" ]] || rm -rf "$log_pipe_dir"
 }
 trap cleanup EXIT
 
@@ -399,8 +404,14 @@ if [[ -z "$pods" ]]; then
   cat "$log_scan" >&2
   exit 1
 fi
-log_text=""
+log_scan_tmp="$(mktemp)"
+log_pipe_dir="$(mktemp -d)"
+log_match_fifo="$log_pipe_dir/match"
+log_count_fifo="$log_pipe_dir/count"
+mkfifo "$log_match_fifo" "$log_count_fifo"
 log_pods=0
+log_lines=0
+log_nonblank_lines=0
 while IFS= read -r pod; do
   [[ -n "$pod" ]] || continue
   log_pods=$((log_pods + 1))
@@ -408,7 +419,23 @@ while IFS= read -r pod; do
   if [[ -n "$logs_since" ]]; then
     log_args+=(--since "$logs_since")
   fi
-  if ! pod_logs="$(kubectl -n "$namespace" "${log_args[@]}" 2>>"$log_err")"; then
+  : >"$log_scan_tmp"
+  grep -Ei "$log_forbidden_pattern" <"$log_match_fifo" >/dev/null &
+  match_pid=$!
+  awk '
+    { count++; if ($0 ~ /[^[:space:]]/) nonblank++ }
+    END { printf "%d %d\n", count, nonblank }
+  ' <"$log_count_fifo" >"$log_scan_tmp" &
+  count_pid=$!
+  set +e
+  kubectl -n "$namespace" "${log_args[@]}" 2>>"$log_err" | tee "$log_match_fifo" >"$log_count_fifo"
+  pipeline_status=("${PIPESTATUS[@]}")
+  wait "$match_pid"
+  match_status=$?
+  wait "$count_pid"
+  count_status=$?
+  set -e
+  if (( pipeline_status[0] != 0 )); then
     {
       echo "adapter log scan: FAILED"
       echo "Could not retrieve adapter logs from pod/${pod}. Raw logs were not stored."
@@ -418,10 +445,30 @@ while IFS= read -r pod; do
     cat "$log_scan" >&2
     exit 1
   fi
-  log_text+=$'\n'"${pod_logs}"
+  if (( pipeline_status[1] != 0 || count_status != 0 || (match_status != 0 && match_status != 1) )); then
+    {
+      echo "adapter log scan: FAILED"
+      echo "Could not scan adapter logs from pod/${pod}. Raw logs were not stored."
+    } >"$log_scan"
+    rm -f "$log_err"
+    cat "$log_scan" >&2
+    exit 1
+  fi
+  if (( match_status == 0 )); then
+    {
+      echo "adapter log scan: FAILED"
+      echo "A forbidden credential/tool-url pattern was detected in adapter logs. Raw logs were not stored."
+    } >"$log_scan"
+    rm -f "$log_err"
+    cat "$log_scan" >&2
+    exit 1
+  fi
+  read -r pod_lines pod_nonblank_lines <"$log_scan_tmp"
+  log_lines=$((log_lines + pod_lines))
+  log_nonblank_lines=$((log_nonblank_lines + pod_nonblank_lines))
 done <<<"$pods"
 rm -f "$log_err"
-if [[ -z "${log_text//[[:space:]]/}" ]]; then
+if (( log_nonblank_lines == 0 )); then
   {
     echo "adapter log scan: FAILED"
     echo "No adapter logs were returned from pods for deployment/${runtime}; evidence is indeterminate."
@@ -429,18 +476,11 @@ if [[ -z "${log_text//[[:space:]]/}" ]]; then
   cat "$log_scan" >&2
   exit 1
 fi
-if grep -Eiq "$log_forbidden_pattern" <<<"$log_text"; then
-  {
-    echo "adapter log scan: FAILED"
-    echo "A forbidden credential/tool-url pattern was detected in adapter logs. Raw logs were not stored."
-  } >"$log_scan"
-  cat "$log_scan" >&2
-  exit 1
-fi
 {
   echo "adapter log scan: passed"
   echo "scanned pods: ${log_pods}"
-  echo "scanned tail lines: $(wc -l <<<"$log_text" | tr -d ' ')"
+  echo "scanned lines: ${log_lines}"
+  echo "scanned nonblank lines: ${log_nonblank_lines}"
 } >"$log_scan"
 
 {
