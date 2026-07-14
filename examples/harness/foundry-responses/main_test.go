@@ -1457,6 +1457,37 @@ func TestResponsesAdapterContinuationFailureFailsClosedWithoutDuplicatePost(t *t
 	}
 }
 
+func TestResponsesAdapterHostedErrorDoesNotExposeUpstreamDiagnostics(t *testing.T) {
+	server := newServer(config{}, &http.Client{Timeout: time.Second})
+	request := responsesStartTurnRequest("foundry-safe-hosted-error")
+	turn := &turnState{request: request, frameUpdates: make(chan struct{})}
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	secret := "proof-that-must-not-reach-task-events"
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-error",
+		Status: "failed",
+		Error: &responsesError{
+			Code:    secret,
+			Message: "upstream echoed brokered_continuation_proof=" + secret,
+		},
+	})
+	failed := findFrame(turn.frames, harness.FrameTurnFailed)
+	if failed == nil || failed.Failed == nil || failed.Error == nil {
+		t.Fatalf("failed frame = %#v, want safe terminal failure", failed)
+	}
+	if failed.Failed.Reason != "foundry_response_error" ||
+		failed.Failed.Message != "Foundry hosted Responses returned an error" {
+		t.Fatalf("failed frame = %#v, want fixed safe upstream error", failed)
+	}
+	payload, err := json.Marshal(failed)
+	if err != nil {
+		t.Fatalf("marshal failed frame: %v", err)
+	}
+	if strings.Contains(string(payload), secret) {
+		t.Fatalf("failed frame leaked upstream diagnostics: %s", payload)
+	}
+}
+
 func TestResponsesRepeatedSubmittedFunctionCallFailsTurn(t *testing.T) {
 	server := newServer(config{
 		runtimeName:         "test",

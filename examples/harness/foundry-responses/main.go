@@ -812,7 +812,7 @@ func (s *server) handleResponsesResponseLocked(turn *turnState, response respons
 		s.appendFailedLocked(
 			turn,
 			"foundry_response_error",
-			firstNonBlank(response.Error.Message, response.Error.Code, "Foundry hosted Responses returned an error"),
+			"Foundry hosted Responses returned an error",
 		)
 		return responseRejected
 	}

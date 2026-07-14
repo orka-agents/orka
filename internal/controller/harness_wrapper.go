@@ -1457,13 +1457,18 @@ func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := err.Error()
-	for _, marker := range []string{"(404)", "turn not found"} {
-		if strings.Contains(message, marker) {
-			return true
-		}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) && clientErr.StatusCode > 0 {
+		return clientErr.StatusCode == 404
 	}
-	return false
+	message := err.Error()
+	if strings.Contains(message, "(404)") {
+		return true
+	}
+	if strings.Contains(message, "(410)") {
+		return false
+	}
+	return strings.Contains(message, "turn not found")
 }
 
 func harnessWrapperCancelErrorIsMissingTurn(err error) bool {

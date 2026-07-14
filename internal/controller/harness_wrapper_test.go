@@ -2577,8 +2577,16 @@ func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
 	if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (404): turn not found")) {
 		t.Fatal("404 turn-not-found stream error should be classified as retryable missing turn")
 	}
+	if harnessWrapperStreamErrorIsMissingTurn(harness.ClientError{
+		Op:         "stream_frames",
+		StatusCode: http.StatusGone,
+		Message:    "turn not found",
+	}) {
+		t.Fatal("typed 410 turn-not-found stream error should remain terminal")
+	}
 	for _, message := range []string{
 		"stream_frames failed (410): terminal turn expired from runtime retention",
+		"stream_frames failed (410): turn not found",
 		"stream_frames failed (401): unauthorized",
 	} {
 		if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
