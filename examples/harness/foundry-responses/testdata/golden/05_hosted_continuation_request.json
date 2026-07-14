@@ -1,12 +1,13 @@
 {
-  "previous_response_id": "resp-1",
   "agent_session_id": "session-1",
+  "brokered_continuation_proof": "proof-for-test",
   "input": [
     {
-      "type": "function_call_output",
       "call_id": "call-1",
       "output": "{\"approved\":true,\"output\":{\"success\":true}}",
-      "status": "completed"
+      "status": "completed",
+      "type": "function_call_output"
     }
-  ]
+  ],
+  "previous_response_id": "resp-1"
 }

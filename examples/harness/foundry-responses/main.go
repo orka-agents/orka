@@ -226,6 +226,16 @@ func loadConfig() config {
 	return cfg
 }
 
+func (c config) validationError() error {
+	if c.configError != "" {
+		return errors.New(c.configError)
+	}
+	if len(c.brokeredToolClasses) > 0 && strings.TrimSpace(c.continuationProof) == "" {
+		return fmt.Errorf("%s is required when brokered tool classes are enabled", envContinuationProof)
+	}
+	return nil
+}
+
 func newServer(cfg config, client *http.Client) *server {
 	if client == nil {
 		client = &http.Client{Timeout: cfg.requestTimeout}
@@ -261,7 +271,8 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, endpointErr := s.responsesEndpoint()
-	ready := s.cfg.configError == "" && s.cfg.adapterBearer != "" && endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
+	configErr := s.cfg.validationError()
+	ready := configErr == nil && s.cfg.adapterBearer != "" && endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
 	status := harness.HealthStatusOK
 	msg := "ready"
 	if !ready {
@@ -269,8 +280,8 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 		parts := []string{
 			"adapter bearer, safe Foundry hosted Responses endpoint, and exactly one Foundry auth mode are required",
 		}
-		if s.cfg.configError != "" {
-			parts = append(parts, s.cfg.configError)
+		if configErr != nil {
+			parts = append(parts, configErr.Error())
 		}
 		if endpointErr != nil {
 			parts = append(parts, endpointErr.Error())
@@ -293,7 +304,8 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, endpointErr := s.responsesEndpoint()
-	ready := s.cfg.configError == "" && s.cfg.adapterBearer != "" && endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
+	ready := s.cfg.validationError() == nil && s.cfg.adapterBearer != "" &&
+		endpointErr == nil && exactlyOneFoundryAuth(s.cfg)
 	if !ready {
 		harness.WriteError(w, http.StatusServiceUnavailable, "adapter is not ready")
 		return
@@ -308,13 +320,18 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	modes := []harness.ToolExecutionMode{harness.ToolExecutionModeObserved}
 	maxTurnSeconds := int(s.cfg.requestTimeout.Seconds())
-	if len(s.cfg.brokeredToolClasses) > 0 {
+	brokeredEnabled := len(s.cfg.brokeredToolClasses) > 0 && s.cfg.validationError() == nil
+	if brokeredEnabled {
 		modes = append(modes, harness.ToolExecutionModeBrokered)
 		// A brokered turn can contain multiple hosted request/tool-result rounds,
 		// each with its own request timeout and approval wait. The harness contract
 		// has only one runtime-wide ceiling, so advertise unknown rather than an
 		// understated duration when brokered mode is available.
 		maxTurnSeconds = 0
+	}
+	advertisedClasses := []harness.BrokeredToolClass(nil)
+	if brokeredEnabled {
+		advertisedClasses = append(advertisedClasses, s.cfg.brokeredToolClasses...)
 	}
 	harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
 		Version:                 harness.ProtocolVersion,
@@ -324,10 +341,10 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 		RuntimeVersion:          "foundry-responses-adapter",
 		ProviderKind:            harness.ProviderKindRemote,
 		ToolExecutionModes:      modes,
-		BrokeredToolClasses:     append([]harness.BrokeredToolClass(nil), s.cfg.brokeredToolClasses...),
+		BrokeredToolClasses:     advertisedClasses,
 		SupportsCancel:          true,
 		SupportsRuntimeSessions: true,
-		SupportsContinuation:    len(s.cfg.brokeredToolClasses) > 0,
+		SupportsContinuation:    brokeredEnabled,
 		SupportsArtifacts:       false,
 		MaxConcurrentTurns:      1,
 		MaxTurnSeconds:          maxTurnSeconds,
@@ -1073,7 +1090,17 @@ func canonicalToolResultOutput(result harness.ToolCallResult) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("tool result %q output must be valid JSON: %w", result.ToolCallID, err)
 		}
-		output = compacted
+		if trimmed := bytes.TrimSpace(compacted); len(trimmed) > 0 && trimmed[0] != '{' {
+			wrapped, err := json.Marshal(struct {
+				Result json.RawMessage `json:"result"`
+			}{Result: compacted})
+			if err != nil {
+				return "", fmt.Errorf("wrap tool result %q output: %w", result.ToolCallID, err)
+			}
+			output = wrapped
+		} else {
+			output = compacted
+		}
 	}
 	return compactJSON(struct {
 		Approved bool            `json:"approved"`
@@ -1304,8 +1331,8 @@ func (s *server) foundryRequestContext(
 }
 
 func (s *server) validateStartRequest(req harness.StartTurnRequest) error {
-	if s.cfg.configError != "" {
-		return errors.New(s.cfg.configError)
+	if err := s.cfg.validationError(); err != nil {
+		return err
 	}
 	if _, err := s.responsesEndpoint(); err != nil {
 		return err

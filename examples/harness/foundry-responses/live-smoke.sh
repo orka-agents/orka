@@ -29,7 +29,7 @@ Optional environment:
     Set explicitly to an empty string for observed-only mode. Every advertised
     class requires the hosted agent to statically expose the matching probe-only
     conformance_read/conformance_write schema.
-  ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF optional
+  ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF required when brokered classes are enabled
 
 The script never prints secret values. Do not run with shell tracing (set -x).
 USAGE
@@ -209,6 +209,9 @@ preflight() {
       [[ -z "$class" ]] && continue
       [[ "$class" == "read" || "$class" == "write" ]] || fail "unsupported brokered class '$class' (expected read/write)"
     done
+  fi
+  if [[ -n "${brokered_classes//[[:space:],]/}" && -z "${continuation_proof//[[:space:]]/}" ]]; then
+    fail "ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF is required when brokered classes are enabled"
   fi
 
   if [[ "$apply" == "1" && -z "$adapter_image" ]]; then

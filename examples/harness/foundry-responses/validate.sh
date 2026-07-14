@@ -119,6 +119,7 @@ ORKA_FOUNDRY_RESPONSES_ENDPOINT="http://127.0.0.1/agents/test/endpoint/protocols
   ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
   ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
   ORKA_FOUNDRY_RESPONSES_ADAPTER_IMAGE="" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES="" \
   examples/harness/foundry-responses/live-smoke.sh --apply >/dev/null 2>"$missing_image_err"
 missing_image_code=$?
 set -e
@@ -129,6 +130,42 @@ if [[ "$missing_image_code" == "0" ]] || ! grep -q "ADAPTER_IMAGE is required" "
   exit 1
 fi
 rm -f "$missing_image_err"
+
+missing_proof_err="$(mktemp)"
+set +e
+ORKA_FOUNDRY_RESPONSES_ENDPOINT="http://127.0.0.1/agents/test/endpoint/protocols/openai/responses" \
+  ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
+  ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES="read" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF="" \
+  examples/harness/foundry-responses/live-smoke.sh >/dev/null 2>"$missing_proof_err"
+missing_proof_code=$?
+set -e
+if [[ "$missing_proof_code" == "0" ]] || ! grep -q "CONTINUATION_PROOF is required" "$missing_proof_err"; then
+  cat "$missing_proof_err" >&2
+  rm -f "$missing_proof_err"
+  echo "expected brokered live smoke without continuation proof to fail" >&2
+  exit 1
+fi
+rm -f "$missing_proof_err"
+
+whitespace_proof_err="$(mktemp)"
+set +e
+ORKA_FOUNDRY_RESPONSES_ENDPOINT="http://127.0.0.1/agents/test/endpoint/protocols/openai/responses" \
+  ORKA_FOUNDRY_RESPONSES_API_KEY="placeholder" \
+  ORKA_FOUNDRY_RESPONSES_AUTH_BEARER="" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES="read" \
+  ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF="   " \
+  examples/harness/foundry-responses/live-smoke.sh >/dev/null 2>"$whitespace_proof_err"
+whitespace_proof_code=$?
+set -e
+if [[ "$whitespace_proof_code" == "0" ]] || ! grep -q "CONTINUATION_PROOF is required" "$whitespace_proof_err"; then
+  cat "$whitespace_proof_err" >&2
+  rm -f "$whitespace_proof_err"
+  echo "expected whitespace-only brokered continuation proof to fail" >&2
+  exit 1
+fi
+rm -f "$whitespace_proof_err"
 
 invalid_class_err="$(mktemp)"
 set +e

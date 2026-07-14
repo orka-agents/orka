@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,7 +22,10 @@ import (
 	"github.com/orka-agents/orka/internal/harness/conformance"
 )
 
-const fakeSessionID = "session-1"
+const (
+	fakeSessionID         = "session-1"
+	testContinuationProof = "proof-for-test"
+)
 
 func TestResponsesAdapterObservedTurnCompletes(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
@@ -614,6 +618,47 @@ func TestResponsesAdapterInitialPostHonorsTurnDeadline(t *testing.T) {
 	}
 }
 
+func TestResponsesAdapterRequiresProofForBrokeredReadinessAndStart(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "observed"})
+	server := newServer(config{
+		runtimeName:         "foundry-responses-test",
+		adapterBearer:       "adapter-auth-value",
+		endpoint:            foundry.endpoint(),
+		foundryAuth:         "foundry-auth-value",
+		requestTimeout:      time.Second,
+		stateRetention:      time.Minute,
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	adapter := httptest.NewServer(server.handler())
+	t.Cleanup(adapter.Close)
+
+	response, err := http.Get(adapter.URL + readinessPath)
+	if err != nil {
+		t.Fatalf("GET ready: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("ready status = %d, want 503", response.StatusCode)
+	}
+	client := newHarnessClient(t, adapter)
+	capabilities, err := client.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeBrokered) ||
+		capabilities.SupportsContinuation || len(capabilities.BrokeredToolClasses) != 0 {
+		t.Fatalf("capabilities = %#v, missing proof must disable brokered advertisement", capabilities)
+	}
+	request := brokeredReadRequest("foundry-missing-proof")
+	if _, err := client.StartTurn(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), envContinuationProof) {
+		t.Fatalf("StartTurn missing proof error = %v", err)
+	}
+	if got := foundry.postCount.Load(); got != 0 {
+		t.Fatalf("hosted post count = %d, want no request without continuation proof", got)
+	}
+}
+
 func TestResponsesAdapterReadyEndpointReflectsConfigReadiness(t *testing.T) {
 	unready := httptest.NewServer(newServer(config{
 		runtimeName:    "foundry-responses-test",
@@ -936,7 +981,7 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 	foundry := newFakeResponses(t, fakeResponsesConfig{
 		scenario:      "function_call",
 		toolName:      "support-ticket-lookup",
-		requiredProof: "proof-for-test",
+		requiredProof: testContinuationProof,
 	})
 	s := newServer(config{
 		runtimeName:         "foundry-responses-test",
@@ -945,7 +990,7 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
-		continuationProof:   "proof-for-test",
+		continuationProof:   testContinuationProof,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(s.handler())
@@ -965,10 +1010,10 @@ func TestResponsesAdapterSendsBrokeredContinuationProof(t *testing.T) {
 	if _, err := client.ContinueTurn(context.Background(), continueRequest); err != nil {
 		t.Fatalf("ContinueTurn: %v", err)
 	}
-	if got := foundry.requestHeader(1).Get("X-AgentKit-Brokered-Continuation-Proof"); got != "proof-for-test" {
+	if got := foundry.requestHeader(1).Get("X-AgentKit-Brokered-Continuation-Proof"); got != testContinuationProof {
 		t.Fatalf("continuation proof header = %q, want proof-for-test", got)
 	}
-	if got := requestMap(t, foundry.requestBody(1))["brokered_continuation_proof"]; got != "proof-for-test" {
+	if got := requestMap(t, foundry.requestBody(1))["brokered_continuation_proof"]; got != testContinuationProof {
 		t.Fatalf("continuation proof body = %#v, want proof-for-test", got)
 	}
 	if got := foundry.requestHeader(0).Get("X-AgentKit-Brokered-Continuation-Proof"); got != "" {
@@ -1418,6 +1463,7 @@ func TestResponsesAdapterBrokeredMaxTurnIsUnknown(t *testing.T) {
 		foundryAuth:         "foundry-auth-value",
 		requestTimeout:      2 * time.Second,
 		stateRetention:      time.Minute,
+		continuationProof:   testContinuationProof,
 		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(s.handler())
@@ -2591,6 +2637,31 @@ func TestResponsesFunctionCallWithoutResponseIDFailsBeforeToolRequest(t *testing
 	}
 }
 
+func TestCanonicalToolResultOutputWrapsNonObjectJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		output json.RawMessage
+		want   string
+	}{
+		{name: "object", output: json.RawMessage(`{"value":1}`), want: `{"approved":true,"output":{"value":1}}`},
+		{name: "array", output: json.RawMessage(`[1,2]`), want: `{"approved":true,"output":{"result":[1,2]}}`},
+		{name: "string", output: json.RawMessage(`"ok"`), want: `{"approved":true,"output":{"result":"ok"}}`},
+		{name: "boolean", output: json.RawMessage(`true`), want: `{"approved":true,"output":{"result":true}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := baseToolResult("call-1", true, tt.output, nil)
+			got, err := canonicalToolResultOutput(result)
+			if err != nil {
+				t.Fatalf("canonicalToolResultOutput: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("canonical output = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCanonicalErrorAndDeclineOutputFixtures(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -2811,6 +2882,10 @@ func newTestResponsesAdapterWithServer(
 	classes []harness.BrokeredToolClass,
 ) (*httptest.Server, *server) {
 	t.Helper()
+	continuationProof := ""
+	if len(classes) > 0 {
+		continuationProof = testContinuationProof
+	}
 	s := newServer(config{
 		addr:                ":0",
 		runtimeName:         "foundry-responses-test",
@@ -2820,6 +2895,7 @@ func newTestResponsesAdapterWithServer(
 		apiVersion:          "v1",
 		requestTimeout:      time.Second,
 		stateRetention:      time.Minute,
+		continuationProof:   continuationProof,
 		brokeredToolClasses: append([]harness.BrokeredToolClass(nil), classes...),
 	}, &http.Client{Timeout: time.Second})
 	adapter := httptest.NewServer(s.handler())
