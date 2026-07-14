@@ -40,11 +40,12 @@ const (
 	repositoryMonitorPhaseError     = "Error"
 	repositoryMonitorPhaseSuspended = "Suspended"
 
-	repositoryMonitorRunPhaseQueued    = "queued"
-	repositoryMonitorRunPhaseRunning   = "running"
-	repositoryMonitorRunPhaseSucceeded = "succeeded"
-	repositoryMonitorRunPhaseFailed    = "failed"
-	repositoryMonitorRunRetryScheduled = "retry_scheduled"
+	repositoryMonitorRunPhaseQueued      = "queued"
+	repositoryMonitorRunPhaseRunning     = "running"
+	repositoryMonitorRunPhaseSucceeded   = "succeeded"
+	repositoryMonitorRunPhaseFailed      = "failed"
+	repositoryMonitorRunRetryScheduled   = "retry_scheduled"
+	repositoryMonitorRunFailurePermanent = "run_failed"
 
 	repositoryMonitorRunningRunTimeout = 30 * time.Minute
 	repositoryMonitorValidationRetry   = time.Minute
@@ -756,7 +757,7 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 				}
 				return &run, repositoryMonitorCommandRetryDelay, nil
 			}
-			failureState = "run_failed"
+			failureState = repositoryMonitorRunFailurePermanent
 			processErr = fmt.Errorf("retry_attempts_exhausted: %w", processErr)
 		}
 		run.Phase = repositoryMonitorRunPhaseFailed
@@ -848,7 +849,12 @@ func repositoryMonitorRunFailureState(err error) string {
 	if strings.Contains(lower, "llm_rate_limited") || strings.Contains(lower, "llm rate limited") {
 		return "llm_rate_limited"
 	}
-	return repositoryMonitorRunRetryScheduled
+	for _, marker := range []string{"timeout", "connection refused", "connection reset", "temporarily unavailable", "unexpected eof"} {
+		if strings.Contains(lower, marker) {
+			return repositoryMonitorRunRetryScheduled
+		}
+	}
+	return repositoryMonitorRunFailurePermanent
 }
 
 func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun) error {

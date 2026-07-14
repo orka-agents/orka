@@ -6553,7 +6553,7 @@ func TestRepositoryMonitorRunFailureState(t *testing.T) {
 		{name: "github transient", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusBadGateway, Body: "bad gateway"}, want: "retry_scheduled"},
 		{name: "github conflict", err: &repositoryMonitorGitHubAPIError{Operation: "merge", StatusCode: http.StatusConflict, Body: "conflict"}, want: repositoryMonitorRunRetryScheduled},
 		{name: "github unprocessable", err: &repositoryMonitorGitHubAPIError{Operation: "merge", StatusCode: http.StatusUnprocessableEntity, Body: "retry"}, want: repositoryMonitorRunRetryScheduled},
-		{name: "github not found", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusNotFound, Body: "missing"}, want: "run_failed"},
+		{name: "github not found", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusNotFound, Body: "missing"}, want: repositoryMonitorRunFailurePermanent},
 		{name: "transport timeout", err: fmt.Errorf("dial tcp timeout"), want: "retry_scheduled"},
 		{name: "cluster capacity", err: fmt.Errorf("cluster capacity exhausted"), want: "cluster_capacity_blocked"},
 		{name: "llm", err: fmt.Errorf("llm_rate_limited by provider"), want: "llm_rate_limited"},
