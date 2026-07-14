@@ -275,7 +275,12 @@ def safe_content(value):
         found = scalar(value.get(key))
         if found not in (None, ""):
             safe[key] = found
-    for key in ("executionIdempotencyKey", "idempotencyKey", "Idempotency-Key"):
+    for key in ("executionIdempotencyKey", "Execution-Idempotency-Key"):
+        idempotency = scalar(value.get(key))
+        if isinstance(idempotency, str) and idempotency.strip():
+            safe["executionIdempotencyKey"] = idempotency.strip()
+            break
+    for key in ("idempotencyKey", "Idempotency-Key"):
         idempotency = scalar(value.get(key))
         if isinstance(idempotency, str) and idempotency.strip():
             safe["idempotencyKey"] = idempotency.strip()

@@ -509,7 +509,11 @@ func (s *server) startTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	if !turn.completed {
 		disposition := s.handleResponsesResponseLocked(turn, response)
-		if disposition != responseRejected {
+		if disposition == responseRejected {
+			if _, reused := s.runtimeSessions[turn.request.RuntimeSessionID]; reused {
+				s.quarantineRuntimeSessionLocked(turn)
+			}
+		} else {
 			s.setTurnSessionLocked(turn, foundrySessionID)
 		}
 		if disposition == responseCompleted {
@@ -573,7 +577,6 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 	for {
 		s.mu.Lock()
 		frames := append([]harness.HarnessEventFrame(nil), turn.frames...)
-		suppressed := maps.Clone(turn.suppressedToolCalls)
 		completed := turn.completed
 		updates := turn.frameUpdates
 		if updates == nil {
@@ -586,7 +589,11 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 				continue
 			}
 			if frame.Type == harness.FrameToolCallRequested {
-				if _, skip := suppressed[frame.ToolCallID]; skip {
+				s.mu.Lock()
+				_, suppressed := turn.suppressedToolCalls[frame.ToolCallID]
+				terminal := turn.completed
+				s.mu.Unlock()
+				if suppressed || terminal {
 					continue
 				}
 			}
@@ -594,6 +601,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request, turn *turn
 				return
 			}
 			nextSeq = frame.Seq
+			if frame.Type == harness.FrameToolCallRequested {
+				// Pace brokered calls one at a time. A partial /continue result,
+				// cancellation, or terminal transition wakes the stream before the
+				// next request is considered, so suppression is observed live.
+				break
+			}
 		}
 		if completed {
 			_ = harness.WriteSSEDone(w)
@@ -736,7 +749,11 @@ func (s *server) continueTurn(w http.ResponseWriter, r *http.Request, turn *turn
 		delete(turn.bufferedDigests, result.ToolCallID)
 	}
 	disposition := s.handleResponsesResponseLocked(turn, response)
-	if disposition != responseRejected {
+	if disposition == responseRejected {
+		if _, reused := s.runtimeSessions[turn.request.RuntimeSessionID]; reused {
+			s.quarantineRuntimeSessionLocked(turn)
+		}
+	} else {
 		s.setTurnSessionLocked(turn, updatedSessionID)
 	}
 	if disposition == responseCompleted {
@@ -768,7 +785,8 @@ func (s *server) cancelTurn(w http.ResponseWriter, r *http.Request, turn *turnSt
 	s.mu.Lock()
 	if !turn.completed {
 		cancelHostedRequest = turn.activeHostedRequestCancel
-		if cancelHostedRequest != nil {
+		_, reusedRuntimeSession := s.runtimeSessions[turn.request.RuntimeSessionID]
+		if cancelHostedRequest != nil || reusedRuntimeSession {
 			s.quarantineRuntimeSessionLocked(turn)
 		}
 		s.suppressPendingToolCallsLocked(turn)
@@ -1081,6 +1099,9 @@ func (s *server) recordContinueResults(
 		}
 	}
 	if readyCount < len(turn.pendingTools) {
+		if len(newResults) > 0 {
+			s.notifyTurnUpdatedLocked(turn)
+		}
 		return nil, nil
 	}
 	toSubmit := make([]harness.ToolCallResult, 0, len(unsubmittedIDs))
@@ -1757,6 +1778,10 @@ func harnessFrameFitsSSE(frame harness.HarnessEventFrame) bool {
 
 func (s *server) appendPreparedFrameLocked(turn *turnState, frame harness.HarnessEventFrame) {
 	turn.frames = append(turn.frames, frame)
+	s.notifyTurnUpdatedLocked(turn)
+}
+
+func (s *server) notifyTurnUpdatedLocked(turn *turnState) {
 	if turn.frameUpdates != nil {
 		close(turn.frameUpdates)
 	}

@@ -24,6 +24,8 @@ import (
 
 const (
 	fakeSessionID         = "session-1"
+	existingSessionID     = "existing-session"
+	foundryFailedReason   = "foundry_failed"
 	testContinuationProof = "proof-for-test"
 )
 
@@ -413,7 +415,7 @@ func TestResponsesAdapterRejectedResponseDoesNotRetainSession(t *testing.T) {
 		t.Fatalf("first StartTurn: %v", err)
 	}
 	frames := streamCurrentFrames(t, client, first.TurnID)
-	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil || failed.Failed.Reason != "foundry_failed" {
+	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil || failed.Failed.Reason != foundryFailedReason {
 		t.Fatalf("failed frame = %#v, want foundry_failed", failed)
 	}
 	server.mu.Lock()
@@ -430,6 +432,93 @@ func TestResponsesAdapterRejectedResponseDoesNotRetainSession(t *testing.T) {
 	}
 	if got := requestMap(t, foundry.requestBody(1))["agent_session_id"]; got != nil {
 		t.Fatalf("second request agent_session_id = %#v, want no rejected session reuse", got)
+	}
+}
+
+func TestResponsesAdapterRejectedReusedSessionIsQuarantined(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{scenario: "failed_with_session"})
+	adapter, server := newTestResponsesAdapterWithServer(t, foundry.endpoint(), nil)
+	client := newHarnessClient(t, adapter)
+	request := responsesStartTurnRequest("foundry-rejected-reused-session")
+	server.mu.Lock()
+	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
+		ID:       existingSessionID,
+		LastSeen: time.Now().UTC(),
+	}
+	server.mu.Unlock()
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	if got := requestMap(t, foundry.requestBody(0))["agent_session_id"]; got != existingSessionID {
+		t.Fatalf("initial agent_session_id = %#v, want existing-session", got)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if failed := findFrame(frames, harness.FrameTurnFailed); failed == nil || failed.Failed.Reason != foundryFailedReason {
+		t.Fatalf("failed frame = %#v, want foundry_failed", failed)
+	}
+	server.mu.Lock()
+	_, retained := server.runtimeSessions[request.RuntimeSessionID]
+	_, quarantined := server.quarantinedSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if retained || !quarantined {
+		t.Fatalf("rejected reused session retained=%v quarantined=%v", retained, quarantined)
+	}
+	retry := responsesStartTurnRequest("foundry-rejected-reused-session-retry")
+	retry.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), retry); err == nil ||
+		!strings.Contains(err.Error(), "runtime session unavailable after unconfirmed hosted cancellation") {
+		t.Fatalf("StartTurn with rejected reused session error = %v", err)
+	}
+	if got := foundry.postCount.Load(); got != 1 {
+		t.Fatalf("hosted post count = %d, want no retry for quarantined session", got)
+	}
+}
+
+func TestResponsesAdapterCancelPendingReusedSessionQuarantinesIt(t *testing.T) {
+	foundry := newFakeResponses(t, fakeResponsesConfig{
+		scenario: "function_call",
+		toolName: "support-ticket-lookup",
+	})
+	adapter, server := newTestResponsesAdapterWithServer(
+		t,
+		foundry.endpoint(),
+		[]harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	)
+	client := newHarnessClient(t, adapter)
+	request := brokeredReadRequest("foundry-cancel-pending-reused-session")
+	server.mu.Lock()
+	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
+		ID:       existingSessionID,
+		LastSeen: time.Now().UTC(),
+	}
+	server.mu.Unlock()
+
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := streamCurrentFrames(t, client, request.TurnID)
+	if findFrame(frames, harness.FrameToolCallRequested) == nil {
+		t.Fatalf("frames = %#v, want pending tool call", frames)
+	}
+	if _, err := client.CancelTurn(context.Background(), cancelRequestForStart(request)); err != nil {
+		t.Fatalf("CancelTurn: %v", err)
+	}
+	server.mu.Lock()
+	_, retained := server.runtimeSessions[request.RuntimeSessionID]
+	_, quarantined := server.quarantinedSessions[request.RuntimeSessionID]
+	server.mu.Unlock()
+	if retained || !quarantined {
+		t.Fatalf("cancelled pending reused session retained=%v quarantined=%v", retained, quarantined)
+	}
+	retry := brokeredReadRequest("foundry-cancel-pending-reused-session-retry")
+	retry.RuntimeSessionID = request.RuntimeSessionID
+	if _, err := client.StartTurn(context.Background(), retry); err == nil ||
+		!strings.Contains(err.Error(), "runtime session unavailable after unconfirmed hosted cancellation") {
+		t.Fatalf("StartTurn with cancelled pending reused session error = %v", err)
+	}
+	if got := foundry.postCount.Load(); got != 1 {
+		t.Fatalf("hosted post count = %d, want no retry for quarantined session", got)
 	}
 }
 
@@ -452,7 +541,7 @@ func TestResponsesAdapterCancelDuringInitialPostCancelsHostedRequest(t *testing.
 		if err := json.Unmarshal(body, &decoded); err != nil {
 			return nil, err
 		}
-		if got := decoded["agent_session_id"]; got != "existing-session" {
+		if got := decoded["agent_session_id"]; got != existingSessionID {
 			return nil, fmt.Errorf("agent_session_id = %#v, want existing-session", got)
 		}
 		close(received)
@@ -470,7 +559,7 @@ func TestResponsesAdapterCancelDuringInitialPostCancelsHostedRequest(t *testing.
 	request := responsesStartTurnRequest("foundry-cancel-initial")
 	server.mu.Lock()
 	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
-		ID:       "existing-session",
+		ID:       existingSessionID,
 		LastSeen: time.Now().UTC(),
 	}
 	server.mu.Unlock()
@@ -1000,26 +1089,38 @@ func TestResponsesAdapterMultipleFunctionCallsBufferedAndContinued(t *testing.T)
 	if _, err := client.StartTurn(context.Background(), request); err != nil {
 		t.Fatalf("StartTurn: %v", err)
 	}
-	frames := streamCurrentFrames(t, client, request.TurnID)
-	requests := findFrames(frames, harness.FrameToolCallRequested)
-	if len(requests) != 2 {
-		t.Fatalf("tool request frames = %#v, want 2", requests)
+	var frames []harness.HarnessEventFrame
+	var requested []string
+	err := client.StreamFrames(context.Background(), request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+		frames = append(frames, frame)
+		if frame.Type != harness.FrameToolCallRequested {
+			return nil
+		}
+		requested = append(requested, frame.ToolCallID)
+		result := toolResultForRequest(
+			request,
+			frame.ToolCallID,
+			true,
+			json.RawMessage(fmt.Sprintf(`{"success":true,"call":%d}`, len(requested))),
+			nil,
+		)
+		_, continueErr := client.ContinueTurn(context.Background(), harness.ContinueTurnRequest{
+			Version:          harness.ProtocolVersion,
+			Namespace:        request.Namespace,
+			TaskName:         request.TaskName,
+			SessionName:      request.SessionName,
+			RuntimeSessionID: request.RuntimeSessionID,
+			TurnID:           request.TurnID,
+			CorrelationID:    request.CorrelationID,
+			ToolResults:      []harness.ToolCallResult{result},
+		})
+		return continueErr
+	})
+	if err != nil {
+		t.Fatalf("StreamFrames: %v", err)
 	}
-	continueRequest := harness.ContinueTurnRequest{
-		Version:          harness.ProtocolVersion,
-		Namespace:        request.Namespace,
-		TaskName:         request.TaskName,
-		SessionName:      request.SessionName,
-		RuntimeSessionID: request.RuntimeSessionID,
-		TurnID:           request.TurnID,
-		CorrelationID:    request.CorrelationID,
-		ToolResults: []harness.ToolCallResult{
-			toolResultForRequest(request, "call-1", true, json.RawMessage(`{"success":true,"call":1}`), nil),
-			toolResultForRequest(request, "call-2", true, json.RawMessage(`{"success":true,"call":2}`), nil),
-		},
-	}
-	if _, err := client.ContinueTurn(context.Background(), continueRequest); err != nil {
-		t.Fatalf("ContinueTurn: %v", err)
+	if !reflect.DeepEqual(requested, []string{"call-1", "call-2"}) {
+		t.Fatalf("requested tool calls = %#v, want call-1 then call-2", requested)
 	}
 	continuation := requestMap(t, foundry.requestBody(1))
 	items, ok := continuation["input"].([]any)
@@ -1029,7 +1130,6 @@ func TestResponsesAdapterMultipleFunctionCallsBufferedAndContinued(t *testing.T)
 	if got := continuation["agent_session_id"]; got != fakeSessionID {
 		t.Fatalf("agent_session_id = %#v, want %q", got, fakeSessionID)
 	}
-	frames = streamCurrentFrames(t, client, request.TurnID)
 	if !hasFrameType(frames, harness.FrameToolResultReceived) || !hasFrameType(frames, harness.FrameTurnCompleted) {
 		t.Fatalf("frames = %#v, want tool results and completion", frames)
 	}
@@ -1135,7 +1235,7 @@ func TestResponsesAdapterCancelDuringHostedContinuationCancelsRequest(t *testing
 			return jsonHTTPResponseWithSession(
 				r,
 				functionCallResponse("support-ticket-lookup"),
-				"existing-session",
+				existingSessionID,
 			)
 		}
 		close(continuationReceived)
@@ -1158,7 +1258,7 @@ func TestResponsesAdapterCancelDuringHostedContinuationCancelsRequest(t *testing
 	request := brokeredReadRequest("foundry-cancel-continuation")
 	server.mu.Lock()
 	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
-		ID:       "existing-session",
+		ID:       existingSessionID,
 		LastSeen: time.Now().UTC(),
 	}
 	server.mu.Unlock()
@@ -1173,7 +1273,7 @@ func TestResponsesAdapterCancelDuringHostedContinuationCancelsRequest(t *testing
 	server.mu.Lock()
 	publishedBeforeCompletion := server.runtimeSessions[request.RuntimeSessionID]
 	server.mu.Unlock()
-	if publishedBeforeCompletion.ID != "existing-session" {
+	if publishedBeforeCompletion.ID != existingSessionID {
 		t.Fatalf("runtime session before continuation = %#v, want existing session", publishedBeforeCompletion)
 	}
 
@@ -2439,6 +2539,69 @@ func TestResponsesOversizedBatchValidatesAllResultsBeforeFailure(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamRechecksSuppressionBetweenToolFrames(t *testing.T) {
+	server := newServer(config{
+		adapterBearer:       "adapter-auth-value",
+		brokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClassRead},
+	}, &http.Client{Timeout: time.Second})
+	request := brokeredReadRequest("foundry-live-suppression")
+	turn := &turnState{
+		request:             request,
+		pendingTools:        map[string]string{},
+		suppressedToolCalls: map[string]struct{}{},
+		bufferedResults:     map[string]harness.ToolCallResult{},
+		bufferedDigests:     map[string]toolResultDigest{},
+		submittedDigests:    map[string]toolResultDigest{},
+	}
+	server.turns[request.TurnID] = turn
+	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
+	server.handleResponsesResponse(turn, responsesResponse{
+		ID:     "resp-live-suppression",
+		Status: "completed",
+		Output: []responsesOutput{
+			{
+				Type:      "function_call",
+				CallID:    "call-1",
+				Name:      "support-ticket-lookup",
+				Arguments: json.RawMessage(`{"incident":"inc-1"}`),
+			},
+			{
+				Type:      "function_call",
+				CallID:    "call-2",
+				Name:      "support-ticket-lookup",
+				Arguments: json.RawMessage(`{"incident":"inc-2"}`),
+			},
+		},
+	})
+
+	adapter := httptest.NewServer(server.handler())
+	t.Cleanup(adapter.Close)
+	client := newHarnessClient(t, adapter)
+	var requested []string
+	var frames []harness.HarnessEventFrame
+	err := client.StreamFrames(context.Background(), request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
+		frames = append(frames, frame)
+		if frame.Type != harness.FrameToolCallRequested {
+			return nil
+		}
+		requested = append(requested, frame.ToolCallID)
+		if len(requested) == 1 {
+			_, cancelErr := client.CancelTurn(context.Background(), cancelRequestForStart(request))
+			return cancelErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamFrames: %v", err)
+	}
+	if !reflect.DeepEqual(requested, []string{"call-1"}) {
+		t.Fatalf("requested tool calls = %#v, want only first call before cancellation", requested)
+	}
+	if !hasFrameType(frames, harness.FrameTurnCancelled) {
+		t.Fatalf("frames = %#v, want terminal cancellation", frames)
+	}
+}
+
 func TestResponsesTerminalFailureSuppressesPendingToolFrames(t *testing.T) {
 	server := newServer(config{
 		adapterBearer:       "adapter-auth-value",
@@ -2683,7 +2846,7 @@ func TestResponsesFailureStatusDoesNotCompleteWithPartialText(t *testing.T) {
 		t.Fatalf("frames = %#v, failed response should not complete", turn.frames)
 	}
 	failed := findFrame(turn.frames, harness.FrameTurnFailed)
-	if failed == nil || failed.Failed.Reason != "foundry_failed" {
+	if failed == nil || failed.Failed.Reason != foundryFailedReason {
 		t.Fatalf("failed frame = %#v, want foundry_failed", failed)
 	}
 }
