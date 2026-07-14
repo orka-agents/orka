@@ -148,6 +148,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 	}
 	switch action.Status {
 	case repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked, repositoryMonitorWorkActionStatusCancelled:
+		now := time.Now()
+		command.Status = "processed"
+		command.ProcessedAt = &now
+		command.Error = firstNonEmptyWorkflow(action.Error, action.BlockedReason)
+		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
+			return false, err
+		}
 		return true, nil
 	default:
 		return false, nil

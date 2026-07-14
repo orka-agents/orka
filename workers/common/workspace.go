@@ -832,7 +832,7 @@ func parseDiffNameStatusPaths(raw string) []string {
 			if i >= len(parts) {
 				return uniqueStrings(paths)
 			}
-			if path := strings.TrimSpace(parts[i]); path != "" {
+			if path := parts[i]; path != "" {
 				paths = append(paths, path)
 			}
 			i++
