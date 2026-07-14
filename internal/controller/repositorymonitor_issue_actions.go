@@ -823,7 +823,7 @@ func repositoryMonitorActionRecordFromTask(monitor *corev1alpha1.RepositoryMonit
 }
 
 func repositoryMonitorImplementationResultBody(envelope map[string]any, sr *common.StructuredResult, item *store.MonitorItem) map[string]any {
-	body := make(map[string]any, len(envelope)+8)
+	body := make(map[string]any, len(envelope))
 	maps.Copy(body, envelope)
 	agentBody := map[string]any{}
 	if summaryPayload := repositoryMonitorIssueActionJSONPayload(sr.Summary); summaryPayload != "" {
