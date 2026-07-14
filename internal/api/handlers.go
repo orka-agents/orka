@@ -745,7 +745,9 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		if err != nil {
 			_ = stopSetupCancellation()
 			streamCancel()
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+				errors.Is(streamCtx.Err(), context.DeadlineExceeded) ||
+				errors.Is(err, context.DeadlineExceeded) {
 				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
 			}
 			if ctx.Err() != nil {
@@ -753,10 +755,10 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
 		}
-		if !stopSetupCancellation() || ctx.Err() != nil {
+		if !stopSetupCancellation() || ctx.Err() != nil || streamCtx.Err() != nil {
 			streamCancel()
 			_ = stream.Close()
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
 				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
 			}
 			return nil

@@ -849,6 +849,12 @@ type skillListResponse struct {
 
 // ListSkills returns all skills from the API.
 func (c *Client) ListSkills(ctx context.Context, opts ListOptions) ([]SkillSummary, error) {
+	return collectAllPages(ctx, "skills", "", func(ctx context.Context, continuation string) (*listPage[SkillSummary], error) {
+		return c.listSkillsPage(ctx, opts, continuation)
+	})
+}
+
+func (c *Client) listSkillsPage(ctx context.Context, opts ListOptions, continuation string) (*listPage[SkillSummary], error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/skills")
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
@@ -856,6 +862,9 @@ func (c *Client) ListSkills(ctx context.Context, opts ListOptions) ([]SkillSumma
 	q := u.Query()
 	if opts.Namespace != "" {
 		q.Set("namespace", opts.Namespace)
+	}
+	if continuation != "" {
+		q.Set("continue", continuation)
 	}
 	u.RawQuery = q.Encode()
 
@@ -869,7 +878,11 @@ func (c *Client) ListSkills(ctx context.Context, opts ListOptions) ([]SkillSumma
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return resp.Items, nil
+	return &listPage[SkillSummary]{
+		Items:              resp.Items,
+		Continue:           resp.Metadata.Continue,
+		RemainingItemCount: resp.Metadata.RemainingItemCount,
+	}, nil
 }
 
 // GetSkill returns full details for a single skill.

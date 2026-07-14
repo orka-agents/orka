@@ -986,6 +986,65 @@ func TestListAgentsReturnsAllPagesAndForwardsOpaqueContinuation(t *testing.T) {
 	}
 }
 
+func TestListSkillsReturnsAllPagesAndForwardsOpaqueContinuation(t *testing.T) {
+	const (
+		continuation = "skill-cursor+/=? segment"
+		namespace    = "ns1"
+	)
+
+	firstPage := make([]SkillSummary, 100)
+	for i := range firstPage {
+		firstPage[i] = SkillSummary{Name: fmt.Sprintf("skill-%03d", i+1)}
+	}
+
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("namespace"); got != namespace {
+			t.Errorf("namespace query = %q, want %q", got, namespace)
+		}
+		switch requests {
+		case 1:
+			if got := r.URL.Query().Get(testContinueKey); got != "" {
+				t.Errorf("first continue query = %q, want empty", got)
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey: firstPage,
+				testMetadataKey: map[string]any{
+					testContinueKey: continuation,
+				},
+			})
+		case 2:
+			if got := r.URL.Query().Get(testContinueKey); got != continuation {
+				t.Errorf("second continue query = %q, want %q", got, continuation)
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				testItemsKey:    []SkillSummary{{Name: "skill-101"}},
+				testMetadataKey: map[string]any{},
+			})
+		default:
+			t.Errorf("unexpected request %d", requests)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	skills, err := c.ListSkills(context.Background(), ListOptions{Namespace: namespace})
+	if err != nil {
+		t.Fatalf("ListSkills() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if len(skills) != 101 {
+		t.Fatalf("len(skills) = %d, want 101", len(skills))
+	}
+	if got := skills[100].Name; got != "skill-101" {
+		t.Fatalf("skills[100].Name = %q, want skill-101", got)
+	}
+}
+
 func TestListAgentsStopsOnContinuationCycleWithPartialResults(t *testing.T) {
 	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
