@@ -583,7 +583,8 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeRejectsExtraAgents(t *tes
 			"repoURL":%q,
 			"agents":{
 				"reviewer":{"name":"reviewer"},
-				"repairer":{"name":"repairer"}
+				"repairer":{"name":"repairer"},
+				"planner":{"name":"planner"}
 			}
 		}
 	}`, monitorTestRepoURL)
@@ -604,7 +605,7 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeRejectsExtraAgents(t *tes
 			name: "allows extra agent when allowed agents covers it",
 			transactionContext: map[string]any{
 				"agent":         "demo/reviewer",
-				"allowedAgents": []any{"demo/reviewer", "demo/repairer"},
+				"allowedAgents": []any{"demo/reviewer", "demo/repairer", "demo/planner"},
 			},
 			want: http.StatusCreated,
 		},
@@ -612,7 +613,7 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeRejectsExtraAgents(t *tes
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app, _ := setupRepositoryMonitorHandlers(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+			app, _ := setupRepositoryMonitorHandlers(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, repositoryMonitorHandlerTestAgent("planner", corev1alpha1.AgentRuntimeClaude))
 			token := issueTestContextToken(t, provider, nil, map[string]any{
 				"scope": ContextTokenScopeMonitorsWrite,
 				"tctx":  tt.transactionContext,
@@ -653,6 +654,40 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeAuthorizesBeforeReviewerL
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	require.NotContains(t, readRespBody(t, resp), "missing-reviewer")
+}
+
+func TestCreateRepositoryMonitor_RejectsUnsupportedIssueReadOnlyAgent(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff,
+		repositoryMonitorHandlerTestAgent("codex-planner", corev1alpha1.AgentRuntimeCodex),
+	)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"planner":{"name":"codex-planner"}}
+		}
+	}`, monitorTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	responseBody := readRespBody(t, resp)
+	require.Contains(t, responseBody, "spec.agents.planner")
+	require.Contains(t, responseBody, "not supported")
+}
+
+func TestRepositoryMonitorPullRequestCommandTargetSHARequirement(t *testing.T) {
+	for _, intent := range []string{finishReasonStop, commandIntentResume} {
+		if repositoryMonitorPullRequestCommandRequiresTargetSHA(CreateRepositoryMonitorCommandRequest{Kind: repositoryMonitorTargetKindPullRequest, Intent: intent}) {
+			t.Fatalf("%s unexpectedly requires targetSHA", intent)
+		}
+	}
+	if !repositoryMonitorPullRequestCommandRequiresTargetSHA(CreateRepositoryMonitorCommandRequest{Kind: repositoryMonitorTargetKindPullRequest, Intent: "review"}) {
+		t.Fatal("review should require targetSHA")
+	}
 }
 
 func TestGetRepositoryMonitorImplementationPatchPreview(t *testing.T) {
@@ -934,4 +969,110 @@ func TestCreateRepositoryMonitorCommandEventRequiresInventoryForPR(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Contains(t, readRespBody(t, resp), "must be present in monitor inventory")
+}
+
+func TestCreateRepositoryMonitor_IgnoresReviewerWhenPullRequestsDisabled(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	body := fmt.Sprintf(`{
+		"name":"issue-only",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"reviewer":{"name":"unused-missing-reviewer"}}
+		}
+	}`, monitorTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestCreateRepositoryMonitor_RejectsCopilotImplementer(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff,
+		repositoryMonitorHandlerTestAgent("copilot-implementer", corev1alpha1.AgentRuntimeCopilot),
+	)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"implementer":{"name":"copilot-implementer"}}
+		}
+	}`, monitorTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readRespBody(t, resp), "cannot use copilot")
+}
+
+func TestCreateRepositoryMonitor_IgnoresPlannerWhenPlanningDisabled(t *testing.T) {
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff,
+		repositoryMonitorHandlerTestAgent("disabled-codex-planner", corev1alpha1.AgentRuntimeCodex),
+	)
+	body := fmt.Sprintf(`{
+		"name":"issue-only",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"planner":{"name":"disabled-codex-planner"}},
+			"issueWorkflow":{"planning":{"enabled":false}}
+		}
+	}`, monitorTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestCreateRepositoryMonitor_RejectsRuntimeRefImplementer(t *testing.T) {
+	custom := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-implementer", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"},
+		}},
+	}
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, custom)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"implementer":{"name":"custom-implementer"}}
+		}
+	}`, monitorTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readRespBody(t, resp), "cannot use runtimeRef")
+}
+
+func TestCreateRepositoryMonitor_RejectsRuntimeRefReadOnlyAgent(t *testing.T) {
+	custom := repositoryMonitorHandlerTestAgent("custom-planner", corev1alpha1.AgentRuntimeClaude)
+	custom.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	app, _ := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, custom)
+	body := fmt.Sprintf(`{
+		"name":"repo-monitor",
+		"namespace":"demo",
+		"spec":{
+			"repoURL":%q,
+			"targets":{"pullRequests":{"enabled":false},"issues":{"enabled":true}},
+			"agents":{"planner":{"name":"custom-planner"}}
+		}
+	}`, monitorTestRepoURL)
+	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Contains(t, readRespBody(t, resp), "cannot use runtimeRef")
 }

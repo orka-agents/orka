@@ -337,6 +337,8 @@ func repositoryMonitorItemFromIssue(monitor *corev1alpha1.RepositoryMonitor, iss
 		item.LastCommandID = existing.LastCommandID
 		item.LastCommandIntent = existing.LastCommandIntent
 		item.LinkedPRNumber = existing.LinkedPRNumber
+		item.StatusCommentID = existing.StatusCommentID
+		item.StatusCommentURL = existing.StatusCommentURL
 		if existing.SnapshotDigest == digest {
 			item.WorkflowPhase = existing.WorkflowPhase
 			item.LastActionID = existing.LastActionID

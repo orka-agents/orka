@@ -30,9 +30,10 @@ const (
 	AgentName         = "ORKA_AGENT_NAME"
 
 	// Task relationship env vars.
-	PriorTask          = "ORKA_PRIOR_TASK"
-	PriorTaskNamespace = "ORKA_PRIOR_TASK_NAMESPACE"
-	ParentTask         = "ORKA_PARENT_TASK"
+	PriorTask           = "ORKA_PRIOR_TASK"
+	PriorTaskNamespace  = "ORKA_PRIOR_TASK_NAMESPACE"
+	PriorTaskDiffSHA256 = "ORKA_PRIOR_TASK_DIFF_SHA256"
+	ParentTask          = "ORKA_PARENT_TASK"
 
 	// Transaction context env vars.
 	TransactionID                     = "ORKA_TRANSACTION_ID"

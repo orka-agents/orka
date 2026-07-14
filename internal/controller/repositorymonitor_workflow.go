@@ -10,7 +10,14 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -215,6 +222,80 @@ func (r *RepositoryMonitorReconciler) updateImplementationJobForTask(ctx context
 	job := jobs[0]
 	mutate(&job)
 	return r.Store.UpdateImplementationJob(ctx, &job)
+}
+
+func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorImplementationJobs(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, issueNumber int64, reason string) error {
+	if r == nil || r.Store == nil || monitor == nil {
+		return nil
+	}
+	cursor := ""
+	for {
+		jobs, next, err := r.Store.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, IssueNumber: issueNumber, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return err
+		}
+		for i := range jobs {
+			job := jobs[i]
+			if !repositoryMonitorImplementationJobActive(job.Phase) {
+				continue
+			}
+			now := time.Now()
+			job.Phase = repositoryMonitorWorkActionStatusCancelled
+			job.Error = reason
+			job.CompletedAt = &now
+			if err := r.Store.UpdateImplementationJob(ctx, &job); err != nil {
+				return err
+			}
+		}
+		if next == "" {
+			return nil
+		}
+		cursor = next
+	}
+}
+
+func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, targetKind string, targetNumber int64, reason string) error {
+	if r == nil || r.Client == nil || monitor == nil {
+		return nil
+	}
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks,
+		crclient.InNamespace(monitor.Namespace),
+		crclient.MatchingLabels{
+			labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+			labels.LabelGitHubTarget:      labels.SelectorValue(targetKind),
+			labels.LabelGitHubNumber:      labels.SelectorValue(fmt.Sprintf("%d", targetNumber)),
+		},
+	); err != nil {
+		return err
+	}
+	for i := range tasks.Items {
+		key := types.NamespacedName{Namespace: tasks.Items[i].Namespace, Name: tasks.Items[i].Name}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var current corev1alpha1.Task
+			if err := r.Get(ctx, key, &current); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			if repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+				return nil
+			}
+			now := metav1.Now()
+			current.Status.Phase = corev1alpha1.TaskPhaseCancelled
+			current.Status.CompletionTime = &now
+			current.Status.Message = reason
+			if err := r.Status().Update(ctx, &current); apierrors.IsNotFound(err) {
+				return nil
+			} else {
+				return err
+			}
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func repositoryMonitorImplementationJobID(taskName string) string {

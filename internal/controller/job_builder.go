@@ -129,6 +129,9 @@ func workerServiceAccountForTask(task *corev1alpha1.Task) string {
 	if task == nil {
 		return ContainerWorkerServiceAccount
 	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		return ContainerWorkerServiceAccount
+	}
 
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
@@ -1227,6 +1230,11 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 			return err
 		}
 	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		if err := b.addScopedAgentRuntimeSecretEnv(ctx, job, task, agent); err != nil {
+			return err
+		}
+	}
 
 	// Add provider secret (mounted as environment variable source)
 	if allowDirectProviderSecrets && provider != nil {
@@ -1305,7 +1313,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add task secret
-	if allowDirectSecretMounts && task.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && !taskRequestsRuntimeAuthOnly(task) && task.Spec.SecretRef != nil {
 		secretName := task.Spec.SecretRef.Name
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "task-secrets",
@@ -1326,7 +1334,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add agent secret
-	if allowDirectSecretMounts && agent != nil && agent.Spec.SecretRef != nil {
+	if allowDirectSecretMounts && !taskRequestsRuntimeAuthOnly(task) && agent != nil && agent.Spec.SecretRef != nil {
 		secretName := agent.Spec.SecretRef.Name
 		// Inject all secret keys as environment variables
 		job.Spec.Template.Spec.Containers[0].EnvFrom = append(
@@ -1424,6 +1432,9 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if !taskRequestsReadOnlyAgent(task) || agent == nil || agent.Spec.Runtime == nil {
 		return nil
 	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fmt.Errorf("read-only agent tasks do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
+	}
 	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex {
 		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
 	}
@@ -1431,6 +1442,79 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
 	}
 	return nil
+}
+
+func (b *JobBuilder) addScopedAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return nil
+	}
+	keys, _, err := scopedAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		return err
+	}
+	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+	var secret corev1.Secret
+	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: task.Namespace}, &secret); err != nil {
+		return fmt.Errorf("get scoped agent runtime secret %q: %w", secretName, err)
+	}
+	if !scopedAgentRuntimeSecretHasCredential(&secret, agent) {
+		return fmt.Errorf("scoped agent runtime secret %q contains no supported credentials for runtime %q", secretName, readOnlyAgentRuntimeType(agent))
+	}
+	for _, key := range keys {
+		if _, ok := secret.Data[key]; !ok {
+			continue
+		}
+		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: key,
+			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  key,
+			}},
+		})
+	}
+	return nil
+}
+
+func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKeys []string, err error) {
+	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
+	}
+	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeCodex:
+		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey}, nil
+	case corev1alpha1.AgentRuntimeClaude:
+		return []string{
+			workerenv.AnthropicAPIKey,
+			workerenv.AnthropicBaseURL,
+			"CLAUDE_CODE_USE_FOUNDRY",
+			"ANTHROPIC_FOUNDRY_API_KEY",
+			workerenv.AnthropicFoundryBaseURL,
+			"ANTHROPIC_FOUNDRY_RESOURCE",
+			"ANTHROPIC_DEFAULT_SONNET_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		}, []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"}, nil
+	case corev1alpha1.AgentRuntimeCopilot:
+		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support copilot because %s can mutate GitHub", workerenv.GitHubToken)
+	default:
+		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support runtime %q", readOnlyAgentRuntimeType(agent))
+	}
+}
+
+func scopedAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev1alpha1.Agent) bool {
+	if secret == nil {
+		return false
+	}
+	_, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		return false
+	}
+	for _, key := range credentialKeys {
+		if strings.TrimSpace(string(secret.Data[key])) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *JobBuilder) addReadOnlyAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -1506,6 +1590,7 @@ func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error)
 			workerenv.AnthropicBaseURL,
 			"CLAUDE_CODE_USE_FOUNDRY",
 			"ANTHROPIC_FOUNDRY_API_KEY",
+			workerenv.AnthropicFoundryBaseURL,
 			"ANTHROPIC_FOUNDRY_RESOURCE",
 			"ANTHROPIC_DEFAULT_SONNET_MODEL",
 			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -2024,6 +2109,10 @@ func taskUsesWorkspaceInitContainer(task *corev1alpha1.Task) bool {
 
 func taskRequestsReadOnlyAgent(task *corev1alpha1.Task) bool {
 	return task != nil && task.Annotations[labels.AnnotationAgentReadOnly] == scheduledRunLabelValue
+}
+
+func taskRequestsRuntimeAuthOnly(task *corev1alpha1.Task) bool {
+	return task != nil && task.Annotations[labels.AnnotationAgentRuntimeAuthOnly] == scheduledRunLabelValue
 }
 
 func readOnlyAgentAllowedTools() []string {

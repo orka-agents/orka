@@ -246,8 +246,8 @@ spec:
                           a planner agent is configured and a command requests it.
                         type: boolean
                       requireHumanApprovalFor:
-                        description: RequireHumanApprovalFor names risk categories
-                          that require explicit approval.
+                        description: RequireHumanApprovalFor names risk levels or
+                          plan categories that require explicit approval.
                         items:
                           type: string
                         type: array

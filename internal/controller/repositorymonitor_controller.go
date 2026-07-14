@@ -170,6 +170,8 @@ func parseRepositoryMonitorSchedule(monitor *corev1alpha1.RepositoryMonitor) (cr
 	return nil, err
 }
 
+const repositoryMonitorReasonUnsupportedReviewerAgent = "UnsupportedReviewerAgent"
+
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, bool, time.Duration, error) {
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
@@ -186,6 +188,20 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 		return "", "", true, 0, updateErr
 	}
 	if reason, message, err := r.validateRepositoryMonitorReviewerAgent(ctx, monitor); reason != "" || err != nil {
+		if err != nil {
+			return "", "", false, 0, err
+		}
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
+		return "", "", true, repositoryMonitorValidationRetry, updateErr
+	}
+	if reason, message, err := r.validateRepositoryMonitorIssueReadOnlyAgents(ctx, monitor); reason != "" || err != nil {
+		if err != nil {
+			return "", "", false, 0, err
+		}
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
+		return "", "", true, repositoryMonitorValidationRetry, updateErr
+	}
+	if reason, message, err := r.validateRepositoryMonitorImplementerAgent(ctx, monitor); reason != "" || err != nil {
 		if err != nil {
 			return "", "", false, 0, err
 		}
@@ -226,10 +242,13 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx
 		return "", "", err
 	}
 	if agent.Spec.Runtime == nil {
-		return "UnsupportedReviewerAgent", fmt.Sprintf("spec.agents.reviewer %q must use the claude runtime for read-only repository monitor reviews", reviewer.Name), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q must use the claude runtime for read-only repository monitor reviews", reviewer.Name), nil
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude", reviewer.Name), nil
 	}
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
-		return "UnsupportedReviewerAgent", fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type), nil
+		return repositoryMonitorReasonUnsupportedReviewerAgent, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type), nil
 	}
 	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
 		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q must reference a Secret with Claude credentials for read-only repository monitor reviews", reviewer.Name), nil
@@ -244,6 +263,131 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx
 	}
 	if !readOnlyAgentRuntimeSecretHasCredential(&secret, &agent) {
 		return repositoryMonitorReasonReviewerCredentialsInvalid, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q must contain a supported Claude auth key", reviewer.Name, secretName), nil
+	}
+	return "", "", nil
+}
+
+const repositoryMonitorReasonImplementerAuthInvalid = "ImplementerCredentialsInvalid"
+
+const repositoryMonitorReasonUnsupportedImplementerAgent = "UnsupportedImplementerAgent"
+
+func (r *RepositoryMonitorReconciler) validateRepositoryMonitorImplementerAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
+	if monitor == nil || !monitor.Spec.Targets.Issues.Enabled || (monitor.Spec.IssueWorkflow.Implementation.Enabled != nil && !*monitor.Spec.IssueWorkflow.Implementation.Enabled) {
+		return "", "", nil
+	}
+	ref := monitor.Spec.Agents.Implementer
+	if ref == nil || strings.TrimSpace(ref.Name) == "" {
+		return "", "", nil
+	}
+	agentNamespace := strings.TrimSpace(ref.Namespace)
+	if agentNamespace == "" {
+		agentNamespace = monitor.Namespace
+	}
+	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
+		return "ImplementerNamespaceInvalid", fmt.Sprintf("spec.agents.implementer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, monitor.Namespace), nil
+	}
+	var agent corev1alpha1.Agent
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "ImplementerAgentNotFound", fmt.Sprintf("spec.agents.implementer %q not found in namespace %q", ref.Name, agentNamespace), nil
+		}
+		return "", "", err
+	}
+	if agent.Spec.Runtime == nil {
+		return repositoryMonitorReasonUnsupportedImplementerAgent, fmt.Sprintf("spec.agents.implementer %q must configure a CLI runtime", ref.Name), nil
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return repositoryMonitorReasonUnsupportedImplementerAgent, fmt.Sprintf("spec.agents.implementer %q cannot use runtimeRef because external runtimes cannot enforce implementation credential isolation; use built-in codex or claude", ref.Name), nil
+	}
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
+		if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q must reference a runtime credential Secret", ref.Name), nil
+		}
+		secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q credential Secret %q not found in monitor namespace %q", ref.Name, secretName, monitor.Namespace), nil
+			}
+			return "", "", err
+		}
+		if !scopedAgentRuntimeSecretHasCredential(&secret, &agent) {
+			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q credential Secret %q has no supported key for runtime %q", ref.Name, secretName, agent.Spec.Runtime.Type), nil
+		}
+		return "", "", nil
+	case corev1alpha1.AgentRuntimeCopilot:
+		return repositoryMonitorReasonUnsupportedImplementerAgent, fmt.Sprintf("spec.agents.implementer %q cannot use copilot because its runtime credential can mutate GitHub; use codex or claude", ref.Name), nil
+	default:
+		return repositoryMonitorReasonUnsupportedImplementerAgent, fmt.Sprintf("spec.agents.implementer %q runtime %q is not supported; use built-in codex or claude", ref.Name, agent.Spec.Runtime.Type), nil
+	}
+}
+
+func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgents(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
+	if monitor == nil || !monitor.Spec.Targets.Issues.Enabled {
+		return "", "", nil
+	}
+	candidates := []struct {
+		role    string
+		ref     *corev1alpha1.AgentReference
+		enabled bool
+	}{
+		{role: "triager", ref: monitor.Spec.Agents.Triager, enabled: monitor.Spec.IssueWorkflow.Triage.Enabled == nil || *monitor.Spec.IssueWorkflow.Triage.Enabled},
+		{role: "researcher", ref: monitor.Spec.Agents.Researcher, enabled: monitor.Spec.IssueWorkflow.Research.Enabled == nil || *monitor.Spec.IssueWorkflow.Research.Enabled},
+		{role: "planner", ref: monitor.Spec.Agents.Planner, enabled: monitor.Spec.IssueWorkflow.Planning.Enabled == nil || *monitor.Spec.IssueWorkflow.Planning.Enabled},
+	}
+	for _, candidate := range candidates {
+		if !candidate.enabled || candidate.ref == nil || strings.TrimSpace(candidate.ref.Name) == "" {
+			continue
+		}
+		reason, message, err := r.validateRepositoryMonitorIssueReadOnlyAgent(ctx, monitor, candidate.role, candidate.ref)
+		if reason != "" || err != nil {
+			return reason, message, err
+		}
+	}
+	return "", "", nil
+}
+
+func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, role string, ref *corev1alpha1.AgentReference) (string, string, error) {
+	field := "spec.agents." + role
+	reasonPrefix := strings.ToUpper(role[:1]) + role[1:]
+	agentNamespace := strings.TrimSpace(ref.Namespace)
+	if agentNamespace == "" {
+		agentNamespace = monitor.Namespace
+	}
+	if r.EnforceNamespaceIsolation && agentNamespace != monitor.Namespace {
+		return reasonPrefix + "NamespaceInvalid", fmt.Sprintf("%s namespace %q must match monitor namespace %q when namespace isolation is enforced", field, agentNamespace, monitor.Namespace), nil
+	}
+	var agent corev1alpha1.Agent
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return reasonPrefix + "AgentNotFound", fmt.Sprintf("%s %q not found in namespace %q", field, ref.Name, agentNamespace), nil
+		}
+		return "", "", err
+	}
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
+		runtimeType := corev1alpha1.AgentRuntimeType("")
+		if agent.Spec.Runtime != nil {
+			runtimeType = agent.Spec.Runtime.Type
+		}
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude", field, ref.Name, runtimeType), nil
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return "Unsupported" + reasonPrefix + "Agent", fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude", field, ref.Name), nil
+	}
+	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q must reference a Secret with Claude credentials for read-only repository monitor tasks", field, ref.Name), nil
+	}
+	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: monitor.Namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q credential Secret %q not found in monitor namespace %q", field, ref.Name, secretName, monitor.Namespace), nil
+		}
+		return "", "", err
+	}
+	if !readOnlyAgentRuntimeSecretHasCredential(&secret, &agent) {
+		return reasonPrefix + "CredentialsInvalid", fmt.Sprintf("%s %q credential Secret %q must contain a supported Claude auth key", field, ref.Name, secretName), nil
 	}
 	return "", "", nil
 }

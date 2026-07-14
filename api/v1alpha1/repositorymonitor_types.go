@@ -298,7 +298,7 @@ type RepositoryMonitorIssuePlanningSpec struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// RequireHumanApprovalFor names risk categories that require explicit approval.
+	// RequireHumanApprovalFor names risk levels or plan categories that require explicit approval.
 	// +listType=set
 	// +optional
 	RequireHumanApprovalFor []string `json:"requireHumanApprovalFor,omitempty"`

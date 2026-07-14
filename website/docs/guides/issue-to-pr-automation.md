@@ -8,21 +8,24 @@ RepositoryMonitor can run a durable maintainer-controlled issue-to-PR loop from 
 2. Orka verifies the webhook signature and current GitHub actor permission, then records a durable `command_event`.
 3. A `work_action` is queued with the monitor generation, target snapshot digest, dedupe key, and command ID.
 4. Orka inventories the issue and computes a content digest that excludes Orka-authored labels/comments.
-5. Triage, research, and planning run as read-only agent tasks when missing or stale.
-6. If policy requires approval, the workflow stops until `orka:approve-plan` or the equivalent CLI/API/UI command.
-7. Implementation runs as a patch-only task. The agent returns an `orka.issueImplementation.v1` result and a diff.
-8. The controller validates and stores an `orka.patch.v1` artifact, then creates a separate mutation task with a configured push branch.
-9. The mutation task applies/pushes the branch; the controller creates or reuses the PR and records GitHub mutation audit rows.
+5. Optional triage and research commands run as hardened read-only agent tasks. If an `implement` command has no approved plan, Orka queues a read-only planning task first.
+6. If policy requires approval, the workflow stops until `orka:approve-plan` or the equivalent CLI/API/UI command; otherwise the original implement command continues automatically.
+7. Implementation runs as a patch-only task. The agent returns an `orka.issueImplementation.v1` status, and the worker-owned result finalizer captures the actual workspace diff and changed paths.
+8. The controller validates and stores an `orka.patch.v1` artifact, then creates a deterministic general-worker mutation task with a configured push branch.
+9. The mutation task applies and pushes only the validated prior-task diff; the controller creates or reuses the PR and records GitHub mutation audit rows.
 10. PR review and repair continue on exact heads until the PR reaches `merge_ready` or a clear blocked state.
 
 ## Safety model
 
 - Issue and PR text is untrusted input.
-- Read-only agents never receive GitHub mutation credentials.
+- Read-only agents never receive GitHub mutation credentials, shell/write tools, or direct Git credentials. RepositoryMonitor read-only roles use the Claude runtime; Codex and Copilot are rejected for this hardened mode.
+- Implementation agents receive only runtime model credentials and a pre-cloned writable workspace, never Git push credentials. Codex and Claude are supported; Copilot is rejected because its runtime credential can mutate GitHub.
 - Code-changing tasks must produce a validated patch artifact before any branch push.
 - GitHub writes are controller-owned and recorded in `github_mutation_records`.
-- Stop commands cancel queued workflow actions and prevent post-task mutation from stale task results.
+- Stop commands cancel queued workflow actions and active monitor Tasks, and prevent post-task mutation from stale task results.
+- Repair commands execute only when `spec.repair.enabled` is true and remain bounded by `maxRepairsPerPR` and `maxRepairsPerHead` when configured.
 - Plans and implementation are bound to issue content digests; human edits make downstream artifacts stale.
+- `planning.requireHumanApprovalFor` matches either a plan risk level (for example `high`) or a plan category (for example `security` or `database-migration`). Legacy plan results without a `categories` field require approval when category-based policy is configured.
 
 ## CLI quick reference
 

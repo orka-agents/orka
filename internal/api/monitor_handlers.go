@@ -145,49 +145,141 @@ func validateRepositoryMonitorReviewPublishSpec(publish corev1alpha1.RepositoryM
 	return nil
 }
 
-func (h *Handlers) validateRepositoryMonitorReviewerAgent(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
-	if !repositoryMonitorPullRequestsEnabled(spec) {
+func (h *Handlers) validateRepositoryMonitorImplementerAgent(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
+	if !spec.Targets.Issues.Enabled || (spec.IssueWorkflow.Implementation.Enabled != nil && !*spec.IssueWorkflow.Implementation.Enabled) {
 		return nil
 	}
-	reviewer := spec.Agents.Reviewer
-	if reviewer == nil || strings.TrimSpace(reviewer.Name) == "" {
+	ref := spec.Agents.Implementer
+	if ref == nil || strings.TrimSpace(ref.Name) == "" {
 		return nil
 	}
-	agentNamespace := reviewer.Namespace
+	agentNamespace := strings.TrimSpace(ref.Namespace)
 	if agentNamespace == "" {
 		agentNamespace = namespace
 	}
 	if h.enforceNamespaceIsolation && agentNamespace != namespace {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, namespace))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer namespace %q must match monitor namespace %q when namespace isolation is enforced", agentNamespace, namespace))
 	}
 	var agent corev1alpha1.Agent
-	if err := h.client.Get(c.Context(), types.NamespacedName{Name: reviewer.Name, Namespace: agentNamespace}, &agent); err != nil {
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q not found in namespace %q", reviewer.Name, agentNamespace))
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q not found in namespace %q", ref.Name, agentNamespace))
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get reviewer agent %q: %v", reviewer.Name, err))
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get implementer agent %q: %v", ref.Name, err))
 	}
 	if agent.Spec.Runtime == nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q must use the claude runtime for read-only repository monitor reviews", reviewer.Name))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q must configure a CLI runtime", ref.Name))
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q cannot use runtimeRef because external runtimes cannot enforce implementation credential isolation; use built-in codex or claude", ref.Name))
+	}
+	switch agent.Spec.Runtime.Type {
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude:
+		if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q must reference a runtime credential Secret", ref.Name))
+		}
+		secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
+		var secret corev1.Secret
+		if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q credential Secret %q not found in monitor namespace %q", ref.Name, secretName, namespace))
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get implementer credential Secret %q: %v", secretName, err))
+		}
+		if !repositoryMonitorImplementerSecretHasCredential(&secret, agent.Spec.Runtime.Type) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q credential Secret %q has no supported key for runtime %q", ref.Name, secretName, agent.Spec.Runtime.Type))
+		}
+		return nil
+	case corev1alpha1.AgentRuntimeCopilot:
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q cannot use copilot because its runtime credential can mutate GitHub; use codex or claude", ref.Name))
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.implementer %q runtime %q is not supported; use built-in codex or claude", ref.Name, agent.Spec.Runtime.Type))
+	}
+}
+
+func (h *Handlers) validateRepositoryMonitorReadOnlyAgents(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
+	readOnlyAgents := []struct {
+		role    string
+		ref     *corev1alpha1.AgentReference
+		enabled bool
+	}{
+		{role: "reviewer", ref: spec.Agents.Reviewer, enabled: repositoryMonitorPullRequestsEnabled(spec)},
+		{role: "triager", ref: spec.Agents.Triager, enabled: spec.Targets.Issues.Enabled && (spec.IssueWorkflow.Triage.Enabled == nil || *spec.IssueWorkflow.Triage.Enabled)},
+		{role: "researcher", ref: spec.Agents.Researcher, enabled: spec.Targets.Issues.Enabled && (spec.IssueWorkflow.Research.Enabled == nil || *spec.IssueWorkflow.Research.Enabled)},
+		{role: "planner", ref: spec.Agents.Planner, enabled: spec.Targets.Issues.Enabled && (spec.IssueWorkflow.Planning.Enabled == nil || *spec.IssueWorkflow.Planning.Enabled)},
+	}
+	for _, candidate := range readOnlyAgents {
+		if !candidate.enabled || candidate.ref == nil || strings.TrimSpace(candidate.ref.Name) == "" {
+			continue
+		}
+		if err := h.validateRepositoryMonitorReadOnlyAgent(c, namespace, candidate.role, candidate.ref); err != nil {
+			return err
+		}
+	}
+	return h.validateRepositoryMonitorImplementerAgent(c, namespace, spec)
+}
+
+func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace, role string, ref *corev1alpha1.AgentReference) error {
+	field := "spec.agents." + role
+	agentNamespace := strings.TrimSpace(ref.Namespace)
+	if agentNamespace == "" {
+		agentNamespace = namespace
+	}
+	if h.enforceNamespaceIsolation && agentNamespace != namespace {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s namespace %q must match monitor namespace %q when namespace isolation is enforced", field, agentNamespace, namespace))
+	}
+	var agent corev1alpha1.Agent
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: ref.Name, Namespace: agentNamespace}, &agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q not found in namespace %q", field, ref.Name, agentNamespace))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s agent %q: %v", role, ref.Name, err))
+	}
+	if agent.Spec.Runtime == nil {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must use the claude runtime for read-only repository monitor tasks", field, ref.Name))
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q cannot use runtimeRef because external runtimes cannot enforce read-only credential and tool isolation; use built-in claude", field, ref.Name))
 	}
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeClaude {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q runtime %q is not supported for read-only repository monitor reviews; use claude", reviewer.Name, agent.Spec.Runtime.Type))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use claude", field, ref.Name, agent.Spec.Runtime.Type))
 	}
 	if agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q must reference a Secret with Claude credentials for read-only repository monitor reviews", reviewer.Name))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must reference a Secret with Claude credentials for read-only repository monitor tasks", field, ref.Name))
 	}
 	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
 	var secret corev1.Secret
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q not found in monitor namespace %q", reviewer.Name, secretName, namespace))
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q not found in monitor namespace %q", field, ref.Name, secretName, namespace))
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get spec.agents.reviewer %q credential Secret %q: %v", reviewer.Name, secretName, err))
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get %s %q credential Secret %q: %v", field, ref.Name, secretName, err))
 	}
 	if !repositoryMonitorClaudeSecretHasCredential(&secret) {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.agents.reviewer %q credential Secret %q must contain a supported Claude auth key", reviewer.Name, secretName))
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q credential Secret %q must contain a supported Claude auth key", field, ref.Name, secretName))
 	}
 	return nil
+}
+
+func repositoryMonitorImplementerSecretHasCredential(secret *corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) bool {
+	if secret == nil {
+		return false
+	}
+	var keys []string
+	switch runtimeType {
+	case corev1alpha1.AgentRuntimeCodex:
+		keys = []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey}
+	case corev1alpha1.AgentRuntimeClaude:
+		keys = []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"}
+	default:
+		return false
+	}
+	for _, key := range keys {
+		if strings.TrimSpace(string(secret.Data[key])) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handlers) validateRepositoryMonitorGitSecret(c fiber.Ctx, namespace string, spec corev1alpha1.RepositoryMonitorSpec) error {
@@ -287,15 +379,22 @@ func effectiveRepositoryMonitorBranch(monitor *corev1alpha1.RepositoryMonitor) s
 }
 
 func repositoryMonitorAgentRefs(monitor *corev1alpha1.RepositoryMonitor) []corev1alpha1.AgentReference {
-	var refs []corev1alpha1.AgentReference
-	if monitor.Spec.Agents.Reviewer != nil && monitor.Spec.Agents.Reviewer.Name != "" {
-		refs = append(refs, *monitor.Spec.Agents.Reviewer)
+	if monitor == nil {
+		return nil
 	}
-	if monitor.Spec.Agents.Repairer != nil && monitor.Spec.Agents.Repairer.Name != "" {
-		refs = append(refs, *monitor.Spec.Agents.Repairer)
+	candidates := []*corev1alpha1.AgentReference{
+		monitor.Spec.Agents.Reviewer,
+		monitor.Spec.Agents.Triager,
+		monitor.Spec.Agents.Researcher,
+		monitor.Spec.Agents.Planner,
+		monitor.Spec.Agents.Repairer,
+		monitor.Spec.Agents.Implementer,
 	}
-	if monitor.Spec.Agents.Implementer != nil && monitor.Spec.Agents.Implementer.Name != "" {
-		refs = append(refs, *monitor.Spec.Agents.Implementer)
+	refs := make([]corev1alpha1.AgentReference, 0, len(candidates))
+	for _, ref := range candidates {
+		if ref != nil && strings.TrimSpace(ref.Name) != "" {
+			refs = append(refs, *ref)
+		}
 	}
 	return refs
 }
@@ -418,7 +517,7 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "createRepositoryMonitor", monitor); err != nil {
 		return err
 	}
-	if err := h.validateRepositoryMonitorReviewerAgent(c, namespace, req.Spec); err != nil {
+	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
 	if err := h.validateRepositoryMonitorGitSecret(c, namespace, req.Spec); err != nil {
@@ -527,7 +626,7 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenRepositoryMonitor(c, "updateRepositoryMonitor", updated); err != nil {
 		return err
 	}
-	if err := h.validateRepositoryMonitorReviewerAgent(c, namespace, req.Spec); err != nil {
+	if err := h.validateRepositoryMonitorReadOnlyAgents(c, namespace, req.Spec); err != nil {
 		return err
 	}
 	if err := h.validateRepositoryMonitorGitSecret(c, namespace, req.Spec); err != nil {
@@ -935,7 +1034,15 @@ func repositoryMonitorCommandRequiresInventoriedTarget(req CreateRepositoryMonit
 }
 
 func repositoryMonitorPullRequestCommandRequiresTargetSHA(req CreateRepositoryMonitorCommandRequest) bool {
-	return req.Kind == repositoryMonitorTargetKindPullRequest && !repositoryMonitorControlCommandIntent(req.Intent)
+	if req.Kind != repositoryMonitorTargetKindPullRequest {
+		return false
+	}
+	switch strings.TrimSpace(req.Intent) {
+	case finishReasonStop, commandIntentResume:
+		return false
+	default:
+		return true
+	}
 }
 
 func repositoryMonitorLabelsFromItem(item *store.MonitorItem) []string {

@@ -464,7 +464,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		return
 	}
 	turnCtx.Env = setEnv(turnCtx.Env, "HOME", turnHome)
-	if strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") {
+	stripGitCredentials := strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") ||
+		strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["runtimeAuthOnly"]), "true")
+	if stripGitCredentials {
 		turnCtx.Env = removeTurnEnv(
 			turnCtx.Env,
 			workerenv.GitToken,

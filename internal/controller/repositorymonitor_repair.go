@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	repositoryMonitorRepairPhaseQueued    = "queued"
-	repositoryMonitorRepairPhaseSucceeded = "succeeded"
-	repositoryMonitorRepairPhaseFailed    = "failed"
+	repositoryMonitorRepairPhaseQueued     = "queued"
+	repositoryMonitorRepairPhaseSucceeded  = "succeeded"
+	repositoryMonitorRepairPhaseFailed     = "failed"
+	repositoryMonitorRepairPRBudgetReason  = "repair_pr_budget_exhausted"
+	repositoryMonitorRepairTaskCreateError = "repair_task_create_failed"
 )
 
 //nolint:gocyclo // PR command safety gates are intentionally explicit.
@@ -42,6 +44,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	}
 	switch command.Intent {
 	case repositoryMonitorCommandIntentStop:
+		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, "stopped_by_command"); err != nil {
+			return true, 0, err
+		}
 		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, "stopped_by_command"); err != nil {
 			return true, 0, err
 		}
@@ -124,7 +129,24 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorRepairWorkflowActionKind(command.Intent)); err != nil || cancelled {
 			return true, 0, err
 		}
-		created, err := r.createRepositoryMonitorRepairTask(ctx, monitor, run, command, owner, repository, pr, item)
+		monitoredRepo := owner + "/" + repository
+		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
+		reason, repairCountPR, repairCountHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, monitoredRepo, pr, currentRepairJobID)
+		if err != nil {
+			return true, 0, err
+		}
+		if reason != "" {
+			item.RepairState = repositoryMonitorRepairPhaseFailed
+			item.SkipReason = reason
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, "repair_blocked", "", reason); err != nil {
+				return true, 0, err
+			}
+			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+				return true, 0, err
+			}
+			return true, 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_blocked", fmt.Sprintf("Pull request #%d repair blocked: %s", pr.Number, reason), map[string]any{"intent": command.Intent, "reason": reason})
+		}
+		created, err := r.createRepositoryMonitorRepairTask(ctx, monitor, run, command, owner, repository, pr, item, repairCountPR+1, repairCountHead+1)
 		if err != nil {
 			return true, created, err
 		}
@@ -137,18 +159,82 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	}
 }
 
-func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (int, error) {
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, monitoredRepo string, pr repositoryMonitorPullRequest, currentJobID string) (string, int, int, error) {
+	if monitor == nil || !monitor.Spec.Repair.Enabled {
+		return "repair_disabled", 0, 0, nil
+	}
 	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
-		item.RepairState = repositoryMonitorRepairPhaseFailed
-		item.SkipReason = "missing_repairer_agent"
-		return 0, r.Store.UpsertMonitorItem(ctx, item)
+		return "missing_repairer_agent", 0, 0, nil
 	}
+	if !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), strings.TrimSpace(monitoredRepo)) {
+		return "fork_pr_repair_not_writable", 0, 0, nil
+	}
+	if r.Store == nil {
+		return "", 0, 0, nil
+	}
+	repairCountPR := 0
+	repairCountHead := 0
+	cursor := ""
+	for {
+		jobs, next, err := r.Store.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: pr.Number, Limit: 200, Cursor: cursor})
+		if err != nil {
+			return "", 0, 0, err
+		}
+		for _, job := range jobs {
+			if strings.TrimSpace(currentJobID) != "" && job.ID == currentJobID {
+				continue
+			}
+			consumesBudget, err := r.repositoryMonitorRepairJobConsumesBudget(ctx, monitor.Namespace, &job)
+			if err != nil {
+				return "", 0, 0, err
+			}
+			if !consumesBudget {
+				continue
+			}
+			repairCountPR++
+			if strings.TrimSpace(job.HeadSHA) == strings.TrimSpace(pr.HeadSHA) {
+				repairCountHead++
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if max := monitor.Spec.Repair.MaxRepairsPerPR; max != nil && repairCountPR >= int(*max) {
+		return repositoryMonitorRepairPRBudgetReason, repairCountPR, repairCountHead, nil
+	}
+	if max := monitor.Spec.Repair.MaxRepairsPerHead; max != nil && repairCountHead >= int(*max) {
+		return "repair_head_budget_exhausted", repairCountPR, repairCountHead, nil
+	}
+	return "", repairCountPR, repairCountHead, nil
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairJobConsumesBudget(ctx context.Context, namespace string, job *store.RepairJob) (bool, error) {
+	if job == nil {
+		return false, nil
+	}
+	if strings.TrimSpace(job.Phase) != repositoryMonitorRepairPhaseQueued {
+		return true, nil
+	}
+	if strings.TrimSpace(job.TaskName) == "" {
+		return false, nil
+	}
+	if r.Client == nil {
+		return true, nil
+	}
+	var task corev1alpha1.Task
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: job.TaskName}, &task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, owner, repository string, pr repositoryMonitorPullRequest, item *store.MonitorItem, repairCountPR, repairCountHead int) (int, error) {
 	monitoredRepo := owner + "/" + repository
-	if !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), monitoredRepo) {
-		item.RepairState = repositoryMonitorRepairPhaseFailed
-		item.SkipReason = "fork_pr_repair_not_writable"
-		return 0, r.Store.UpsertMonitorItem(ctx, item)
-	}
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
 	job := &store.RepairJob{
 		ID:               "repair-" + repositoryMonitorShortHash(command.ID),
@@ -161,6 +247,8 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		HeadSHA:          pr.HeadSHA,
 		BaseSHA:          pr.BaseSHA,
 		Phase:            repositoryMonitorRepairPhaseQueued,
+		RepairCountPR:    repairCountPR,
+		RepairCountHead:  repairCountHead,
 		TaskName:         taskName,
 		Branch:           pr.HeadBranch,
 	}
@@ -168,6 +256,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		if !strings.Contains(strings.ToLower(err.Error()), "constraint") {
 			return 0, err
 		}
+		existing, getErr := r.Store.GetRepairJob(ctx, monitor.Namespace, job.ID)
+		if getErr != nil {
+			return 0, getErr
+		}
+		job = existing
 	}
 	priority := int32(820)
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
@@ -227,9 +320,21 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	created := 1
 	if err := r.Create(ctx, task); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
+			job.Phase = repositoryMonitorRepairPhaseQueued
+			job.LastError = repositoryMonitorRepairTaskCreateError
+			job.CompletedAt = nil
+			_ = r.Store.UpdateRepairJob(ctx, job)
 			return 0, err
 		}
 		created = 0
+	}
+	if job.LastError == repositoryMonitorRepairTaskCreateError {
+		job.Phase = repositoryMonitorRepairPhaseQueued
+		job.LastError = ""
+		job.CompletedAt = nil
+		if err := r.Store.UpdateRepairJob(ctx, job); err != nil {
+			return created, err
+		}
 	}
 	item.RepairState = repositoryMonitorRepairPhaseQueued
 	item.SkipReason = ""

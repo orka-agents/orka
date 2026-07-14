@@ -1707,6 +1707,9 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if task.Spec.AgentRuntime != nil && len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
 		disallowedTools = append(disallowedTools, task.Spec.AgentRuntime.DisallowedTools...)
 	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		metadata["runtimeAuthOnly"] = scheduledRunLabelValue
+	}
 	if taskRequestsReadOnlyAgent(task) {
 		metadata["readOnly"] = scheduledRunLabelValue
 		allowedTools = readOnlyAgentAllowedTools()
@@ -1955,6 +1958,9 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
+	if err := validateHarnessWrapperRestrictedAgentRuntime(task, agent); err != nil {
+		return nil, err
+	}
 	env, err := r.harnessWrapperBaseTurnEnv(ctx, task)
 	if err != nil {
 		return nil, err
@@ -1968,7 +1974,7 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 		return nil, err
 	}
 	env = append(env, agentSecretEnv...)
-	if !taskRequestsReadOnlyAgent(task) {
+	if !taskRequestsReadOnlyAgent(task) && !taskRequestsRuntimeAuthOnly(task) {
 		taskSecretEnv, err := r.harnessWrapperTaskSecretEnv(ctx, task)
 		if err != nil {
 			return nil, err
@@ -1979,6 +1985,19 @@ func (r *TaskReconciler) harnessWrapperTurnEnv(
 	// must remain authoritative over broad runtime Secret keys such as GIT_TOKEN.
 	env = append(env, workspaceGitEnv...)
 	return env, nil
+}
+
+func validateHarnessWrapperRestrictedAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		return err
+	}
+	if !taskRequestsRuntimeAuthOnly(task) || agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.RuntimeRef == nil {
+		return nil
+	}
+	if runtimeRefName := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name); runtimeRefName != "" {
+		return fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+	}
+	return nil
 }
 
 func (r *TaskReconciler) harnessWrapperWorkspaceGitSecretEnv(
@@ -2025,6 +2044,20 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 	env, err := r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: task.Namespace})
 	if err != nil {
 		return nil, err
+	}
+	if taskRequestsRuntimeAuthOnly(task) {
+		if runtimeRefName := agentHarnessRuntimeRefName(agent); runtimeRefName != "" {
+			return nil, fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+		}
+		allowedKeys, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
+		if err != nil {
+			return nil, err
+		}
+		filtered := filterHarnessTurnEnv(env, allowedKeys)
+		if !harnessTurnEnvHasAny(filtered, credentialKeys) {
+			return nil, fmt.Errorf("runtime-auth-only agent secret contains no supported credentials")
+		}
+		return filtered, nil
 	}
 	if !taskRequestsReadOnlyAgent(task) {
 		return env, nil
@@ -2092,6 +2125,19 @@ func (r *TaskReconciler) harnessWrapperTaskSecretEnv(
 		return nil, fmt.Errorf("task secretRef namespace %q does not match task namespace %q", namespace, task.Namespace)
 	}
 	return r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: task.Spec.SecretRef.Name, Namespace: namespace})
+}
+
+func harnessTurnEnvHasAny(env []harness.TurnEnvVar, names []string) bool {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[strings.TrimSpace(name)] = struct{}{}
+	}
+	for _, item := range env {
+		if _, ok := wanted[item.Name]; ok && strings.TrimSpace(item.Value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func filterHarnessTurnEnv(env []harness.TurnEnvVar, allowedKeys []string) []harness.TurnEnvVar {

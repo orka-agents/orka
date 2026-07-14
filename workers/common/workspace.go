@@ -8,6 +8,7 @@ package common
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,6 +95,9 @@ func PrepareWorkspace(workDir string) error {
 	sr := ParseStructuredResult(resultResp.Result)
 	if sr.Diff == "" {
 		return nil
+	}
+	if err := validatePriorTaskDiffDigest(sr.Diff); err != nil {
+		return err
 	}
 
 	// Warn if HEAD doesn't match the base SHA of the prior result.
@@ -353,6 +357,18 @@ func pullRequestReviewMergeBaseExists(workDir, baseRef string) bool {
 	return err == nil
 }
 
+func validatePriorTaskDiffDigest(diff string) error {
+	expected := strings.TrimSpace(os.Getenv(workerenv.PriorTaskDiffSHA256))
+	if expected == "" {
+		return nil
+	}
+	actual := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(diff)))
+	if !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("prior task diff digest mismatch: got %s, want %s", actual, expected)
+	}
+	return nil
+}
+
 // FinalizeResult builds a structured result from the agent output and any
 // uncommitted changes in workDir. If workDir is empty, it returns the raw
 // agent output as plain text bytes.
@@ -374,21 +390,22 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	execGit(workDir, "add", "-A") //nolint:errcheck
 	resetReservedWorkspacePaths(workDir)
 
-	diff, err := execGit(workDir, "diff", "--cached", "--binary", "--full-index")
+	diff, err := execGit(workDir, "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: git diff failed in %s, returning plain text result\n", workDir)
 		return []byte(agentOutput), nil
 	}
 
 	var files []string
-	stat, err := execGit(workDir, "diff", "--cached", "--stat")
-	if err == nil {
-		files = parseDiffStatFiles(stat)
+	cachedNameStatusArgs := []string{"diff", "--cached", "--name-status", "-z", "--no-ext-diff", "--no-textconv"}
+	if nameStatus, nameErr := execGit(workDir, cachedNameStatusArgs...); nameErr == nil {
+		files = append(files, parseDiffNameStatusPaths(nameStatus)...)
 	}
-	unstagedStat, _ := execGit(workDir, "diff", "--stat")
-	if unstagedStat != "" {
-		files = append(files, parseDiffStatFiles(unstagedStat)...)
+	unstagedNameStatusArgs := []string{"diff", "--name-status", "-z", "--no-ext-diff", "--no-textconv"}
+	if unstagedNameStatus, nameErr := execGit(workDir, unstagedNameStatusArgs...); nameErr == nil {
+		files = append(files, parseDiffNameStatusPaths(unstagedNameStatus)...)
 	}
+	files = uniqueStrings(files)
 
 	sr := &StructuredResult{
 		Summary: TruncateStructuredSummary(agentOutput),
@@ -795,23 +812,44 @@ func (b *limitedOutputBuffer) String() string {
 	return b.buf.String()
 }
 
-// parseDiffStatFiles extracts file paths from `git diff --stat` output.
-// Each line looks like: " path/to/file | 5 ++-" and the last line is a summary.
-func parseDiffStatFiles(stat string) []string {
-	var files []string
-	for line := range strings.SplitSeq(stat, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+// parseDiffNameStatusPaths extracts every affected path from zero-delimited
+// `git diff --name-status -z` output. Rename/copy records contribute both the
+// source and destination so policy checks cannot miss a protected target path.
+func parseDiffNameStatusPaths(raw string) []string {
+	parts := strings.Split(raw, "\x00")
+	paths := make([]string, 0, len(parts))
+	for i := 0; i < len(parts); {
+		status := strings.TrimSpace(parts[i])
+		i++
+		if status == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
-			continue
+		pathCount := 1
+		if status[0] == 'R' || status[0] == 'C' {
+			pathCount = 2
 		}
-		f := strings.TrimSpace(parts[0])
-		if f != "" {
-			files = append(files, f)
+		for range pathCount {
+			if i >= len(parts) {
+				return uniqueStrings(paths)
+			}
+			if path := strings.TrimSpace(parts[i]); path != "" {
+				paths = append(paths, path)
+			}
+			i++
 		}
 	}
-	return files
+	return uniqueStrings(paths)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }

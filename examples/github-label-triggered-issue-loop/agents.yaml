@@ -28,9 +28,9 @@ metadata:
   namespace: default
 spec:
   secretRef:
-    name: codex-runtime-credentials
+    name: claude-runtime-credentials
   runtime:
-    type: codex
+    type: claude
     defaultMaxTurns: 50
     defaultAllowedTools:
       - Read
