@@ -547,7 +547,7 @@ func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFi
 	return items, nextOffsetCursor(offset, len(items), limit), nil
 }
 
-// CreateActionRecord inserts an immutable action record.
+// CreateActionRecord inserts a durable action record.
 func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("action record is required")
@@ -573,6 +573,33 @@ func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionReco
 		record.PayloadDigest, record.CreatedAt,
 	)
 	return err
+}
+
+// UpdateActionRecord replaces result fields when sensitive content must be redacted.
+func (s *Store) UpdateActionRecord(ctx context.Context, record *store.ActionRecord) error {
+	if record == nil {
+		return store.ValidationErrorf("action record is required")
+	}
+	if record.ID == "" || record.MonitorNamespace == "" {
+		return store.ValidationErrorf("action record id and monitor namespace are required")
+	}
+	if record.PayloadJSON == "" {
+		record.PayloadJSON = "{}"
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE action_records
+		 SET verdict = ?, confidence = ?, summary = ?, payload_json = ?, payload_digest = ?
+		 WHERE monitor_namespace = ? AND id = ?`,
+		record.Verdict, record.Confidence, record.Summary, record.PayloadJSON, record.PayloadDigest,
+		record.MonitorNamespace, record.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetActionRecord fetches an action record by ID.
@@ -1669,6 +1696,34 @@ func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.Gi
 		record.CreatedAt,
 	)
 	return err
+}
+
+// UpdateGitHubMutationRecord updates the durable outcome of one mutation attempt.
+func (s *Store) UpdateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
+	if record == nil {
+		return store.ValidationErrorf("github mutation record is required")
+	}
+	if record.ID == "" || record.MonitorNamespace == "" || record.MonitorName == "" || record.Operation == "" {
+		return store.ValidationErrorf("github mutation record id, monitor namespace, monitor name, and operation are required")
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE github_mutation_records
+		 SET monitor_name = ?, run_id = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?,
+		     operation = ?, target_kind = ?, target_number = ?, target_sha = ?, actor = ?, reason = ?,
+		     request_digest = ?, github_url = ?, github_request_id = ?, external_id = ?, status = ?, error = ?
+		 WHERE monitor_namespace = ? AND id = ?`,
+		record.MonitorName, record.RunID, record.CommandEventID, record.WorkActionID, record.MonitorGeneration,
+		record.Operation, record.TargetKind, record.TargetNumber, record.TargetSHA, record.Actor, record.Reason,
+		record.RequestDigest, record.GitHubURL, record.GitHubRequestID, record.ExternalID, record.Status, record.Error,
+		record.MonitorNamespace, record.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 func githubMutationRecordSelectSQL() string {

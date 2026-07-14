@@ -461,7 +461,7 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 		}
 	}
 	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed {
-		item.AutomergeState = "merge_ready"
+		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
 	} else if record.Verdict != repositoryMonitorReviewVerdictPassed {
 		item.AutomergeState = ""
 	}

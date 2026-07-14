@@ -129,6 +129,8 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       <TableCell className="space-x-1">
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'review', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Review</Button>
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix_ci', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix CI</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'update_branch', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Update branch</Button>
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'automerge', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Automerge</Button>
                       </TableCell>
                     </TableRow>
@@ -167,8 +169,12 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       <TableCell><Badge variant="outline">{item.lastActionKind || item.lastCommandIntent || 'none'}</Badge></TableCell>
                       <TableCell>{item.skipReason || '-'}</TableCell>
                       <TableCell className="space-x-1">
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'triage' })} disabled={createCommand.isPending || !item.number}>Triage</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'research' })} disabled={createCommand.isPending || !item.number}>Research</Button>
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'plan' })} disabled={createCommand.isPending || !item.number}>Plan</Button>
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'approve_plan' })} disabled={createCommand.isPending || !item.number}>Approve</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'implement' })} disabled={createCommand.isPending || !item.number}>Implement</Button>
+                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'decompose' })} disabled={createCommand.isPending || !item.number}>Decompose</Button>
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'stop' })} disabled={createCommand.isPending || !item.number}>Stop</Button>
                         <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'resume' })} disabled={createCommand.isPending || !item.number}>Resume</Button>
                       </TableCell>

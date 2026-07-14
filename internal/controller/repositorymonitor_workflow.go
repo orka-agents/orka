@@ -78,9 +78,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		existing.TaskName = firstNonEmptyWorkflow(taskName, existing.TaskName)
 		existing.BlockedReason = blockedReason
 		existing.Error = actionError
-		if completedAt != nil {
-			existing.CompletedAt = completedAt
-		}
+		existing.CompletedAt = completedAt
 		metrics.RecordRepositoryMonitorWorkAction(existing.DesiredAction, existing.Status)
 		return r.Store.UpdateWorkAction(ctx, existing)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -171,6 +169,23 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx 
 		record.CreatedAt = time.Now()
 	}
 	if err := r.Store.CreateGitHubMutationRecord(ctx, record); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {
+		return err
+	}
+	metrics.RecordRepositoryMonitorGitHubMutation(record.Operation, record.Status)
+	return nil
+}
+
+func (r *RepositoryMonitorReconciler) updateRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {
+	if r.Store == nil || monitor == nil || record == nil {
+		return nil
+	}
+	record.MonitorNamespace = monitor.Namespace
+	record.MonitorName = monitor.Name
+	record.MonitorGeneration = monitor.Generation
+	if record.Actor == "" {
+		record.Actor = "orka-controller"
+	}
+	if err := r.Store.UpdateGitHubMutationRecord(ctx, record); err != nil {
 		return err
 	}
 	metrics.RecordRepositoryMonitorGitHubMutation(record.Operation, record.Status)

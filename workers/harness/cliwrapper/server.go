@@ -475,6 +475,12 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			workerenv.GitUsername,
 		)
 	}
+	turnCtx, closeRuntimeAuthProxy, err := protectRuntimeAuthTurn(turnCtx)
+	if err != nil {
+		turn.appendFrame(s.failedFrame(turn, "runtime_auth_proxy_failed", err.Error(), false))
+		return
+	}
+	defer closeRuntimeAuthProxy()
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))

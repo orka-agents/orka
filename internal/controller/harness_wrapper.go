@@ -2038,16 +2038,28 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 ) ([]harness.TurnEnvVar, error) {
-	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
-		return nil, nil
-	}
-	env, err := r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: task.Namespace})
-	if err != nil {
-		return nil, err
-	}
 	if taskRequestsRuntimeAuthOnly(task) {
 		if runtimeRefName := agentHarnessRuntimeRefName(agent); runtimeRefName != "" {
 			return nil, fmt.Errorf("runtime-auth-only tasks do not support external runtimeRef %q", runtimeRefName)
+		}
+		secretNamespace, secretName, err := scopedAgentRuntimeSecretCoordinates(task, agent)
+		if err != nil {
+			return nil, err
+		}
+		if secretName == "" {
+			return nil, nil
+		}
+		secret := &corev1.Secret{}
+		key := ctrlclient.ObjectKey{Name: secretName, Namespace: secretNamespace}
+		if err := r.Get(ctx, key, secret); err != nil {
+			return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
+		}
+		if err := validateScopedAgentRuntimeBinding(task, agent, secret); err != nil {
+			return nil, err
+		}
+		env, err := harnessWrapperSecretEnvFromSecret(key, secret)
+		if err != nil {
+			return nil, err
 		}
 		allowedKeys, credentialKeys, err := scopedAgentRuntimeSecretKeys(agent)
 		if err != nil {
@@ -2058,6 +2070,13 @@ func (r *TaskReconciler) harnessWrapperAgentSecretEnv(
 			return nil, fmt.Errorf("runtime-auth-only agent secret contains no supported credentials")
 		}
 		return filtered, nil
+	}
+	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return nil, nil
+	}
+	env, err := r.harnessWrapperSecretEnv(ctx, ctrlclient.ObjectKey{Name: agent.Spec.SecretRef.Name, Namespace: task.Namespace})
+	if err != nil {
+		return nil, err
 	}
 	if !taskRequestsReadOnlyAgent(task) {
 		return env, nil
@@ -2077,6 +2096,10 @@ func (r *TaskReconciler) harnessWrapperSecretEnv(
 	if err := r.Get(ctx, key, secret); err != nil {
 		return nil, fmt.Errorf("resolve harness runtime credential Secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
+	return harnessWrapperSecretEnvFromSecret(key, secret)
+}
+
+func harnessWrapperSecretEnvFromSecret(key ctrlclient.ObjectKey, secret *corev1.Secret) ([]harness.TurnEnvVar, error) {
 	env := make([]harness.TurnEnvVar, 0, len(secret.Data))
 	for name, raw := range secret.Data {
 		name = strings.TrimSpace(name)

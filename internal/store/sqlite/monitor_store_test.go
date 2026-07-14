@@ -9,7 +9,10 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const publishPhaseFailed = "failed"
+const (
+	publishPhaseFailed = "failed"
+	testPhaseSucceeded = "succeeded"
+)
 
 func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 	s := setupTestStore(t)
@@ -84,7 +87,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		HeadSHA:           "abc123",
 		LastVerdict:       "needs_changes",
 		LastPublishID:     "publish-1",
-		LastPublishPhase:  "succeeded",
+		LastPublishPhase:  testPhaseSucceeded,
 		LastPublishReason: "",
 		LastPublishURL:    "https://github.example/review/1",
 	}); err != nil {
@@ -125,7 +128,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		ItemNumber:         42,
 		HeadSHA:            "abc123",
 		ReviewRecordID:     "review-1",
-		Phase:              "succeeded",
+		Phase:              testPhaseSucceeded,
 		Event:              "COMMENT",
 		GitHubReviewID:     "123",
 		GitHubReviewURL:    "https://github.example/review/123",
@@ -153,12 +156,12 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	if publishRecord.Phase != publishPhaseFailed || publishRecord.Error == "" {
 		t.Fatalf("publishRecord = %#v, want updated failure outcome", publishRecord)
 	}
-	publishRecord.Phase = "succeeded"
+	publishRecord.Phase = testPhaseSucceeded
 	publishRecord.Error = ""
 	if err := s.UpdateReviewPublishRecord(ctx, publishRecord); err != nil {
 		t.Fatalf("UpdateReviewPublishRecord(succeeded) error = %v", err)
 	}
-	publishRecords, _, err := s.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "demo", MonitorName: "orka", ItemNumber: 42, HeadSHA: "abc123", Phase: "succeeded"})
+	publishRecords, _, err := s.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "demo", MonitorName: "orka", ItemNumber: 42, HeadSHA: "abc123", Phase: testPhaseSucceeded})
 	if err != nil {
 		t.Fatalf("ListReviewPublishRecords() error = %v", err)
 	}
@@ -251,7 +254,7 @@ func TestCreateMonitorRunRejectsDuplicateActiveRun(t *testing.T) {
 		MonitorNamespace: "demo",
 		MonitorName:      "orka",
 		Trigger:          "manual",
-		Phase:            "succeeded",
+		Phase:            testPhaseSucceeded,
 	}); err != nil {
 		t.Fatalf("CreateMonitorRun(succeeded) error = %v", err)
 	}
@@ -567,6 +570,7 @@ func TestDeleteRepositoryMonitorCascadesMonitorState(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This integration-style store test intentionally exercises the full workflow schema.
 func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -639,9 +643,22 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 		t.Fatalf("jobs = %#v, want updated implementation job", jobs)
 	}
 
-	mutation := &store.GitHubMutationRecord{ID: "mut-1", MonitorNamespace: "demo", MonitorName: "orka", Operation: "create_pr", TargetKind: "issue", TargetNumber: 123, Status: "succeeded", GitHubURL: "https://github.example/pr/456"}
+	mutation := &store.GitHubMutationRecord{ID: "mut-1", MonitorNamespace: "demo", MonitorName: "orka", Operation: "create_pr", TargetKind: "issue", TargetNumber: 123, Status: "started"}
 	if err := s.CreateGitHubMutationRecord(ctx, mutation); err != nil {
 		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	mutation.Status = testPhaseSucceeded
+	mutation.ExternalID = "456"
+	mutation.GitHubURL = "https://github.example/pr/456"
+	if err := s.UpdateGitHubMutationRecord(ctx, mutation); err != nil {
+		t.Fatalf("UpdateGitHubMutationRecord() error = %v", err)
+	}
+	updatedMutation, err := s.GetGitHubMutationRecord(ctx, "demo", mutation.ID)
+	if err != nil {
+		t.Fatalf("GetGitHubMutationRecord() error = %v", err)
+	}
+	if updatedMutation.Status != testPhaseSucceeded || updatedMutation.ExternalID != "456" {
+		t.Fatalf("updated mutation = %#v, want succeeded outcome", updatedMutation)
 	}
 	mutations, _, err := s.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: "demo", MonitorName: "orka", Operation: "create_pr", TargetKind: "issue", TargetNumber: 123})
 	if err != nil {

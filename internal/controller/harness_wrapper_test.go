@@ -2719,8 +2719,17 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 
 func TestHarnessWrapperTurnRequestFiltersRuntimeAuthOnlySecrets(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
-	task.Annotations = map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}
+	immutable := true
+	task.Annotations = map[string]string{
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationRuntimeAgentUID:        "uid-harness-agent",
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-task-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
+	agent.UID = "uid-harness-agent"
 	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime"}
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
 		GitRepo:      "https://github.com/orka-agents/orka",
@@ -2731,9 +2740,10 @@ func TestHarnessWrapperTurnRequestFiltersRuntimeAuthOnlySecrets(t *testing.T) {
 		workerenv.OpenAIAPIKey: []byte("x"),
 		workerenv.GitHubToken:  []byte("y"),
 	}}
-	taskSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "task-runtime", Namespace: task.Namespace}, Data: map[string][]byte{
-		workerenv.AnthropicAPIKey: []byte("z"),
-	}}
+	taskSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "task-runtime", Namespace: task.Namespace, UID: "uid-task-runtime"}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey:    []byte("z"),
+		workerenv.AnthropicAPIKey: []byte("task-only"),
+	}, Immutable: &immutable}
 	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-auth", Namespace: task.Namespace}, Data: map[string][]byte{"token": []byte("g")}}
 	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret, gitSecret)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
@@ -2744,8 +2754,8 @@ func TestHarnessWrapperTurnRequestFiltersRuntimeAuthOnlySecrets(t *testing.T) {
 	for _, item := range request.Input.Env {
 		env[item.Name] = item.Value
 	}
-	if env[workerenv.OpenAIAPIKey] != "x" {
-		t.Fatalf("%s = %q, want scoped model credential", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	if env[workerenv.OpenAIAPIKey] != "z" {
+		t.Fatalf("%s = %q, want task-pinned scoped model credential", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
 	}
 	if _, ok := env[workerenv.GitHubToken]; ok {
 		t.Fatalf("runtime GitHub credential reached harness request: %#v", env)

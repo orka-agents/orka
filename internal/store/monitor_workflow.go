@@ -43,6 +43,8 @@ func RepositoryMonitorDesiredActionForActionKind(actionKind string) string {
 		return "approve"
 	case "issue_implementation":
 		return "implement"
+	case "issue_decompose":
+		return repositoryMonitorDesiredActionDecompose
 	case "mutate_to_pr":
 		return "mutate_to_pr"
 	case "pr_review":

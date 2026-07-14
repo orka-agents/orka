@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +66,8 @@ type repositoryMonitorPullRequest struct {
 	HeadSHA        string
 	Draft          bool
 	MergeableState string
+	Merged         bool
+	MergeCommitSHA string
 }
 
 //nolint:gocyclo // Pull request inventory combines selection, CI gating, and audit decisions.
@@ -74,6 +77,12 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	}
 	if !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 		return 0, 0, 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, 0, "", "inventory_skipped", "Pull request monitoring is disabled", nil)
+	}
+	if handled, created, err := r.processTargetedPullRequestControlCommand(ctx, monitor, run, owner, repository); handled || err != nil {
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		return 1, created, 0, nil
 	}
 
 	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
@@ -85,6 +94,15 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	pullRequests, err := r.listRepositoryMonitorPullRequestsForRun(ctx, owner, repository, token, baseBranch, run)
 	if err != nil {
 		return 0, 0, 0, err
+	}
+	if handled, err := r.reconcileRepositoryMonitorCompletedAutomerge(ctx, monitor, run, pullRequests); handled || err != nil {
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		return 1, 0, 0, nil
+	}
+	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(pullRequests, baseBranch, run); reason != "" {
+		return 0, 0, 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, reason)
 	}
 	pullRequests = filterRepositoryMonitorBasePullRequests(pullRequests, baseBranch)
 	seenPullRequestKeys := repositoryMonitorPullRequestKeys(pullRequests)
@@ -222,6 +240,84 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	}
 
 	return selected, createdTasks, skipped, nil
+}
+
+func (r *RepositoryMonitorReconciler) processTargetedPullRequestControlCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string) (bool, int, error) {
+	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || run.TargetNumber == 0 || strings.TrimSpace(run.TargetKind) != repositoryMonitorPullRequestKind {
+		return false, 0, nil
+	}
+	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
+	if err != nil {
+		return false, 0, err
+	}
+	if strings.TrimSpace(command.Kind) != repositoryMonitorPullRequestKind {
+		return false, 0, nil
+	}
+	if command.Intent != repositoryMonitorCommandIntentStop {
+		return false, 0, nil
+	}
+	existing, getErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprintf("%d", run.TargetNumber))
+	if errors.Is(getErr, store.ErrNotFound) {
+		// Do not synthesize an open inventory item for an unknown control target.
+		// Fall through to the normal targeted GitHub lookup so the command is
+		// applied only after the pull request has been verified.
+		return false, 0, nil
+	}
+	if getErr != nil {
+		return false, 0, getErr
+	}
+	item := existing
+	pr := repositoryMonitorPullRequest{Number: run.TargetNumber, State: item.State, BaseBranch: item.BaseBranch, HeadBranch: item.HeadBranch, HeadRepo: owner + "/" + repository, BaseSHA: item.BaseSHA, HeadSHA: firstNonEmptyIssueAction(item.HeadSHA, run.TargetSHA)}
+	return r.tryProcessPullRequestCommandRun(ctx, monitor, run, owner, repository, pr, item)
+}
+
+func repositoryMonitorTargetPullRequestCommandBlockReason(pullRequests []repositoryMonitorPullRequest, baseBranch string, run *store.MonitorRun) string {
+	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || run.TargetNumber == 0 || strings.TrimSpace(run.TargetKind) != repositoryMonitorPullRequestKind {
+		return ""
+	}
+	if len(pullRequests) == 0 {
+		return "target_not_open"
+	}
+	for _, pr := range pullRequests {
+		if pr.Number != run.TargetNumber {
+			continue
+		}
+		if strings.TrimSpace(baseBranch) != "" && pr.BaseBranch != strings.TrimSpace(baseBranch) {
+			return "target_base_changed"
+		}
+		if targetSHA := strings.TrimSpace(run.TargetSHA); targetSHA != "" && pr.HeadSHA != targetSHA {
+			return "stale_head_sha"
+		}
+		if !strings.EqualFold(strings.TrimSpace(pr.State), repositoryMonitorItemStateOpen) {
+			return "target_not_open"
+		}
+		return ""
+	}
+	return "target_not_found"
+}
+
+func (r *RepositoryMonitorReconciler) blockRepositoryMonitorTargetCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, reason string) error {
+	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
+	if err != nil {
+		return err
+	}
+	actionKind := repositoryMonitorCommandActionKind(command.Intent)
+	if command.Intent == repositoryMonitorCommandIntentAutomerge {
+		preserveSuccess, err := r.terminalizeRepositoryMonitorAutomerge(ctx, monitor, *command, reason)
+		if err != nil {
+			return err
+		}
+		if preserveSuccess {
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "", actionKind, repositoryMonitorWorkActionStatusSucceeded, repositoryMonitorAutomergeStateMerged, "", ""); err != nil {
+				return err
+			}
+			return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_already_completed", fmt.Sprintf("Command %s target already completed", command.ID), map[string]any{"commandEventID": command.ID, "intent": command.Intent})
+		}
+	}
+	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "", actionKind, repositoryMonitorWorkActionStatusBlocked, "command_blocked", "", reason); err != nil {
+		return err
+	}
+	return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, run.TargetNumber, run.TargetSHA, "command_target_blocked", fmt.Sprintf("Command %s blocked: %s", command.ID, reason), map[string]any{"commandEventID": command.ID, "intent": command.Intent, "reason": reason})
 }
 
 func repositoryMonitorPullRequestKeys(pullRequests []repositoryMonitorPullRequest) map[string]struct{} {
@@ -863,8 +959,14 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequestsForRun(ct
 		if err != nil {
 			return nil, err
 		}
-		if !strings.EqualFold(strings.TrimSpace(pr.State), "open") {
-			return nil, nil
+		if !strings.EqualFold(strings.TrimSpace(pr.State), repositoryMonitorItemStateOpen) {
+			if strings.TrimSpace(run.CommandEventID) == "" {
+				return nil, nil
+			}
+			command, commandErr := r.Store.GetCommandEvent(ctx, run.MonitorNamespace, run.CommandEventID)
+			if commandErr != nil || command.Intent != repositoryMonitorCommandIntentAutomerge {
+				return nil, commandErr
+			}
 		}
 		return []repositoryMonitorPullRequest{*pr}, nil
 	}
@@ -965,6 +1067,8 @@ type repositoryMonitorPullRequestResponse struct {
 	State          string `json:"state"`
 	Draft          bool   `json:"draft"`
 	MergeableState string `json:"mergeable_state"`
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
 	User           struct {
 		Login string `json:"login"`
 	} `json:"user"`
@@ -1016,6 +1120,8 @@ func repositoryMonitorPullRequestFromGitHub(pr repositoryMonitorPullRequestRespo
 		HeadSHA:        pr.Head.SHA,
 		Draft:          pr.Draft,
 		MergeableState: pr.MergeableState,
+		Merged:         pr.Merged,
+		MergeCommitSHA: pr.MergeCommitSHA,
 	}
 }
 

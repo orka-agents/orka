@@ -80,10 +80,13 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 	}
 
 	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(turn.Env, workerenv.OpenAIBaseURL))
+	if strings.EqualFold(strings.TrimSpace(turn.Metadata["runtimeAuthOnly"]), "true") {
+		baseURL = firstNonEmpty(envEntryValue(turn.Env, workerenv.OpenAIBaseURL), codexOpenAIBaseURL())
+	}
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
 		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, baseURL),
-		Env:        buildCodexEnv(turn.Env),
+		Env:        buildCodexEnv(turn.Env, baseURL),
 		UnsetEnv:   []string{workerenv.Prompt},
 		Dir:        dir,
 		Stdin:      []byte(turn.Prompt),
@@ -214,8 +217,7 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 	return strings.TrimSpace(strings.Join(sections, "\n\n"))
 }
 
-func buildCodexEnv(extra []string) []string {
-	baseURL := firstNonEmpty(codexOpenAIBaseURL(), envEntryValue(extra, workerenv.OpenAIBaseURL))
+func buildCodexEnv(extra []string, baseURL string) []string {
 	// Codex receives the turn prompt on stdin. Remove the explicit copy here;
 	// BuildCommand also unsets any inherited copy after the final environment merge.
 	env := removeTurnEnv(

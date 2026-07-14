@@ -1444,18 +1444,104 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 	return nil
 }
 
-func (b *JobBuilder) addScopedAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+func scopedAgentRuntimeSecretCoordinates(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (namespace, name string, err error) {
+	if task == nil {
+		return "", "", nil
+	}
+	if repositoryMonitorTaskUsesPinnedRuntimeAuth(task) {
+		namespace = strings.TrimSpace(task.Spec.SecretRef.Namespace)
+		if namespace == "" {
+			namespace = task.Namespace
+		}
+		if namespace != task.Namespace {
+			return "", "", fmt.Errorf("runtime-auth-only task secretRef namespace %q does not match task namespace %q", namespace, task.Namespace)
+		}
+		return namespace, strings.TrimSpace(task.Spec.SecretRef.Name), nil
+	}
 	if agent == nil || agent.Spec.SecretRef == nil || strings.TrimSpace(agent.Spec.SecretRef.Name) == "" {
+		return "", "", nil
+	}
+	return task.Namespace, strings.TrimSpace(agent.Spec.SecretRef.Name), nil
+}
+
+func repositoryMonitorTaskUsesPinnedRuntimeAuth(task *corev1alpha1.Task) bool {
+	return task != nil && taskRequestsRuntimeAuthOnly(task) && task.Spec.SecretRef != nil &&
+		strings.TrimSpace(task.Spec.SecretRef.Name) != "" &&
+		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationActionKind]) == repositoryMonitorIssueActionImplementation &&
+		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration]) != "" &&
+		strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields]) != ""
+}
+
+func validateScopedAgentRuntimeBinding(task *corev1alpha1.Task, agent *corev1alpha1.Agent, secret *corev1.Secret) error {
+	if task == nil || !taskRequestsRuntimeAuthOnly(task) {
+		return nil
+	}
+	if expectedUID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentUID]); expectedUID != "" {
+		if agent == nil || string(agent.UID) != expectedUID {
+			return fmt.Errorf("%w: runtime agent UID changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
+		}
+	}
+	if expectedGeneration := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAgentGeneration]); expectedGeneration != "" {
+		generation, err := strconv.ParseInt(expectedGeneration, 10, 64)
+		if err != nil || agent == nil || agent.Generation != generation {
+			return fmt.Errorf("%w: runtime agent generation changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
+		}
+	}
+	return validateScopedRuntimeSecretBinding(task, secret)
+}
+
+func validateScopedRuntimeSecretBinding(task *corev1alpha1.Task, secret *corev1.Secret) error {
+	if task == nil || !taskRequestsRuntimeAuthOnly(task) {
+		return nil
+	}
+	expectedUID := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthUID])
+	pinnedFields := strings.TrimSpace(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields])
+	if expectedUID == "" && pinnedFields == "" {
+		return nil
+	}
+	if secret == nil {
+		return fmt.Errorf("%w: runtime auth snapshot is missing", errRepositoryMonitorRuntimeAuthBindingInvalid)
+	}
+	if expectedUID != "" && string(secret.UID) != expectedUID {
+		return fmt.Errorf("%w: runtime credential Secret UID changed", errRepositoryMonitorRuntimeAuthBindingInvalid)
+	}
+	if secret.Immutable == nil || !*secret.Immutable {
+		return fmt.Errorf("%w: runtime credential Secret is not immutable", errRepositoryMonitorRuntimeAuthBindingInvalid)
+	}
+	return nil
+}
+
+func repositoryMonitorPinnedRuntimeAuthFields(task *corev1alpha1.Task) []string {
+	if task == nil {
+		return nil
+	}
+	var keys []string
+	for key := range strings.SplitSeq(task.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields], ",") {
+		if key = strings.TrimSpace(key); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func (b *JobBuilder) addScopedAgentRuntimeSecretEnv(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	secretNamespace, secretName, err := scopedAgentRuntimeSecretCoordinates(task, agent)
+	if err != nil {
+		return err
+	}
+	if secretName == "" {
 		return nil
 	}
 	keys, _, err := scopedAgentRuntimeSecretKeys(agent)
 	if err != nil {
 		return err
 	}
-	secretName := strings.TrimSpace(agent.Spec.SecretRef.Name)
 	var secret corev1.Secret
-	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: task.Namespace}, &secret); err != nil {
+	if err := b.Get(ctx, client.ObjectKey{Name: secretName, Namespace: secretNamespace}, &secret); err != nil {
 		return fmt.Errorf("get scoped agent runtime secret %q: %w", secretName, err)
+	}
+	if err := validateScopedAgentRuntimeBinding(task, agent, &secret); err != nil {
+		return err
 	}
 	if !scopedAgentRuntimeSecretHasCredential(&secret, agent) {
 		return fmt.Errorf("scoped agent runtime secret %q contains no supported credentials for runtime %q", secretName, readOnlyAgentRuntimeType(agent))

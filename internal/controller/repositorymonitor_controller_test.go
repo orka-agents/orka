@@ -2849,7 +2849,7 @@ func TestRepositoryMonitorStatusCountsIncludesTerminalBlockedReviewVerdicts(t *t
 		{Number: 4, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictStale},
 		{Number: 5, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictNeedsHuman},
 		{Number: 6, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictSecuritySensitive},
-		{Number: 7, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictPassed},
+		{Number: 7, State: repositoryMonitorItemStateOpen, HeadSHA: "head-7", LastReviewedHeadSHA: "head-7", LastVerdict: repositoryMonitorReviewVerdictPassed, RepairState: repositoryMonitorRepairPhaseSucceeded},
 		{Number: 8, State: repositoryMonitorItemStateOpen, LastVerdict: repositoryMonitorReviewVerdictNeedsChanges},
 		{Number: 9, State: repositoryMonitorItemStateOutOfScope, LastVerdict: repositoryMonitorReviewVerdictFailed},
 	}
@@ -2867,8 +2867,8 @@ func TestRepositoryMonitorStatusCountsIncludesTerminalBlockedReviewVerdicts(t *t
 	if err != nil {
 		t.Fatalf("repositoryMonitorStatusCounts() error = %v", err)
 	}
-	if counts.openPullRequests != 8 || counts.pendingReviews != 1 || counts.blockedItems != 6 {
-		t.Fatalf("counts = %#v, want open=8 pending=1 blocked=6", counts)
+	if counts.openPullRequests != 8 || counts.pendingReviews != 1 || counts.blockedItems != 6 || counts.mergeReadyItems != 1 {
+		t.Fatalf("counts = %#v, want open=8 pending=1 blocked=6 mergeReady=1", counts)
 	}
 }
 
@@ -2953,6 +2953,217 @@ func TestRepositoryMonitorReconcileStaleExactEventDoesNotRewriteCurrentPullReque
 	}
 	if len(events) != 0 {
 		t.Fatalf("item_skipped events = %#v, want no stale skip event", events)
+	}
+}
+
+func TestRepositoryMonitorStaleHeadCommandBlocksWorkAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 2, `{"number":2,"title":"Current head","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2"},"head":{"ref":"targeted","sha":"new-sha"},"labels":[]}`)
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("stale-head-command")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "2", Number: 2, State: repositoryMonitorItemStateOpen, HeadSHA: "new-sha", LastVerdict: repositoryMonitorRunPhaseQueued}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	command := &store.CommandEvent{ID: "cmd-stale-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 2, Intent: "review", HeadSHA: "old-sha", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "review")
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 2, TargetSHA: "old-sha", DesiredAction: "review", Status: repositoryMonitorWorkActionStatusQueued, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	run := &store.MonitorRun{ID: "run-stale-command", CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 2, TargetSHA: "old-sha"}
+	selected, created, skipped, err := reconciler.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka")
+	if err != nil || selected != 0 || created != 0 || skipped != 1 {
+		t.Fatalf("processPullRequestInventoryRun() = selected=%d created=%d skipped=%d err=%v", selected, created, skipped, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, monitor.Namespace, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != "stale_head_sha" || action.CompletedAt == nil {
+		t.Fatalf("work action = %#v, want terminal stale_head_sha block", action)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "2")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.HeadSHA != "new-sha" || item.SkipReason != "" {
+		t.Fatalf("current item was rewritten by stale command: %#v", item)
+	}
+}
+
+func TestRepositoryMonitorStopCommandBypassesStaleHeadAndCancelsTask(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "stale-stop", Namespace: defaultNS}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-review", Namespace: defaultNS, Labels: map[string]string{
+		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+		labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
+		labels.LabelGitHubNumber:      labels.SelectorValue("42"),
+	}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "42", Number: 42, State: repositoryMonitorItemStateOpen, HeadSHA: "new-head"}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	command := &store.CommandEvent{ID: "cmd-stop-stale", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentStop, HeadSHA: "old-head", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: repositoryMonitorCommandIntentStop, Status: repositoryMonitorWorkActionStatusQueued, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	run := &store.MonitorRun{ID: "run-stop-stale", MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 42, TargetSHA: "old-head"}
+	selected, created, skipped, err := reconciler.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka")
+	if err != nil || selected != 1 || created != 0 || skipped != 0 {
+		t.Fatalf("processPullRequestInventoryRun() = selected=%d created=%d skipped=%d err=%v", selected, created, skipped, err)
+	}
+	var currentTask corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: task.Name}, &currentTask); err != nil {
+		t.Fatalf("Get task error = %v", err)
+	}
+	if currentTask.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		t.Fatalf("task phase = %q, want Cancelled", currentTask.Status.Phase)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "42")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.HeadSHA != "new-head" || item.SkipReason != "stopped_by_command" {
+		t.Fatalf("stopped item = %#v, want current head preserved", item)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != repositoryMonitorWorkActionStatusSucceeded {
+		t.Fatalf("stop action = %#v, want succeeded", action)
+	}
+}
+
+func TestRepositoryMonitorResumeCommandRequiresLiveUnblockedTarget(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 42, `{"number":42,"title":"Paused","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base42"},"head":{"ref":"targeted","sha":"head42"},"labels":[{"name":"hold"}]}`)
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("resume-live-validation")
+	monitor.Spec.Policy.PauseLabels = []string{"hold"}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "42", Number: 42, State: repositoryMonitorItemStateOpen, HeadSHA: "head42", RepairState: repositoryMonitorRepairPhaseFailed, SkipReason: repositoryMonitorIssueSkipStoppedByCommand}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	command := &store.CommandEvent{ID: "cmd-resume-live", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 42, Intent: repositoryMonitorCommandIntentResume, HeadSHA: "head42", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	run := &store.MonitorRun{ID: "run-resume-live", MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 42, TargetSHA: "head42"}
+	selected, created, skipped, err := reconciler.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka")
+	if err != nil || selected != 1 || created != 0 || skipped != 0 {
+		t.Fatalf("processPullRequestInventoryRun() selected=%d created=%d skipped=%d err=%v", selected, created, skipped, err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "42")
+	if err != nil || item.RepairState != repositoryMonitorRepairPhaseFailed || item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+		t.Fatalf("blocked resume changed stopped item: %#v err=%v", item, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentResume))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != repositoryMonitorSkipReasonBlockedLabel {
+		t.Fatalf("resume action = %#v err=%v, want blocked label", action, err)
+	}
+}
+
+func TestRepositoryMonitorUnknownStopTargetDoesNotCreateOpenInventoryItem(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/pulls/404" {
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("unknown-stop-target")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-stop-unknown", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 404, Intent: repositoryMonitorCommandIntentStop, Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	run := &store.MonitorRun{ID: "run-stop-unknown", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 404}
+	if _, _, _, err := reconciler.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka"); err == nil {
+		t.Fatal("processPullRequestInventoryRun() error = nil, want target lookup failure")
+	}
+	if item, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "404"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown target item = %#v err=%v, want no inventory item", item, err)
+	}
+	counts, err := reconciler.repositoryMonitorStatusCounts(ctx, monitor)
+	if err != nil {
+		t.Fatalf("repositoryMonitorStatusCounts() error = %v", err)
+	}
+	if counts.openPullRequests != 0 {
+		t.Fatalf("open pull requests = %d, want 0", counts.openPullRequests)
+	}
+}
+
+func TestRepositoryMonitorPullRequestShortcutsIgnoreIssueCommands(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "cross-target-command", Namespace: defaultNS}}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "42", Number: 42, State: repositoryMonitorItemStateOpen, HeadSHA: "pr-head"}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	command := &store.CommandEvent{ID: "cmd-stop-issue-42", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 42, Intent: repositoryMonitorCommandIntentStop, Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	issueRun := &store.MonitorRun{ID: "run-stop-issue-42", MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: 42}
+	if handled, created, err := reconciler.processTargetedPullRequestControlCommand(ctx, monitor, issueRun, "orka-agents", "orka"); err != nil || handled || created != 0 {
+		t.Fatalf("issue run pull-request shortcut handled=%v created=%d err=%v", handled, created, err)
+	}
+	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(nil, "main", issueRun); reason != "" {
+		t.Fatalf("issue run pull-request block reason = %q, want empty", reason)
+	}
+	malformedRun := *issueRun
+	malformedRun.TargetKind = repositoryMonitorPullRequestKind
+	if handled, created, err := reconciler.processTargetedPullRequestControlCommand(ctx, monitor, &malformedRun, "orka-agents", "orka"); err != nil || handled || created != 0 {
+		t.Fatalf("issue command pull-request shortcut handled=%v created=%d err=%v", handled, created, err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "42")
+	if err != nil || item.SkipReason != "" || item.HeadSHA != "pr-head" {
+		t.Fatalf("pull request item changed by issue command: %#v err=%v", item, err)
 	}
 }
 
@@ -4100,9 +4311,11 @@ func repositoryMonitorControllerTestAgent(name string, runtimeType corev1alpha1.
 }
 
 func repositoryMonitorControllerTestSecret(name string, data map[string][]byte) *corev1.Secret {
+	immutable := true
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID("uid-" + name)},
 		Data:       data,
+		Immutable:  &immutable,
 	}
 }
 
@@ -4218,6 +4431,42 @@ func TestRepositoryMonitorWorkActionReasonFields(t *testing.T) {
 	if action.BlockedReason != "" || action.Error != "boom" {
 		t.Fatalf("failed action BlockedReason=%q Error=%q, want error only", action.BlockedReason, action.Error)
 	}
+	if action.CompletedAt == nil {
+		t.Fatal("failed action CompletedAt is nil, want terminal timestamp")
+	}
+
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, 77, "", "sha256:reason", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusRunning, "retrying", "", ""); err != nil {
+		t.Fatalf("record retrying action error = %v", err)
+	}
+	action, err = monitorStore.GetWorkAction(ctx, "default", store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentStop))
+	if err != nil {
+		t.Fatalf("GetWorkAction(retrying) error = %v", err)
+	}
+	if action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil || action.BlockedReason != "" || action.Error != "" {
+		t.Fatalf("retrying action = %#v, want non-terminal running state", action)
+	}
+}
+
+func TestRepositoryMonitorDecomposeActionReusesCommandWorkAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "decompose-action", Namespace: defaultNS}}
+	command := &store.CommandEvent{ID: "cmd-decompose", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: "decompose"}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "decompose")
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "decompose", Status: repositoryMonitorWorkActionStatusQueued, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, repositoryMonitorIssueKind, 77, "", "sha256:decompose", repositoryMonitorIssueActionDecompose, repositoryMonitorWorkActionStatusRunning, repositoryMonitorIssuePhasePlanQueued, "decompose-task", ""); err != nil {
+		t.Fatalf("recordRepositoryMonitorWorkActionState() error = %v", err)
+	}
+	actions, _, err := monitorStore.ListWorkActions(ctx, store.WorkActionFilter{Namespace: defaultNS, MonitorName: monitor.Name, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListWorkActions() error = %v", err)
+	}
+	if len(actions) != 1 || actions[0].ID != actionID || actions[0].DesiredAction != "decompose" || actions[0].Status != repositoryMonitorWorkActionStatusRunning {
+		t.Fatalf("decompose actions = %#v, want one updated command action", actions)
+	}
 }
 
 func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
@@ -4271,6 +4520,159 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	}
 	if implementationTask.Annotations[labels.AnnotationAgentReadOnly] != "" || implementationTask.Annotations[labels.AnnotationWorkspaceInitContainer] != scheduledRunLabelValue || implementationTask.Annotations[labels.AnnotationAgentRuntimeAuthOnly] != scheduledRunLabelValue {
 		t.Fatalf("implementation task annotations = %#v, want workspace init and runtime-only credentials without read-only tools", implementationTask.Annotations)
+	}
+	if implementationTask.Spec.SecretRef == nil || implementationTask.Spec.SecretRef.Name == "implementer-credentials" || implementationTask.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthFields] != workerenv.OpenAIAPIKey {
+		t.Fatalf("implementation runtime credential binding = spec=%#v annotations=%#v", implementationTask.Spec.SecretRef, implementationTask.Annotations)
+	}
+	var runtimeSnapshot corev1.Secret
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: implementationTask.Spec.SecretRef.Name}, &runtimeSnapshot); err != nil {
+		t.Fatalf("Get runtime auth snapshot error = %v", err)
+	}
+	if runtimeSnapshot.Immutable == nil || !*runtimeSnapshot.Immutable || string(runtimeSnapshot.Data[workerenv.OpenAIAPIKey]) != "x" || !metav1.IsControlledBy(&runtimeSnapshot, monitor) {
+		t.Fatalf("runtime auth snapshot = %#v, want immutable monitor-owned scoped copy", runtimeSnapshot)
+	}
+	if err := cl.Delete(ctx, &implementationTask); err != nil {
+		t.Fatalf("Delete implementation task error = %v", err)
+	}
+	if err := reconciler.cleanupRepositoryMonitorOrphanedRuntimeAuthSnapshots(ctx, monitor); err != nil {
+		t.Fatalf("cleanupRepositoryMonitorOrphanedRuntimeAuthSnapshots() error = %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: runtimeSnapshot.Name}, &corev1.Secret{}); err == nil || crclient.IgnoreNotFound(err) != nil {
+		t.Fatalf("runtime auth snapshot cleanup error = %v, want deleted snapshot", err)
+	}
+}
+
+func TestRepositoryMonitorImplementationTaskCreationFailureCleansRuntimeAuthSnapshot(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("implementation-create-cleanup")
+	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
+				if _, ok := obj.(*corev1alpha1.Task); ok {
+					return errors.New("permanent task creation failure")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "77", Number: 77, SnapshotDigest: "sha256:create-cleanup"}
+	run := &store.MonitorRun{ID: "run-create-cleanup"}
+	command := &store.CommandEvent{ID: "cmd-create-cleanup", Intent: repositoryMonitorCommandIntentImplement}
+	if _, created, err := reconciler.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, "orka-agents", "orka", repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer); err == nil || created {
+		t.Fatalf("createRepositoryMonitorIssueActionTask() created=%v err=%v, want permanent failure", created, err)
+	}
+	var snapshots corev1.SecretList
+	if err := cl.List(ctx, &snapshots, crclient.InNamespace(defaultNS), crclient.MatchingLabels{
+		labels.LabelCreatedBy:         "repository-monitor",
+		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+	}); err != nil {
+		t.Fatalf("List snapshots error = %v", err)
+	}
+	if len(snapshots.Items) != 0 {
+		t.Fatalf("runtime auth snapshots = %#v, want cleanup after task creation failure", snapshots.Items)
+	}
+}
+
+func TestRepositoryMonitorImplementationTaskAmbiguousCreatePreservesSnapshot(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("implementation-ambiguous-create")
+	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
+				if _, ok := obj.(*corev1alpha1.Task); ok {
+					if err := c.Create(ctx, obj, opts...); err != nil {
+						return err
+					}
+					return errors.New("timeout after task persisted")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "78", Number: 78, SnapshotDigest: "sha256:ambiguous-create"}
+	run := &store.MonitorRun{ID: "run-ambiguous-create"}
+	command := &store.CommandEvent{ID: "cmd-ambiguous-create", Intent: repositoryMonitorCommandIntentImplement}
+	taskName, created, err := reconciler.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, "orka-agents", "orka", repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer)
+	if err != nil || created || taskName == "" {
+		t.Fatalf("createRepositoryMonitorIssueActionTask() task=%q created=%v err=%v", taskName, created, err)
+	}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: taskName}, &task); err != nil {
+		t.Fatalf("Get persisted task error = %v", err)
+	}
+	if task.Spec.SecretRef == nil {
+		t.Fatal("persisted task has no runtime auth snapshot reference")
+	}
+	var snapshot corev1.Secret
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: task.Spec.SecretRef.Name}, &snapshot); err != nil {
+		t.Fatalf("Get preserved snapshot error = %v", err)
+	}
+	var source corev1.Secret
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: "implementer-credentials"}, &source); err != nil {
+		t.Fatalf("Get source runtime config error = %v", err)
+	}
+	source.Immutable = nil
+	source.Data[workerenv.OpenAIAPIKey] = []byte("rotated-value")
+	if err := cl.Update(ctx, &source); err != nil {
+		t.Fatalf("Update source runtime config error = %v", err)
+	}
+	recoveredName, recoveredCreated, err := reconciler.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, "orka-agents", "orka", repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer)
+	if err != nil || recoveredCreated || recoveredName != taskName {
+		t.Fatalf("retry after source rotation task=%q created=%v err=%v", recoveredName, recoveredCreated, err)
+	}
+}
+
+func TestRepositoryMonitorRejectsMismatchedPreexistingRuntimeAuthSnapshot(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{TypeMeta: metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor"}, ObjectMeta: metav1.ObjectMeta{Name: "snapshot-spoof", Namespace: defaultNS, UID: "uid-snapshot-spoof"}}
+	ref := &corev1alpha1.AgentReference{Name: "implementer"}
+	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "source-runtime")
+	source := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source-runtime", Namespace: defaultNS, UID: "uid-source-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("expected-value")}}
+	taskName := "impl-spoofed-snapshot"
+	snapshotName := repositoryMonitorBoundedDNSName(taskName+"-runtime-auth", 63)
+	controller := true
+	immutable := true
+	spoofed := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name: snapshotName, Namespace: defaultNS,
+		Labels:          map[string]string{labels.LabelManaged: scheduledRunLabelValue, labels.LabelCreatedBy: "repository-monitor", labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name)},
+		Annotations:     map[string]string{repositoryMonitorIssueAnnotationRuntimeAuthTask: taskName, repositoryMonitorIssueAnnotationRuntimeAuthSourceUID: string(source.UID)},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryMonitor", Name: monitor.Name, UID: monitor.UID, Controller: &controller}},
+	}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("attacker-value"), workerenv.OpenAIBaseURL: []byte("https://example.invalid/v1")}, Immutable: &immutable}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(monitor, agent, source, spoofed).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme}
+	if _, err := reconciler.repositoryMonitorImplementationRuntimeCredentialBinding(ctx, monitor, taskName, ref); !errors.Is(err, errRepositoryMonitorRuntimeAuthBindingInvalid) {
+		t.Fatalf("binding error = %v, want mismatched snapshot rejection", err)
 	}
 }
 
@@ -5339,7 +5741,7 @@ func TestRepositoryMonitorPRReviewRepairReadinessAutomergeFakeGitHubE2E(t *testi
 	if err != nil {
 		t.Fatalf("GetMonitorItem(passed review) error = %v", err)
 	}
-	if item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != "head88-fixed" || item.AutomergeState != "merge_ready" {
+	if item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != "head88-fixed" || item.AutomergeState != repositoryMonitorAutomergeStateMergeReady {
 		t.Fatalf("item after passed review = %#v, want merge_ready", item)
 	}
 
@@ -5441,6 +5843,7 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 		t.Fatalf("corev1 AddToScheme() error = %v", err)
 	}
 	merged := false
+	sawStartedAudit := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != repositoryMonitorTestBearerHeader() {
 			t.Fatalf("Authorization header = %q, want %q", got, repositoryMonitorTestBearerHeader())
@@ -5454,6 +5857,11 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head41/status":
 			_, _ = w.Write([]byte(`{"state":"success","statuses":[{"context":"legacy","state":"success"}]}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/repos/orka-agents/orka/pulls/41/merge":
+			mutations, _, err := monitorStore.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: "default", MonitorName: "pr-automerge", Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 41, Limit: 10})
+			if err != nil || len(mutations) != 1 || mutations[0].Status != "started" {
+				t.Fatalf("pre-merge mutation audit = %#v err=%v, want one started record", mutations, err)
+			}
+			sawStartedAudit = true
 			merged = true
 			_, _ = w.Write([]byte(`{"sha":"merged-sha"}`))
 		default:
@@ -5489,12 +5897,231 @@ func TestRepositoryMonitorPullRequestAutomergeCommandMergesWhenGatesPass(t *test
 	if !merged {
 		t.Fatal("merge endpoint was not called")
 	}
+	if !sawStartedAudit {
+		t.Fatal("merge endpoint was called before the started mutation audit was durable")
+	}
 	item, err := monitorStore.GetMonitorItem(ctx, "default", "pr-automerge", repositoryMonitorPullRequestKind, "41")
 	if err != nil {
 		t.Fatalf("GetMonitorItem() error = %v", err)
 	}
 	if item.AutomergeState != repositoryMonitorAutomergeStateMerged {
 		t.Fatalf("item = %#v, want automerge merged", item)
+	}
+	mutations, _, err := monitorStore.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: "default", MonitorName: monitor.Name, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 41, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListGitHubMutationRecords() error = %v", err)
+	}
+	if len(mutations) != 1 || mutations[0].Status != "succeeded" || mutations[0].ExternalID != "merged-sha" {
+		t.Fatalf("merge mutation outcome = %#v, want one succeeded record", mutations)
+	}
+}
+
+func TestRepositoryMonitorAutomergeRecoversMergedStartedAttempt(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := newRepositoryMonitorSinglePullRequestServerWithBody(t, 41, `{"number":41,"title":"Merged","state":"closed","merged":true,"merge_commit_sha":"merged-sha","draft":false,"mergeable_state":"unknown","user":{"login":"alice"},"base":{"ref":"main","sha":"base41","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"ready","sha":"head41","repo":{"full_name":"orka-agents/orka"}},"labels":[]}`)
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("automerge-recovery")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-automerge-recovery", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 41, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "head41", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	run := &store.MonitorRun{ID: "run-automerge-recovery", MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 41, TargetSHA: "head41", CommandEventID: command.ID}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, RunID: run.ID, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 41, TargetSHA: "head41", Status: repositoryMonitorAutomergeStateStarted, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	selected, created, skipped, err := reconciler.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka")
+	if err != nil || selected != 1 || created != 0 || skipped != 0 {
+		t.Fatalf("processPullRequestInventoryRun() = selected=%d created=%d skipped=%d err=%v", selected, created, skipped, err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil {
+		t.Fatalf("GetGitHubMutationRecord() error = %v", err)
+	}
+	if mutation.Status != repositoryMonitorRunPhaseSucceeded || mutation.ExternalID != "merged-sha" {
+		t.Fatalf("recovered mutation = %#v, want succeeded merged-sha", mutation)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "41")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if item.State != "merged" || item.AutomergeState != repositoryMonitorAutomergeStateMerged {
+		t.Fatalf("recovered item = %#v, want merged", item)
+	}
+}
+
+func TestRepositoryMonitorAutomergeRecoveryRejectsDifferentHead(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "automerge-stale-recovery", Namespace: defaultNS}}
+	command := &store.CommandEvent{ID: "cmd-automerge-stale", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 41, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "head-a", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 41, TargetSHA: "head-a", Status: repositoryMonitorAutomergeStateStarted, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	handled, err := reconciler.reconcileRepositoryMonitorCompletedAutomerge(ctx, monitor, &store.MonitorRun{ID: "run-stale", CommandEventID: command.ID, TargetNumber: 41, TargetSHA: "head-a"}, []repositoryMonitorPullRequest{{Number: 41, State: "closed", HeadSHA: "head-b", Merged: true, MergeCommitSHA: "merge-b"}})
+	if err != nil || handled {
+		t.Fatalf("reconcileRepositoryMonitorCompletedAutomerge() handled=%v err=%v, want stale-head rejection", handled, err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil {
+		t.Fatalf("GetGitHubMutationRecord() error = %v", err)
+	}
+	if mutation.Status != repositoryMonitorAutomergeStateStarted || mutation.ExternalID != "" {
+		t.Fatalf("stale-head mutation was changed: %#v", mutation)
+	}
+}
+
+func TestRepositoryMonitorAutomergeTransientMergeErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head41/check-runs":
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"success"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head41/status":
+			_, _ = w.Write([]byte(`{"state":"success","statuses":[]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/orka-agents/orka/pulls/41/merge":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"message":"upstream unavailable"}`))
+		default:
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("automerge-transient")
+	globalGate := false
+	monitor.Spec.Automerge.Enabled = true
+	monitor.Spec.Automerge.RequireGlobalMergeGate = &globalGate
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-automerge-transient", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
+	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", BaseSHA: "base41", BaseBranch: "main", HeadBranch: "ready", HeadRepo: "orka-agents/orka", MergeableState: "clean"}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-transient"}, command, "orka-agents", "orka", pr, item)
+	if !handled || err == nil {
+		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want propagated transient error", handled, err)
+	}
+	var ghErr *repositoryMonitorGitHubAPIError
+	if !errors.As(err, &ghErr) || ghErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("automerge error = %v, want GitHub 502", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	mutation, getErr := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if getErr != nil || mutation.Status != repositoryMonitorAutomergeStatePending {
+		t.Fatalf("retryable mutation = %#v err=%v, want pending", mutation, getErr)
+	}
+	storedItem, getErr := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "41")
+	if getErr != nil || storedItem.AutomergeState != repositoryMonitorAutomergeStatePending || storedItem.SkipReason != repositoryMonitorRunRetryScheduled {
+		t.Fatalf("retryable item = %#v err=%v, want pending retry_scheduled", storedItem, getErr)
+	}
+	action, getErr := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorActionAutomerge)))
+	if getErr != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.CompletedAt != nil {
+		t.Fatalf("retryable work action = %#v err=%v, want running without completion", action, getErr)
+	}
+}
+
+func repositoryMonitorPatchValidationReason(t *testing.T, reconciler *RepositoryMonitorReconciler, ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task, result *common.StructuredResult) string {
+	t.Helper()
+	reason, err := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, result)
+	if err != nil {
+		t.Fatalf("validateAndSaveIssuePatchArtifacts() error = %v", err)
+	}
+	return reason
+}
+
+func TestRepositoryMonitorAutomergePermanentGateFinalizesExistingMutation(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "automerge-gate-terminal", Namespace: defaultNS}}
+	command := &store.CommandEvent{ID: "cmd-automerge-gate-terminal", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "head41"}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: command.HeadSHA, AutomergeState: repositoryMonitorAutomergeStatePending}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: command.HeadSHA, Status: repositoryMonitorAutomergeStatePending, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	pr := repositoryMonitorPullRequest{Number: item.Number, State: repositoryMonitorItemStateOpen, HeadSHA: command.HeadSHA}
+	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-gate-terminal"}, command, "orka-agents", "orka", pr, item)
+	if err != nil || !handled {
+		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v", handled, err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil || mutation.Status != repositoryMonitorRunPhaseFailed || mutation.Error != repositoryMonitorAutomergeReasonDisabled {
+		t.Fatalf("gate-terminal mutation = %#v err=%v", mutation, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentAutomerge))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != repositoryMonitorAutomergeReasonDisabled {
+		t.Fatalf("gate-terminal action = %#v err=%v", action, err)
+	}
+}
+
+func TestRepositoryMonitorAutomergeAmbiguousMergeErrorRemainsRetryable(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head41/check-runs":
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"success"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head41/status":
+			_, _ = w.Write([]byte(`{"state":"success","statuses":[]}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/orka-agents/orka/pulls/41/merge":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message":"head cannot be merged"}`))
+		default:
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("automerge-permanent")
+	globalGate := false
+	monitor.Spec.Automerge.Enabled = true
+	monitor.Spec.Automerge.RequireGlobalMergeGate = &globalGate
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-automerge-permanent", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Intent: repositoryMonitorCommandIntentAutomerge, Permission: "maintain", HeadSHA: "head41"}
+	pr := repositoryMonitorPullRequest{Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", MergeableState: "clean"}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "41", Number: 41, State: repositoryMonitorItemStateOpen, HeadSHA: "head41", LastVerdict: repositoryMonitorReviewVerdictPassed, LastReviewedHeadSHA: "head41"}
+	handled, err := reconciler.tryProcessPullRequestAutomergeCommand(ctx, monitor, &store.MonitorRun{ID: "run-automerge-permanent"}, command, "orka-agents", "orka", pr, item)
+	if !handled || err == nil {
+		t.Fatalf("tryProcessPullRequestAutomergeCommand() handled=%v err=%v, want permanent error", handled, err)
+	}
+	action, getErr := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentAutomerge))
+	if getErr != nil || action.Status != repositoryMonitorWorkActionStatusRunning || action.Error != "" || action.CompletedAt != nil {
+		t.Fatalf("retryable automerge action = %#v err=%v", action, getErr)
 	}
 }
 
@@ -5509,15 +6136,15 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 	record := &store.ActionRecord{ID: "act-impl", CommandEventID: "cmd-impl"}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore, ArtifactStore: monitorStore}
 	missingFiles := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/internal/x.go b/internal/x.go\n"}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, missingFiles); got != "patch_file_list_missing" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, missingFiles); got != "patch_file_list_missing" {
 		t.Fatalf("missing file list reason = %q, want patch_file_list_missing", got)
 	}
 	denied := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n", Files: []string{".github/workflows/ci.yml"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, denied); got != "patch_path_denied" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, denied); got != "patch_path_denied" {
 		t.Fatalf("denied patch reason = %q, want patch_path_denied", got)
 	}
 	manifestMismatch := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/docs/safe.md b/.github/workflows/pwn.yml\n--- a/docs/safe.md\n+++ b/.github/workflows/pwn.yml\n", Files: []string{"docs/safe.md"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, manifestMismatch); got != "patch_path_manifest_mismatch" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, manifestMismatch); got != "patch_path_manifest_mismatch" {
 		t.Fatalf("forged patch manifest reason = %q, want patch_path_manifest_mismatch", got)
 	}
 	headerLikeHunk := &common.StructuredResult{
@@ -5525,39 +6152,44 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 		Diff:    "diff --git a/schema.sql b/schema.sql\n--- a/schema.sql\n+++ b/schema.sql\n@@ -1 +1 @@\n--- initialize schema\n+-- initialize schema safely\n",
 		Files:   []string{"schema.sql"},
 	}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, &store.ActionRecord{ID: "act-header-like", CommandEventID: "cmd-header-like"}, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-header-like", Namespace: "default"}}, headerLikeHunk); got != "" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, &store.ActionRecord{ID: "act-header-like", CommandEventID: "cmd-header-like"}, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-header-like", Namespace: "default"}}, headerLikeHunk); got != "" {
 		t.Fatalf("header-like hunk patch reason = %q, want empty", got)
 	}
 	missingGitHeader := &common.StructuredResult{BaseSHA: "base", Diff: "--- a/.github/workflows/pwn.yml\n+++ b/.github/workflows/pwn.yml\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"docs/safe.md"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, missingGitHeader); got != "patch_path_invalid" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, missingGitHeader); got != "patch_path_invalid" {
 		t.Fatalf("non-git patch reason = %q, want patch_path_invalid", got)
 	}
 	prefixBypass := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git \"x/.github/workflows/pwn.yml\" \"x/.github/workflows/pwn.yml\"\n--- \"x/.github/workflows/pwn.yml\"\n+++ \"x/.github/workflows/pwn.yml\"\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"x/.github/workflows/pwn.yml"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, prefixBypass); got != "patch_path_invalid" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, prefixBypass); got != "patch_path_invalid" {
 		t.Fatalf("noncanonical prefix reason = %q, want patch_path_invalid", got)
 	}
 	mixedPatch := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/docs/safe.md b/docs/safe.md\n--- a/docs/safe.md\n+++ b/docs/safe.md\n@@ -1 +1 @@\n-old\n+new\n--- a/.github/workflows/pwn.yml\n+++ b/.github/workflows/pwn.yml\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"docs/safe.md"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, mixedPatch); got != "patch_path_invalid" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, mixedPatch); got != "patch_path_invalid" {
 		t.Fatalf("mixed patch reason = %q, want patch_path_invalid", got)
 	}
 	leadingMixedPatch := &common.StructuredResult{BaseSHA: "base", Diff: "--- a/.github/workflows/pwn.yml\n+++ b/.github/workflows/pwn.yml\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/docs/safe.md b/docs/safe.md\n--- a/docs/safe.md\n+++ b/docs/safe.md\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"docs/safe.md"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, leadingMixedPatch); got != "patch_path_invalid" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, leadingMixedPatch); got != "patch_path_invalid" {
 		t.Fatalf("leading mixed patch reason = %q, want patch_path_invalid", got)
 	}
 	dotPath := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/./.github/workflows/pwn.yml b/./.github/workflows/pwn.yml\n--- a/./.github/workflows/pwn.yml\n+++ b/./.github/workflows/pwn.yml\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"./.github/workflows/pwn.yml"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, dotPath); got != "patch_path_invalid" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, dotPath); got != "patch_path_invalid" {
 		t.Fatalf("dot path reason = %q, want patch_path_invalid", got)
 	}
+	credentialMarker := "github" + "_pat_" + strings.Repeat("a", 24)
+	secretPatch := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/config.txt b/config.txt\n--- a/config.txt\n+++ b/config.txt\n@@ -0,0 +1 @@\n+++ " + credentialMarker + "\n", Files: []string{"config.txt"}}
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, secretPatch); got != "patch_secret_scan_failed" {
+		t.Fatalf("secret patch reason = %q, want patch_secret_scan_failed", got)
+	}
 	modeMismatch := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/.github/workflows/pwn.yml b/.github/workflows/pwn.yml\nold mode 100644\nnew mode 100755\n", Files: []string{"docs/safe.md"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, modeMismatch); got != "patch_path_manifest_mismatch" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, modeMismatch); got != "patch_path_manifest_mismatch" {
 		t.Fatalf("mode-only manifest mismatch reason = %q, want patch_path_manifest_mismatch", got)
 	}
 	renameDenied := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/docs/pwn.yml b/.github/workflows/pwn.yml\nsimilarity index 100%\nrename from docs/pwn.yml\nrename to .github/workflows/pwn.yml\n", Files: []string{"docs/pwn.yml", ".github/workflows/pwn.yml"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, renameDenied); got != "patch_path_denied" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, renameDenied); got != "patch_path_denied" {
 		t.Fatalf("rename destination reason = %q, want patch_path_denied", got)
 	}
 	valid := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/internal/x.go b/internal/x.go\n--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-old\n+new\n", Files: []string{"internal/x.go"}}
-	if got := reconciler.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, valid); got != "" {
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, valid); got != "" {
 		t.Fatalf("valid patch reason = %q, want empty", got)
 	}
 	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")); err != nil {
@@ -5565,6 +6197,253 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 	}
 	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")); err != nil {
 		t.Fatalf("summary artifact missing: %v", err)
+	}
+}
+
+func TestRepositoryMonitorIssuePatchRejectsInjectedRuntimeCredential(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	opaqueValue := strings.Repeat("z", 24) + "-opaque"
+	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "implementation-runtime-config", Namespace: defaultNS}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(opaqueValue)}}
+	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "opaque-implementer", Namespace: defaultNS}, Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex}, SecretRef: &corev1.LocalObjectReference{Name: runtimeConfig.Name}}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, runtimeConfig).Build()
+	monitor := repositoryMonitorReviewIngestTestMonitor("opaque-patch-credential")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 55, SnapshotDigest: "sha256:test"}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-opaque", Namespace: defaultNS, Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}}}
+	record := &store.ActionRecord{ID: "act-opaque", CommandEventID: "cmd-opaque"}
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ArtifactStore: monitorStore}
+	result := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/config.txt b/config.txt\n--- a/config.txt\n+++ b/config.txt\n@@ -0,0 +1 @@\n+" + opaqueValue + "\n", Files: []string{"config.txt"}}
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, result); got != "patch_secret_scan_failed" {
+		t.Fatalf("opaque credential patch reason = %q, want patch_secret_scan_failed", got)
+	}
+	pathResult := &common.StructuredResult{BaseSHA: "base", Diff: "diff --git a/" + opaqueValue + " b/" + opaqueValue + "\nnew file mode 100644\n", Files: []string{opaqueValue}}
+	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, pathResult); got != "patch_secret_scan_failed" {
+		t.Fatalf("opaque credential path reason = %q, want patch_secret_scan_failed", got)
+	}
+}
+
+func TestRepositoryMonitorIssueImplementationResultRedactsRuntimeCredentialBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	immutable := true
+	credential := strings.Repeat("q", 24) + "-opaque"
+	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pinned-runtime", Namespace: defaultNS, UID: "uid-pinned-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(credential)}, Immutable: &immutable}
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: defaultNS}, Data: map[string][]byte{repositoryMonitorTokenKey: []byte("test-token")}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/orka-agents/orka/issues/55/comments" {
+			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode status comment: %v", err)
+		}
+		if strings.Contains(payload["body"], credential) || !strings.Contains(payload["body"], "could not be safely accepted") {
+			t.Fatalf("status comment was not safely redacted: %q", payload["body"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":5501,"html_url":"https://github.com/orka-agents/orka/issues/55#issuecomment-5501"}`))
+	}))
+	t.Cleanup(server.Close)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig, gitSecret).Build()
+	monitor := repositoryMonitorReviewIngestTestMonitor("implementation-result-redaction")
+	monitor.Spec.GitSecretRef = &corev1.LocalObjectReference{Name: gitSecret.Name}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "55", Number: 55, SnapshotDigest: "sha256:redact", WorkflowPhase: repositoryMonitorIssuePhaseImplementing, LastActionKind: repositoryMonitorIssueActionImplementation, LastActionTaskName: "impl-redact"}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-redact", Namespace: defaultNS, Annotations: map[string]string{
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationCommandID:              "cmd-redact",
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-pinned-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}}, Spec: corev1alpha1.TaskSpec{SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded}}
+	summary, _ := json.Marshal(map[string]any{"schemaVersion": "orka.issueImplementation.v1", "status": "patch_ready", "summary": "leaked " + credential})
+	raw, err := common.FormatStructuredResult(&common.StructuredResult{Summary: string(summary), BaseSHA: "base", Diff: "diff --git a/internal/x.go b/internal/x.go\n--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-old\n+" + credential + "\n", Files: []string{"internal/x.go"}})
+	if err != nil {
+		t.Fatalf("FormatStructuredResult() error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, task.Namespace, task.Name, raw); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ResultStore: monitorStore, ArtifactStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	handled, err := reconciler.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, item, task)
+	if err != nil || !handled {
+		t.Fatalf("ingestCompletedRepositoryMonitorIssueTask() handled=%v err=%v", handled, err)
+	}
+	record, err := monitorStore.GetActionRecord(ctx, defaultNS, repositoryMonitorIssueActionRecordID(task))
+	if err != nil {
+		t.Fatalf("GetActionRecord() error = %v", err)
+	}
+	if strings.Contains(record.PayloadJSON, credential) || strings.Contains(record.Summary, credential) {
+		t.Fatalf("credential persisted in action record: %#v", record)
+	}
+	durableResult, err := monitorStore.GetResult(ctx, task.Namespace, task.Name)
+	if err != nil {
+		t.Fatalf("GetResult() error = %v", err)
+	}
+	if strings.Contains(string(durableResult), credential) || !strings.Contains(string(durableResult), "could not be safely accepted") {
+		t.Fatalf("durable result was not safely replaced: %q", durableResult)
+	}
+	if record.Verdict != repositoryMonitorPatchSensitiveContentReason || record.Summary != "Implementation result was blocked because it could not be safely accepted." {
+		t.Fatalf("sanitized record = %#v", record)
+	}
+	storedItem, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorIssueKind, "55")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if storedItem.WorkflowPhase != repositoryMonitorIssuePhaseBlocked || storedItem.SkipReason != repositoryMonitorPatchSensitiveContentReason {
+		t.Fatalf("stored item = %#v, want sensitive-result block", storedItem)
+	}
+}
+
+func TestRepositoryMonitorStoredImplementationRecordIsRedactedBeforeApply(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	immutable := true
+	credential := strings.Repeat("r", 24) + "-stored"
+	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "stored-runtime", Namespace: defaultNS, UID: "uid-stored-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(credential)}, Immutable: &immutable}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig).Build()
+	monitor := repositoryMonitorReviewIngestTestMonitor("stored-implementation-redaction")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "56", Number: 56, SnapshotDigest: "sha256:stored"}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-stored", Namespace: defaultNS, Annotations: map[string]string{
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationCommandID:              "cmd-stored",
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-stored-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}}, Spec: corev1alpha1.TaskSpec{SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}}
+	raw, _ := json.Marshal(map[string]any{
+		"schemaVersion": "orka.issueImplementation.v1", "issueNumber": item.Number,
+		"snapshotDigest": item.SnapshotDigest, "status": "patch_ready", "summary": "stored " + credential,
+	})
+	record := repositoryMonitorActionRecordFromTask(monitor, item, task, repositoryMonitorIssueActionImplementation, raw)
+	if err := monitorStore.CreateActionRecord(ctx, record); err != nil {
+		t.Fatalf("CreateActionRecord() error = %v", err)
+	}
+	if err := monitorStore.SaveResult(ctx, task.Namespace, task.Name, raw); err != nil {
+		t.Fatalf("SaveResult() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ResultStore: monitorStore}
+	redacted, err := reconciler.sanitizeRepositoryMonitorStoredImplementationRecord(ctx, monitor, item, task, record)
+	if err != nil {
+		t.Fatalf("sanitizeRepositoryMonitorStoredImplementationRecord() error = %v", err)
+	}
+	if strings.Contains(redacted.PayloadJSON, credential) || strings.Contains(redacted.Summary, credential) || redacted.Verdict != repositoryMonitorPatchSensitiveContentReason {
+		t.Fatalf("redacted record = %#v", redacted)
+	}
+	stored, err := monitorStore.GetActionRecord(ctx, defaultNS, record.ID)
+	if err != nil || strings.Contains(stored.PayloadJSON, credential) || stored.Verdict != repositoryMonitorPatchSensitiveContentReason {
+		t.Fatalf("stored action record = %#v err=%v", stored, err)
+	}
+	result, err := monitorStore.GetResult(ctx, task.Namespace, task.Name)
+	if err != nil || strings.Contains(string(result), credential) {
+		t.Fatalf("stored result = %q err=%v", result, err)
+	}
+}
+
+func TestRepositoryMonitorIssuePatchScansPinnedCredentialWithoutCurrentAgent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	immutable := true
+	credential := strings.Repeat("p", 24) + "-pinned"
+	runtimeConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pinned-runtime", Namespace: defaultNS, UID: "uid-pinned-runtime"}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(credential)}, Immutable: &immutable}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(runtimeConfig).Build()
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-pinned", Namespace: defaultNS, Annotations: map[string]string{
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-pinned-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "removed-agent"}, SecretRef: &corev1alpha1.SecretReference{Name: runtimeConfig.Name}}}
+	reconciler := &RepositoryMonitorReconciler{Client: cl}
+	contains, err := reconciler.repositoryMonitorPatchContainsRuntimeCredential(ctx, task, "safe prefix "+credential+" safe suffix")
+	if err != nil || !contains {
+		t.Fatalf("repositoryMonitorPatchContainsRuntimeCredential() contains=%v err=%v, want pinned credential match", contains, err)
+	}
+}
+
+func TestRepositoryMonitorIssuePatchCredentialLookupErrorRemainsRetryable(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	lookupErr := errors.New("transient agent lookup failure")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c crclient.WithWatch, key crclient.ObjectKey, obj crclient.Object, opts ...crclient.GetOption) error {
+				if _, ok := obj.(*corev1alpha1.Agent); ok {
+					return lookupErr
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	monitor := repositoryMonitorReviewIngestTestMonitor("patch-credential-lookup-retry")
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "55", Number: 55, SnapshotDigest: "sha256:test", WorkflowPhase: repositoryMonitorIssuePhaseImplementing, LastActionKind: repositoryMonitorIssueActionImplementation, LastActionTaskName: "impl-retry"}
+	if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	if err := monitorStore.CreateImplementationJob(ctx, &store.ImplementationJob{ID: repositoryMonitorImplementationJobID("impl-retry"), MonitorNamespace: defaultNS, MonitorName: monitor.Name, IssueNumber: item.Number, SnapshotDigest: item.SnapshotDigest, Phase: repositoryMonitorIssuePhaseImplementationQueued, TaskName: "impl-retry", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateImplementationJob() error = %v", err)
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "impl-retry", Namespace: defaultNS, Annotations: map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}}, Spec: corev1alpha1.TaskSpec{AgentRef: &corev1alpha1.AgentReference{Name: "implementer"}}}
+	diff := "diff --git a/internal/x.go b/internal/x.go\n--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-old\n+new\n"
+	payload, err := common.FormatStructuredResult(&common.StructuredResult{Summary: `{"schemaVersion":"orka.issueImplementation.v1","status":"patch_ready","summary":"safe patch"}`, BaseSHA: "base", Diff: diff, Files: []string{"internal/x.go"}})
+	if err != nil {
+		t.Fatalf("FormatStructuredResult() error = %v", err)
+	}
+	record := &store.ActionRecord{ID: "act-lookup-retry", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, ActionKind: repositoryMonitorIssueActionImplementation, SnapshotDigest: item.SnapshotDigest, TaskName: task.Name, CommandEventID: "cmd-lookup-retry", Verdict: "patch_ready", PayloadJSON: string(payload), CreatedAt: time.Now()}
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Store: monitorStore, ArtifactStore: monitorStore}
+	handled, err := reconciler.applyIssueActionRecord(ctx, monitor, item, record, task)
+	if handled || !errors.Is(err, lookupErr) {
+		t.Fatalf("applyIssueActionRecord() handled=%v err=%v, want retryable lookup error", handled, err)
+	}
+	storedItem, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorIssueKind, "55")
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if storedItem.WorkflowPhase != repositoryMonitorIssuePhaseImplementing || storedItem.SkipReason != "" {
+		t.Fatalf("stored item = %#v, want implementation state preserved for retry", storedItem)
+	}
+	job, err := monitorStore.GetImplementationJob(ctx, defaultNS, repositoryMonitorImplementationJobID(task.Name))
+	if err != nil {
+		t.Fatalf("GetImplementationJob() error = %v", err)
+	}
+	if job.Phase != repositoryMonitorIssuePhaseImplementationQueued || job.CompletedAt != nil || job.Error != "" {
+		t.Fatalf("implementation job = %#v, want non-terminal retryable state", job)
+	}
+	if action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(record.CommandEventID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorIssueActionImplementation))); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("implementation work action = %#v err=%v, want no terminal action", action, err)
 	}
 }
 
@@ -5657,7 +6536,7 @@ func TestRepositoryMonitorStateTransitionValidation(t *testing.T) {
 	if !repositoryMonitorPRPhaseTransitionAllowed("reviewed_needs_changes", "repair_queued") {
 		t.Fatal("reviewed_needs_changes should transition to repair_queued")
 	}
-	if repositoryMonitorPRPhaseTransitionAllowed("merge_ready", "repairing") {
+	if repositoryMonitorPRPhaseTransitionAllowed(repositoryMonitorAutomergeStateMergeReady, "repairing") {
 		t.Fatal("merge_ready should not jump directly to repairing")
 	}
 }
@@ -5670,7 +6549,12 @@ func TestRepositoryMonitorRunFailureState(t *testing.T) {
 	}{
 		{name: "github rate limited", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusForbidden, Body: "secondary rate limit"}, want: "github_rate_limited"},
 		{name: "github too many requests", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusTooManyRequests, Body: "slow down"}, want: "github_rate_limited"},
+		{name: "github request timeout", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusRequestTimeout, Body: "timed out"}, want: repositoryMonitorRunRetryScheduled},
 		{name: "github transient", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusBadGateway, Body: "bad gateway"}, want: "retry_scheduled"},
+		{name: "github conflict", err: &repositoryMonitorGitHubAPIError{Operation: "merge", StatusCode: http.StatusConflict, Body: "conflict"}, want: repositoryMonitorRunRetryScheduled},
+		{name: "github unprocessable", err: &repositoryMonitorGitHubAPIError{Operation: "merge", StatusCode: http.StatusUnprocessableEntity, Body: "retry"}, want: repositoryMonitorRunRetryScheduled},
+		{name: "github not found", err: &repositoryMonitorGitHubAPIError{Operation: "issues", StatusCode: http.StatusNotFound, Body: "missing"}, want: "run_failed"},
+		{name: "transport timeout", err: fmt.Errorf("dial tcp timeout"), want: "retry_scheduled"},
 		{name: "cluster capacity", err: fmt.Errorf("cluster capacity exhausted"), want: "cluster_capacity_blocked"},
 		{name: "llm", err: fmt.Errorf("llm_rate_limited by provider"), want: "llm_rate_limited"},
 	}
@@ -5680,6 +6564,297 @@ func TestRepositoryMonitorRunFailureState(t *testing.T) {
 				t.Fatalf("state = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRepositoryMonitorFailedRunPreservesTerminalActionAndApprovalMapping(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "terminal-action", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-terminal", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 12, Intent: repositoryMonitorCommandIntentApprovePlan}
+	actionKind := repositoryMonitorCommandActionKind(command.Intent)
+	if actionKind != repositoryMonitorIssueActionApprove {
+		t.Fatalf("approve_plan action kind = %q, want %q", actionKind, repositoryMonitorIssueActionApprove)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "approve")
+	completedAt := time.Now()
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "approve", Status: repositoryMonitorWorkActionStatusSucceeded, CompletedAt: &completedAt, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	if err := reconciler.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, &store.MonitorRun{ID: "run-terminal"}, "late run failure"); err != nil {
+		t.Fatalf("terminalizeRepositoryMonitorFailedCommand() error = %v", err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != repositoryMonitorWorkActionStatusSucceeded || action.Error != "" {
+		t.Fatalf("terminal action was downgraded: %#v", action)
+	}
+}
+
+func TestRepositoryMonitorPermanentCommandRunTerminalizesWorkAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "permanent-command", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-permanent", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 7, Intent: "review", HeadSHA: "head-7"}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+	completedAt := time.Now()
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "[run_failed] GitHub returned 404"}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "review")
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "review", Status: repositoryMonitorWorkActionStatusQueued, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v", handled, reset, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != repositoryMonitorWorkActionStatusFailed || action.Error == "" || action.CompletedAt == nil {
+		t.Fatalf("terminal action = %#v, want failed permanent outcome", action)
+	}
+}
+
+func TestRepositoryMonitorTransientCommandRunStopsAfterRetryBudget(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "retry-budget", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-budget", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 8, Intent: "review", HeadSHA: "head-8"}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+	completedAt := time.Now()
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "[retry_scheduled] upstream unavailable"}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "review")
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "review", Status: repositoryMonitorWorkActionStatusQueued, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	for i := range repositoryMonitorCommandMaxRetries {
+		if err := monitorStore.CreateMonitorEvent(ctx, &store.MonitorEvent{ID: fmt.Sprintf("evt-retry-%d", i), MonitorNamespace: defaultNS, MonitorName: monitor.Name, RunID: runID, EventType: "run_failed", CreatedAt: time.Now()}); err != nil {
+			t.Fatalf("CreateMonitorEvent(%d) error = %v", i, err)
+		}
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v", handled, reset, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != repositoryMonitorWorkActionStatusFailed || action.Error != "retry_attempts_exhausted" {
+		t.Fatalf("retry-exhausted action = %#v", action)
+	}
+}
+
+func TestRepositoryMonitorTransientAutomergeRunFinalizesAfterRetryBudget(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "automerge-retry-budget", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-automerge-budget", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 8, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "head-8"}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+	completedAt := time.Now()
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "[retry_scheduled] upstream unavailable"}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "8", Number: 8, State: repositoryMonitorItemStateOpen, HeadSHA: command.HeadSHA, AutomergeState: repositoryMonitorAutomergeStatePending, SkipReason: repositoryMonitorRunRetryScheduled}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, Status: repositoryMonitorAutomergeStatePending, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentAutomerge)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: repositoryMonitorCommandIntentAutomerge, Status: repositoryMonitorWorkActionStatusRunning, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	for i := range repositoryMonitorCommandMaxRetries {
+		if err := monitorStore.CreateMonitorEvent(ctx, &store.MonitorEvent{ID: fmt.Sprintf("evt-automerge-retry-%d", i), MonitorNamespace: defaultNS, MonitorName: monitor.Name, RunID: runID, EventType: "run_failed", CreatedAt: time.Now()}); err != nil {
+			t.Fatalf("CreateMonitorEvent(%d) error = %v", i, err)
+		}
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v", handled, reset, err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "8")
+	if err != nil || item.AutomergeState != repositoryMonitorAutomergeStateFailed || item.SkipReason != "retry_attempts_exhausted" {
+		t.Fatalf("retry-exhausted item = %#v err=%v", item, err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil || mutation.Status != repositoryMonitorRunPhaseFailed || mutation.Error != "retry_attempts_exhausted" {
+		t.Fatalf("retry-exhausted mutation = %#v err=%v", mutation, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusFailed || action.Error != "retry_attempts_exhausted" {
+		t.Fatalf("retry-exhausted action = %#v err=%v", action, err)
+	}
+}
+
+func TestRepositoryMonitorBlockedAutomergeRetryFinalizesMutationWithoutRewritingNewHead(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "automerge-blocked-retry", Namespace: defaultNS}}
+	command := &store.CommandEvent{ID: "cmd-automerge-stale-retry", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 9, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "old-head", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "9", Number: 9, State: repositoryMonitorItemStateOpen, HeadSHA: "new-head", AutomergeState: repositoryMonitorAutomergeStateMergeReady}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, Status: repositoryMonitorAutomergeStatePending, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentAutomerge)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: repositoryMonitorCommandIntentAutomerge, Status: repositoryMonitorWorkActionStatusRunning, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	run := &store.MonitorRun{ID: "run-automerge-stale-retry", CommandEventID: command.ID, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA}
+	if err := reconciler.blockRepositoryMonitorTargetCommand(ctx, monitor, run, repositoryMonitorReviewSkipReasonStaleHead); err != nil {
+		t.Fatalf("blockRepositoryMonitorTargetCommand() error = %v", err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "9")
+	if err != nil || item.HeadSHA != "new-head" || item.AutomergeState != repositoryMonitorAutomergeStateMergeReady || item.SkipReason != "" {
+		t.Fatalf("new-head item was rewritten: %#v err=%v", item, err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil || mutation.Status != repositoryMonitorRunPhaseFailed || mutation.Error != repositoryMonitorReviewSkipReasonStaleHead {
+		t.Fatalf("blocked retry mutation = %#v err=%v", mutation, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != repositoryMonitorReviewSkipReasonStaleHead {
+		t.Fatalf("blocked retry action = %#v err=%v", action, err)
+	}
+}
+
+func TestRepositoryMonitorAutomergeTerminalizationPreservesSucceededMutation(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "automerge-preserve-success", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-automerge-success", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 10, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "head-10"}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "10", Number: 10, State: repositoryMonitorItemStateOpen, HeadSHA: command.HeadSHA, AutomergeState: repositoryMonitorAutomergeStatePending}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, ExternalID: "merge-sha", Status: repositoryMonitorRunPhaseSucceeded, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentAutomerge)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: repositoryMonitorCommandIntentAutomerge, Status: repositoryMonitorWorkActionStatusRunning, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	if err := reconciler.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, &store.MonitorRun{ID: "run-automerge-success"}, "retry_attempts_exhausted"); err != nil {
+		t.Fatalf("terminalizeRepositoryMonitorFailedCommand() error = %v", err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "10")
+	if err != nil || item.State != repositoryMonitorAutomergeStateMerged || item.AutomergeState != repositoryMonitorAutomergeStateMerged || item.SkipReason != "" {
+		t.Fatalf("merged item was downgraded: %#v err=%v", item, err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil || mutation.Status != repositoryMonitorRunPhaseSucceeded || mutation.ExternalID != "merge-sha" || mutation.Error != "" {
+		t.Fatalf("successful mutation was downgraded: %#v err=%v", mutation, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusSucceeded || action.Error != "" || action.CompletedAt == nil {
+		t.Fatalf("successful action was not finalized: %#v err=%v", action, err)
+	}
+}
+
+func TestRepositoryMonitorMergedDifferentHeadDoesNotSucceedStaleAutomerge(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "automerge-stale-merged", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-automerge-old-head", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 11, Intent: repositoryMonitorCommandIntentAutomerge, HeadSHA: "old-head"}
+	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "11", Number: 11, State: repositoryMonitorAutomergeStateMerged, HeadSHA: "new-head", AutomergeState: repositoryMonitorAutomergeStateMerged}); err != nil {
+		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(command.ID+"-merge")
+	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: mutationID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, Operation: "merge_pr", TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, Status: repositoryMonitorAutomergeStatePending, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, repositoryMonitorCommandIntentAutomerge)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: repositoryMonitorCommandIntentAutomerge, Status: repositoryMonitorWorkActionStatusRunning, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	if err := reconciler.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, &store.MonitorRun{ID: "run-automerge-old-head"}, "retry_attempts_exhausted"); err != nil {
+		t.Fatalf("terminalizeRepositoryMonitorFailedCommand() error = %v", err)
+	}
+	mutation, err := monitorStore.GetGitHubMutationRecord(ctx, defaultNS, mutationID)
+	if err != nil || mutation.Status != repositoryMonitorRunPhaseFailed {
+		t.Fatalf("stale-head mutation = %#v err=%v, want failed", mutation, err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusFailed {
+		t.Fatalf("stale-head action = %#v err=%v, want failed", action, err)
+	}
+	item, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "11")
+	if err != nil || item.HeadSHA != "new-head" || item.AutomergeState != repositoryMonitorAutomergeStateMerged {
+		t.Fatalf("new merged item was rewritten: %#v err=%v", item, err)
+	}
+}
+
+func TestRepositoryMonitorTransientCommandRunRetriesWithBackoff(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "retry-command", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-retry", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 7, Intent: "review", HeadSHA: "head-7"}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+	completedAt := time.Now()
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, Trigger: repositoryMonitorTriggerLabelCommand, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "[retry_scheduled] upstream unavailable"}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || !reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v", handled, reset, err)
+	}
+	run, err := monitorStore.GetMonitorRun(ctx, defaultNS, runID)
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.Phase != repositoryMonitorRunPhaseQueued || run.CompletedAt != nil || run.Error != "" || !run.StartedAt.After(time.Now()) {
+		t.Fatalf("retried run = %#v, want delayed queued state", run)
+	}
+	processed, requeueAfter, err := reconciler.processNextQueuedMonitorRun(ctx, monitor, "orka-agents", "orka")
+	if err != nil || processed != nil || requeueAfter <= 0 {
+		t.Fatalf("processNextQueuedMonitorRun() = processed=%#v requeueAfter=%s err=%v", processed, requeueAfter, err)
+	}
+}
+
+func TestRepositoryMonitorRunSignalFailureRemainsRetryable(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "signal-retry", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-signal", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 9, Intent: "review", HeadSHA: "head-9"}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+	completedAt := time.Now()
+	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "failed to signal repository monitor run: conflict"}); err != nil {
+		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || !reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v", handled, reset, err)
+	}
+	run, err := monitorStore.GetMonitorRun(ctx, defaultNS, runID)
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.Phase != repositoryMonitorRunPhaseQueued || run.CompletedAt != nil || run.Error != "" {
+		t.Fatalf("signal retry run = %#v, want queued reset", run)
 	}
 }
 
@@ -5931,6 +7106,71 @@ func TestRepositoryMonitorValidationRejectsCopilotImplementer(t *testing.T) {
 	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
 	if err != nil || reason != repositoryMonitorReasonUnsupportedImplementerAgent || !strings.Contains(message, "cannot use copilot") {
 		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	}
+}
+
+func TestRepositoryMonitorValidationRejectsFoundryImplementer(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	pullRequestsEnabled := false
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "foundry-implementer", Namespace: defaultNS}}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeClaude, "foundry-runtime")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "foundry-runtime", Namespace: defaultNS}, Data: map[string][]byte{
+		workerenv.AnthropicAPIKey: []byte("direct-value"),
+		"CLAUDE_CODE_USE_FOUNDRY": []byte("1"),
+	}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, secret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl}
+	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
+	if err != nil || reason != repositoryMonitorReasonImplementerAuthInvalid || !strings.Contains(message, "cannot use Azure AI Foundry") {
+		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	}
+}
+
+func TestRepositoryMonitorMutableImplementerCredentialCreatesImmutableTaskSnapshot(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	pullRequestsEnabled := false
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "mutable-implementer", Namespace: defaultNS}}
+	monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+	monitor.Spec.Targets.Issues.Enabled = true
+	monitor.Spec.Agents.Implementer = &corev1alpha1.AgentReference{Name: "implementer"}
+	agent := repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "mutable-runtime")
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "mutable-runtime", Namespace: defaultNS}, Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("credential")}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, secret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme}
+	reason, message, err := reconciler.validateRepositoryMonitorImplementerAgent(ctx, monitor)
+	if err != nil || reason != "" || message != "" {
+		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	}
+	binding, err := reconciler.repositoryMonitorImplementationRuntimeCredentialBinding(ctx, monitor, "impl-mutable-source", monitor.Spec.Agents.Implementer)
+	if err != nil {
+		t.Fatalf("repositoryMonitorImplementationRuntimeCredentialBinding() error = %v", err)
+	}
+	if binding.authRef == nil || binding.authRef.Name == secret.Name {
+		t.Fatalf("binding = %#v, want per-task snapshot", binding)
+	}
+	var snapshot corev1.Secret
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: binding.authRef.Name}, &snapshot); err != nil {
+		t.Fatalf("Get snapshot error = %v", err)
+	}
+	if snapshot.Immutable == nil || !*snapshot.Immutable || string(snapshot.Data[workerenv.OpenAIAPIKey]) != "credential" || !metav1.IsControlledBy(&snapshot, monitor) {
+		t.Fatalf("snapshot = %#v, want immutable monitor-owned copy", snapshot)
 	}
 }
 

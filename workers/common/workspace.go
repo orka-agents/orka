@@ -93,11 +93,11 @@ func PrepareWorkspace(workDir string) error {
 	}
 
 	sr := ParseStructuredResult(resultResp.Result)
-	if sr.Diff == "" {
-		return nil
-	}
 	if err := validatePriorTaskDiffDigest(sr.Diff); err != nil {
 		return err
+	}
+	if sr.Diff == "" {
+		return nil
 	}
 
 	// Warn if HEAD doesn't match the base SHA of the prior result.

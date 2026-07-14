@@ -2979,15 +2979,20 @@ func TestAddSecretVolumes_RuntimeAuthOnlyFiltersGitHubToken(t *testing.T) {
 			workerenv.GitHubToken:  []byte("y"),
 		},
 	}
+	immutable := true
 	taskConfig := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "implementation-task-config", Namespace: defaultNS},
-		Data:       map[string][]byte{"CONFIG_VALUE": []byte("task-only")},
+		ObjectMeta: metav1.ObjectMeta{Name: "implementation-task-config", Namespace: defaultNS, UID: "uid-implementation-task-config"},
+		Data: map[string][]byte{
+			workerenv.OpenAIAPIKey: []byte("task-pinned"),
+			"CONFIG_VALUE":         []byte("task-only"),
+		},
+		Immutable: &immutable,
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, taskConfig).Build()
 	jb := NewJobBuilder(fc)
 	jb.ControllerURL = testControllerURL
 	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "implementer", Namespace: defaultNS},
+		ObjectMeta: metav1.ObjectMeta{Name: "implementer", Namespace: defaultNS, UID: "uid-implementer"},
 		Spec: corev1alpha1.AgentSpec{
 			Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 			SecretRef: &corev1.LocalObjectReference{Name: secret.Name},
@@ -2999,7 +3004,12 @@ func TestAddSecretVolumes_RuntimeAuthOnlyFiltersGitHubToken(t *testing.T) {
 			Namespace: defaultNS,
 			UID:       "uid-1234-5678",
 			Annotations: map[string]string{
-				labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue,
+				labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+				repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+				repositoryMonitorIssueAnnotationRuntimeAgentUID:        "uid-implementer",
+				repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+				repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-implementation-task-config",
+				repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -3029,11 +3039,41 @@ func TestAddSecretVolumes_RuntimeAuthOnlyFiltersGitHubToken(t *testing.T) {
 			t.Fatal("runtime-auth-only task secret was mounted into the worker container")
 		}
 	}
-	if env, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.OpenAIAPIKey); !ok || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+	if env, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.OpenAIAPIKey); !ok || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil || env.ValueFrom.SecretKeyRef.Name != taskConfig.Name {
 		t.Fatalf("scoped model credential env = %#v, found=%v", env, ok)
 	}
 	if _, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.GitHubToken); ok {
 		t.Fatalf("%s was exposed to implementation task", workerenv.GitHubToken)
+	}
+}
+
+func TestAddSecretVolumes_RuntimeAuthOnlyUnpinnedTaskSecretUsesAgentRuntime(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = corev1alpha1.AddToScheme(scheme)
+	agentRuntime := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime", Namespace: defaultNS}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey: []byte("agent-value"),
+	}}
+	taskConfig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "task-config", Namespace: defaultNS}, Data: map[string][]byte{
+		"CONFIG_VALUE": []byte("task-only"),
+	}}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agentRuntime, taskConfig).Build()
+	builder := NewJobBuilder(fakeClient)
+	builder.ControllerURL = testControllerURL
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
+		Runtime:   &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		SecretRef: &corev1.LocalObjectReference{Name: agentRuntime.Name},
+	}}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, Annotations: map[string]string{
+		labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue,
+	}}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, SecretRef: &corev1alpha1.SecretReference{Name: taskConfig.Name}}}
+	job, err := builder.Build(context.Background(), task, agent, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	env, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.OpenAIAPIKey)
+	if !ok || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil || env.ValueFrom.SecretKeyRef.Name != agentRuntime.Name {
+		t.Fatalf("runtime env = %#v found=%v, want agent runtime Secret", env, ok)
 	}
 }
 

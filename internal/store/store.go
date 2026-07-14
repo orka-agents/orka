@@ -157,6 +157,7 @@ type RepositoryMonitorStore interface {
 	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason string) (int, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error
+	UpdateActionRecord(ctx context.Context, record *ActionRecord) error
 	GetActionRecord(ctx context.Context, namespace, id string) (*ActionRecord, error)
 	ListActionRecords(ctx context.Context, filter ActionRecordFilter) ([]ActionRecord, string, error)
 
@@ -180,6 +181,7 @@ type RepositoryMonitorStore interface {
 	ListImplementationJobs(ctx context.Context, filter ImplementationJobFilter) ([]ImplementationJob, string, error)
 
 	CreateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
+	UpdateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
 	GetGitHubMutationRecord(ctx context.Context, namespace, id string) (*GitHubMutationRecord, error)
 	ListGitHubMutationRecords(ctx context.Context, filter GitHubMutationRecordFilter) ([]GitHubMutationRecord, string, error)
 

@@ -868,7 +868,7 @@ func TestServerRunTurnEmitsTaskRunSpanFromTraceparentMetadata(t *testing.T) {
 	}
 }
 
-func TestServerStripsGitCredentialsFromRuntimeAuthOnlyCommandEnv(t *testing.T) {
+func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic.Command = wrapperTestShellPath
@@ -890,10 +890,7 @@ func TestServerStripsGitCredentialsFromRuntimeAuthOnlyCommandEnv(t *testing.T) {
 	}
 	frames := collectWrapperFrames(t, client, request.TurnID, 0)
 	last := frames[len(frames)-1]
-	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
-		t.Fatalf("last frame = %#v, want completed", last)
-	}
-	if strings.Contains(last.Completed.Result, "x") || strings.Contains(last.Completed.Result, "y") {
-		t.Fatalf("runtime-auth-only command received git credentials: %q", last.Completed.Result)
+	if last.Type != harness.FrameTurnFailed || last.Failed == nil || last.Failed.Reason != "runtime_auth_proxy_failed" {
+		t.Fatalf("last frame = %#v, want runtime auth proxy failure", last)
 	}
 }

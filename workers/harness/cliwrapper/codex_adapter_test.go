@@ -422,6 +422,28 @@ func TestCodexAdapterIgnoresTurnEnvOpenAIBaseURL(t *testing.T) {
 	}
 }
 
+func TestCodexAdapterRuntimeAuthOnlyPrefersProtectedTurnBaseURL(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIBaseURL, "https://operator.example.invalid/v1")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt:   "do work",
+		Metadata: map[string]string{"runtimeAuthOnly": "true"},
+		Env:      []string{workerenv.OpenAIBaseURL + "=http://127.0.0.1:4321/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "openai_base_url=http://127.0.0.1:4321/v1") {
+		t.Fatalf("args = %q, want protected turn base URL", joined)
+	}
+	if !containsEnv(spec.Env, workerenv.OpenAIBaseURL+"=http://127.0.0.1:4321/v1") {
+		t.Fatalf("env = %#v, want protected turn base URL", spec.Env)
+	}
+}
+
 func TestCodexAdapterIgnoresTurnEnvSandboxPolicy(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.CodexSandboxMode, "")

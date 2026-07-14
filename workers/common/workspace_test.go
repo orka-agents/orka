@@ -1082,4 +1082,7 @@ func TestValidatePriorTaskDiffDigest(t *testing.T) {
 	if err := validatePriorTaskDiffDigest(diff); err == nil {
 		t.Fatal("validatePriorTaskDiffDigest accepted mismatched diff")
 	}
+	if err := validatePriorTaskDiffDigest(""); err == nil {
+		t.Fatal("validatePriorTaskDiffDigest accepted a missing diff when a digest was required")
+	}
 }

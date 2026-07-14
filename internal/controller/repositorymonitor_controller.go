@@ -44,6 +44,7 @@ const (
 	repositoryMonitorRunPhaseRunning   = "running"
 	repositoryMonitorRunPhaseSucceeded = "succeeded"
 	repositoryMonitorRunPhaseFailed    = "failed"
+	repositoryMonitorRunRetryScheduled = "retry_scheduled"
 
 	repositoryMonitorRunningRunTimeout = 30 * time.Minute
 	repositoryMonitorValidationRetry   = time.Minute
@@ -68,7 +69,9 @@ type RepositoryMonitorReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// Secret write/list verbs are already present in generated and Helm RBAC for Task reconciliation;
+// keep this marker explicit because RepositoryMonitor also manages per-task runtime auth snapshots.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;create;delete
 
 // Reconcile keeps monitor metadata durable and publishes basic status.
 func (r *RepositoryMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -314,6 +317,9 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorImplementerAgent(
 		}
 		if !scopedAgentRuntimeSecretHasCredential(&secret, &agent) {
 			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q credential Secret %q has no supported key for runtime %q", ref.Name, secretName, agent.Spec.Runtime.Type), nil
+		}
+		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeClaude && repositoryMonitorClaudeFoundryConfigured(secret.Data) {
+			return repositoryMonitorReasonImplementerAuthInvalid, fmt.Sprintf("spec.agents.implementer %q cannot use Azure AI Foundry credentials because implementation tasks require the local runtime auth proxy", ref.Name), nil
 		}
 		return "", "", nil
 	case corev1alpha1.AgentRuntimeCopilot:
@@ -706,6 +712,9 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	}
 
 	run := runs[0]
+	if requeueAfter := time.Until(run.StartedAt); requeueAfter > 0 {
+		return nil, requeueAfter, nil
+	}
 	run.Phase = repositoryMonitorRunPhaseRunning
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
@@ -728,12 +737,33 @@ func (r *RepositoryMonitorReconciler) processNextQueuedMonitorRun(ctx context.Co
 	run.CreatedTaskCount = createdTasks
 	run.SkippedCount = skipped
 	if processErr != nil {
+		failureState := repositoryMonitorRunFailureState(processErr)
+		if strings.TrimSpace(run.CommandEventID) == "" && repositoryMonitorFailedCommandRunRetryable("["+failureState+"]") {
+			events, _, listErr := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
+			if listErr != nil {
+				return nil, 0, listErr
+			}
+			if len(events) < repositoryMonitorCommandMaxRetries {
+				run.Phase = repositoryMonitorRunPhaseQueued
+				run.StartedAt = time.Now().Add(repositoryMonitorCommandRetryDelay)
+				run.CompletedAt = nil
+				run.Error = ""
+				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
+					return nil, 0, err
+				}
+				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{"state": failureState}); eventErr != nil {
+					return nil, 0, eventErr
+				}
+				return &run, repositoryMonitorCommandRetryDelay, nil
+			}
+			failureState = "run_failed"
+			processErr = fmt.Errorf("retry_attempts_exhausted: %w", processErr)
+		}
 		run.Phase = repositoryMonitorRunPhaseFailed
-		run.Error = processErr.Error()
+		run.Error = fmt.Sprintf("[%s] %s", failureState, processErr.Error())
 		if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 			return nil, 0, err
 		}
-		failureState := repositoryMonitorRunFailureState(processErr)
 		metrics.RecordRepositoryMonitorBlock(failureState)
 		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_failed", repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{"state": failureState}); eventErr != nil {
 			return nil, 0, eventErr
@@ -776,7 +806,7 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 
 	run.Phase = repositoryMonitorRunPhaseFailed
 	run.CompletedAt = &now
-	run.Error = fmt.Sprintf("repository monitor run did not complete within %s and was marked failed", repositoryMonitorRunningRunTimeout)
+	run.Error = fmt.Sprintf("[retry_scheduled] repository monitor run did not complete within %s and was marked failed", repositoryMonitorRunningRunTimeout)
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
 	}
@@ -798,8 +828,17 @@ func repositoryMonitorRunFailureState(err error) string {
 		if ghErr.StatusCode == http.StatusTooManyRequests || (ghErr.StatusCode == http.StatusForbidden && repositoryMonitorGitHubErrorLooksRateLimited(ghErr.Body)) {
 			return "github_rate_limited"
 		}
+		if ghErr.StatusCode == http.StatusRequestTimeout {
+			return repositoryMonitorRunRetryScheduled
+		}
+		if ghErr.StatusCode == http.StatusConflict || ghErr.StatusCode == http.StatusUnprocessableEntity {
+			return repositoryMonitorRunRetryScheduled
+		}
 		if ghErr.StatusCode >= 500 {
-			return "retry_scheduled"
+			return repositoryMonitorRunRetryScheduled
+		}
+		if ghErr.StatusCode >= 400 && ghErr.StatusCode < 500 {
+			return "run_failed"
 		}
 	}
 	lower := strings.ToLower(err.Error())
@@ -809,7 +848,7 @@ func repositoryMonitorRunFailureState(err error) string {
 	if strings.Contains(lower, "llm_rate_limited") || strings.Contains(lower, "llm rate limited") {
 		return "llm_rate_limited"
 	}
-	return "retry_scheduled"
+	return repositoryMonitorRunRetryScheduled
 }
 
 func (r *RepositoryMonitorReconciler) updateStatusAfterMonitorRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun) error {
@@ -883,7 +922,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorStatusCounts(ctx context.
 			continue
 		}
 		counts.openPullRequests++
-		if item.LastVerdict == repositoryMonitorReviewVerdictPassed && item.LastReviewedHeadSHA == item.HeadSHA && item.RepairState == "" && item.SkipReason == "" {
+		if item.LastVerdict == repositoryMonitorReviewVerdictPassed && item.LastReviewedHeadSHA == item.HeadSHA && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) && item.SkipReason == "" {
 			counts.mergeReadyItems++
 		}
 		if item.RepairState == repositoryMonitorRepairPhaseQueued {

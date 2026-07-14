@@ -28,6 +28,7 @@ const (
 	repositoryMonitorRepairPhaseFailed     = "failed"
 	repositoryMonitorRepairPRBudgetReason  = "repair_pr_budget_exhausted"
 	repositoryMonitorRepairTaskCreateError = "repair_task_create_failed"
+	repositoryMonitorCommandIntentFix      = "fix"
 )
 
 //nolint:gocyclo // PR command safety gates are intentionally explicit.
@@ -44,19 +45,25 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 	}
 	switch command.Intent {
 	case repositoryMonitorCommandIntentStop:
-		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, "stopped_by_command"); err != nil {
+		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
 			return true, 0, err
 		}
-		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, "stopped_by_command"); err != nil {
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorIssueSkipStoppedByCommand); err != nil {
 			return true, 0, err
 		}
-		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusSucceeded, "blocked", "", "stopped_by_command"); err != nil {
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentStop, repositoryMonitorWorkActionStatusSucceeded, "blocked", "", repositoryMonitorIssueSkipStoppedByCommand); err != nil {
 			return true, 0, err
 		}
 		item.RepairState = repositoryMonitorRepairPhaseFailed
-		item.SkipReason = "stopped_by_command"
+		item.SkipReason = repositoryMonitorIssueSkipStoppedByCommand
 		return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 	case repositoryMonitorCommandIntentResume:
+		if repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "" {
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusBlocked, "resume_blocked", "", repositoryMonitorSkipReasonBlockedLabel); err != nil {
+				return true, 0, err
+			}
+			return true, 0, nil
+		}
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorCommandIntentResume, repositoryMonitorWorkActionStatusSucceeded, "resumed", "", ""); err != nil {
 			return true, 0, err
 		}
@@ -117,7 +124,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			return true, 1, nil
 		}
 		return true, 0, nil
-	case "fix", "fix_ci", "update_branch":
+	case repositoryMonitorCommandIntentFix, "fix_ci", "update_branch":
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.RepairState = repositoryMonitorRepairPhaseFailed
 			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
@@ -345,7 +352,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 }
 
 func repositoryMonitorRepairWorkflowActionKind(intent string) string {
-	if strings.TrimSpace(intent) == "fix" {
+	if strings.TrimSpace(intent) == repositoryMonitorCommandIntentFix {
 		return "pr_repair"
 	}
 	return strings.TrimSpace(intent)
@@ -387,7 +394,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		} else if cancelled {
 			completedAt := time.Now()
 			job.Phase = repositoryMonitorRepairPhaseFailed
-			job.LastError = "stopped_by_command"
+			job.LastError = repositoryMonitorIssueSkipStoppedByCommand
 			job.CompletedAt = &completedAt
 			if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
 				return ingested, err

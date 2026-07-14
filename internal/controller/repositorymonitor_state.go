@@ -36,14 +36,14 @@ func repositoryMonitorPRPhaseTransitionAllowed(from, to string) bool {
 		"discovered":             {"review_queued": {}, "blocked": {}, "closed": {}},
 		"review_queued":          {"reviewing": {}, "blocked": {}, "closed": {}},
 		"reviewing":              {"reviewed_passed": {}, "reviewed_needs_changes": {}, "blocked": {}, "closed": {}},
-		"reviewed_passed":        {"merge_ready": {}, "head_updated": {}, "ci_failed": {}, "blocked": {}, "closed": {}},
+		"reviewed_passed":        {repositoryMonitorAutomergeStateMergeReady: {}, "head_updated": {}, "ci_failed": {}, "blocked": {}, "closed": {}},
 		"reviewed_needs_changes": {"repair_queued": {}, "head_updated": {}, "blocked": {}, "closed": {}},
 		"ci_failed":              {"repair_queued": {}, "head_updated": {}, "blocked": {}, "closed": {}},
 		"repair_queued":          {"repairing": {}, "blocked": {}, "closed": {}},
 		"repairing":              {"head_updated": {}, "review_queued": {}, "blocked": {}, "closed": {}},
 		"head_updated":           {"review_queued": {}, "blocked": {}, "closed": {}},
-		"merge_ready":            {"head_updated": {}, "blocked": {}, "closed": {}},
-		"blocked":                {"review_queued": {}, "repair_queued": {}, "closed": {}},
+		repositoryMonitorAutomergeStateMergeReady: {"head_updated": {}, "blocked": {}, "closed": {}},
+		"blocked": {"review_queued": {}, "repair_queued": {}, "closed": {}},
 	}
 	_, ok := allowed[from][to]
 	return ok
