@@ -344,7 +344,7 @@ Pull request command labels can start bounded controller-tracked repair tasks:
 - `orka:fix-ci` queues a CI repair task using the same repair path.
 - `orka:update-branch` queues a base-update repair task and allows empty push-branch updates.
 
-Repair jobs are stored durably and linked to monitor items. Successful repairs clear stale review state so the next exact-head review can recompute readiness. A PR with a passed exact-head review and no active repair is surfaced as merge-ready state for humans to merge; Orka still does not merge automatically.
+Repair jobs are stored durably and linked to monitor items. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready state for humans to merge; Orka only merges automatically when the optional automerge workflow below is explicitly enabled.
 
 
 ## Optional Automerge

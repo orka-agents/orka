@@ -54,7 +54,7 @@ commands=(
   "monitor work-actions" "monitor work-actions list" "monitor work-actions get"
   "monitor implementations" "monitor implementations list" "monitor implementations get"
   "monitor mutations" "monitor mutations list" "monitor mutations get"
-  "monitor issue" "monitor issue triage" "monitor issue research" "monitor issue plan" "monitor issue approve-plan" "monitor issue implement" "monitor issue stop" "monitor issue resume" "monitor issue status" "monitor issue implementation" "monitor issue implementation get" "monitor issue patch" "monitor issue patch preview"
+  "monitor issue" "monitor issue triage" "monitor issue research" "monitor issue plan" "monitor issue approve-plan" "monitor issue implement" "monitor issue decompose" "monitor issue stop" "monitor issue resume" "monitor issue status" "monitor issue implementation" "monitor issue implementation get" "monitor issue patch" "monitor issue patch preview"
   "monitor pr" "monitor pr review" "monitor pr fix" "monitor pr fix-ci" "monitor pr update-branch" "monitor pr automerge" "monitor pr stop" "monitor pr resume" "monitor pr status" "monitor pr repairs" "monitor pr repairs list" "monitor pr ready" "monitor pr ready list" "monitor pr ready readiness"
   "monitor doctor" "monitor watch" "monitor trigger-labels" "monitor trigger-labels validate" "monitor events"
   "substrate" "substrate pool" "substrate pool list" "substrate pool get" "substrate pool create" "substrate pool update" "substrate pool delete"

@@ -248,17 +248,39 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		return err
 	}
 
-	response, err := r.createRepositoryMonitorPullRequestReview(ctx, owner, repository, token, item.Number, repositoryMonitorPullRequestReviewRequest{
-		CommitID: reviewedHead,
-		Event:    repositoryMonitorPublishEventComment,
-		Body:     body,
-		Comments: comments,
-	})
-	if err != nil {
-		_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review-failed"), RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", Status: "failed", Error: err.Error()})
-		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "create_review"})
+	mutationID := "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review")
+	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", Status: repositoryMonitorAutomergeStateStarted}
+	existing, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
+	if mutationErr == nil {
+		mutation = existing
+	} else if errors.Is(mutationErr, store.ErrNotFound) {
+		if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+			return err
+		}
+	} else {
+		return mutationErr
 	}
-	_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review"), RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", GitHubURL: response.HTMLURL, ExternalID: strconv.FormatInt(response.ID, 10), Status: "succeeded"})
+	response := &repositoryMonitorPullRequestReviewResponse{HTMLURL: mutation.GitHubURL}
+	if mutation.Status == repositoryMonitorRunPhaseSucceeded {
+		response.ID, _ = strconv.ParseInt(mutation.ExternalID, 10, 64)
+	} else {
+		response, err = r.createRepositoryMonitorPullRequestReview(ctx, owner, repository, token, item.Number, repositoryMonitorPullRequestReviewRequest{CommitID: reviewedHead, Event: repositoryMonitorPublishEventComment, Body: body, Comments: comments})
+		if err != nil {
+			mutation.Status = repositoryMonitorRunPhaseFailed
+			mutation.Error = err.Error()
+			if auditErr := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); auditErr != nil {
+				return fmt.Errorf("publish review failed: %w; additionally failed to update mutation audit: %v", err, auditErr)
+			}
+			return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "create_review"})
+		}
+		mutation.Status = repositoryMonitorRunPhaseSucceeded
+		mutation.Error = ""
+		mutation.GitHubURL = response.HTMLURL
+		mutation.ExternalID = strconv.FormatInt(response.ID, 10)
+		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+			return err
+		}
+	}
 	publishRecord.Phase = repositoryMonitorPublishPhaseSucceeded
 	publishRecord.GitHubReviewID = strconv.FormatInt(response.ID, 10)
 	publishRecord.GitHubReviewURL = response.HTMLURL

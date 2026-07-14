@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -591,6 +592,7 @@ func newMonitorIssueWorkflowCmd() *cobra.Command {
 		{"plan <name> <number>", "Queue issue planning", "plan"},
 		{"approve-plan <name> <number>", "Approve the current issue plan", "approve_plan"},
 		{"implement <name> <number>", "Queue issue implementation", "implement"},
+		{"decompose <name> <number>", "Queue issue decomposition", "decompose"},
 		{"stop <name> <number>", "Stop issue automation", "stop"},
 		{"resume <name> <number>", "Resume issue automation", "resume"},
 	} {
@@ -751,11 +753,24 @@ func newMonitorPRRepairsCmd() *cobra.Command {
 		Short: "List repair jobs for a PR",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			q := mergeQuery(map[string]string{}, "name", args[0], "kind", "pull_request", "number", args[1], "desiredAction", "repair", "limit", "20")
+			q := mergeQuery(map[string]string{}, "name", args[0], "kind", "pull_request", "number", args[1], "limit", "100")
 			c := newClientFromCmd(cmd)
 			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/work-actions", q, nil)
 			if err != nil {
 				return err
+			}
+			if body, ok := result.(map[string]any); ok {
+				if items, ok := body["items"].([]any); ok {
+					filtered := make([]any, 0, len(items))
+					for _, raw := range items {
+						item, _ := raw.(map[string]any)
+						switch fmt.Sprint(item["desiredAction"]) {
+						case "repair", "fix_ci", "update_branch":
+							filtered = append(filtered, raw)
+						}
+					}
+					body["items"] = filtered
+				}
 			}
 			return printStructured(cmd, result)
 		},
@@ -776,6 +791,9 @@ func newMonitorPRReadyCmd() *cobra.Command {
 			c := newClientFromCmd(cmd)
 			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/repositories/"+url.PathEscape(args[0])+"/items", q, nil)
 			if err != nil {
+				return err
+			}
+			if err := validateMonitorTriggerLabels(result); err != nil {
 				return err
 			}
 			return printStructured(cmd, result)
@@ -799,6 +817,33 @@ func newMonitorPRReadyCmd() *cobra.Command {
 	addOutputFlag(readinessCmd, outputYAML)
 	cmd.AddCommand(listCmd, readinessCmd)
 	return cmd
+}
+
+func validateMonitorTriggerLabels(result any) error {
+	body, ok := result.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected monitor response shape")
+	}
+	spec, _ := body["spec"].(map[string]any)
+	triggers, _ := spec["triggers"].(map[string]any)
+	github, _ := triggers["github"].(map[string]any)
+	labels, _ := github["labels"].(map[string]any)
+	seen := map[string]string{}
+	for _, groupName := range []string{"issues", "pullRequests"} {
+		group, _ := labels[groupName].(map[string]any)
+		for intent, raw := range group {
+			label := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+			if label == "" {
+				continue
+			}
+			key := groupName + "." + intent
+			if previous := seen[label]; previous != "" {
+				return fmt.Errorf("trigger label %q is configured for both %s and %s", label, previous, key)
+			}
+			seen[label] = key
+		}
+	}
+	return nil
 }
 
 func newMonitorDoctorCmd() *cobra.Command {
