@@ -1075,6 +1075,9 @@ func (s *server) recordContinueResults(
 		if !toolResultFrameFitsSSE(frame) {
 			maps.Copy(turn.submittedDigests, turn.bufferedDigests)
 			maps.Copy(turn.submittedDigests, newDigests)
+			if _, reused := s.runtimeSessions[turn.request.RuntimeSessionID]; reused {
+				s.quarantineRuntimeSessionLocked(turn)
+			}
 			s.appendFailedLocked(
 				turn,
 				"brokered_tool_result_frame_too_large",

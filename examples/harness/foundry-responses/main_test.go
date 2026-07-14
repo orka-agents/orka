@@ -2617,6 +2617,10 @@ func TestResponsesTerminalFailureSuppressesPendingToolFrames(t *testing.T) {
 		submittedDigests:    map[string]toolResultDigest{},
 	}
 	server.turns[request.TurnID] = turn
+	server.runtimeSessions[request.RuntimeSessionID] = foundrySession{
+		ID:       existingSessionID,
+		LastSeen: time.Now().UTC(),
+	}
 	server.appendFrameLocked(turn, harness.FrameTurnStarted, "foundry hosted response started")
 	server.handleResponsesResponse(turn, responsesResponse{
 		ID:     "resp-1",
@@ -2644,6 +2648,12 @@ func TestResponsesTerminalFailureSuppressesPendingToolFrames(t *testing.T) {
 	second := toolResultForRequest(request, "call-2", true, oversizedOutput, nil)
 	if _, err := server.recordContinueResults(turn, []harness.ToolCallResult{second}); err == nil {
 		t.Fatal("oversized second result error = nil")
+	}
+	if _, retained := server.runtimeSessions[request.RuntimeSessionID]; retained {
+		t.Fatal("oversized result failure retained reused runtime session")
+	}
+	if _, quarantined := server.quarantinedSessions[request.RuntimeSessionID]; !quarantined {
+		t.Fatal("oversized result failure did not quarantine reused runtime session")
 	}
 
 	adapter := httptest.NewServer(server.handler())
