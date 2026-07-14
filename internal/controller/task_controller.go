@@ -59,6 +59,11 @@ const (
 	failedMountEventStaleAfter                    = 2 * time.Minute
 	podLogLimitBytes                              = int64(5 << 20)
 	stdoutResultLogLimitBytes                     = int64(15 << 20)
+	terminalResultCollectionMaxAttempts           = 3
+	terminalResultCollectionRetryDelay            = time.Second
+	terminalResultCollectionAttemptsAnnotation    = "orka.ai/terminal-result-collection-attempts"
+	terminalResultCollectionExecutionAnnotation   = "orka.ai/terminal-result-collection-execution"
+	terminalResultCollectionRetryAtAnnotation     = "orka.ai/terminal-result-collection-retry-at"
 	maxResolvedApprovalsJSONForWorkerEnvBytes     = 32 * 1024
 	maxRecentResolvedApprovalsForWorkerEnv        = 32
 	maxResolvedApprovalWorkerEnvFieldBytes        = 512
@@ -2974,9 +2979,42 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 	// delayed until the required finalization work below has run, so a crash or
 	// transient error leaves the Task in its prior phase with a resumable claim.
 	if !meta.IsStatusConditionTrue(task.Status.Conditions, ConditionTypeTerminalResultCollection) {
-		if err := r.collectResult(ctx, task); err != nil {
-			log.Error(err, "failed to collect result")
-			return ctrl.Result{}, err
+		if terminalResultCollectionAttempts(task) < terminalResultCollectionMaxAttempts {
+			if retryAfter := terminalResultCollectionRetryAfter(task, time.Now()); retryAfter > 0 {
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
+			}
+			if err := r.collectResult(ctx, task); err != nil {
+				collectionErr := err
+				var sourceErr *terminalResultSourceError
+				if !errors.As(collectionErr, &sourceErr) {
+					log.Error(collectionErr, "failed to collect result")
+					return ctrl.Result{}, collectionErr
+				}
+				attempt, retryAfter, shouldRetry, current, prepareErr := r.prepareTerminalResultCollectionRetry(
+					ctx,
+					task,
+					expected,
+					phase,
+					time.Now().UTC(),
+					sourceErr.permanent,
+				)
+				if prepareErr != nil {
+					return ctrl.Result{}, errors.Join(collectionErr, prepareErr)
+				}
+				if !current {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				if shouldRetry {
+					log.Error(sourceErr, "retrying terminal result source collection", "attempt", attempt)
+					return ctrl.Result{RequeueAfter: retryAfter}, nil
+				}
+				log.Error(
+					collectionErr,
+					"continuing terminal transition without best-effort result",
+					"attempt", attempt,
+					"permanent", sourceErr.permanent,
+				)
+			}
 		}
 		checkpointed, err := r.markTerminalResultCollectionComplete(ctx, task, expected, phase)
 		if err != nil {
@@ -3032,6 +3070,140 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	return ctrl.Result{RequeueAfter: time.Second}, nil
+}
+
+func terminalResultCollectionAttempts(task *corev1alpha1.Task) int {
+	if !terminalResultCollectionStateMatchesTask(task) {
+		return 0
+	}
+	attempts, err := strconv.Atoi(strings.TrimSpace(task.Annotations[terminalResultCollectionAttemptsAnnotation]))
+	if err != nil || attempts < 0 {
+		return 0
+	}
+	return attempts
+}
+
+func terminalResultCollectionRetryAfter(task *corev1alpha1.Task, now time.Time) time.Duration {
+	if !terminalResultCollectionStateMatchesTask(task) {
+		return 0
+	}
+	retryAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(task.Annotations[terminalResultCollectionRetryAtAnnotation]))
+	if err != nil || !retryAt.After(now) {
+		return 0
+	}
+	return min(retryAt.Sub(now), terminalResultCollectionRetryDelay)
+}
+
+func terminalResultCollectionExecutionKey(expected taskExecutionExpectation) string {
+	payload := strings.Join([]string{
+		string(expected.taskUID),
+		string(expected.phase),
+		strconv.FormatInt(int64(expected.attempts), 10),
+		expected.jobName,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
+}
+
+func terminalResultCollectionStateMatchesTask(task *corev1alpha1.Task) bool {
+	if task == nil || task.Annotations == nil {
+		return false
+	}
+	return strings.TrimSpace(task.Annotations[terminalResultCollectionExecutionAnnotation]) ==
+		terminalResultCollectionExecutionKey(taskExecutionExpectationFromTask(task))
+}
+
+func (r *TaskReconciler) prepareTerminalResultCollectionRetry(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	phase corev1alpha1.TaskPhase,
+	now time.Time,
+	exhaust bool,
+) (attempt int, retryAfter time.Duration, shouldRetry, executionCurrent bool, err error) {
+	_, reason := terminalTransitionDetails(phase)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	var current *corev1alpha1.Task
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
+			return err
+		}
+		current = latest
+		attempt = 0
+		retryAfter = 0
+		shouldRetry = false
+		executionCurrent = false
+		if !taskExecutionMatches(latest, expected) {
+			return nil
+		}
+		claim := meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeTerminalTransition)
+		if claim == nil || claim.Status != metav1.ConditionTrue || claim.Reason != reason {
+			return nil
+		}
+		executionCurrent = true
+		if exhaust {
+			attempt = terminalResultCollectionMaxAttempts
+			if err := r.patchTerminalResultCollectionState(ctx, latest, expected, attempt, ""); err != nil {
+				return err
+			}
+			current = latest
+			return nil
+		}
+		if retryAfter = terminalResultCollectionRetryAfter(latest, now); retryAfter > 0 {
+			attempt = terminalResultCollectionAttempts(latest)
+			shouldRetry = true
+			return nil
+		}
+		attempt = terminalResultCollectionAttempts(latest) + 1
+		if attempt >= terminalResultCollectionMaxAttempts {
+			attempt = terminalResultCollectionMaxAttempts
+			if err := r.patchTerminalResultCollectionState(ctx, latest, expected, attempt, ""); err != nil {
+				return err
+			}
+			current = latest
+			return nil
+		}
+		retryAt := now.Add(terminalResultCollectionRetryDelay)
+		if err := r.patchTerminalResultCollectionState(ctx, latest, expected, attempt, retryAt.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		current = latest
+		retryAfter = terminalResultCollectionRetryDelay
+		shouldRetry = true
+		return nil
+	})
+	if err != nil {
+		return 0, 0, false, false, err
+	}
+	if current != nil {
+		*task = *current.DeepCopy()
+	}
+	return attempt, retryAfter, shouldRetry, executionCurrent, nil
+}
+
+func (r *TaskReconciler) patchTerminalResultCollectionState(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	expected taskExecutionExpectation,
+	attempts int,
+	retryAt string,
+) error {
+	patch := client.MergeFromWithOptions(task.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[terminalResultCollectionExecutionAnnotation] = terminalResultCollectionExecutionKey(expected)
+	task.Annotations[terminalResultCollectionAttemptsAnnotation] = strconv.Itoa(attempts)
+	if retryAt == "" {
+		delete(task.Annotations, terminalResultCollectionRetryAtAnnotation)
+	} else {
+		task.Annotations[terminalResultCollectionRetryAtAnnotation] = retryAt
+	}
+	return r.Patch(ctx, task, patch)
 }
 
 func (r *TaskReconciler) markTerminalResultCollectionComplete(
@@ -4528,6 +4700,26 @@ func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Durat
 	return delay
 }
 
+type terminalResultSourceError struct {
+	err       error
+	permanent bool
+}
+
+func (e *terminalResultSourceError) Error() string {
+	return e.err.Error()
+}
+
+func (e *terminalResultSourceError) Unwrap() error {
+	return e.err
+}
+
+func newTerminalResultSourceError(err error, permanent bool) error {
+	if err == nil {
+		return nil
+	}
+	return &terminalResultSourceError{err: err, permanent: permanent}
+}
+
 // collectResult collects the task result from the Job's output
 func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.Task) error {
 	if r.ResultStore == nil {
@@ -4564,7 +4756,7 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		}
 		stdoutPayload, ok, decodeErr := extractStdoutTaskResult(logs)
 		if decodeErr != nil {
-			return decodeErr
+			return newTerminalResultSourceError(decodeErr, true)
 		}
 		if !ok {
 			return nil
@@ -4636,22 +4828,26 @@ func stdoutResultPodLogOptions() corev1.PodLogOptions {
 
 func (r *TaskReconciler) readPodLogsWithOptions(ctx context.Context, task *corev1alpha1.Task, opts corev1.PodLogOptions, appendTruncatedMarker bool) (string, error) {
 	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList,
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.List(ctx, podList,
 		client.InNamespace(task.Namespace),
 		client.MatchingLabels{"job-name": task.Status.JobName},
 	); err != nil {
-		return "", fmt.Errorf("listing pods: %w", err)
+		return "", newTerminalResultSourceError(fmt.Errorf("listing pods: %w", err), false)
 	}
 
 	if len(podList.Items) == 0 {
-		return "", fmt.Errorf("no pods found for job %s", task.Status.JobName)
+		return "", newTerminalResultSourceError(fmt.Errorf("no pods found for job %s", task.Status.JobName), false)
 	}
 
 	pod := podList.Items[len(podList.Items)-1]
 	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &opts)
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return "", fmt.Errorf("streaming logs: %w", err)
+		return "", newTerminalResultSourceError(fmt.Errorf("streaming logs: %w", err), false)
 	}
 	defer stream.Close() //nolint:errcheck
 
@@ -4661,7 +4857,7 @@ func (r *TaskReconciler) readPodLogsWithOptions(ctx context.Context, task *corev
 	}
 	data, err := io.ReadAll(io.LimitReader(stream, limit))
 	if err != nil {
-		return "", fmt.Errorf("reading logs: %w", err)
+		return "", newTerminalResultSourceError(fmt.Errorf("reading logs: %w", err), false)
 	}
 
 	if appendTruncatedMarker && int64(len(data)) == limit {

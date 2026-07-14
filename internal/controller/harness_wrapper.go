@@ -68,11 +68,13 @@ const (
 	harnessWrapperCancellationAnno            = "orka.ai/harness-wrapper-cancellation"
 	harnessWrapperAuthRetriesAnno             = "orka.ai/harness-wrapper-auth-retries"
 	harnessWrapperMaxOutputFetchRetries       = 3
+	harnessWrapperMaxCancelDependencyAttempts = 3
 	harnessWrapperMaxAuthRetries              = 3
 	harnessWrapperSkillsFilesMeta             = "skillsFiles"
 	harnessWrapperStreamPollTimeout           = 2 * time.Second
 	harnessWrapperCancelInitialBackoff        = time.Second
 	harnessWrapperCancelMaxBackoff            = 30 * time.Second
+	harnessWrapperCancelDependencyMaxWait     = 2 * time.Minute
 	harnessWrapperNoTimeoutDuration           = time.Hour * 24 * 365 * 100
 	harnessWrapperRuntimeGeneric              = "generic"
 	harnessWrapperOutcomeUnknown              = "outcome_unknown"
@@ -147,11 +149,26 @@ type harnessRuntimeTarget struct {
 }
 
 type harnessWrapperCancellationState struct {
-	TurnID   string `json:"turnID"`
-	Status   string `json:"status"`
-	Reason   string `json:"reason,omitempty"`
-	Attempts int    `json:"attempts,omitempty"`
-	RetryAt  string `json:"retryAt,omitempty"`
+	TurnID                  string `json:"turnID"`
+	Status                  string `json:"status"`
+	Reason                  string `json:"reason,omitempty"`
+	Attempts                int    `json:"attempts,omitempty"`
+	DependencyAttempts      int    `json:"dependencyAttempts,omitempty"`
+	DependencyFirstFailedAt string `json:"dependencyFirstFailedAt,omitempty"`
+	RetryAt                 string `json:"retryAt,omitempty"`
+}
+
+type harnessWrapperCancelDependencyError struct {
+	err       error
+	permanent bool
+}
+
+func (e *harnessWrapperCancelDependencyError) Error() string {
+	return e.err.Error()
+}
+
+func (e *harnessWrapperCancelDependencyError) Unwrap() error {
+	return e.err
 }
 
 type harnessWrapperCancelOutcome string
@@ -160,6 +177,7 @@ const (
 	harnessWrapperCancelPending      harnessWrapperCancelOutcome = "pending"
 	harnessWrapperCancelAcknowledged harnessWrapperCancelOutcome = "acknowledged"
 	harnessWrapperCancelMissing      harnessWrapperCancelOutcome = "missing"
+	harnessWrapperCancelAbandoned    harnessWrapperCancelOutcome = "abandoned"
 	harnessWrapperCancelNotNeeded    harnessWrapperCancelOutcome = "not_needed"
 )
 
@@ -1356,6 +1374,7 @@ func harnessWrapperCancellation(task *corev1alpha1.Task) (harnessWrapperCancella
 	state.TurnID = strings.TrimSpace(state.TurnID)
 	state.Status = strings.TrimSpace(state.Status)
 	state.Reason = strings.TrimSpace(state.Reason)
+	state.DependencyFirstFailedAt = strings.TrimSpace(state.DependencyFirstFailedAt)
 	state.RetryAt = strings.TrimSpace(state.RetryAt)
 	return state, state.TurnID != "" && state.Status != ""
 }
@@ -1406,7 +1425,9 @@ func (r *TaskReconciler) patchHarnessWrapperCancellation(
 }
 
 func harnessWrapperCancellationFinished(state harnessWrapperCancellationState) bool {
-	return state.Status == string(harnessWrapperCancelAcknowledged) || state.Status == string(harnessWrapperCancelMissing)
+	return state.Status == string(harnessWrapperCancelAcknowledged) ||
+		state.Status == string(harnessWrapperCancelMissing) ||
+		state.Status == string(harnessWrapperCancelAbandoned)
 }
 
 func harnessWrapperCancelRetryDelay(attempts int) time.Duration {
@@ -1435,6 +1456,21 @@ func harnessWrapperCancellationRetryAfter(state harnessWrapperCancellationState,
 		return 0
 	}
 	return min(retryAt.Sub(now), harnessWrapperCancelMaxBackoff)
+}
+
+func harnessWrapperCancelDependency(err error) (*harnessWrapperCancelDependencyError, bool) {
+	var dependencyErr *harnessWrapperCancelDependencyError
+	ok := errors.As(err, &dependencyErr)
+	return dependencyErr, ok
+}
+
+func harnessWrapperCancelDependencyWaitExpired(state harnessWrapperCancellationState, now time.Time) bool {
+	firstFailure, err := time.Parse(time.RFC3339Nano, state.DependencyFirstFailedAt)
+	return err == nil && !now.Before(firstFailure.Add(harnessWrapperCancelDependencyMaxWait))
+}
+
+func harnessWrapperCancelDependencyFailureIsPermanent(err error) bool {
+	return errors.Is(err, errAgentRuntimePinnedBackendLost) || strings.Contains(err.Error(), "cannot be safely resumed")
 }
 
 func (r *TaskReconciler) ensureHarnessWrapperTurnCancelled(
@@ -1487,8 +1523,39 @@ func (r *TaskReconciler) ensureHarnessWrapperTurnCancelled(
 		if state.Attempts < 1_000_000 {
 			state.Attempts++
 		}
+		now := time.Now().UTC()
+		if dependencyErr, dependencyFailure := harnessWrapperCancelDependency(err); dependencyFailure {
+			if state.DependencyAttempts < 1_000_000 {
+				state.DependencyAttempts++
+			}
+			if _, parseErr := time.Parse(time.RFC3339Nano, state.DependencyFirstFailedAt); parseErr != nil {
+				state.DependencyFirstFailedAt = now.Format(time.RFC3339Nano)
+			}
+			abandon := dependencyErr.permanent && state.DependencyAttempts >= harnessWrapperMaxCancelDependencyAttempts
+			if !dependencyErr.permanent && harnessWrapperCancelDependencyWaitExpired(state, now) {
+				abandon = true
+			}
+			if abandon {
+				state.Status = string(harnessWrapperCancelAbandoned)
+				state.RetryAt = ""
+				if patchErr := r.patchHarnessWrapperCancellation(ctx, task, state); patchErr != nil {
+					return false, 0, errors.Join(err, patchErr)
+				}
+				logf.FromContext(ctx).Error(
+					err,
+					"abandoning harness cancellation after bounded dependency unavailability",
+					"task", task.Name,
+					"attempts", state.DependencyAttempts,
+					"permanent", dependencyErr.permanent,
+				)
+				return true, 0, nil
+			}
+		} else {
+			state.DependencyAttempts = 0
+			state.DependencyFirstFailedAt = ""
+		}
 		retryAfter := harnessWrapperCancelRetryDelay(state.Attempts)
-		state.RetryAt = time.Now().UTC().Add(retryAfter).Format(time.RFC3339Nano)
+		state.RetryAt = now.Add(retryAfter).Format(time.RFC3339Nano)
 		if patchErr := r.patchHarnessWrapperCancellation(ctx, task, state); patchErr != nil {
 			return false, 0, errors.Join(err, patchErr)
 		}
@@ -2102,11 +2169,14 @@ func (r *TaskReconciler) cancelHarnessWrapperTurnOnce(
 	}
 	target, err := r.resolveHarnessRuntimeTarget(ctx, task, nil)
 	if err != nil {
-		return harnessWrapperCancelPending, err
+		return harnessWrapperCancelPending, &harnessWrapperCancelDependencyError{
+			err:       err,
+			permanent: harnessWrapperCancelDependencyFailureIsPermanent(err),
+		}
 	}
 	client, err := newHarnessClientForRuntimeTarget(target)
 	if err != nil {
-		return harnessWrapperCancelPending, err
+		return harnessWrapperCancelPending, &harnessWrapperCancelDependencyError{err: err, permanent: true}
 	}
 	_, err = client.CancelTurn(ctx, harness.CancelTurnRequest{
 		Version:          harness.ProtocolVersion,

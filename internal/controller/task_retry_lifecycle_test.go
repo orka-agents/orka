@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -200,6 +201,102 @@ func TestCompleteTaskClaimsTerminalTransitionBeforeResultCollection(t *testing.T
 		if !claimed {
 			t.Fatalf("result collection %d observed no durable terminal claim (phase %q)", i, observer.observedPhases[i])
 		}
+	}
+}
+
+func TestCompleteTaskFinalizesWhenPodLogResultIsUnavailable(t *testing.T) {
+	scheme := newTestScheme()
+	task := retryLifecycleTask("terminal-missing-pod-logs", corev1alpha1.TaskPhaseRunning, 1, "missing-job")
+	task.Annotations = map[string]string{
+		terminalResultCollectionExecutionAnnotation: "stale-execution",
+		terminalResultCollectionAttemptsAnnotation:  "2",
+		terminalResultCollectionRetryAtAnnotation:   time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	r := newUnitReconciler(scheme, task)
+	r.KubeClient = k8sfake.NewSimpleClientset()
+
+	for attempt := 1; attempt <= terminalResultCollectionMaxAttempts; attempt++ {
+		if _, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
+			t.Fatalf("completeTask() attempt %d error = %v", attempt, err)
+		}
+		if attempt < terminalResultCollectionMaxAttempts {
+			if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+				t.Fatalf("phase after attempt %d = %s, want Running while result collection retries", attempt, task.Status.Phase)
+			}
+			if got := terminalResultCollectionAttempts(task); got != attempt {
+				t.Fatalf("persisted result collection attempts = %d, want %d", got, attempt)
+			}
+			if retryAfter := terminalResultCollectionRetryAfter(task, time.Now()); retryAfter <= 0 {
+				t.Fatalf("retry delay after attempt %d = %v, want positive durable gate", attempt, retryAfter)
+			}
+			if _, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
+				t.Fatalf("completeTask() gated retry after attempt %d error = %v", attempt, err)
+			}
+			if got := terminalResultCollectionAttempts(task); got != attempt {
+				t.Fatalf("immediate reconcile advanced result collection attempts to %d, want %d", got, attempt)
+			}
+			patch := client.MergeFrom(task.DeepCopy())
+			task.Annotations[terminalResultCollectionRetryAtAnnotation] = time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
+			if err := r.Patch(context.Background(), task, patch); err != nil {
+				t.Fatalf("force result collection retry due after attempt %d: %v", attempt, err)
+			}
+		}
+	}
+
+	var completed corev1alpha1.Task
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), &completed); err != nil {
+		t.Fatalf("Get(completed Task) error = %v", err)
+	}
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded despite unavailable best-effort pod logs", completed.Status.Phase)
+	}
+	if !meta.IsStatusConditionTrue(completed.Status.Conditions, ConditionTypeTerminalResultCollection) {
+		t.Fatalf("terminal result collection was not checkpointed: %#v", completed.Status.Conditions)
+	}
+	if completed.Status.ResultRef != nil {
+		t.Fatalf("ResultRef = %#v, want nil when pod logs are unavailable", completed.Status.ResultRef)
+	}
+}
+
+func TestPrepareTerminalResultCollectionRetryUsesFreshState(t *testing.T) {
+	task := retryLifecycleTask("terminal-result-fresh-state", corev1alpha1.TaskPhaseRunning, 1, "attempt-1-job")
+	expected := taskExecutionExpectationFromTask(task)
+	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
+		Type:   ConditionTypeTerminalTransition,
+		Status: metav1.ConditionTrue,
+		Reason: taskSucceededReason,
+	})
+	task.Annotations = map[string]string{
+		terminalResultCollectionExecutionAnnotation: terminalResultCollectionExecutionKey(expected),
+		terminalResultCollectionAttemptsAnnotation:  "2",
+		terminalResultCollectionRetryAtAnnotation:   time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano),
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	stale := task.DeepCopy()
+	stale.Annotations[terminalResultCollectionAttemptsAnnotation] = "1"
+
+	attempt, retryAfter, shouldRetry, current, err := r.prepareTerminalResultCollectionRetry(
+		context.Background(),
+		stale,
+		expected,
+		corev1alpha1.TaskPhaseSucceeded,
+		time.Now().UTC(),
+		false,
+	)
+	if err != nil {
+		t.Fatalf("prepareTerminalResultCollectionRetry() error = %v", err)
+	}
+	if !current || shouldRetry || retryAfter != 0 || attempt != terminalResultCollectionMaxAttempts {
+		t.Fatalf(
+			"decision = (attempt=%d, retryAfter=%v, shouldRetry=%v, current=%v), want fresh exhausted state",
+			attempt,
+			retryAfter,
+			shouldRetry,
+			current,
+		)
+	}
+	if got := terminalResultCollectionAttempts(stale); got != terminalResultCollectionMaxAttempts {
+		t.Fatalf("persisted exhausted attempts = %d, want %d", got, terminalResultCollectionMaxAttempts)
 	}
 }
 

@@ -64,6 +64,122 @@ func TestHandleDeletionRetainsFinalizerWhileHarnessCancellationFails(t *testing.
 	}
 }
 
+func TestHandleDeletionAbandonsCancellationAfterMissingRuntimeRetries(t *testing.T) {
+	task := harnessDurabilityTask(corev1alpha1.TaskPhaseRunning)
+	task.Finalizers = []string{labels.TaskFinalizer}
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, "https://runtime.example.test")
+	task.Annotations[harnessWrapperRuntimeRefAnno] = runtime.Name
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               runtime.Spec.Deployment.Endpoint,
+		TransportSecurity:      runtime.Spec.Deployment.TransportSecurity,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            runtime.Spec.ClientAuth.BearerAuthRef.Name,
+		AuthRefField:           runtime.Spec.ClientAuth.BearerAuthRef.Key,
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	current := task
+	transientAttempts := harnessWrapperMaxCancelDependencyAttempts + 1
+
+	for attempt := 1; attempt <= transientAttempts; attempt++ {
+		result, err := r.handleDeletion(context.Background(), current)
+		if err != nil {
+			t.Fatalf("handleDeletion() attempt %d error = %v", attempt, err)
+		}
+		var updated corev1alpha1.Task
+		if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+			t.Fatalf("Get Task after attempt %d: %v", attempt, err)
+		}
+		state, ok := harnessWrapperCancellation(&updated)
+		if !ok || state.Status != string(harnessWrapperCancelPending) || state.DependencyAttempts != attempt || state.DependencyFirstFailedAt == "" {
+			t.Fatalf("cancellation state after transient attempt %d = %#v, ok=%v", attempt, state, ok)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("attempt %d RequeueAfter = %v, want bounded retry", attempt, result.RequeueAfter)
+		}
+		if !controllerutil.ContainsFinalizer(&updated, labels.TaskFinalizer) {
+			t.Fatalf("Task finalizer removed during transient dependency attempt %d", attempt)
+		}
+		current = forceHarnessCancellationDue(t, r, &updated)
+	}
+
+	state, ok := harnessWrapperCancellation(current)
+	if !ok {
+		t.Fatalf("missing cancellation state before forcing dependency timeout: %#v", current.Annotations)
+	}
+	state.DependencyFirstFailedAt = time.Now().UTC().Add(-harnessWrapperCancelDependencyMaxWait - time.Second).Format(time.RFC3339Nano)
+	if err := r.patchHarnessWrapperCancellation(context.Background(), current, state); err != nil {
+		t.Fatalf("force dependency wait expired: %v", err)
+	}
+	result, err := r.handleDeletion(context.Background(), current)
+	if err != nil {
+		t.Fatalf("handleDeletion() after dependency timeout error = %v", err)
+	}
+	var updated corev1alpha1.Task
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+		t.Fatalf("Get Task after dependency timeout: %v", err)
+	}
+	state, ok = harnessWrapperCancellation(&updated)
+	if !ok || state.Status != string(harnessWrapperCancelAbandoned) {
+		t.Fatalf("final cancellation state = %#v, ok=%v, want abandoned", state, ok)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("final RequeueAfter = %v, want deletion cleanup to continue", result.RequeueAfter)
+	}
+	if controllerutil.ContainsFinalizer(&updated, labels.TaskFinalizer) {
+		t.Fatal("Task finalizer retained after bounded dependency wait")
+	}
+}
+
+func TestHarnessCancellationAbandonsStartedLegacyRuntimeWithoutPinnedBackend(t *testing.T) {
+	task := harnessDurabilityTask(corev1alpha1.TaskPhaseCancelled)
+	endpoint := testInsecureAgentRuntimeEndpoint
+	runtime, token := harnessWrapperReadyAgentRuntime(t, task.Namespace, endpoint)
+	service, pod := harnessWrapperInsecureServiceBackend(task.Namespace)
+	task.Annotations[harnessWrapperRuntimeRefAnno] = runtime.Name
+	task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
+		RuntimeRefName:         runtime.Name,
+		RuntimeName:            runtime.Name,
+		ContractVersion:        string(runtime.Spec.ContractVersion),
+		Endpoint:               endpoint,
+		TransportSecurity:      corev1alpha1.AgentRuntimeTransportSecurityInsecureClusterLocalHTTP,
+		RuntimeGeneration:      runtime.Generation,
+		AuthRefName:            token.Name,
+		AuthRefField:           "token",
+		AuthRefResourceVersion: token.ResourceVersion,
+	}
+	r := newUnitReconciler(newTestScheme(), task, runtime, token, service, pod)
+	current := task
+
+	for attempt := 1; attempt <= harnessWrapperMaxCancelDependencyAttempts; attempt++ {
+		done, retryAfter, err := r.ensureHarnessWrapperTurnCancelled(context.Background(), current, "legacy runtime cleanup")
+		if err != nil {
+			t.Fatalf("ensureHarnessWrapperTurnCancelled() attempt %d error = %v", attempt, err)
+		}
+		var updated corev1alpha1.Task
+		if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+			t.Fatalf("Get Task after attempt %d: %v", attempt, err)
+		}
+		state, ok := harnessWrapperCancellation(&updated)
+		if !ok || state.DependencyAttempts != attempt {
+			t.Fatalf("cancellation state after attempt %d = %#v, ok=%v", attempt, state, ok)
+		}
+		if attempt < harnessWrapperMaxCancelDependencyAttempts {
+			if done || retryAfter <= 0 {
+				t.Fatalf("attempt %d result = (done=%v, retryAfter=%v), want dependency retry", attempt, done, retryAfter)
+			}
+			current = forceHarnessCancellationDue(t, r, &updated)
+			continue
+		}
+		if !done || retryAfter != 0 || state.Status != string(harnessWrapperCancelAbandoned) {
+			t.Fatalf("final result = (done=%v, retryAfter=%v, state=%#v), want abandoned", done, retryAfter, state)
+		}
+	}
+}
+
 func TestHandleCompletedRetriesHarnessCancellation503ThenCleansUp(t *testing.T) {
 	var cancelCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -236,20 +352,27 @@ func TestHarnessCancellationNetworkFailureRemainsPending(t *testing.T) {
 
 	task := harnessDurabilityTask(corev1alpha1.TaskPhaseCancelled)
 	r := newUnitReconciler(newTestScheme(), task)
-	done, retryAfter, err := r.ensureHarnessWrapperTurnCancelled(context.Background(), task, "network failure")
-	if err != nil {
-		t.Fatalf("ensureHarnessWrapperTurnCancelled() error = %v", err)
-	}
-	if done || retryAfter <= 0 || retryAfter > harnessWrapperCancelMaxBackoff {
-		t.Fatalf("result = (done=%v, retryAfter=%v), want bounded pending retry", done, retryAfter)
-	}
-	var updated corev1alpha1.Task
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
-		t.Fatalf("Get Task: %v", err)
-	}
-	state, ok := harnessWrapperCancellation(&updated)
-	if !ok || state.Status != string(harnessWrapperCancelPending) || state.Attempts != 1 {
-		t.Fatalf("cancellation state = %#v, ok=%v, want one pending attempt", state, ok)
+	current := task
+	maxAttempts := harnessWrapperMaxCancelDependencyAttempts + 1
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		done, retryAfter, err := r.ensureHarnessWrapperTurnCancelled(context.Background(), current, "network failure")
+		if err != nil {
+			t.Fatalf("ensureHarnessWrapperTurnCancelled() attempt %d error = %v", attempt, err)
+		}
+		if done || retryAfter <= 0 || retryAfter > harnessWrapperCancelMaxBackoff {
+			t.Fatalf("attempt %d result = (done=%v, retryAfter=%v), want bounded pending retry", attempt, done, retryAfter)
+		}
+		var updated corev1alpha1.Task
+		if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, &updated); err != nil {
+			t.Fatalf("Get Task after attempt %d: %v", attempt, err)
+		}
+		state, ok := harnessWrapperCancellation(&updated)
+		if !ok || state.Status != string(harnessWrapperCancelPending) || state.Attempts != attempt || state.DependencyAttempts != 0 {
+			t.Fatalf("cancellation state after attempt %d = %#v, ok=%v, want pending transport retry", attempt, state, ok)
+		}
+		if attempt < maxAttempts {
+			current = forceHarnessCancellationDue(t, r, &updated)
+		}
 	}
 }
 

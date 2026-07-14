@@ -230,15 +230,10 @@ func TestHandlers_GetTaskLogsFollowDisconnectCancelsQuietUpstream(t *testing.T) 
 	}
 }
 
-func TestHandlers_GetTaskLogsFollowCancelsUpstreamWithRequest(t *testing.T) {
+func TestHandlers_GetTaskLogsFollowCancelsUpstreamDuringSetup(t *testing.T) {
 	logStarted := make(chan struct{})
 	upstreamCanceled := make(chan struct{})
-	h, app, kubeServer := newTaskLogStreamTestApp(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
+	h, app, kubeServer := newTaskLogStreamTestApp(t, func(_ http.ResponseWriter, r *http.Request) {
 		close(logStarted)
 		<-r.Context().Done()
 		close(upstreamCanceled)
@@ -252,24 +247,23 @@ func TestHandlers_GetTaskLogsFollowCancelsUpstreamWithRequest(t *testing.T) {
 	})
 	app.Get("/tasks/:id/logs", h.GetTaskLogs)
 
-	type testResult struct {
-		resp *http.Response
-		err  error
-	}
-	result := make(chan testResult, 1)
+	result := make(chan error, 1)
 	go func() {
 		resp, err := app.Test(
 			httptest.NewRequest(http.MethodGet, "/tasks/log-task/logs?follow="+queryTrue, nil),
 			fiber.TestConfig{Timeout: 2 * time.Second},
 		)
-		result <- testResult{resp: resp, err: err}
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		result <- err
 	}()
 
 	select {
 	case <-logStarted:
 	case <-time.After(2 * time.Second):
 		kubeServer.CloseClientConnections()
-		t.Fatal("Kubernetes log request did not start")
+		t.Fatal("Kubernetes log stream setup did not start")
 	}
 	cancelRequest()
 
@@ -277,22 +271,136 @@ func TestHandlers_GetTaskLogsFollowCancelsUpstreamWithRequest(t *testing.T) {
 	case <-upstreamCanceled:
 	case <-time.After(2 * time.Second):
 		kubeServer.CloseClientConnections()
-		select {
-		case <-result:
-		case <-time.After(2 * time.Second):
-		}
-		t.Fatal("canceling the request did not cancel the upstream Kubernetes log request")
+		t.Fatal("request cancellation did not stop Kubernetes log stream setup")
 	}
-
 	select {
-	case got := <-result:
-		require.NoError(t, got.err)
-		if got.resp != nil {
-			defer got.resp.Body.Close() //nolint:errcheck
-		}
+	case err := <-result:
+		require.NoError(t, err)
 	case <-time.After(2 * time.Second):
 		kubeServer.CloseClientConnections()
-		t.Fatal("log response did not finish after request cancellation")
+		t.Fatal("log request did not finish after setup cancellation")
+	}
+}
+
+func TestHandlers_GetTaskLogsFollowReturnsTimeoutWhenSetupDeadlineExpires(t *testing.T) {
+	upstreamCanceled := make(chan struct{})
+	h, app, kubeServer := newTaskLogStreamTestApp(t, func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		close(upstreamCanceled)
+	})
+
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelRequest()
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(requestCtx)
+		return c.Next()
+	})
+	app.Get("/tasks/:id/logs", h.GetTaskLogs)
+
+	resp, err := app.Test(
+		httptest.NewRequest(http.MethodGet, "/tasks/log-task/logs?follow="+queryTrue, nil),
+		fiber.TestConfig{Timeout: 2 * time.Second},
+	)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusGatewayTimeout, resp.StatusCode)
+
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(2 * time.Second):
+		kubeServer.CloseClientConnections()
+		t.Fatal("request deadline did not cancel Kubernetes log stream setup")
+	}
+}
+
+func TestHandlers_GetTaskLogsFollowOutlivesFiberRequestContext(t *testing.T) {
+	releaseUpstream := make(chan struct{})
+	upstreamCanceled := make(chan struct{})
+	h, app, kubeServer := newTaskLogStreamTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "before-request-context-cancel\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+			_, _ = io.WriteString(w, "after-request-context-cancel\n")
+		case <-r.Context().Done():
+			close(upstreamCanceled)
+		}
+	})
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(requestCtx)
+		return c.Next()
+	})
+	app.Get("/tasks/:id/logs", h.GetTaskLogs)
+
+	client := newTaskLogHTTPClient()
+	resp, err := client.Get(startTaskLogFiberServer(t, app) + "/tasks/log-task/logs?follow=" + queryTrue)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	firstFrame := make([]byte, len("data: before-request-context-cancel\n\n"))
+	_, err = io.ReadFull(resp.Body, firstFrame)
+	require.NoError(t, err)
+	require.Equal(t, "data: before-request-context-cancel\n\n", string(firstFrame))
+
+	cancelRequest()
+	select {
+	case <-upstreamCanceled:
+		kubeServer.CloseClientConnections()
+		t.Fatal("Fiber request context cancellation stopped the handed-off Kubernetes log stream")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseUpstream)
+
+	remainingBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(remainingBody), "data: after-request-context-cancel\n\n")
+}
+
+func TestHandlers_GetTaskLogsFollowHonorsDeadlineAfterHandoff(t *testing.T) {
+	upstreamCanceled := make(chan struct{})
+	h, app, kubeServer := newTaskLogStreamTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "before-request-deadline\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+		close(upstreamCanceled)
+	})
+
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelRequest()
+	app.Use(func(c fiber.Ctx) error {
+		c.SetContext(requestCtx)
+		return c.Next()
+	})
+	app.Get("/tasks/:id/logs", h.GetTaskLogs)
+
+	client := newTaskLogHTTPClient()
+	resp, err := client.Get(startTaskLogFiberServer(t, app) + "/tasks/log-task/logs?follow=" + queryTrue)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	firstFrame := make([]byte, len("data: before-request-deadline\n\n"))
+	_, err = io.ReadFull(resp.Body, firstFrame)
+	require.NoError(t, err)
+	require.Equal(t, "data: before-request-deadline\n\n", string(firstFrame))
+
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(2 * time.Second):
+		kubeServer.CloseClientConnections()
+		t.Fatal("request deadline did not cancel the handed-off Kubernetes log stream")
 	}
 }
 

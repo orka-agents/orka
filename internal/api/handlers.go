@@ -726,11 +726,40 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	follow := c.Query("follow") == queryTrue
 
 	if follow {
-		streamCtx, streamCancel := context.WithCancel(ctx)
+		// SendStreamWriter outlives the Fiber handler, so the Kubernetes stream
+		// must not permanently inherit Fiber's recyclable request context. Mirror
+		// request cancellation only while the upstream stream is being established,
+		// then hand ownership to explicit deadlines plus heartbeat/write failure
+		// detection below. A bare post-handoff cancellation cannot be retained:
+		// Fiber uses that same signal when it recycles the handler context.
+		streamBaseCtx := context.WithoutCancel(ctx)
+		var streamCtx context.Context
+		var streamCancel context.CancelFunc
+		if deadline, ok := ctx.Deadline(); ok {
+			streamCtx, streamCancel = context.WithDeadline(streamBaseCtx, deadline)
+		} else {
+			streamCtx, streamCancel = context.WithCancel(streamBaseCtx)
+		}
+		stopSetupCancellation := context.AfterFunc(ctx, streamCancel)
 		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
 		if err != nil {
+			_ = stopSetupCancellation()
 			streamCancel()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
+		}
+		if !stopSetupCancellation() || ctx.Err() != nil {
+			streamCancel()
+			_ = stream.Close()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fiber.NewError(fiber.StatusGatewayTimeout, "task log stream setup timed out")
+			}
+			return nil
 		}
 
 		c.Set("Content-Type", "text/event-stream")

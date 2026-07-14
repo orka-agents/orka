@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	sandboxextv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -2995,6 +2996,41 @@ func TestReadPodLogs_NoPods(t *testing.T) {
 	_, err := r.readPodLogs(context.Background(), task)
 	if err == nil {
 		t.Error("expected error when no pods found")
+	}
+}
+
+func TestReadPodLogs_NotFoundRemainsRetryable(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{JobName: "j1"},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "j1-pod",
+		Namespace: task.Namespace,
+		Labels:    map[string]string{"job-name": task.Status.JobName},
+	}}
+	r := newUnitReconciler(scheme, task, pod)
+	kubeClient := k8sfake.NewSimpleClientset(pod.DeepCopy())
+	kubeClient.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods/log"}, pod.Name)
+	})
+	r.KubeClient = kubeClient
+
+	_, err := r.readPodLogs(context.Background(), task)
+	if err == nil {
+		t.Fatal("readPodLogs() error = nil, want pod log NotFound")
+	}
+	var sourceErr *terminalResultSourceError
+	if !errors.As(err, &sourceErr) {
+		t.Fatalf("readPodLogs() error = %T %v, want terminalResultSourceError", err, err)
+	}
+	if sourceErr.permanent {
+		t.Fatalf("pod log NotFound marked permanent: %v", err)
 	}
 }
 
