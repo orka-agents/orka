@@ -107,7 +107,8 @@ kubectl apply -f examples/fibey-custom-agent-demo/agent-agentkit.yaml
 kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-runtime --timeout=60s
 
 # Foundry adapter facade; requires a Service named fibey-foundry-runtime.
-# Build/deploy github.com/orka-agents/agent-runtime-foundry-classic with ORKA_FOUNDRY_* credentials first.
+# Build/deploy github.com/orka-agents/agent-runtime-foundry-classic with its ORKA_FOUNDRY_*
+# adapter settings plus an Azure SDK identity, such as Azure Workload Identity, for authentication.
 kubectl apply -f examples/fibey-custom-agent-demo/secret-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-foundry.yaml

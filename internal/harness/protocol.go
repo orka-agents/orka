@@ -466,11 +466,12 @@ func (r ContinueTurnRequest) Validate() error {
 		if err := result.Validate(); err != nil {
 			return fmt.Errorf("tool result %d is invalid: %w", i, err)
 		}
-		if _, exists := seenToolCallIDs[result.ToolCallID]; exists {
-			return fmt.Errorf("tool result %d duplicates tool call id %q", i, result.ToolCallID)
+		toolCallID := strings.TrimSpace(result.ToolCallID)
+		if _, exists := seenToolCallIDs[toolCallID]; exists {
+			return fmt.Errorf("tool result %d duplicates tool call id %q", i, toolCallID)
 		}
-		seenToolCallIDs[result.ToolCallID] = struct{}{}
-		expectedKey := ToolRequestIdempotencyKey(result.RuntimeSessionID, result.TurnID, result.ToolCallID)
+		seenToolCallIDs[toolCallID] = struct{}{}
+		expectedKey := ToolRequestIdempotencyKey(result.RuntimeSessionID, result.TurnID, toolCallID)
 		if result.IdempotencyKey != expectedKey {
 			return fmt.Errorf("tool result %d idempotency key %q does not match canonical key %q", i, result.IdempotencyKey, expectedKey)
 		}

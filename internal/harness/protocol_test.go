@@ -279,6 +279,12 @@ func TestContinueTurnRequestRejectsDuplicateAndNonCanonicalToolResults(t *testin
 	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "duplicates tool call id") {
 		t.Fatalf("ContinueTurnRequest Validate() = %v, want duplicate rejection", err)
 	}
+	spacePadded := base
+	spacePadded.ToolCallID = " tool-a "
+	request.ToolResults = []ToolCallResult{base, spacePadded}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "duplicates tool call id") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want normalized duplicate rejection", err)
+	}
 	request.ToolResults = []ToolCallResult{base}
 	request.ToolResults[0].IdempotencyKey = "unrelated-key"
 	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "canonical key") {
