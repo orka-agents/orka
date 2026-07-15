@@ -487,7 +487,8 @@ func bindApprovalOutboundAccessPolicyVersion(
 	}
 	secretRefs := approvalOutboundPolicySecretRefs(policy)
 	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
-	secretVersions := make([]string, 0, len(secretRefs)+len(serviceAccountNames))
+	serviceRefs := approvalOutboundPolicyServiceRefs(policy)
+	secretVersions := make([]string, 0, len(secretRefs)+len(serviceAccountNames)+len(serviceRefs))
 	serviceAccountNamespace := strings.TrimSpace(policy.Namespace)
 	if serviceAccountNamespace == "" {
 		serviceAccountNamespace = namespace
@@ -504,6 +505,20 @@ func bindApprovalOutboundAccessPolicyVersion(
 		secretVersions = append(
 			secretVersions,
 			serviceAccountNamespace+"/"+name+"\x00"+string(serviceAccount.UID)+"\x00"+serviceAccount.ResourceVersion,
+		)
+	}
+	for _, ref := range serviceRefs {
+		serviceNamespace := strings.TrimSpace(ref.Namespace)
+		if serviceNamespace == "" {
+			serviceNamespace = policy.Namespace
+		}
+		service := &corev1.Service{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: serviceNamespace, Name: ref.Name}, service); err != nil {
+			return fmt.Errorf("read outbound access Service %q for approval binding: %w", ref.Name, err)
+		}
+		secretVersions = append(
+			secretVersions,
+			serviceNamespace+"/"+ref.Name+"\x00"+string(service.UID)+"\x00"+service.ResourceVersion,
 		)
 	}
 	for _, ref := range secretRefs {
@@ -539,6 +554,22 @@ func bindApprovalOutboundAccessPolicyVersion(
 		tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation] = secretsDigest
 	}
 	return nil
+}
+
+func approvalOutboundPolicyServiceRefs(
+	policy *corev1alpha1.OutboundAccessPolicy,
+) []corev1alpha1.OutboundServiceReference {
+	if policy == nil {
+		return nil
+	}
+	refs := []corev1alpha1.OutboundServiceReference{}
+	if policy.Spec.Direct != nil && policy.Spec.Direct.TokenEndpoint.ServiceRef != nil {
+		refs = append(refs, *policy.Spec.Direct.TokenEndpoint.ServiceRef)
+	}
+	if policy.Spec.Gateway != nil {
+		refs = append(refs, policy.Spec.Gateway.ServiceRef)
+	}
+	return refs
 }
 
 func approvalOutboundPolicyServiceAccountNames(policy *corev1alpha1.OutboundAccessPolicy) []string {

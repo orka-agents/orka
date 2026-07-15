@@ -49,6 +49,7 @@ type ResolveRequest struct {
 	TransactionToken        string
 	ParentTransactionScopes []string
 	HasAuthSecretRef        bool
+	TargetScheme            string
 }
 
 // Resolution describes how ToolExecutor should modify a prepared request.
@@ -109,6 +110,9 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		return Resolution{}, issue
 	}
 	if policy.Spec.Direct != nil {
+		if !strings.EqualFold(strings.TrimSpace(req.TargetScheme), schemeHTTPS) {
+			return Resolution{}, errors.New("direct outbound access requires an HTTPS Tool URL")
+		}
 		if req.HasAuthSecretRef {
 			return Resolution{}, errors.New("direct outbound access cannot coexist with authSecretRef")
 		}
@@ -165,6 +169,7 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 		Endpoint:                endpoint,
 		TLS:                     endpointTLS,
 		RequirePublicEndpoint:   direct.TokenEndpoint.URL != "",
+		DisableProxy:            direct.TokenEndpoint.ServiceRef != nil,
 		GrantType:               grantType,
 		SubjectToken:            subject.value,
 		SubjectTokenType:        subject.tokenTypeForGrant(grantType),

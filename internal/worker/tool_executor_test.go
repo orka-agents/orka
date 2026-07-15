@@ -2450,7 +2450,7 @@ func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *
 	t.Setenv(workerenv.TransactionScopes, "api.read,api.write")
 
 	var authorization, transactionHeader string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authorization = r.Header.Get("Authorization")
 		transactionHeader = r.Header.Get(transactiontoken.HeaderName)
 		http.Error(w, "debug resource-credential", http.StatusBadGateway)
@@ -2481,10 +2481,10 @@ func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *
 	if authorization != "Bearer resource-credential" {
 		t.Fatalf("Authorization = %q", authorization)
 	}
-	if transactionHeader != "parent-transaction-token" {
+	if transactionHeader != "" {
 		t.Fatalf("%s = %q", transactiontoken.HeaderName, transactionHeader)
 	}
-	if resolver.request.PolicyName != "resource-api" || resolver.request.TransactionToken != "parent-transaction-token" {
+	if resolver.request.PolicyName != "resource-api" || resolver.request.TransactionToken != "parent-transaction-token" || resolver.request.TargetScheme != "https" {
 		t.Fatalf("resolver request = %#v", resolver.request)
 	}
 	if got := resolver.request.ParentTransactionScopes; len(got) != 2 || got[0] != "api.read" || got[1] != "api.write" {
@@ -2494,7 +2494,7 @@ func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *
 
 func TestToolExecutorDirectOutboundAccessRejectsHeaderCollision(t *testing.T) {
 	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -2726,7 +2726,7 @@ func TestToolExecutorGatewayRedactsExplicitAuthorizationFromErrors(t *testing.T)
 }
 
 func TestToolExecutorDirectOutboundAccessRedactsCredentialFromSuccessfulResult(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"authorization":"Bearer resource-credential","token":"resource-credential"}`))
 	}))
 	defer server.Close()

@@ -27,6 +27,7 @@ import (
 )
 
 const (
+	defaultCredentialHeader = "Authorization"
 	ReasonAccepted          = "Accepted"
 	ReasonInvalidPolicy     = "InvalidPolicy"
 	ReasonResolvedRefs      = "ResolvedRefs"
@@ -108,15 +109,12 @@ func validateDirectSpec(direct *corev1alpha1.DirectOutboundAccess) *Issue {
 	if issue := validateClientAuthentication(direct.ClientAuthentication); issue != nil {
 		return issue
 	}
-	header := http.CanonicalHeaderKey("Authorization")
+	header := defaultCredentialHeader
 	if direct.Output != nil && strings.TrimSpace(direct.Output.Header) != "" {
-		header = http.CanonicalHeaderKey(strings.TrimSpace(direct.Output.Header))
+		header = direct.Output.Header
 	}
-	if header == "" || !validHeaderName(header) {
-		return invalid("output header is invalid")
-	}
-	if strings.EqualFold(header, transactiontoken.HeaderName) {
-		return invalid("Txn-Token cannot be used as the resource credential output header")
+	if err := ValidateCredentialHeader(header); err != nil {
+		return invalid(err.Error())
 	}
 	if direct.Output != nil && direct.Output.Prefix != nil && strings.ContainsAny(*direct.Output.Prefix, "\r\n") {
 		return invalid("output prefix must not contain carriage returns or newlines")
@@ -447,6 +445,21 @@ func endpointScheme(endpoint corev1alpha1.OutboundTokenEndpoint) string {
 		return endpoint.Scheme
 	}
 	return schemeHTTPS
+}
+
+func ValidateCredentialHeader(name string) error {
+	name = http.CanonicalHeaderKey(strings.TrimSpace(name))
+	if name == "" || !validHeaderName(name) {
+		return errors.New("output header is invalid")
+	}
+	if strings.EqualFold(name, transactiontoken.HeaderName) {
+		return errors.New("Txn-Token cannot be used as the resource credential output header")
+	}
+	switch strings.ToLower(name) {
+	case "host", "content-length", "transfer-encoding", "connection", "trailer", "upgrade", "proxy-connection":
+		return fmt.Errorf("output header %q is managed by net/http", name)
+	}
+	return nil
 }
 
 func validHeaderName(name string) bool {

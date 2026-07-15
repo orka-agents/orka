@@ -212,6 +212,19 @@ func TestToolReconcilerOutboundAccessPolicyAuthCompatibility(t *testing.T) {
 	}
 }
 
+func TestToolReconcilerRejectsPlaintextDirectToolURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	direct := readyControllerPolicy("tenant", "direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}})
+	client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(direct).Build()
+	reconciler := &ToolReconciler{Client: client}
+	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "tool", Namespace: "tenant"}, Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: "http://api.example.test", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "direct"}}}}
+	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+//nolint:unparam // Namespace is explicit to mirror the namespaced API contract.
 func readyControllerPolicy(namespace, name string, spec corev1alpha1.OutboundAccessPolicySpec) *corev1alpha1.OutboundAccessPolicy {
 	generation := int64(2)
 	return &corev1alpha1.OutboundAccessPolicy{

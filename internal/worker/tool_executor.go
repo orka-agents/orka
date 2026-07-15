@@ -738,12 +738,17 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		return errors.New("outbound access policy reference name is required")
 	}
 	parentScopes := e.currentParentTransactionScopes()
+	targetScheme := ""
+	if prepared.request != nil && prepared.request.URL != nil {
+		targetScheme = prepared.request.URL.Scheme
+	}
 	resolution, err := e.outboundResolver.Resolve(ctx, outboundaccess.ResolveRequest{
 		Namespace:               e.namespace,
 		PolicyName:              ref.Name,
 		TransactionToken:        prepared.transactionToken,
 		ParentTransactionScopes: parentScopes,
 		HasAuthSecretRef:        prepared.httpConfig.AuthSecretRef != nil,
+		TargetScheme:            targetScheme,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
@@ -751,6 +756,9 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
 	case outboundaccess.AdapterDirect:
+		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
+			return errors.New("direct outbound access requires an HTTPS Tool URL")
+		}
 		if prepared.httpConfig.AuthSecretRef != nil {
 			return errors.New("direct outbound access cannot coexist with authSecretRef")
 		}
@@ -764,6 +772,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		if strings.TrimSpace(resolution.CredentialValue) == "" {
 			return errors.New("direct outbound access returned an empty credential")
 		}
+		prepared.request.Header.Del(transactiontoken.HeaderName)
 		prepared.request.Header.Set(header, resolution.CredentialValue)
 	case outboundaccess.AdapterGateway:
 		if len(parentScopes) > 0 && strings.TrimSpace(prepared.transactionToken) == "" {

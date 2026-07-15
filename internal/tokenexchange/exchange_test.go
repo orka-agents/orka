@@ -751,6 +751,19 @@ func TestClientRejectsEndpointWhitespace(t *testing.T) {
 	}
 }
 
+func TestServiceEndpointClientDisablesProxy(t *testing.T) {
+	base := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+	client := NewClient(ClientOptions{HTTPClient: base})
+	hardened, err := client.clientFor(Request{DisableProxy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := hardened.Transport.(*http.Transport)
+	if transport.Proxy != nil {
+		t.Fatal("service endpoint client retained proxy")
+	}
+}
+
 func TestPublicClientForcesTLSVerification(t *testing.T) {
 	base := &http.Client{Transport: &http.Transport{
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true, ServerName: "inherited.example"},

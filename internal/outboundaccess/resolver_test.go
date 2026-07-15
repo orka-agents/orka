@@ -53,7 +53,7 @@ func TestKubernetesResolverDirectSecretExchange(t *testing.T) {
 	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource-credential", IssuedTokenType: "urn:example:resource", TokenType: "Bearer"}}
 	resolver := &KubernetesResolver{Reader: reader, Exchanger: exchanger}
 
-	resolution, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct"})
+	resolution, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -77,6 +77,7 @@ func TestKubernetesResolverTransactionScopeSubset(t *testing.T) {
 	_, err := resolver.Resolve(context.Background(), ResolveRequest{
 		Namespace:               "tenant",
 		PolicyName:              "direct",
+		TargetScheme:            "https",
 		TransactionToken:        "transaction-token",
 		ParentTransactionScopes: []string{"write"},
 	})
@@ -112,11 +113,22 @@ func TestKubernetesResolverActorTransactionScopeSubset(t *testing.T) {
 	_, err := resolver.Resolve(context.Background(), ResolveRequest{
 		Namespace:               "tenant",
 		PolicyName:              "direct",
+		TargetScheme:            "https",
 		TransactionToken:        "transaction-token",
 		ParentTransactionScopes: []string{"api.write"},
 	})
 	if err == nil || !containsFold(err.Error(), "not present") {
 		t.Fatalf("Resolve() error = %v, want actor scope expansion denial", err)
+	}
+}
+
+func TestKubernetesResolverRejectsPlaintextDirectTarget(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: validDirect()})
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build()
+	_, err := (&KubernetesResolver{Reader: reader}).Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "http"})
+	if err == nil || !containsFold(err.Error(), "HTTPS Tool URL") {
+		t.Fatalf("Resolve() error = %v", err)
 	}
 }
 
@@ -196,7 +208,7 @@ func TestKubernetesResolverServiceAccountSubject(t *testing.T) {
 	})
 	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
 	resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger}
-	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct"}); err != nil {
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"}); err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if exchanger.request.SubjectToken != "service-account-subject" || exchanger.request.SubjectTokenType != tokenexchange.TokenTypeAccessToken {
@@ -243,7 +255,7 @@ func TestKubernetesResolverServiceAccountActorExpiry(t *testing.T) {
 		AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer",
 	}}
 	resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger}
-	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct"}); err != nil {
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"}); err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if exchanger.request.ActorToken != "service-account-actor" || !exchanger.request.ActorExpiresAt.Equal(expires.Time) {

@@ -118,6 +118,7 @@ type Request struct {
 	Timeout               time.Duration
 	TLS                   TLSConfig
 	RequirePublicEndpoint bool
+	DisableProxy          bool
 
 	GrantType        string
 	SubjectToken     string
@@ -632,7 +633,8 @@ func (c *Client) clientFor(req Request) (*http.Client, error) {
 	} else if client.Timeout <= 0 {
 		client.Timeout = defaultTimeout
 	}
-	if len(req.TLS.CAPEM) == 0 && strings.TrimSpace(req.TLS.ServerName) == "" && !req.RequirePublicEndpoint {
+	if len(req.TLS.CAPEM) == 0 && strings.TrimSpace(req.TLS.ServerName) == "" &&
+		!req.RequirePublicEndpoint && !req.DisableProxy {
 		return &client, nil
 	}
 	baseTransport := c.httpClient.Transport
@@ -671,8 +673,10 @@ func (c *Client) clientFor(req Request) (*http.Client, error) {
 		}
 		clone.TLSClientConfig = tlsConfig
 	}
-	if req.RequirePublicEndpoint {
+	if req.RequirePublicEndpoint || req.DisableProxy {
 		clone.Proxy = nil
+	}
+	if req.RequirePublicEndpoint {
 		clone.DialTLS = nil //nolint:staticcheck // Clear the legacy hook so it cannot bypass public-address validation.
 		clone.DialTLSContext = nil
 		clone.DialContext = publicEndpointDialContext
@@ -1040,6 +1044,7 @@ func digestRequest(req Request) (string, error) {
 		TLSServerName         string
 		CADigest              string
 		RequirePublicEndpoint bool
+		DisableProxy          bool
 	}
 	shape := digestShape{
 		CacheNamespace:        req.CacheNamespace,
@@ -1068,6 +1073,7 @@ func digestRequest(req Request) (string, error) {
 		TLSServerName:         req.TLS.ServerName,
 		CADigest:              digestBytes(req.TLS.CAPEM),
 		RequirePublicEndpoint: req.RequirePublicEndpoint,
+		DisableProxy:          req.DisableProxy,
 	}
 	data, err := json.Marshal(shape)
 	if err != nil {

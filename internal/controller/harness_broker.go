@@ -724,7 +724,14 @@ func (r *TaskReconciler) harnessBrokeredOutboundPolicyIdentity(ctx context.Conte
 		appendSource(&direct.Subject)
 		appendSource(direct.Actor)
 	}
-	versions := make([]string, 0, len(secretRefs)+len(serviceAccountNames))
+	serviceRefs := []corev1alpha1.OutboundServiceReference{}
+	if policy.Spec.Direct != nil && policy.Spec.Direct.TokenEndpoint.ServiceRef != nil {
+		serviceRefs = append(serviceRefs, *policy.Spec.Direct.TokenEndpoint.ServiceRef)
+	}
+	if policy.Spec.Gateway != nil {
+		serviceRefs = append(serviceRefs, policy.Spec.Gateway.ServiceRef)
+	}
+	versions := make([]string, 0, len(secretRefs)+len(serviceAccountNames)+len(serviceRefs))
 	for _, name := range serviceAccountNames {
 		serviceAccount := &corev1.ServiceAccount{}
 		if err := r.brokeredApprovalReader().Get(
@@ -738,6 +745,17 @@ func (r *TaskReconciler) harnessBrokeredOutboundPolicyIdentity(ctx context.Conte
 			versions,
 			policy.Namespace+"/"+name+"\x00"+string(serviceAccount.UID)+"\x00"+serviceAccount.ResourceVersion,
 		)
+	}
+	for _, ref := range serviceRefs {
+		serviceNamespace := strings.TrimSpace(ref.Namespace)
+		if serviceNamespace == "" {
+			serviceNamespace = policy.Namespace
+		}
+		service := &corev1.Service{}
+		if err := r.brokeredApprovalReader().Get(ctx, ctrlclient.ObjectKey{Namespace: serviceNamespace, Name: ref.Name}, service); err != nil {
+			return nil, fmt.Errorf("resolve outbound access Service approval identity: %w", err)
+		}
+		versions = append(versions, serviceNamespace+"/"+ref.Name+"\x00"+string(service.UID)+"\x00"+service.ResourceVersion)
 	}
 	for _, ref := range secretRefs {
 		if ref == nil || strings.TrimSpace(ref.Name) == "" {
