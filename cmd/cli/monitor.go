@@ -793,9 +793,6 @@ func newMonitorPRReadyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := validateMonitorTriggerLabels(result); err != nil {
-				return err
-			}
 			return printStructured(cmd, result)
 		},
 	}
@@ -828,15 +825,19 @@ func validateMonitorTriggerLabels(result any) error {
 	triggers, _ := spec["triggers"].(map[string]any)
 	github, _ := triggers["github"].(map[string]any)
 	labels, _ := github["labels"].(map[string]any)
-	seen := map[string]string{}
-	for _, groupName := range []string{"issues", "pullRequests"} {
+	groups := map[string][]struct{ field, intent string }{
+		"issues":       {{"triage", "triage"}, {"research", "research"}, {"plan", "plan"}, {"approvePlan", "approve_plan"}, {"implement", "implement"}, {"decompose", "decompose"}, {"stop", "stop"}, {"resume", "resume"}},
+		"pullRequests": {{"review", "review"}, {"fix", "fix"}, {"fixCI", "fix_ci"}, {"updateBranch", "update_branch"}, {"automerge", "automerge"}, {"stop", "stop"}, {"resume", "resume"}},
+	}
+	for groupName, entries := range groups {
+		seen := map[string]string{}
 		group, _ := labels[groupName].(map[string]any)
-		for intent, raw := range group {
-			label := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+		for _, entry := range entries {
+			label := strings.ToLower(strings.TrimSpace(fmt.Sprint(group[entry.field])))
 			if label == "" {
-				continue
+				label = defaultMonitorCommandLabel(entry.intent)
 			}
-			key := groupName + "." + intent
+			key := groupName + "." + entry.field
 			if previous := seen[label]; previous != "" {
 				return fmt.Errorf("trigger label %q is configured for both %s and %s", label, previous, key)
 			}
@@ -844,6 +845,21 @@ func validateMonitorTriggerLabels(result any) error {
 		}
 	}
 	return nil
+}
+
+func defaultMonitorCommandLabel(intent string) string {
+	switch intent {
+	case "approve_plan":
+		return "orka:approve-plan"
+	case "fix_ci":
+		return "orka:fix-ci"
+	case "update_branch":
+		return "orka:update-branch"
+	case "decompose":
+		return "orka:to-issues"
+	default:
+		return "orka:" + strings.ReplaceAll(intent, "_", "-")
+	}
 }
 
 func newMonitorDoctorCmd() *cobra.Command {
@@ -893,6 +909,9 @@ func newMonitorTriggerLabelsCmd() *cobra.Command {
 			c := newClientFromCmd(cmd)
 			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/repositories/"+url.PathEscape(args[0]), nil, nil)
 			if err != nil {
+				return err
+			}
+			if err := validateMonitorTriggerLabels(result); err != nil {
 				return err
 			}
 			return printStructured(cmd, result)

@@ -401,6 +401,9 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorIssueReadOnlyAgen
 
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorGitSecret(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {
 	if monitor.Spec.GitSecretRef == nil || strings.TrimSpace(monitor.Spec.GitSecretRef.Name) == "" {
+		if monitor.Spec.Triggers.GitHub.Labels.Enabled {
+			return repositoryMonitorReasonGitSecretInvalid, "spec.gitSecretRef is required when GitHub label triggers are enabled", nil
+		}
 		return "", "", nil
 	}
 	secretName := strings.TrimSpace(monitor.Spec.GitSecretRef.Name)

@@ -117,6 +117,9 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")
 	}
+	if spec.Triggers.GitHub.Labels.Enabled && (spec.GitSecretRef == nil || strings.TrimSpace(spec.GitSecretRef.Name) == "") {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.gitSecretRef is required when GitHub label triggers are enabled")
+	}
 	return nil
 }
 
