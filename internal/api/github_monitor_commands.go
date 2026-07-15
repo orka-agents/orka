@@ -656,6 +656,7 @@ func slicesSortStringsFold(values []string) {
 
 func osGetenv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
+//nolint:gocyclo // Durable command/action coalescing keeps each terminal and race outcome explicit.
 func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string) error {
 	if monitor == nil || command == nil || h.repositoryMonitorStore == nil {
 		return nil
@@ -753,10 +754,10 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 		CompletedAt:          completedAt,
 	}); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "constraint") {
-			command.Status = githubCommandStatusCompleted
-			command.Error = "coalesced with active workflow action"
-			_ = h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
-			return nil
+			existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)
+			if getErr == nil && existing.CommandEventID == command.ID && existing.DedupeKey == dedupe {
+				return nil
+			}
 		}
 		return err
 	}
