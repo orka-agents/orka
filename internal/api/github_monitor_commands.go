@@ -176,16 +176,20 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 			{intent: commandIntentResume, label: labels.Issues.Resume},
 		}
 	}
+	matchedIntent := ""
 	for _, entry := range configured {
-		configuredLabel := entry.label
+		configuredLabel := strings.TrimSpace(entry.label)
 		if configuredLabel == "" {
 			configuredLabel = repositoryMonitorDefaultCommandLabel(entry.intent)
 		}
-		if strings.EqualFold(strings.TrimSpace(configuredLabel), label) {
-			return entry.intent, true
+		if strings.EqualFold(configuredLabel, label) {
+			if matchedIntent != "" {
+				return "", false
+			}
+			matchedIntent = entry.intent
 		}
 	}
-	return "", false
+	return matchedIntent, matchedIntent != ""
 }
 
 func repositoryMonitorDefaultCommandLabel(intent string) string {

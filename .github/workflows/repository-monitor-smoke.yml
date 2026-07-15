@@ -10,6 +10,7 @@ on:
       - "go.mod"
       - "go.sum"
       - "internal/**"
+      - "scripts/repository-monitor-*.sh"
       - "workers/**"
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - "go.mod"
       - "go.sum"
       - "internal/**"
+      - "scripts/repository-monitor-*.sh"
       - "workers/**"
 
 permissions:
