@@ -1377,12 +1377,14 @@ func contextTokenTaskToolCredentialFailures(
 			failures = append(failures, fmt.Sprintf("Tool %q references unresolved OutboundAccessPolicy %q", toolName, policyName))
 			continue
 		}
-		if policy.Spec.Direct == nil {
-			continue
+		if direct := policy.Spec.Direct; direct != nil {
+			collectOutboundCredentialSecrets(credentialSecrets, direct)
+			if outboundAccessUsesServiceAccount(direct) {
+				requiresCredentialScope = true
+			}
 		}
-		collectOutboundCredentialSecrets(credentialSecrets, policy.Spec.Direct)
-		if outboundAccessUsesServiceAccount(policy.Spec.Direct) {
-			requiresCredentialScope = true
+		if gateway := policy.Spec.Gateway; gateway != nil {
+			collectOutboundTLSCredentialSecret(credentialSecrets, gateway.TLS)
 		}
 	}
 	if len(credentialSecrets) > 0 {
@@ -1449,6 +1451,16 @@ func collectOutboundCredentialSecrets(names map[string]struct{}, direct *corev1a
 		if auth.PrivateKeyRef != nil && strings.TrimSpace(auth.PrivateKeyRef.Name) != "" {
 			names[auth.PrivateKeyRef.Name] = struct{}{}
 		}
+	}
+	collectOutboundTLSCredentialSecret(names, direct.TokenEndpoint.TLS)
+}
+
+func collectOutboundTLSCredentialSecret(names map[string]struct{}, tlsConfig *corev1alpha1.OutboundTLSConfig) {
+	if tlsConfig == nil || tlsConfig.CASecretRef == nil {
+		return
+	}
+	if name := strings.TrimSpace(tlsConfig.CASecretRef.Name); name != "" {
+		names[name] = struct{}{}
 	}
 }
 

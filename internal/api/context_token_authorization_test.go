@@ -627,7 +627,7 @@ func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t
 func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	policy := readyContextTokenOutboundPolicy("resource-api", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+	policy := readyContextTokenOutboundPolicy(corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
 		Subject: corev1alpha1.OutboundTokenSource{
 			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
 			TokenType: "urn:example:assertion",
@@ -663,6 +663,70 @@ func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testin
 	require.NoError(t, err)
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], "resource-assertion")
+}
+
+func TestContextTokenTaskToolCredentialFailuresForTLSCASecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		spec corev1alpha1.OutboundAccessPolicySpec
+	}{
+		{
+			name: "direct token endpoint",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+				Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+				TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{
+					URL: "https://identity.example.test/token",
+					TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: &corev1alpha1.NamespacedSecretKeySelector{
+						Name: "direct-ca", Key: "ca.crt",
+					}},
+				},
+			}},
+		},
+		{
+			name: "gateway",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{
+				ServiceRef: corev1alpha1.OutboundServiceReference{Name: "agentgateway", Port: 8443},
+				Scheme:     "https",
+				TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: &corev1alpha1.NamespacedSecretKeySelector{
+					Name: "gateway-ca", Key: "ca.crt",
+				}},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			policy := readyContextTokenOutboundPolicy(tt.spec)
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy.Name},
+				}},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+			cfg := enforceContextTokenAuthorizationConfig()
+			cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+			authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{tool.Name}}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+			token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+
+			token.TransactionContext = map[string]any{"secret": "different-ca"}
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], "-ca")
+		})
+	}
 }
 
 func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedOutboundAccessPolicy(t *testing.T) {
@@ -734,7 +798,6 @@ func TestContextTokenTaskToolCredentialFailuresForServiceAccountSources(t *testi
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1alpha1.AddToScheme(scheme))
 			policy := readyContextTokenOutboundPolicy(
-				"resource-api",
 				corev1alpha1.OutboundAccessPolicySpec{Direct: &tt.direct},
 			)
 			tool := &corev1alpha1.Tool{
@@ -801,7 +864,7 @@ func TestContextTokenTaskToolCredentialFailuresRejectsStaleOrRejectedOutboundAcc
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1alpha1.AddToScheme(scheme))
-			policy := readyContextTokenOutboundPolicy("resource-api", corev1alpha1.OutboundAccessPolicySpec{
+			policy := readyContextTokenOutboundPolicy(corev1alpha1.OutboundAccessPolicySpec{
 				Direct: &corev1alpha1.DirectOutboundAccess{
 					Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
 				},
@@ -832,12 +895,11 @@ func TestContextTokenTaskToolCredentialFailuresRejectsStaleOrRejectedOutboundAcc
 }
 
 func readyContextTokenOutboundPolicy(
-	name string,
 	spec corev1alpha1.OutboundAccessPolicySpec,
 ) *corev1alpha1.OutboundAccessPolicy {
 	generation := int64(2)
 	return &corev1alpha1.OutboundAccessPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a", Generation: generation},
+		ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "team-a", Generation: generation},
 		Spec:       spec,
 		Status: corev1alpha1.OutboundAccessPolicyStatus{
 			ObservedGeneration: generation,
