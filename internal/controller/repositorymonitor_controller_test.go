@@ -4287,6 +4287,7 @@ func repositoryMonitorControllerObjects(objects ...crclient.Object) []crclient.O
 		repositoryMonitorControllerTestAgent("researcher", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
 		repositoryMonitorControllerTestAgent("planner", corev1alpha1.AgentRuntimeClaude, repositoryMonitorTestReviewerSecret),
 		repositoryMonitorControllerTestAgent("implementer", corev1alpha1.AgentRuntimeCodex, "implementer-credentials"),
+		repositoryMonitorControllerTestAgent("repairer", corev1alpha1.AgentRuntimeCodex, "implementer-credentials"),
 		repositoryMonitorControllerTestSecret("implementer-credentials", map[string][]byte{
 			workerenv.OpenAIAPIKey: []byte("x"),
 		}),

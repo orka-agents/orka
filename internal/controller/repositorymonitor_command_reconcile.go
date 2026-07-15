@@ -52,7 +52,7 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 				StartedAt:        time.Now(),
 			}
 			if err := r.Store.CreateMonitorRun(ctx, run); err != nil {
-				if strings.Contains(strings.ToLower(err.Error()), "conflict") {
+				if errors.Is(err, store.ErrConflict) {
 					continue
 				}
 				return queued, err

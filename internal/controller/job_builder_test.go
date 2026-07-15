@@ -3077,7 +3077,7 @@ func TestAddSecretVolumes_RuntimeAuthOnlyUnpinnedTaskSecretUsesAgentRuntime(t *t
 	}
 }
 
-func TestAddSecretVolumes_RuntimeAuthOnlyPreservesFoundryBaseURL(t *testing.T) {
+func TestAddSecretVolumes_RuntimeAuthOnlyRejectsFoundryCredentials(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -3105,13 +3105,8 @@ func TestAddSecretVolumes_RuntimeAuthOnlyPreservesFoundryBaseURL(t *testing.T) {
 		}},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
 	}
-	job, err := jb.Build(context.Background(), task, agent, nil)
-	if err != nil {
-		t.Fatalf("Build() error = %v", err)
-	}
-	env, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.AnthropicFoundryBaseURL)
-	if !ok || env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil || env.ValueFrom.SecretKeyRef.Name != runtimeConfig.Name {
-		t.Fatalf("%s env = %#v, found=%v", workerenv.AnthropicFoundryBaseURL, env, ok)
+	if _, err := jb.Build(context.Background(), task, agent, nil); err == nil || !strings.Contains(err.Error(), "contains no supported credentials") {
+		t.Fatalf("Build() error = %v, want unsupported Foundry credential rejection", err)
 	}
 }
 

@@ -1569,17 +1569,7 @@ func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKe
 	case corev1alpha1.AgentRuntimeCodex:
 		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey}, nil
 	case corev1alpha1.AgentRuntimeClaude:
-		return []string{
-			workerenv.AnthropicAPIKey,
-			workerenv.AnthropicBaseURL,
-			"CLAUDE_CODE_USE_FOUNDRY",
-			"ANTHROPIC_FOUNDRY_API_KEY",
-			workerenv.AnthropicFoundryBaseURL,
-			"ANTHROPIC_FOUNDRY_RESOURCE",
-			"ANTHROPIC_DEFAULT_SONNET_MODEL",
-			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
-			"ANTHROPIC_DEFAULT_OPUS_MODEL",
-		}, []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"}, nil
+		return []string{workerenv.AnthropicAPIKey, workerenv.AnthropicBaseURL}, []string{workerenv.AnthropicAPIKey}, nil
 	case corev1alpha1.AgentRuntimeCopilot:
 		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support copilot because %s can mutate GitHub", workerenv.GitHubToken)
 	default:
