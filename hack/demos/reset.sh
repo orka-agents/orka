@@ -25,11 +25,7 @@ log "Cleaning up demo security resources"
 kubectl delete repositoryscans -n "${DEMO_NAMESPACE}" -l "$(demo_label_selector)" --ignore-not-found >/dev/null 2>&1 || true
 delete_repository_scans_by_name_prefix "${DEMO_SECURITY_SCAN_PREFIX}"
 
-log "Cleaning up kontxt demo resources"
-kubectl delete sa,jobs -n "${DEMO_KONTXT_NAMESPACE:-default}" \
-  -l 'orka.ai/demo in (kontxt)' --ignore-not-found >/dev/null 2>&1 || true
 kubectl delete tasks   -n "${DEMO_NAMESPACE}" \
-  -l 'orka.ai/demo in (kontxt)' --ignore-not-found >/dev/null 2>&1 || true
 
 log "Cleaning up agent-sandbox demo resources"
 kubectl delete tasks,sandboxclaims -n "${DEMO_NAMESPACE}" \

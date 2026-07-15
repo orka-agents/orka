@@ -49,8 +49,8 @@ Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
   -v, --version                 version for orka
 
 Use "orka [command] --help" for more information about a command.
@@ -75,8 +75,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka run`
@@ -104,8 +104,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka config`
@@ -130,8 +130,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka config [command] --help" for more information about a command.
 ```
@@ -152,8 +152,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka config set-token`
@@ -173,8 +173,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka config set-namespace`
@@ -193,8 +193,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka config view`
@@ -213,8 +213,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka auth`
@@ -237,8 +237,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka auth [command] --help" for more information about a command.
 ```
@@ -260,8 +260,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka auth whoami`
@@ -281,8 +281,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka models`
@@ -304,8 +304,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka models [command] --help" for more information about a command.
 ```
@@ -328,8 +328,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka status`
@@ -348,8 +348,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka audit`
@@ -361,7 +361,7 @@ Usage:
   orka audit [command]
 
 Available Commands:
-  trace       Show tasks correlated by kontxt transaction ID
+  trace       Show tasks correlated by transaction ID
 
 Flags:
   -h, --help   help for audit
@@ -371,8 +371,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka audit [command] --help" for more information about a command.
 ```
@@ -380,7 +380,7 @@ Use "orka audit [command] --help" for more information about a command.
 ## `orka audit trace`
 
 ```text
-Show tasks correlated by kontxt transaction ID
+Show tasks correlated by transaction ID
 
 Usage:
   orka audit trace <transaction-id> [flags]
@@ -394,8 +394,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task`
@@ -434,8 +434,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka task [command] --help" for more information about a command.
 ```
@@ -471,8 +471,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task list`
@@ -493,15 +493,15 @@ Flags:
       --limit int            Maximum number of results (default 20)
   -o, --output string        Output format: table, json, yaml (default "table")
       --status string        Filter by status (client-side scan; may page through many tasks)
-      --transaction string   Filter by kontxt transaction ID (client-side scan)
+      --transaction string   Filter by transaction ID (client-side scan)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task get`
@@ -522,8 +522,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task logs`
@@ -543,8 +543,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task result`
@@ -564,8 +564,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task plan`
@@ -585,8 +585,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task children`
@@ -606,8 +606,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task events`
@@ -630,8 +630,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task follow`
@@ -652,8 +652,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task trace`
@@ -673,8 +673,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task approvals`
@@ -694,8 +694,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task approve`
@@ -716,8 +716,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task decline`
@@ -738,8 +738,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task fork`
@@ -763,8 +763,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task wait`
@@ -784,8 +784,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task delete`
@@ -807,8 +807,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task artifacts`
@@ -827,8 +827,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka task download`
@@ -848,8 +848,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka workspace`
@@ -871,8 +871,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka workspace [command] --help" for more information about a command.
 ```
@@ -894,8 +894,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka provider`
@@ -921,8 +921,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka provider [command] --help" for more information about a command.
 ```
@@ -947,8 +947,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka provider get`
@@ -968,8 +968,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka provider create`
@@ -989,8 +989,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka provider update`
@@ -1010,8 +1010,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka provider delete`
@@ -1030,8 +1030,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka agent`
@@ -1057,8 +1057,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka agent [command] --help" for more information about a command.
 ```
@@ -1080,8 +1080,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka agent get`
@@ -1101,8 +1101,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka agent create`
@@ -1122,8 +1122,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka agent update`
@@ -1143,8 +1143,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka agent delete`
@@ -1163,8 +1163,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka tool`
@@ -1190,8 +1190,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka tool [command] --help" for more information about a command.
 ```
@@ -1216,8 +1216,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka tool get`
@@ -1237,8 +1237,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka tool create`
@@ -1258,8 +1258,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka tool update`
@@ -1279,8 +1279,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka tool delete`
@@ -1299,8 +1299,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill`
@@ -1330,8 +1330,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka skill [command] --help" for more information about a command.
 ```
@@ -1353,8 +1353,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill get`
@@ -1374,8 +1374,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill content`
@@ -1394,8 +1394,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill create`
@@ -1415,8 +1415,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill init`
@@ -1438,8 +1438,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill validate`
@@ -1459,8 +1459,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill import`
@@ -1480,8 +1480,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill update`
@@ -1501,8 +1501,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka skill delete`
@@ -1521,8 +1521,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka secret`
@@ -1544,8 +1544,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka secret [command] --help" for more information about a command.
 ```
@@ -1570,8 +1570,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka session`
@@ -1597,8 +1597,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka session [command] --help" for more information about a command.
 ```
@@ -1623,8 +1623,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka session get`
@@ -1644,8 +1644,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka session delete`
@@ -1664,8 +1664,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory`
@@ -1694,8 +1694,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka memory [command] --help" for more information about a command.
 ```
@@ -1728,8 +1728,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory get`
@@ -1749,8 +1749,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory create`
@@ -1773,8 +1773,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory update`
@@ -1797,8 +1797,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory delete`
@@ -1817,8 +1817,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory enable`
@@ -1837,8 +1837,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory disable`
@@ -1857,8 +1857,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory proposal`
@@ -1884,8 +1884,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka memory proposal [command] --help" for more information about a command.
 ```
@@ -1913,8 +1913,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory proposal get`
@@ -1934,8 +1934,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory proposal review`
@@ -1957,8 +1957,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory proposal apply`
@@ -1978,8 +1978,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka memory proposal archive`
@@ -1998,8 +1998,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security`
@@ -2026,8 +2026,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security [command] --help" for more information about a command.
 ```
@@ -2055,8 +2055,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security repo [command] --help" for more information about a command.
 ```
@@ -2081,8 +2081,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security repo get`
@@ -2102,8 +2102,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security repo create`
@@ -2123,8 +2123,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security repo update`
@@ -2144,8 +2144,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security repo delete`
@@ -2164,8 +2164,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security scan`
@@ -2188,8 +2188,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security scan [command] --help" for more information about a command.
 ```
@@ -2210,8 +2210,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security scan list`
@@ -2234,8 +2234,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security threat-model`
@@ -2258,8 +2258,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security threat-model [command] --help" for more information about a command.
 ```
@@ -2281,8 +2281,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security threat-model update`
@@ -2304,8 +2304,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding`
@@ -2334,8 +2334,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security finding [command] --help" for more information about a command.
 ```
@@ -2366,8 +2366,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding get`
@@ -2387,8 +2387,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding dismiss`
@@ -2407,8 +2407,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding reopen`
@@ -2427,8 +2427,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding validate`
@@ -2447,8 +2447,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding patch`
@@ -2468,8 +2468,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding patches`
@@ -2489,8 +2489,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security finding pr`
@@ -2510,8 +2510,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security slice`
@@ -2534,8 +2534,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security slice [command] --help" for more information about a command.
 ```
@@ -2561,8 +2561,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security slice get`
@@ -2582,8 +2582,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka security dropped-findings`
@@ -2605,8 +2605,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka security dropped-findings [command] --help" for more information about a command.
 ```
@@ -2635,8 +2635,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor`
@@ -2666,8 +2666,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka monitor [command] --help" for more information about a command.
 ```
@@ -2692,8 +2692,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor get`
@@ -2713,8 +2713,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor create`
@@ -2734,8 +2734,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor update`
@@ -2755,8 +2755,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor delete`
@@ -2775,8 +2775,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor run`
@@ -2798,8 +2798,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor runs`
@@ -2824,8 +2824,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor items`
@@ -2853,8 +2853,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka monitor events`
@@ -2882,8 +2882,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka substrate`
@@ -2905,8 +2905,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka substrate [command] --help" for more information about a command.
 ```
@@ -2934,8 +2934,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka substrate pool [command] --help" for more information about a command.
 ```
@@ -2960,8 +2960,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka substrate pool get`
@@ -2981,8 +2981,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka substrate pool create`
@@ -3002,8 +3002,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka substrate pool update`
@@ -3023,8 +3023,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka substrate pool delete`
@@ -3043,8 +3043,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka completion`
@@ -3070,8 +3070,8 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
-      --txn-token string        Kontxt transaction token to send via Txn-Token header
-      --txn-token-file string   Path to file containing a Kontxt transaction token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka completion [command] --help" for more information about a command.
 ```

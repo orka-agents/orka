@@ -9,28 +9,31 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/aramase/kontxt/pkg/keys"
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
-	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
+	"github.com/orka-agents/orka/internal/transactiontoken"
+	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -1162,7 +1165,7 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 
 	var receivedTxnToken string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
+		receivedTxnToken = r.Header.Get(transactiontoken.HeaderName)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -1182,7 +1185,7 @@ func TestToolExecutor_Execute_PropagatesTransactionTokenFile(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if receivedTxnToken != "tx-token" {
-		t.Fatalf("%s = %q, want tx-token", kontxttoken.HeaderName, receivedTxnToken)
+		t.Fatalf("%s = %q, want tx-token", transactiontoken.HeaderName, receivedTxnToken)
 	}
 }
 
@@ -1210,7 +1213,7 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 			HTTP: &corev1alpha1.HTTPExecution{
 				URL: server.URL,
 				Headers: map[string]string{
-					kontxttoken.HeaderName: "user-configured-token",
+					transactiontoken.HeaderName: "user-configured-token",
 				},
 			},
 		},
@@ -1220,8 +1223,8 @@ func TestToolExecutor_Execute_FailsClosedOnConfiguredTransactionTokenHeader(t *t
 	if err == nil {
 		t.Fatal("Execute() error = nil, want reserved header conflict")
 	}
-	if !strings.Contains(err.Error(), "reserved header") || !strings.Contains(err.Error(), kontxttoken.HeaderName) {
-		t.Fatalf("Execute() error = %q, want reserved %s header conflict", err, kontxttoken.HeaderName)
+	if !strings.Contains(err.Error(), "reserved header") || !strings.Contains(err.Error(), transactiontoken.HeaderName) {
+		t.Fatalf("Execute() error = %q, want reserved %s header conflict", err, transactiontoken.HeaderName)
 	}
 	if called {
 		t.Fatal("server was called despite reserved TxToken header conflict")
@@ -1234,14 +1237,10 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 		t.Fatalf("failed to write subject token fixture: %v", err)
 	}
 
-	keyManager, err := keys.NewManager(2048, time.Hour)
-	if err != nil {
-		t.Fatalf("failed to create kontxt key manager: %v", err)
-	}
-	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	issuer := txtest.NewIssuer(t)
+	jwksServer := httptest.NewServer(issuer.JWKSHandler())
 	defer jwksServer.Close()
-	signingKey, kid := keyManager.SigningKey()
-	downstreamToken, err := kontxttoken.New(kontxttoken.Claims{
+	downstreamToken := issuer.Sign(t, transactiontoken.Claims{
 		Issuer:             "https://tts.example.test",
 		Audience:           "downstream.example.test",
 		TransactionID:      "txn-downstream-123",
@@ -1252,10 +1251,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 			"operation": "httpTool",
 			"tool":      "downstream",
 		},
-	}, signingKey, kid, time.Minute)
-	if err != nil {
-		t.Fatalf("failed to create downstream TxToken: %v", err)
-	}
+	}, time.Minute)
 
 	var ttsScope string
 	var ttsSubjectToken string
@@ -1283,7 +1279,7 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+testTokenEndpointPath)
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
@@ -1292,13 +1288,12 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 	t.Setenv(workerenv.ContextTokenToolTokenTTL, "17s")
 	t.Setenv(workerenv.TaskName, "task-1")
 
-	verifier := sdkverify.New(jwksServer.URL, "downstream.example.test")
 	var receivedTxnToken string
 	var verifiedTransactionID string
 	var verifiedScope string
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
-		claims, err := verifier.Verify(r.Context(), receivedTxnToken)
+		receivedTxnToken = r.Header.Get(transactiontoken.HeaderName)
+		claims, err := txtest.Verify(r.Context(), jwksServer.URL, "downstream.example.test", receivedTxnToken)
 		if err != nil {
 			http.Error(w, "invalid TxToken", http.StatusUnauthorized)
 			t.Errorf("downstream verifier rejected propagated TxToken: %v", err)
@@ -1334,10 +1329,10 @@ func TestToolExecutor_Execute_ExchangesOutboundTransactionTokenWithTTS(t *testin
 		t.Fatalf("request_details = %#v", requestDetails)
 	}
 	if receivedTxnToken == "" {
-		t.Fatalf("missing propagated %s header", kontxttoken.HeaderName)
+		t.Fatalf("missing propagated %s header", transactiontoken.HeaderName)
 	}
 	if receivedTxnToken != downstreamToken {
-		t.Fatalf("%s did not contain token returned by TTS", kontxttoken.HeaderName)
+		t.Fatalf("%s did not contain token returned by TTS", transactiontoken.HeaderName)
 	}
 	if verifiedTransactionID != "txn-downstream-123" {
 		t.Fatalf("downstream verified txn = %q, want txn-downstream-123", verifiedTransactionID)
@@ -1360,8 +1355,8 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 		if got := r.FormValue("subject_token"); got != "service-account-token" {
 			t.Fatalf("TTS subject_token = %q, want service-account-token", got)
 		}
-		if got := r.FormValue("subject_token_type"); got != kontxttoken.SubjectTokenTypeAccessToken {
-			t.Fatalf("TTS subject_token_type = %q, want %q", got, kontxttoken.SubjectTokenTypeAccessToken)
+		if got := r.FormValue("subject_token_type"); got != transactiontoken.SubjectTokenTypeAccessToken {
+			t.Fatalf("TTS subject_token_type = %q, want %q", got, transactiontoken.SubjectTokenTypeAccessToken)
 		}
 		if got := r.FormValue("scope"); got != testOutboundToolScope {
 			t.Fatalf("TTS scope = %q, want %s", got, testOutboundToolScope)
@@ -1375,14 +1370,14 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+testTokenEndpointPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
 	t.Setenv(workerenv.TransactionScopes, testOutboundToolScope)
 	t.Setenv(workerenv.ServiceAccountToken, "service-account-token")
 
 	var receivedTxnToken string
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedTxnToken = r.Header.Get(kontxttoken.HeaderName)
+		receivedTxnToken = r.Header.Get(transactiontoken.HeaderName)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer toolServer.Close()
@@ -1402,7 +1397,7 @@ func TestToolExecutor_Execute_DefaultsOutboundTTSToServiceAccountSubjectToken(t 
 		t.Fatal("expected outbound TTS exchange")
 	}
 	if receivedTxnToken != "downstream-token" {
-		t.Fatalf("%s = %q, want downstream-token", kontxttoken.HeaderName, receivedTxnToken)
+		t.Fatalf("%s = %q, want downstream-token", transactiontoken.HeaderName, receivedTxnToken)
 	}
 }
 
@@ -1436,7 +1431,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+testTokenEndpointPath)
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.TransactionTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
@@ -1445,7 +1440,7 @@ func TestToolExecutor_Execute_ReusesOutboundTTSClient(t *testing.T) {
 
 	var receivedTxnTokens []string
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedTxnTokens = append(receivedTxnTokens, r.Header.Get(kontxttoken.HeaderName))
+		receivedTxnTokens = append(receivedTxnTokens, r.Header.Get(transactiontoken.HeaderName))
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer toolServer.Close()
@@ -1496,7 +1491,7 @@ func TestToolExecutor_Execute_FailsClosedWhenOutboundTTSExchangeFails(t *testing
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+testTokenEndpointPath)
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectTokenPath)
 	t.Setenv(workerenv.ContextTokenOutboundScope, testOutboundToolScope)
@@ -1711,7 +1706,7 @@ func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *test
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte("debug echoed " + r.Header.Get(kontxttoken.HeaderName)))
+		_, _ = w.Write([]byte("debug echoed " + r.Header.Get(transactiontoken.HeaderName)))
 	}))
 	defer server.Close()
 
@@ -2405,4 +2400,425 @@ func countMetricDataPoints(rm metricdata.ResourceMetrics, name string) int {
 		}
 	}
 	return count
+}
+
+type fakeOutboundAccessResolver struct {
+	request    outboundaccess.ResolveRequest
+	resolution outboundaccess.Resolution
+	err        error
+}
+
+func (r *fakeOutboundAccessResolver) Resolve(_ context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	r.request = req
+	return r.resolution, r.err
+}
+
+func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *testing.T) {
+	txnPath := filepath.Join(t.TempDir(), "transaction-token")
+	if err := os.WriteFile(txnPath, []byte("parent-transaction-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnPath)
+	t.Setenv(workerenv.TransactionScopes, "api.read api.write")
+
+	var authorization, transactionHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		transactionHeader = r.Header.Get(transactiontoken.HeaderName)
+		http.Error(w, "debug resource-credential", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:          outboundaccess.AdapterDirect,
+		CredentialHeader: "Authorization",
+		CredentialValue:  "Bearer resource-credential",
+		SensitiveValues:  []string{"resource-credential"},
+	}}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     server.URL,
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+		}},
+	}
+	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"input":"value"}`))
+	if err == nil {
+		t.Fatal("Execute() error = nil")
+	}
+	if strings.Contains(err.Error(), "resource-credential") {
+		t.Fatalf("Execute() leaked resource credential: %v", err)
+	}
+	if authorization != "Bearer resource-credential" {
+		t.Fatalf("Authorization = %q", authorization)
+	}
+	if transactionHeader != "parent-transaction-token" {
+		t.Fatalf("%s = %q", transactiontoken.HeaderName, transactionHeader)
+	}
+	if resolver.request.PolicyName != "resource-api" || resolver.request.TransactionToken != "parent-transaction-token" {
+		t.Fatalf("resolver request = %#v", resolver.request)
+	}
+	if got := resolver.request.ParentTransactionScopes; len(got) != 2 || got[0] != "api.read" || got[1] != "api.write" {
+		t.Fatalf("parent scopes = %#v", got)
+	}
+}
+
+func TestToolExecutorDirectOutboundAccessRejectsHeaderCollision(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:          outboundaccess.AdapterDirect,
+		CredentialHeader: "Authorization",
+		CredentialValue:  "Bearer exchanged",
+		SensitiveValues:  []string{"exchanged"},
+	}}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     server.URL,
+		Headers:                 map[string]string{"Authorization": "Bearer static"},
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+	}}}
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("Execute() error = %v, want collision", err)
+	}
+	if called {
+		t.Fatal("downstream called despite credential header collision")
+	}
+}
+
+func TestToolExecutorGatewayDialsGatewayAndPreservesOriginalRequest(t *testing.T) {
+	txnPath := filepath.Join(t.TempDir(), "transaction-token")
+	if err := os.WriteFile(txnPath, []byte("gateway-transaction-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, txnPath)
+
+	var host, path, query, authorization, transactionHeader string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host = r.Host
+		path = r.URL.Path
+		query = r.URL.RawQuery
+		authorization = r.Header.Get("Authorization")
+		transactionHeader = r.Header.Get(transactiontoken.HeaderName)
+		_, _ = w.Write([]byte(`{"gateway":"ok"}`))
+	}))
+	defer gateway.Close()
+	gatewayURL, err := neturl.Parse(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:       outboundaccess.AdapterGateway,
+		GatewayScheme: gatewayURL.Scheme,
+		GatewayHost:   gatewayURL.Host,
+	}}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     "https://api.example.test/v1/items?limit=2",
+		Method:                  http.MethodPost,
+		Headers:                 map[string]string{"Authorization": "Bearer explicit-tool-auth"},
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "agentgateway"},
+	}}}
+	result, err := executor.Execute(context.Background(), tool, json.RawMessage(`{"id":1}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result != `{"gateway":"ok"}` {
+		t.Fatalf("result = %q", result)
+	}
+	if host != "api.example.test" || path != "/v1/items" || query != "limit=2" {
+		t.Fatalf("gateway target = host %q path %q query %q", host, path, query)
+	}
+	if authorization != "Bearer explicit-tool-auth" || transactionHeader != "gateway-transaction-token" {
+		t.Fatalf("gateway headers Authorization=%q Txn-Token=%q", authorization, transactionHeader)
+	}
+}
+
+func TestToolHTTPClientStripsSensitiveHeadersOnRedirect(t *testing.T) {
+	var redirectedTxn, redirectedAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		redirectedTxn = r.Header.Get(transactiontoken.HeaderName)
+		redirectedAuthorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client, err := toolHTTPClient(server.Client(), nil, tokenexchange.TLSConfig{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/redirect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(transactiontoken.HeaderName, "transaction-token-secret")
+	req.Header.Set("Authorization", "Bearer resource-secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	_ = resp.Body.Close()
+	if redirectedTxn != "" {
+		t.Fatalf("redirect leaked Txn-Token=%q", redirectedTxn)
+	}
+	if redirectedAuthorization != "Bearer resource-secret" {
+		t.Fatalf("same-origin redirect lost Authorization=%q", redirectedAuthorization)
+	}
+}
+
+func TestToolHTTPClientDoesNotFollowGatewayRedirect(t *testing.T) {
+	called := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer gateway.Close()
+	client, err := toolHTTPClient(gateway.Client(), nil, tokenexchange.TLSConfig{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, gateway.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(transactiontoken.HeaderName, "transaction-token-secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	if called {
+		t.Fatal("gateway redirect target was called")
+	}
+}
+
+type blockingOutboundAccessResolver struct{}
+
+func (blockingOutboundAccessResolver) Resolve(ctx context.Context, _ outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	<-ctx.Done()
+	return outboundaccess.Resolution{}, ctx.Err()
+}
+
+func TestToolExecutorTimeoutCancelsOutboundExchangeResolution(t *testing.T) {
+	executor := &ToolExecutor{namespace: "tenant", outboundResolver: blockingOutboundAccessResolver{}}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     "https://api.example.test",
+		Timeout:                 &metav1.Duration{Duration: 5 * time.Millisecond},
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+	}}}
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() error = %v, want deadline exceeded", err)
+	}
+}
+
+func TestToolExecutorGatewayRedactsExplicitAuthorizationFromErrors(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "gateway echoed explicit-tool-auth", http.StatusBadGateway)
+	}))
+	defer gateway.Close()
+	gatewayURL, err := neturl.Parse(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:       outboundaccess.AdapterGateway,
+		GatewayScheme: gatewayURL.Scheme,
+		GatewayHost:   gatewayURL.Host,
+	}}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     "https://api.example.test/v1",
+		Headers:                 map[string]string{"Authorization": "Bearer explicit-tool-auth"},
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "gateway"},
+	}}}
+	_, err = executor.Execute(context.Background(), tool, nil)
+	if err == nil {
+		t.Fatal("Execute() error = nil")
+	}
+	if strings.Contains(err.Error(), "explicit-tool-auth") {
+		t.Fatalf("gateway error leaked Authorization credential: %v", err)
+	}
+}
+
+func TestToolExecutorDirectOutboundAccessRedactsCredentialFromSuccessfulResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"authorization":"Bearer resource-credential","token":"resource-credential"}`))
+	}))
+	defer server.Close()
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:          outboundaccess.AdapterDirect,
+		CredentialHeader: "Authorization",
+		CredentialValue:  "Bearer resource-credential",
+		SensitiveValues:  []string{"resource-credential"},
+	}}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     server.URL,
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "direct"},
+	}}}
+	result, err := executor.Execute(context.Background(), tool, nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.Contains(result, "resource-credential") || !strings.Contains(result, "[REDACTED]") {
+		t.Fatalf("successful Tool result was not redacted: %s", result)
+	}
+}
+
+func TestToolHTTPClientRejectsCrossOriginRedirectWithoutCredentials(t *testing.T) {
+	called := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+	client, err := toolHTTPClient(source.Client(), nil, tokenexchange.TLSConfig{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(source.URL)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	if called {
+		t.Fatal("cross-origin redirect target was called")
+	}
+}
+
+func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(transactiontoken.HeaderName); got != "task-scoped-transaction" {
+			t.Fatalf("%s = %q", transactiontoken.HeaderName, got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+	gatewayURL, err := neturl.Parse(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:       outboundaccess.AdapterGateway,
+		GatewayScheme: gatewayURL.Scheme,
+		GatewayHost:   gatewayURL.Host,
+	}}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor.SetTransactionAuthority("task-scoped-transaction", []string{"api.read"})
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     "https://api.example.test/v1",
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "gateway"},
+	}}}
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if resolver.request.TransactionToken != "task-scoped-transaction" || len(resolver.request.ParentTransactionScopes) != 1 {
+		t.Fatalf("resolver request = %#v", resolver.request)
+	}
+}
+
+func TestToolExecutorGatewayFailsClosedWithoutTaskTransactionAuthority(t *testing.T) {
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:       outboundaccess.AdapterGateway,
+		GatewayScheme: "http",
+		GatewayHost:   "gateway.example.test:8080",
+	}}
+	executor := &ToolExecutor{namespace: "tenant", outboundResolver: resolver}
+	executor.SetTransactionAuthority("", []string{"api.read"})
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     "https://api.example.test/v1",
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "gateway"},
+	}}}
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if err == nil || !strings.Contains(err.Error(), "task-scoped transaction authority") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestToolExecutorIncomingTTSDoesNotFallbackAfterTaskAuthorityIsSet(t *testing.T) {
+	fallbackPath := filepath.Join(t.TempDir(), "fallback-transaction")
+	if err := os.WriteFile(fallbackPath, []byte("process-global-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerenv.TransactionTokenFile, fallbackPath)
+	executor := &ToolExecutor{}
+	executor.SetTransactionAuthority("", []string{"api.read"})
+	_, err := executor.outboundTTSSubjectToken(contexttoken.TTSTokenSourceIncoming)
+	if err == nil || !strings.Contains(err.Error(), "task-scoped incoming") {
+		t.Fatalf("outboundTTSSubjectToken() error = %v", err)
+	}
+}
+
+type fakeContextTokenExchanger struct{}
+
+func (fakeContextTokenExchanger) Exchange(context.Context, contexttoken.ExchangeRequest) (string, error) {
+	return "transaction-token", nil
+}
+
+func TestToolExecutorsReuseInjectedBrokeredTransactionExchanger(t *testing.T) {
+	shared := fakeContextTokenExchanger{}
+	config := &TransactionExchangeConfig{
+		TTS:       contexttoken.TTSConfig{Endpoint: "https://issuer.example.test/token", TokenSource: contexttoken.TTSTokenSourceServiceAccount},
+		Exchanger: shared,
+	}
+	first := &ToolExecutor{}
+	second := &ToolExecutor{}
+	first.SetTransactionExchangeConfig(config)
+	second.SetTransactionExchangeConfig(config)
+	firstExchanger, err := first.transactionTokenExchanger(config.TTS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondExchanger, err := second.transactionTokenExchanger(config.TTS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstExchanger != secondExchanger {
+		t.Fatal("brokered ToolExecutors did not reuse the injected transaction exchanger")
+	}
+}
+
+func TestToolExecutorUsesExactInjectedAuthSecretSnapshot(t *testing.T) {
+	var authorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant"}
+	executor.SetAuthSecretValue("tool-auth", "token", "approved-snapshot")
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:           server.URL,
+		AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "tool-auth", Key: "token"},
+	}}}
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if authorization != "Bearer approved-snapshot" {
+		t.Fatalf("Authorization = %q", authorization)
+	}
 }

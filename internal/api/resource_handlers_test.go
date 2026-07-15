@@ -192,7 +192,7 @@ func TestServer_HandleAuthWhoAmI_Sanitized(t *testing.T) {
 			Subject:   "subj",
 			Issuer:    "issuer",
 			ContextToken: &ContextToken{
-				Profile:            "kontxt",
+				Profile:            "transaction-token",
 				TransactionID:      "txn-1",
 				Scope:              "orka:tasks:get",
 				Scopes:             []string{"orka:tasks:get"},

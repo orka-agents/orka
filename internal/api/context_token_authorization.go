@@ -283,6 +283,11 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 	}
 
 	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(c.Context(), h.client, ui.ContextToken, h.contextTokenAuthorization, authzCtx)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures = append(failures, credentialFailures...)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization("createTask", "allowed", "ok")
 		return nil
@@ -308,6 +313,11 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 	}
 
 	failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(ctx, k8sClient, token, cfg, authzCtx)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures = append(failures, credentialFailures...)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
@@ -1304,6 +1314,96 @@ func contextTokenTaskCreateEffectiveRuntimeAllowBash(req CreateTaskRequest, agen
 		allowBash = *req.AgentRuntime.AllowBash
 	}
 	return allowBash
+}
+
+func contextTokenTaskToolCredentialFailures(
+	ctx context.Context,
+	k8sClient client.Client,
+	token *ContextToken,
+	cfg ContextTokenAuthorizationConfig,
+	authzCtx contextTokenTaskCreateAuthorizationContext,
+) ([]string, error) {
+	if token == nil || k8sClient == nil {
+		return nil, nil
+	}
+	toolNames := append([]string{}, authzCtx.EffectiveAITools...)
+	toolNames = append(toolNames, contextTokenRuntimeToolConstraints(authzCtx)...)
+	seenTools := map[string]struct{}{}
+	credentialSecrets := map[string]struct{}{}
+	for _, toolName := range toolNames {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		if _, ok := seenTools[toolName]; ok {
+			continue
+		}
+		seenTools[toolName] = struct{}{}
+		tool := &corev1alpha1.Tool{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: toolName}, tool); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("resolve Tool %q credential policy: %w", toolName, err)
+		}
+		if tool.Spec.HTTP == nil {
+			continue
+		}
+		if tool.Spec.HTTP.AuthSecretRef != nil {
+			credentialSecrets[tool.Spec.HTTP.AuthSecretRef.Name] = struct{}{}
+		}
+		if tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+			continue
+		}
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}, policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("resolve OutboundAccessPolicy %q: %w", tool.Spec.HTTP.OutboundAccessPolicyRef.Name, err)
+		}
+		if policy.Spec.Direct == nil {
+			continue
+		}
+		collectOutboundCredentialSecrets(credentialSecrets, policy.Spec.Direct)
+	}
+	if len(credentialSecrets) == 0 {
+		return nil, nil
+	}
+	failures := []string{}
+	requiredScopes := cfg.SecretCredentialReadScopes()
+	if !hasAnyScope(token.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf("Tool outbound credentials require one of scopes %q", strings.Join(requiredScopes, ",")))
+	}
+	if want, ok := contextString(token.TransactionContext, "secret"); ok {
+		for secretName := range credentialSecrets {
+			if secretName != want {
+				failures = append(failures, fmt.Sprintf("credential secret %q does not match token context %q", secretName, want))
+			}
+		}
+	}
+	return failures, nil
+}
+
+func collectOutboundCredentialSecrets(names map[string]struct{}, direct *corev1alpha1.DirectOutboundAccess) {
+	if direct == nil {
+		return
+	}
+	collect := func(source *corev1alpha1.OutboundTokenSource) {
+		if source != nil && source.SecretRef != nil && strings.TrimSpace(source.SecretRef.Name) != "" {
+			names[source.SecretRef.Name] = struct{}{}
+		}
+	}
+	collect(&direct.Subject)
+	collect(direct.Actor)
+	if auth := direct.ClientAuthentication; auth != nil {
+		if auth.ClientSecretRef != nil && strings.TrimSpace(auth.ClientSecretRef.Name) != "" {
+			names[auth.ClientSecretRef.Name] = struct{}{}
+		}
+		if auth.PrivateKeyRef != nil && strings.TrimSpace(auth.PrivateKeyRef.Name) != "" {
+			names[auth.PrivateKeyRef.Name] = struct{}{}
+		}
+	}
 }
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {

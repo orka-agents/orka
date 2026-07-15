@@ -43,11 +43,12 @@ rules:
   - delete
   - get
   - update
-# Orka Tool CRDs
+# Orka Tool and OutboundAccessPolicy CRDs
 - apiGroups:
   - core.orka.ai
   resources:
   - tools
+  - outboundaccesspolicies
   verbs:
   - get
   - list
@@ -92,6 +93,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
 - apiGroups:
   - discovery.k8s.io
   resources:
@@ -266,11 +273,12 @@ rules:
   - get
   - list
   - watch
-# Orka Tool CRDs
+# Orka Tool and OutboundAccessPolicy CRDs
 - apiGroups:
   - core.orka.ai
   resources:
   - tools
+  - outboundaccesspolicies
   verbs:
   - get
   - list

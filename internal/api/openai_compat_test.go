@@ -1247,7 +1247,7 @@ func TestOpenAICompat_ContextTokenAuthorizationRequiresProviderScopeForModels(t 
 		"scope": ContextTokenScopeTaskList,
 	})
 	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -1299,7 +1299,7 @@ func TestOpenAICompat_ContextTokenAuthorizationFiltersListModels(t *testing.T) {
 		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -1370,7 +1370,7 @@ func TestOpenAICompat_ContextTokenAuthorizationAuditAllowsListModels(t *testing.
 		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)

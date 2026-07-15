@@ -67,6 +67,10 @@ type HTTPExecution struct {
 	// +optional
 	AuthSecretRef *SecretKeySelector `json:"authSecretRef,omitempty"`
 
+	// OutboundAccessPolicyRef references an OutboundAccessPolicy in the same namespace.
+	// +optional
+	OutboundAccessPolicyRef *LocalObjectReference `json:"outboundAccessPolicyRef,omitempty"`
+
 	// AuthInject specifies where to inject the auth token: "header" (default) or "body"
 	// When "header", the token is added as Authorization: Bearer <token>
 	// When "body", the token is added to the JSON request body using AuthBodyKey
@@ -80,6 +84,13 @@ type HTTPExecution struct {
 	// Only used when AuthInject=body
 	// +optional
 	AuthBodyKey string `json:"authBodyKey,omitempty"`
+}
+
+// LocalObjectReference selects an object in the same namespace.
+type LocalObjectReference struct {
+	// Name is the referenced object name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // SecretKeySelector selects a key from a Secret

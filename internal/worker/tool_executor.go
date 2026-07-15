@@ -10,10 +10,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -23,13 +26,20 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/genai"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -46,11 +56,14 @@ const (
 	mcpToolCallRequestID             = "1"
 	mcpInitializeRequestID           = "initialize"
 	mcpSessionTerminateTimeout       = 10 * time.Second
+	maxToolHTTPRedirects             = 10
 	mcpToolsCallMethod               = "tools/call"
 	mcpInitializeMethod              = "initialize"
 	mcpInitializedNotificationMethod = "notifications/initialized"
 	toolIdempotencyKeyHeader         = "Idempotency-Key"
 	toolHTTPResponseBodyLimit        = 10 << 20
+	toolHTTPErrorBodyLimit           = 4096
+	toolAuthInjectHeader             = "header"
 )
 
 var (
@@ -80,14 +93,65 @@ func toolCallIDFromContext(ctx context.Context) string {
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
 type ToolExecutor struct {
-	client     *http.Client
-	secretPath string
-	namespace  string
-	k8sClient  kubernetes.Interface
+	client           *http.Client
+	secretPath       string
+	namespace        string
+	k8sClient        kubernetes.Interface
+	outboundResolver outboundaccess.Resolver
+
+	transactionAuthoritySet bool
+	transactionToken        string
+	transactionScopes       []string
+	transactionExchange     *TransactionExchangeConfig
+	authSecretValues        map[string]string
 
 	ttsMu        sync.Mutex
-	ttsClient    *contexttoken.KontxtTTSClient
+	ttsClient    *contexttoken.TTSClient
 	ttsClientKey string
+}
+
+// TransactionExchangeConfig carries controller-resolved TTS settings for
+// brokered Tool execution, where worker environment variables are unavailable.
+type TransactionExchangeConfig struct {
+	TTS              contexttoken.TTSConfig
+	Exchanger        contexttoken.Exchanger
+	SubjectTokenType string
+	OutboundScope    string
+}
+
+// SetTransactionAuthority sets task-scoped transaction authority. Calling it
+// with an empty token intentionally disables fallback to process-global files.
+func (e *ToolExecutor) SetTransactionAuthority(token string, scopes []string) {
+	if e == nil {
+		return
+	}
+	e.transactionAuthoritySet = true
+	e.transactionToken = strings.TrimSpace(token)
+	e.transactionScopes = append([]string(nil), scopes...)
+}
+
+// SetTransactionExchangeConfig supplies controller-resolved TTS settings.
+func (e *ToolExecutor) SetTransactionExchangeConfig(config *TransactionExchangeConfig) {
+	if e == nil {
+		return
+	}
+	if config == nil {
+		e.transactionExchange = nil
+		return
+	}
+	copyConfig := *config
+	e.transactionExchange = &copyConfig
+}
+
+// SetAuthSecretValue supplies an exact task-scoped Tool auth Secret snapshot.
+func (e *ToolExecutor) SetAuthSecretValue(name, key, value string) {
+	if e == nil || strings.TrimSpace(name) == "" || strings.TrimSpace(key) == "" {
+		return
+	}
+	if e.authSecretValues == nil {
+		e.authSecretValues = map[string]string{}
+	}
+	e.authSecretValues[name+"\x00"+key] = strings.TrimSpace(value)
 }
 
 // NewToolExecutor creates a new tool executor
@@ -97,26 +161,46 @@ func NewToolExecutor() *ToolExecutor {
 		namespace = "default"
 	}
 
-	// Create Kubernetes client for secret access
+	// Create Kubernetes clients for Secret, policy, Service, and TokenRequest access.
 	var k8sClient kubernetes.Interface
+	var resolver outboundaccess.Resolver
 	if config, err := rest.InClusterConfig(); err == nil {
 		k8sClient, _ = kubernetes.NewForConfig(config)
+		scheme := runtime.NewScheme()
+		if clientgoscheme.AddToScheme(scheme) == nil && corev1alpha1.AddToScheme(scheme) == nil {
+			if resourceClient, clientErr := ctrlclient.New(config, ctrlclient.Options{Scheme: scheme}); clientErr == nil {
+				trustedGateways, gatewayErr := outboundaccess.ParseTrustedServiceReferences(os.Getenv(workerenv.OutboundAccessTrustedGatewayServices))
+				trustedEndpoints, endpointErr := outboundaccess.ParseTrustedServiceReferences(os.Getenv(workerenv.OutboundAccessTrustedTokenEndpointServices))
+				if gatewayErr == nil && endpointErr == nil {
+					resolver = &outboundaccess.KubernetesResolver{
+						Reader:     resourceClient,
+						KubeClient: k8sClient,
+						Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+						Trust: outboundaccess.TrustConfig{
+							Gateways:       trustedGateways,
+							TokenEndpoints: trustedEndpoints,
+						},
+					}
+				}
+			}
+		}
 	}
 
 	return &ToolExecutor{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		secretPath: "/secrets/tools",
-		namespace:  namespace,
-		k8sClient:  k8sClient,
+		secretPath:       "/secrets/tools",
+		namespace:        namespace,
+		k8sClient:        k8sClient,
+		outboundResolver: resolver,
 	}
 }
 
 // NewToolExecutorForNamespace creates a Tool CRD executor with explicit
 // dependencies. Controller-side brokered AgentRuntime tool execution uses this
 // path so Orka, not the remote backend, resolves tool credentials.
-func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interface, httpClient *http.Client) *ToolExecutor {
+func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interface, httpClient *http.Client, resolvers ...outboundaccess.Resolver) *ToolExecutor {
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
 		namespace = "default"
@@ -124,11 +208,16 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	var resolver outboundaccess.Resolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
+	}
 	return &ToolExecutor{
-		client:     httpClient,
-		secretPath: "/secrets/tools",
-		namespace:  namespace,
-		k8sClient:  k8sClient,
+		client:           httpClient,
+		secretPath:       "/secrets/tools",
+		namespace:        namespace,
+		k8sClient:        k8sClient,
+		outboundResolver: resolver,
 	}
 }
 
@@ -229,6 +318,11 @@ func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string)
 }
 
 func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, tool.Spec.HTTP.Timeout.Duration)
+		defer cancel()
+	}
 	prepared, err := e.prepareRequest(ctx, tool, args)
 	if err != nil {
 		return "", err
@@ -240,22 +334,106 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
-	// Configure timeout
-	httpClient := e.client
-	if prepared.httpConfig.Timeout != nil {
-		httpClient = &http.Client{Timeout: prepared.httpConfig.Timeout.Duration}
+	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway)
+	if err != nil {
+		return "", err
 	}
 
 	if prepared.mcp {
 		return e.executeMCPToolCall(ctx, httpClient, prepared)
 	}
 
-	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.authToken, prepared.transactionToken)
+	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.redactionSecrets...)
 	if err != nil {
 		return "", ToolRequestAttemptedError{Err: err}
 	}
 
 	return string(respBody), nil
+}
+
+func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway bool) (*http.Client, error) {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	client := *base
+	if timeout != nil {
+		client.Timeout = timeout.Duration
+	}
+
+	if len(gatewayTLS.CAPEM) > 0 || strings.TrimSpace(gatewayTLS.ServerName) != "" {
+		transport := base.Transport
+		if transport == nil {
+			transport = http.DefaultTransport
+		}
+		httpTransport, ok := transport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("gateway TLS settings require an *http.Transport")
+		}
+		clone := httpTransport.Clone()
+		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: strings.TrimSpace(gatewayTLS.ServerName)}
+		if len(gatewayTLS.CAPEM) > 0 {
+			roots, err := x509.SystemCertPool()
+			if err != nil || roots == nil {
+				roots = x509.NewCertPool()
+			}
+			if !roots.AppendCertsFromPEM(gatewayTLS.CAPEM) {
+				return nil, errors.New("gateway CA Secret does not contain a valid PEM certificate")
+			}
+			tlsConfig.RootCAs = roots
+		}
+		clone.TLSClientConfig = tlsConfig
+		client.Transport = clone
+	}
+
+	previousCheckRedirect := base.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if previousCheckRedirect != nil {
+			if err := previousCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		if gateway {
+			return http.ErrUseLastResponse
+		}
+		if len(via) == 0 {
+			return nil
+		}
+		if !sameHTTPOrigin(via[len(via)-1].URL, req.URL) {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= maxToolHTTPRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxToolHTTPRedirects)
+		}
+		// Transaction authority is single-hop even when an authenticated
+		// resource credential is allowed to follow a same-origin canonical redirect.
+		req.Header.Del(transactiontoken.HeaderName)
+		return nil
+	}
+	return &client, nil
+}
+
+func sameHTTPOrigin(a, b *neturl.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && normalizedHTTPHost(a) == normalizedHTTPHost(b)
+}
+
+func normalizedHTTPHost(u *neturl.URL) string {
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	if port == "" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // ToolRequestAttemptedError wraps errors that occur after a custom tool request
@@ -349,7 +527,7 @@ func injectTraceHeaders(ctx context.Context, header http.Header) {
 func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets ...string) ([]byte, error) {
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("tool request failed: %w", err)
+		return nil, safeToolTransportError(req.Context(), err, secrets...)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -360,7 +538,7 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))
 	}
-	return respBody, nil
+	return []byte(redactToolSensitiveText(string(respBody), secrets...)), nil
 }
 
 func readLimitedHTTPResponseBody(body io.Reader, contentLength int64) ([]byte, error) {
@@ -398,7 +576,16 @@ type preparedToolRequest struct {
 	request          *http.Request
 	authToken        string
 	transactionToken string
+	redactionSecrets []string
+	gatewayTLS       tokenexchange.TLSConfig
+	gateway          bool
 	mcp              bool
+}
+
+func (p preparedToolRequest) secrets(extra ...string) []string {
+	values := append([]string(nil), p.redactionSecrets...)
+	values = append(values, extra...)
+	return values
 }
 
 func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
@@ -418,6 +605,7 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 	return params, nil
 }
 
+//nolint:gocyclo // Request preparation centralizes auth, protocol, transaction, and outbound policy invariants.
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
 	params, err := decodeToolArguments(args)
 	if err != nil {
@@ -481,8 +669,12 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set(mcpProtocolVersionHeader, mcpProtocolVersion)
 	}
+	configuredSecrets := []string{}
 	for k, v := range httpConfig.Headers {
 		req.Header.Set(k, v)
+		if sensitiveToolHeader(k) {
+			configuredSecrets = append(configuredSecrets, sensitiveHeaderValues(v)...)
+		}
 	}
 	approvalIdempotencyKey := toolIdempotencyKeyFromContext(ctx)
 	if approvalIdempotencyKey != "" {
@@ -495,8 +687,11 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 			req.Header.Set(toolIdempotencyKeyHeader, approvalIdempotencyKey)
 		}
 	}
-	if authInject == "header" && authToken != "" {
+	if authInject == toolAuthInjectHeader && authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+	if values, ok := req.Header[http.CanonicalHeaderKey(transactiontoken.HeaderName)]; ok && len(values) > 0 {
+		return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q", transactiontoken.HeaderName)
 	}
 
 	transactionToken, err := e.outboundTransactionToken(ctx, tool)
@@ -504,19 +699,118 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		return preparedToolRequest{}, err
 	}
 	if transactionToken != "" {
-		if values, ok := req.Header[http.CanonicalHeaderKey(contexttoken.HeaderName)]; ok && len(values) > 0 {
-			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q while transaction token propagation is enabled", contexttoken.HeaderName)
-		}
-		req.Header.Set(contexttoken.HeaderName, transactionToken)
+		req.Header.Set(transactiontoken.HeaderName, transactionToken)
 	}
 
-	return preparedToolRequest{
+	prepared := preparedToolRequest{
 		httpConfig:       httpConfig,
 		request:          req,
 		authToken:        authToken,
 		transactionToken: transactionToken,
+		redactionSecrets: compactToolSecrets(append(configuredSecrets, authToken, transactionToken)...),
 		mcp:              isMCP,
-	}, nil
+	}
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil {
+		if err := e.applyOutboundAccessPolicy(ctx, tool, &prepared); err != nil {
+			return preparedToolRequest{}, err
+		}
+	}
+	return prepared, nil
+}
+
+func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, prepared *preparedToolRequest) error {
+	if e.outboundResolver == nil {
+		return errors.New("outbound access policy is configured but the resolver is unavailable")
+	}
+	ref := tool.Spec.HTTP.OutboundAccessPolicyRef
+	if ref == nil || strings.TrimSpace(ref.Name) == "" {
+		return errors.New("outbound access policy reference name is required")
+	}
+	parentScopes := e.currentParentTransactionScopes()
+	resolution, err := e.outboundResolver.Resolve(ctx, outboundaccess.ResolveRequest{
+		Namespace:               e.namespace,
+		PolicyName:              ref.Name,
+		TransactionToken:        prepared.transactionToken,
+		ParentTransactionScopes: parentScopes,
+		HasAuthSecretRef:        prepared.httpConfig.AuthSecretRef != nil,
+	})
+	if err != nil {
+		return fmt.Errorf("resolve outbound access policy: %w", err)
+	}
+	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
+	switch resolution.Adapter {
+	case outboundaccess.AdapterDirect:
+		if prepared.httpConfig.AuthSecretRef != nil {
+			return errors.New("direct outbound access cannot coexist with authSecretRef")
+		}
+		header := http.CanonicalHeaderKey(strings.TrimSpace(resolution.CredentialHeader))
+		if header == "" || strings.EqualFold(header, transactiontoken.HeaderName) {
+			return errors.New("direct outbound access returned an invalid credential header")
+		}
+		if values, ok := prepared.request.Header[header]; ok && len(values) > 0 {
+			return fmt.Errorf("outbound credential header %q collides with an existing Tool header", header)
+		}
+		if strings.TrimSpace(resolution.CredentialValue) == "" {
+			return errors.New("direct outbound access returned an empty credential")
+		}
+		prepared.request.Header.Set(header, resolution.CredentialValue)
+	case outboundaccess.AdapterGateway:
+		if len(parentScopes) > 0 && strings.TrimSpace(prepared.transactionToken) == "" {
+			return errors.New("gateway outbound access requires task-scoped transaction authority")
+		}
+		if prepared.request == nil || prepared.request.URL == nil {
+			return errors.New("gateway outbound access requires a prepared Tool request")
+		}
+		originalAuthority := strings.TrimSpace(prepared.request.Host)
+		if originalAuthority == "" {
+			originalAuthority = prepared.request.URL.Host
+		}
+		if originalAuthority == "" || strings.TrimSpace(resolution.GatewayHost) == "" {
+			return errors.New("gateway outbound access could not resolve request authorities")
+		}
+		prepared.request.URL.Scheme = resolution.GatewayScheme
+		prepared.request.URL.Host = resolution.GatewayHost
+		prepared.request.Host = originalAuthority
+		prepared.gatewayTLS = resolution.GatewayTLS
+		prepared.gateway = true
+	default:
+		return fmt.Errorf("unsupported outbound access adapter %q", resolution.Adapter)
+	}
+	return nil
+}
+
+func sensitiveHeaderValues(value string) []string {
+	values := []string{value}
+	fields := strings.Fields(value)
+	if len(fields) == 2 && (strings.EqualFold(fields[0], "Bearer") || strings.EqualFold(fields[0], "Basic")) {
+		values = append(values, fields[1])
+	}
+	return values
+}
+
+func sensitiveToolHeader(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	return normalized == "authorization" || normalized == "proxy-authorization" ||
+		normalized == "cookie" || normalized == "x-api-key" ||
+		strings.Contains(normalized, "token") || strings.Contains(normalized, "secret") ||
+		strings.Contains(normalized, "credential")
+}
+
+func compactToolSecrets(values ...string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func toolHTTPConfig(tool *corev1alpha1.Tool) (corev1alpha1.HTTPExecution, string, error) {
@@ -681,11 +975,11 @@ func (e *ToolExecutor) executeMCPToolCall(ctx context.Context, httpClient *http.
 	if key := toolIdempotencyKeyFromContext(prepared.request.Context()); key != "" {
 		prepared.request.Header.Set(toolIdempotencyKeyHeader, key)
 	}
-	respBody, err := executeMCPHTTPRequest(httpClient, prepared.request, mcpToolCallRequestID, prepared.authToken, prepared.transactionToken, sessionID)
+	respBody, err := executeMCPHTTPRequest(httpClient, prepared.request, mcpToolCallRequestID, prepared.secrets(sessionID)...)
 	if err != nil {
 		return "", ToolRequestAttemptedError{Err: err}
 	}
-	result, err = decodeMCPToolCallResponse(respBody, prepared.authToken, prepared.transactionToken, sessionID)
+	result, err = decodeMCPToolCallResponse(respBody, prepared.secrets(sessionID)...)
 	if err != nil {
 		return "", ToolRequestAttemptedError{Err: err}
 	}
@@ -701,7 +995,7 @@ func (e *ToolExecutor) initializeMCP(ctx context.Context, httpClient *http.Clien
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create MCP initialize request: %w", err)
 	}
-	resp, err := executeMCPHTTPRequestWithResponse(httpClient, req, mcpInitializeRequestID, prepared.authToken, prepared.transactionToken)
+	resp, err := executeMCPHTTPRequestWithResponse(httpClient, req, mcpInitializeRequestID, prepared.secrets()...)
 	sessionID := strings.TrimSpace(resp.header.Get(mcpSessionIDHeader))
 	if err != nil {
 		if sessionID != "" {
@@ -709,7 +1003,7 @@ func (e *ToolExecutor) initializeMCP(ctx context.Context, httpClient *http.Clien
 		}
 		return "", "", fmt.Errorf("MCP initialize failed: %w", err)
 	}
-	protocolVersion, err := mcpInitializedProtocolVersion(resp.body, prepared.authToken, prepared.transactionToken, sessionID)
+	protocolVersion, err := mcpInitializedProtocolVersion(resp.body, prepared.secrets(sessionID)...)
 	if err != nil {
 		if sessionID != "" {
 			_ = e.terminateMCPSession(ctx, httpClient, prepared, sessionID, mcpProtocolVersion)
@@ -731,7 +1025,7 @@ func (e *ToolExecutor) sendMCPInitializedNotification(ctx context.Context, httpC
 	if sessionID != "" {
 		req.Header.Set(mcpSessionIDHeader, sessionID)
 	}
-	if _, err := executeMCPHTTPRequestWithResponse(httpClient, req, "", prepared.authToken, prepared.transactionToken, sessionID); err != nil {
+	if _, err := executeMCPHTTPRequestWithResponse(httpClient, req, "", prepared.secrets(sessionID)...); err != nil {
 		return fmt.Errorf("MCP initialized notification failed: %w", err)
 	}
 	return nil
@@ -761,7 +1055,7 @@ func (e *ToolExecutor) terminateMCPSession(ctx context.Context, httpClient *http
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("MCP session termination request failed: %w", err)
+		return fmt.Errorf("MCP session termination request failed: %w", safeToolTransportError(req.Context(), err, prepared.secrets(sessionID)...))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -775,7 +1069,7 @@ func (e *ToolExecutor) terminateMCPSession(ctx context.Context, httpClient *http
 	return fmt.Errorf(
 		"MCP session termination returned HTTP %d: %s",
 		resp.StatusCode,
-		redactToolHTTPErrorBody(string(respBody), prepared.authToken, prepared.transactionToken, sessionID),
+		redactToolHTTPErrorBody(string(respBody), prepared.secrets(sessionID)...),
 	)
 }
 
@@ -812,7 +1106,7 @@ func executeMCPHTTPRequest(httpClient *http.Client, req *http.Request, expectedR
 func executeMCPHTTPRequestWithResponse(httpClient *http.Client, req *http.Request, expectedResponseID string, secrets ...string) (mcpHTTPResponse, error) {
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return mcpHTTPResponse{}, fmt.Errorf("tool request failed: %w", err)
+		return mcpHTTPResponse{}, safeToolTransportError(req.Context(), err, secrets...)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	mcpResp := mcpHTTPResponse{header: resp.Header.Clone()}
@@ -1065,11 +1359,11 @@ func decodeMCPToolCallResponse(body []byte, secrets ...string) (string, error) {
 			return "", fmt.Errorf("MCP tool reported error: %s", redactToolHTTPErrorBody(text, secrets...))
 		}
 		if text != "" {
-			return text, nil
+			return redactToolSensitiveText(text, secrets...), nil
 		}
 	}
 
-	return string(response.Result), nil
+	return redactToolSensitiveText(string(response.Result), secrets...), nil
 }
 
 func mcpToolContentText(content []mcpToolContent) string {
@@ -1106,7 +1400,7 @@ func applyToolBodyAuth(params map[string]any, httpConfig corev1alpha1.HTTPExecut
 
 func toolAuthInject(httpConfig corev1alpha1.HTTPExecution) string {
 	if httpConfig.AuthInject == "" {
-		return "header"
+		return toolAuthInjectHeader
 	}
 	return httpConfig.AuthInject
 }
@@ -1129,7 +1423,14 @@ func interpolateToolURL(url string, params map[string]any) string {
 	return url
 }
 
-func redactToolHTTPErrorBody(body string, secrets ...string) string {
+func safeToolTransportError(ctx context.Context, err error, secrets ...string) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errors.New("tool request failed: " + redactToolHTTPErrorBody(err.Error(), secrets...))
+}
+
+func redactToolSensitiveText(body string, secrets ...string) string {
 	redacted := body
 	for _, secret := range secrets {
 		secret = strings.TrimSpace(secret)
@@ -1138,11 +1439,27 @@ func redactToolHTTPErrorBody(body string, secrets ...string) string {
 		}
 		redacted = strings.ReplaceAll(redacted, secret, "[REDACTED]")
 	}
+	return redact.SensitiveText(redacted)
+}
+
+func redactToolHTTPErrorBody(body string, secrets ...string) string {
+	redacted := redactToolSensitiveText(body, secrets...)
+	if len(redacted) > toolHTTPErrorBodyLimit {
+		redacted = redacted[:toolHTTPErrorBodyLimit] + "...[truncated]"
+	}
 	return redacted
 }
 
 // getSecretKey reads a key from a secret (mounted path or Kubernetes API)
 func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string) (string, error) {
+	if e != nil && e.authSecretValues != nil {
+		if value, ok := e.authSecretValues[secretName+"\x00"+key]; ok {
+			if value == "" {
+				return "", fmt.Errorf("secret %s/%s is empty", secretName, key)
+			}
+			return value, nil
+		}
+	}
 	// Try mounted secret paths first
 	paths := []string{
 		fmt.Sprintf("%s/%s/%s", e.secretPath, secretName, key),
@@ -1171,39 +1488,34 @@ func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string)
 }
 
 func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev1alpha1.Tool) (string, error) {
-	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
-	if ttsURL == "" {
-		return existingTransactionToken()
-	}
-	ttsConfig, err := contexttoken.NewTTSConfig(
-		ttsURL,
-		os.Getenv(workerenv.ContextTokenTTSAudience),
-		os.Getenv(workerenv.ContextTokenTTSTimeout),
-		os.Getenv(workerenv.ContextTokenTTSTokenSource),
-		"",
-		os.Getenv(workerenv.ContextTokenToolTokenTTL),
-	)
+	ttsConfig, subjectTokenTypeOverride, outboundScopeOverride, err := e.toolTransactionExchangeConfig()
 	if err != nil {
 		return "", err
 	}
 	if !ttsConfig.Enabled() {
-		return existingTransactionToken()
+		return e.currentTransactionToken()
 	}
-	subjectToken, err := outboundTTSSubjectToken(ttsConfig.TokenSource)
+	subjectToken, err := e.outboundTTSSubjectToken(ttsConfig.TokenSource)
 	if err != nil {
 		return "", err
 	}
-	scope := strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope))
+	scope := strings.TrimSpace(outboundScopeOverride)
+	if scope == "" {
+		scope = strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope))
+	}
 	if scope == "" {
 		scope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
 	}
 	if scope == "" {
-		return "", fmt.Errorf("%s or %s is required when %s is set", workerenv.ContextTokenOutboundScope, workerenv.TransactionScope, workerenv.ContextTokenTTSURL)
+		return "", fmt.Errorf("%s or %s is required when %s is set", workerenv.ContextTokenOutboundScope, workerenv.TransactionScope, workerenv.ContextTokenTTSEndpoint)
 	}
-	if err := validateOutboundTransactionScope(scope); err != nil {
+	if err := e.validateOutboundTransactionScope(scope); err != nil {
 		return "", err
 	}
-	subjectTokenType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
+	subjectTokenType := strings.TrimSpace(subjectTokenTypeOverride)
+	if subjectTokenType == "" {
+		subjectTokenType = strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
+	}
 	if subjectTokenType == "" {
 		subjectTokenType = contexttoken.SubjectTokenTypeForSource(ttsConfig.TokenSource)
 	}
@@ -1215,11 +1527,11 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	if taskName := strings.TrimSpace(os.Getenv(workerenv.TaskName)); taskName != "" {
 		requestDetails["task"] = taskName
 	}
-	ttsClient, err := e.outboundTTSClient(ttsConfig)
+	exchanger, err := e.transactionTokenExchanger(ttsConfig)
 	if err != nil {
 		return "", err
 	}
-	token, err := ttsClient.Exchange(ctx, contexttoken.ExchangeRequest{
+	token, err := exchanger.Exchange(ctx, contexttoken.ExchangeRequest{
 		SubjectToken:     subjectToken,
 		SubjectTokenType: subjectTokenType,
 		Scope:            scope,
@@ -1232,23 +1544,67 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	return token, nil
 }
 
-func existingTransactionToken() (string, error) {
+func (e *ToolExecutor) toolTransactionExchangeConfig() (contexttoken.TTSConfig, string, string, error) {
+	if e != nil && e.transactionExchange != nil {
+		return e.transactionExchange.TTS, e.transactionExchange.SubjectTokenType, e.transactionExchange.OutboundScope, nil
+	}
+	ttsEndpoint := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSEndpoint))
+	if ttsEndpoint == "" {
+		return contexttoken.TTSConfig{TokenSource: contexttoken.TTSTokenSourceNone}, "", "", nil
+	}
+	config, err := contexttoken.NewTTSConfig(
+		ttsEndpoint,
+		os.Getenv(workerenv.ContextTokenTTSAudience),
+		os.Getenv(workerenv.ContextTokenTTSTimeout),
+		os.Getenv(workerenv.ContextTokenTTSTokenSource),
+		"",
+		os.Getenv(workerenv.ContextTokenToolTokenTTL),
+	)
+	return config, "", "", err
+}
+
+func (e *ToolExecutor) currentParentTransactionScopes() []string {
+	if e != nil && e.transactionAuthoritySet {
+		return normalizeToolScopes(e.transactionScopes)
+	}
+	parentScope := strings.TrimSpace(os.Getenv(workerenv.TransactionScopes))
+	if parentScope == "" {
+		parentScope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
+	}
+	return normalizeToolScopes([]string{parentScope})
+}
+
+func normalizeToolScopes(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		for scope := range strings.FieldsSeq(value) {
+			if _, ok := seen[scope]; ok {
+				continue
+			}
+			seen[scope] = struct{}{}
+			out = append(out, scope)
+		}
+	}
+	return out
+}
+
+func (e *ToolExecutor) currentTransactionToken() (string, error) {
+	if e != nil && e.transactionAuthoritySet {
+		return e.transactionToken, nil
+	}
 	if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.TransactionTokenFile, "transaction token"); ok || err != nil {
 		return token, err
 	}
 	return "", nil
 }
 
-func validateOutboundTransactionScope(scope string) error {
+func (e *ToolExecutor) validateOutboundTransactionScope(scope string) error {
 	requested := strings.Fields(scope)
 	if len(requested) == 0 {
 		return fmt.Errorf("outbound transaction scope is required")
 	}
-	parentScope := strings.TrimSpace(os.Getenv(workerenv.TransactionScopes))
-	if parentScope == "" {
-		parentScope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
-	}
-	parent := strings.Fields(parentScope)
+	parent := e.currentParentTransactionScopes()
 	if len(parent) == 0 {
 		return fmt.Errorf("parent transaction scopes are required for outbound token exchange")
 	}
@@ -1260,9 +1616,15 @@ func validateOutboundTransactionScope(scope string) error {
 	return nil
 }
 
-func outboundTTSSubjectToken(tokenSource string) (string, error) {
+func (e *ToolExecutor) outboundTTSSubjectToken(tokenSource string) (string, error) {
 	switch tokenSource {
 	case contexttoken.TTSTokenSourceIncoming:
+		if e != nil && e.transactionAuthoritySet {
+			if e.transactionToken == "" {
+				return "", errors.New("task-scoped incoming transaction authority is unavailable")
+			}
+			return e.transactionToken, nil
+		}
 		if token, ok, err := workerenv.ReadTokenFileEnv(workerenv.ContextTokenSubjectTokenFile, "context token subject token"); ok || err != nil {
 			return token, err
 		}
@@ -1286,7 +1648,14 @@ func serviceAccountSubjectToken() (string, error) {
 	return workerenv.ReadTokenFile(workerenv.ServiceAccountTokenFile, "service account token")
 }
 
-func (e *ToolExecutor) outboundTTSClient(cfg contexttoken.TTSConfig) (*contexttoken.KontxtTTSClient, error) {
+func (e *ToolExecutor) transactionTokenExchanger(cfg contexttoken.TTSConfig) (contexttoken.Exchanger, error) {
+	if e != nil && e.transactionExchange != nil && e.transactionExchange.Exchanger != nil {
+		return e.transactionExchange.Exchanger, nil
+	}
+	return e.outboundTTSClient(cfg)
+}
+
+func (e *ToolExecutor) outboundTTSClient(cfg contexttoken.TTSConfig) (*contexttoken.TTSClient, error) {
 	key := outboundTTSClientKey(cfg)
 
 	e.ttsMu.Lock()
@@ -1296,7 +1665,7 @@ func (e *ToolExecutor) outboundTTSClient(cfg contexttoken.TTSConfig) (*contextto
 		return e.ttsClient, nil
 	}
 
-	ttsClient, err := contexttoken.NewKontxtTTSClient(cfg)
+	ttsClient, err := contexttoken.NewTTSClient(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1307,7 +1676,7 @@ func (e *ToolExecutor) outboundTTSClient(cfg contexttoken.TTSConfig) (*contextto
 
 func outboundTTSClientKey(cfg contexttoken.TTSConfig) string {
 	return strings.Join([]string{
-		strings.TrimRight(strings.TrimSpace(cfg.URL), "/"),
+		strings.TrimSpace(cfg.Endpoint),
 		strings.TrimSpace(cfg.Audience),
 		cfg.Timeout.String(),
 		strings.TrimSpace(cfg.TokenSource),

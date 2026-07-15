@@ -1,0 +1,543 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: outboundaccesspolicies.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: OutboundAccessPolicy
+    listKind: OutboundAccessPolicyList
+    plural: outboundaccesspolicies
+    singular: outboundaccesspolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ResolvedRefs")].status
+      name: ResolvedRefs
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          OutboundAccessPolicy governs resource credentials or trusted gateway routing
+          for Tools in the same namespace.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              OutboundAccessPolicySpec configures exactly one outbound credential or
+              routing adapter.
+            properties:
+              direct:
+                description: Direct exchanges a resolved subject for a downstream
+                  resource credential.
+                properties:
+                  actor:
+                    description: Actor optionally resolves an RFC 8693 actor token.
+                    properties:
+                      secretRef:
+                        description: SecretRef selects a same-namespace Secret value.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serviceAccountRef:
+                        description: ServiceAccountRef selects a ServiceAccount and
+                          TokenRequest parameters.
+                        properties:
+                          audiences:
+                            description: Audiences are requested for the projected
+                              ServiceAccount token.
+                            items:
+                              type: string
+                            type: array
+                          expirationSeconds:
+                            default: 600
+                            description: ExpirationSeconds requests a bounded token
+                              lifetime.
+                            format: int64
+                            maximum: 3600
+                            minimum: 600
+                            type: integer
+                          name:
+                            description: Name is the same-namespace ServiceAccount
+                              name.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      source:
+                        description: Source selects TransactionToken, ServiceAccount,
+                          or SecretRef.
+                        enum:
+                        - TransactionToken
+                        - ServiceAccount
+                        - SecretRef
+                        type: string
+                      tokenType:
+                        description: |-
+                          TokenType is an arbitrary RFC 8693 token-type URN. It is not used by
+                          RFC 7523 JWT bearer grants.
+                        type: string
+                    required:
+                    - source
+                    type: object
+                    x-kubernetes-validations:
+                    - message: TransactionToken must not configure Secret or ServiceAccount
+                        references
+                      rule: self.source != 'TransactionToken' || (!has(self.secretRef)
+                        && !has(self.serviceAccountRef))
+                    - message: ServiceAccount requires only serviceAccountRef
+                      rule: self.source != 'ServiceAccount' || (has(self.serviceAccountRef)
+                        && !has(self.secretRef))
+                    - message: SecretRef requires only secretRef
+                      rule: self.source != 'SecretRef' || (has(self.secretRef) &&
+                        !has(self.serviceAccountRef))
+                  additionalParameters:
+                    additionalProperties:
+                      type: string
+                    description: AdditionalParameters are static form parameters.
+                      Reserved OAuth fields are rejected.
+                    maxProperties: 32
+                    type: object
+                  audiences:
+                    description: Audiences are emitted as repeated OAuth audience
+                      parameters.
+                    items:
+                      type: string
+                    type: array
+                  clientAuthentication:
+                    description: ClientAuthentication configures OAuth client authentication.
+                    properties:
+                      audience:
+                        description: Audience overrides the private_key_jwt aud claim.
+                          The endpoint is the default.
+                        type: string
+                      clientID:
+                        description: ClientID is required by confidential-client methods.
+                        type: string
+                      clientSecretRef:
+                        description: ClientSecretRef supplies client-secret basic/post
+                          credentials.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      keyID:
+                        description: KeyID is copied into the private_key_jwt header.
+                        type: string
+                      method:
+                        default: None
+                        description: Method defaults to None.
+                        enum:
+                        - None
+                        - ClientSecretBasic
+                        - ClientSecretPost
+                        - PrivateKeyJWT
+                        type: string
+                      privateKeyRef:
+                        description: PrivateKeyRef supplies a PEM RSA or P-256 key
+                          for private_key_jwt.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: None must not configure client credentials
+                      rule: self.method != 'None' || (!has(self.clientSecretRef) &&
+                        !has(self.privateKeyRef))
+                    - message: client-secret methods require clientID and clientSecretRef
+                        only
+                      rule: '!(self.method in [''ClientSecretBasic'',''ClientSecretPost''])
+                        || (has(self.clientID) && self.clientID.size() > 0 && has(self.clientSecretRef)
+                        && !has(self.privateKeyRef))'
+                    - message: PrivateKeyJWT requires clientID and privateKeyRef only
+                      rule: self.method != 'PrivateKeyJWT' || (has(self.clientID)
+                        && self.clientID.size() > 0 && has(self.privateKeyRef) &&
+                        !has(self.clientSecretRef))
+                  expectedIssuedTokenType:
+                    description: |-
+                      ExpectedIssuedTokenType is the exact issued_token_type required for RFC 8693.
+                      RFC 7523 responses may omit issued_token_type.
+                    minLength: 1
+                    type: string
+                  grant:
+                    default: TokenExchange
+                    description: Grant selects RFC 8693 token exchange or RFC 7523
+                      JWT bearer.
+                    enum:
+                    - TokenExchange
+                    - JWTBearer
+                    type: string
+                  output:
+                    description: Output configures resource credential injection.
+                    properties:
+                      header:
+                        default: Authorization
+                        description: Header defaults to Authorization. Txn-Token is
+                          forbidden.
+                        type: string
+                      prefix:
+                        default: 'Bearer '
+                        description: Prefix defaults to "Bearer ". Set an explicit
+                          empty string for no prefix.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: Txn-Token cannot be used as the resource credential
+                        output header
+                      rule: '!has(self.header) || self.header.lowerAscii() != ''txn-token'''
+                  requestedTokenType:
+                    description: RequestedTokenType is an arbitrary OAuth token-type
+                      URN.
+                    type: string
+                  resources:
+                    description: Resources are emitted as repeated RFC 8707 resource
+                      parameters.
+                    items:
+                      type: string
+                    type: array
+                  scopes:
+                    description: |-
+                      Scopes are emitted as a space-separated OAuth scope parameter.
+                      TransactionToken subjects may request only a subset of the parent scope.
+                    items:
+                      type: string
+                    type: array
+                  subject:
+                    description: Subject resolves the subject token or JWT assertion.
+                    properties:
+                      secretRef:
+                        description: SecretRef selects a same-namespace Secret value.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serviceAccountRef:
+                        description: ServiceAccountRef selects a ServiceAccount and
+                          TokenRequest parameters.
+                        properties:
+                          audiences:
+                            description: Audiences are requested for the projected
+                              ServiceAccount token.
+                            items:
+                              type: string
+                            type: array
+                          expirationSeconds:
+                            default: 600
+                            description: ExpirationSeconds requests a bounded token
+                              lifetime.
+                            format: int64
+                            maximum: 3600
+                            minimum: 600
+                            type: integer
+                          name:
+                            description: Name is the same-namespace ServiceAccount
+                              name.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      source:
+                        description: Source selects TransactionToken, ServiceAccount,
+                          or SecretRef.
+                        enum:
+                        - TransactionToken
+                        - ServiceAccount
+                        - SecretRef
+                        type: string
+                      tokenType:
+                        description: |-
+                          TokenType is an arbitrary RFC 8693 token-type URN. It is not used by
+                          RFC 7523 JWT bearer grants.
+                        type: string
+                    required:
+                    - source
+                    type: object
+                    x-kubernetes-validations:
+                    - message: TransactionToken must not configure Secret or ServiceAccount
+                        references
+                      rule: self.source != 'TransactionToken' || (!has(self.secretRef)
+                        && !has(self.serviceAccountRef))
+                    - message: ServiceAccount requires only serviceAccountRef
+                      rule: self.source != 'ServiceAccount' || (has(self.serviceAccountRef)
+                        && !has(self.secretRef))
+                    - message: SecretRef requires only secretRef
+                      rule: self.source != 'SecretRef' || (has(self.secretRef) &&
+                        !has(self.serviceAccountRef))
+                  tokenEndpoint:
+                    description: TokenEndpoint is the exact OAuth token endpoint.
+                    properties:
+                      path:
+                        description: Path is the exact endpoint path used with ServiceRef.
+                        type: string
+                      scheme:
+                        description: Scheme is used with ServiceRef and defaults to
+                          https.
+                        enum:
+                        - http
+                        - https
+                        type: string
+                      serviceRef:
+                        description: |-
+                          ServiceRef selects a token endpoint Service. Cross-namespace refs require
+                          an exact controller allowlist entry.
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace defaults to the policy namespace. Cross-namespace refs require
+                              an exact trusted Service-reference allowlist entry.
+                            type: string
+                          port:
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                        required:
+                        - name
+                        - port
+                        type: object
+                      tls:
+                        description: TLS configures verification for an HTTPS endpoint.
+                        properties:
+                          caSecretRef:
+                            description: CASecretRef selects PEM CA data from a same-namespace
+                              Secret.
+                            properties:
+                              key:
+                                type: string
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          serverName:
+                            description: ServerName overrides TLS SNI and hostname
+                              verification.
+                            type: string
+                        type: object
+                      url:
+                        description: URL is an exact absolute HTTPS token endpoint
+                          without userinfo.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of url or serviceRef is required
+                      rule: has(self.url) != has(self.serviceRef)
+                    - message: scheme and path are only valid with serviceRef
+                      rule: '!has(self.url) || (!has(self.scheme) && !has(self.path))'
+                    - message: url token endpoints must use https
+                      rule: '!has(self.url) || self.url.startsWith(''https://'')'
+                required:
+                - subject
+                - tokenEndpoint
+                type: object
+                x-kubernetes-validations:
+                - message: JWTBearer does not support actor
+                  rule: self.grant != 'JWTBearer' || !has(self.actor)
+                - message: JWTBearer subject must not set tokenType
+                  rule: self.grant != 'JWTBearer' || !has(self.subject.tokenType)
+                - message: SecretRef token exchange subjects require tokenType
+                  rule: self.grant != 'TokenExchange' || self.subject.source != 'SecretRef'
+                    || (has(self.subject.tokenType) && self.subject.tokenType.size()
+                    > 0)
+                - message: SecretRef token exchange actors require tokenType
+                  rule: self.grant != 'TokenExchange' || !has(self.actor) || self.actor.source
+                    != 'SecretRef' || (has(self.actor.tokenType) && self.actor.tokenType.size()
+                    > 0)
+                - message: TokenExchange requires expectedIssuedTokenType
+                  rule: self.grant != 'TokenExchange' || (has(self.expectedIssuedTokenType)
+                    && self.expectedIssuedTokenType.size() > 0)
+                - message: additionalParameters must not contain reserved OAuth fields
+                  rule: '!has(self.additionalParameters) || self.additionalParameters.all(k,
+                    !(k.lowerAscii() in [''grant_type'',''subject_token'',''subject_token_type'',''actor_token'',''actor_token_type'',''assertion'',''scope'',''audience'',''resource'',''requested_token_type'',''client_id'',''client_secret'',''client_assertion'',''client_assertion_type'']))'
+              gateway:
+                description: Gateway routes the original Tool request through a trusted
+                  Kubernetes Service.
+                properties:
+                  scheme:
+                    default: http
+                    description: Scheme defaults to http for in-cluster gateways.
+                    enum:
+                    - http
+                    - https
+                    type: string
+                  serviceRef:
+                    description: ServiceRef selects the gateway Service.
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace defaults to the policy namespace. Cross-namespace refs require
+                          an exact trusted Service-reference allowlist entry.
+                        type: string
+                      port:
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    required:
+                    - name
+                    - port
+                    type: object
+                  tls:
+                    description: TLS configures gateway verification when scheme is
+                      https.
+                    properties:
+                      caSecretRef:
+                        description: CASecretRef selects PEM CA data from a same-namespace
+                          Secret.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      serverName:
+                        description: ServerName overrides TLS SNI and hostname verification.
+                        type: string
+                    type: object
+                required:
+                - serviceRef
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: exactly one of direct or gateway is required
+              rule: has(self.direct) != has(self.gateway)
+          status:
+            description: OutboundAccessPolicyStatus contains only safe validation
+              state.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

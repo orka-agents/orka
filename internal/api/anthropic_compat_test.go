@@ -984,7 +984,7 @@ func TestAnthropicCompat_ContextTokenAuthorizationFiltersListModels(t *testing.T
 		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("Test request failed: %v", err)
@@ -1734,7 +1734,7 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 	})
 	body := `{"model":"anthropic/claude-sonnet-4-20250514","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {

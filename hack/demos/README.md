@@ -6,7 +6,6 @@ This directory contains a small `demo-magic` kit for showing Orka in six ways:
 - `20-manual-workflow.sh`: explicit coordinator Task CR for a focused Vekil metrics first-PR workflow
 - `30-cron-workflow.sh`: scheduled runtime task with recurring child runs
 - `40-security-scanning.sh`: repository scan -> findings -> patch -> PR
-- `50-kontxt.sh`: workload SA token -> in-cluster TTS -> request-scoped TxToken -> Orka API call (one identity, two outcomes)
 - `60-agent-sandbox.sh`: three turns share a single SandboxClaim via `sessionRef` (scout -> builder -> CI fixup, same workspace)
 - `70-agent-substrate.sh`: a real gpt-5.5 codex agent in a gVisor Actor (Agent Substrate) clones a repo, edits it, and opens a PR; a second task reuses the warm workspace with no cold start
 
@@ -228,7 +227,6 @@ hack/demos/10-chat-pr.sh
 hack/demos/20-manual-workflow.sh
 hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
-hack/demos/50-kontxt.sh           # requires hack/demos/cluster/install-kontxt.sh
 hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sandbox.sh
 ```
 
@@ -248,7 +246,6 @@ Because the Substrate cluster is the superset (custom registry + gVisor nodes),
 a single bootstrap can host **all** demos (00–70) on it:
 
 ```bash
-make demo-cluster-up-all        # substrate cluster + Orka + kontxt + agent-sandbox + vekil + Provider/secrets
                                 # (one-time GitHub device-code login for vekil — follow the log prompt)
 ```
 
@@ -264,8 +261,6 @@ make demo-cluster-up-all        # substrate cluster + Orka + kontxt + agent-sand
 # Workspace demos bring their own namespace/env:
 kubectl config use-context kind-orka-agent-substrate-e2e
 
-# Demo 50 (kontxt): the orka-client API ServiceAccount lives in `default`.
-DEMO_NAMESPACE=default ./hack/demos/50-kontxt.sh
 
 # Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
 # (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
@@ -291,7 +286,6 @@ make demo-cluster-up-all-down     # tear it all down
 Notes: `install-agent-sandbox.sh` runs **last** in the bootstrap because it sets
 the controller's default workspace provider to `agent-sandbox` (Demo 60 relies
 on that default; Demo 70 sets `provider: substrate` explicitly, so it's
-unaffected). kontxt's `enforce` mode only gates requests carrying a `Txn-Token`
 header, so the other demos (which send normal ServiceAccount tokens) are
 unaffected — they coexist safely.
 
@@ -343,8 +337,6 @@ For Demos 50 / 60 (and a clean rerun of 10–40) you can spin up a dedicated
 kind cluster:
 
 ```bash
-make demo-cluster-up      # kind + Orka + kontxt + agent-sandbox
-make demo-images          # build + load the kontxt-caller image
 # ... run demos ...
 make demo-cluster-down
 ```

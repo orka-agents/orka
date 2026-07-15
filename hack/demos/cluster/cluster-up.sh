@@ -2,8 +2,6 @@
 # Bootstrap a kind cluster for the Orka demo set.
 #
 # Idempotent — if the cluster already exists, only Orka images get rebuilt
-# and reloaded. The follow-on install-{kontxt,agent-sandbox}.sh scripts
-# layer on the optional kontxt + sandbox stacks needed by Demos 50 / 60.
 #
 # Requires: kind, docker, kubectl, helm (or `kustomize` + `kubectl apply`).
 
@@ -63,6 +61,5 @@ log "Waiting for orka-controller-manager rollout"
 kubectl -n "${namespace}" rollout status deployment/orka-controller-manager --timeout=300s
 
 log "Cluster up. Next steps (optional):"
-log "  hack/demos/cluster/install-kontxt.sh         # for Demo 50"
 log "  hack/demos/cluster/install-agent-sandbox.sh  # for Demo 60"
-log "  make demo-images                              # for Demo 50's caller image"
+log "  make demo-images                              # for Demo 60's sandbox runtime image"

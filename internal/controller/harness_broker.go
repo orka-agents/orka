@@ -27,6 +27,7 @@ import (
 	toolspkg "github.com/orka-agents/orka/internal/tools"
 	worker "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -231,6 +232,46 @@ func argsOrEmptyObject(args json.RawMessage) json.RawMessage {
 	return args
 }
 
+func (r *TaskReconciler) harnessBrokeredTransactionAuthority(ctx context.Context, task *corev1alpha1.Task) (string, []string, error) {
+	if task == nil || task.Spec.Transaction == nil {
+		return "", nil, nil
+	}
+	scopes := append([]string(nil), task.Spec.Transaction.Scopes...)
+	if len(scopes) == 0 {
+		scopes = strings.Fields(task.Spec.Transaction.Scope)
+	}
+	secretName := ""
+	if task.Annotations != nil {
+		secretName = strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret])
+	}
+	if secretName == "" {
+		return "", scopes, nil
+	}
+	reader := ctrlclient.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: task.Namespace, Name: secretName}, secret); err != nil {
+		return "", nil, fmt.Errorf("read task transaction authority: %w", err)
+	}
+	owned := false
+	for _, owner := range secret.OwnerReferences {
+		if owner.Kind == "Task" && owner.Name == task.Name && owner.UID == task.UID {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		return "", nil, errors.New("task transaction authority Secret is not owned by the Task")
+	}
+	token := strings.TrimSpace(string(secret.Data["token"]))
+	if token == "" {
+		return "", nil, errors.New("task transaction authority Secret token is empty")
+	}
+	return token, scopes, nil
+}
+
 //nolint:gocyclo // Brokered tool handling is a compact policy/approval/idempotency state machine.
 func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	ctx context.Context,
@@ -353,11 +394,34 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 		content := brokeredToolEventContent(result, map[string]any{"targetArgsDigest": argsDigest})
 		return result, r.recordHarnessBrokeredToolEvent(ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), content)
 	}
+	transactionToken, transactionScopes, err := r.harnessBrokeredTransactionAuthority(ctx, task)
+	if err != nil {
+		result.Error = brokeredToolError("transaction_authority_unavailable", err)
+		return result, r.recordHarnessBrokeredToolEvent(
+			ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil),
+		)
+	}
+	transactionIdentity, err := r.harnessBrokeredTransactionAuthorityIdentityFromSnapshot(
+		ctx, task, transactionToken, transactionScopes,
+	)
+	if err != nil {
+		result.Error = brokeredToolError("transaction_authority_unavailable", err)
+		return result, r.recordHarnessBrokeredToolEvent(
+			ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil),
+		)
+	}
+	authSecretValue, authSecretIdentity, err := r.harnessBrokeredAuthSecretSnapshot(ctx, tool)
+	if err != nil {
+		result.Error = brokeredToolError("credential_authority_unavailable", err)
+		return result, r.recordHarnessBrokeredToolEvent(
+			ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil),
+		)
+	}
 	switch tool.Spec.BrokeredToolClass {
 	case corev1alpha1.AgentRuntimeBrokeredToolClassRead:
 		// Read-only brokered tools execute immediately below.
 	case corev1alpha1.AgentRuntimeBrokeredToolClassWrite:
-		approved, decisionApprovalID, err := r.ensureHarnessBrokeredWriteApproval(ctx, task, frame, tool, args)
+		approved, decisionApprovalID, err := r.ensureHarnessBrokeredWriteApproval(ctx, task, frame, tool, args, transactionIdentity, authSecretIdentity)
 		if err != nil {
 			if errors.Is(err, errHarnessBrokeredApprovalPending) {
 				return result, err
@@ -407,7 +471,12 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	defer cancel()
 	execCtx = worker.WithToolCallID(execCtx, frame.ToolCallID)
 	execCtx = worker.WithToolIdempotencyKey(execCtx, execIdempotencyKey)
-	executor := worker.NewToolExecutorForNamespace(task.Namespace, r.KubeClient, nil)
+	executor := worker.NewToolExecutorForNamespace(task.Namespace, r.KubeClient, nil, r.OutboundAccessResolver)
+	executor.SetTransactionAuthority(transactionToken, transactionScopes)
+	executor.SetTransactionExchangeConfig(r.BrokeredTransactionExchange)
+	if tool.Spec.HTTP != nil && tool.Spec.HTTP.AuthSecretRef != nil {
+		executor.SetAuthSecretValue(tool.Spec.HTTP.AuthSecretRef.Name, tool.Spec.HTTP.AuthSecretRef.Key, authSecretValue)
+	}
 	output, err := executor.Execute(execCtx, tool, args)
 	if err != nil {
 		result.Error = brokeredToolError("tool_execution_failed", err)
@@ -448,8 +517,12 @@ func (r *TaskReconciler) ensureHarnessBrokeredWriteApproval(
 	frame harness.HarnessEventFrame,
 	tool *corev1alpha1.Tool,
 	args json.RawMessage,
+	transactionIdentity map[string]any,
+	authSecretIdentity map[string]string,
 ) (bool, string, error) {
-	target, err := r.harnessBrokeredApprovalTarget(task, frame, tool, args)
+	target, err := r.harnessBrokeredApprovalTarget(
+		ctx, task, frame, tool, args, transactionIdentity, authSecretIdentity,
+	)
 	if err != nil {
 		return false, "", err
 	}
@@ -477,18 +550,28 @@ func (r *TaskReconciler) ensureHarnessBrokeredWriteApproval(
 }
 
 func (r *TaskReconciler) harnessBrokeredApprovalTarget(
+	ctx context.Context,
 	task *corev1alpha1.Task,
 	frame harness.HarnessEventFrame,
 	tool *corev1alpha1.Tool,
 	args json.RawMessage,
+	transactionIdentity map[string]any,
+	authSecretIdentity map[string]string,
 ) (approvals.ApprovalTarget, error) {
+	outboundPolicyIdentity, err := r.harnessBrokeredOutboundPolicyIdentity(ctx, tool)
+	if err != nil {
+		return approvals.ApprovalTarget{}, err
+	}
 	specDigest, err := approvals.TargetSpecDigest(map[string]any{
-		"toolResourceVersion": tool.ResourceVersion,
-		"toolName":            tool.Name,
-		"brokeredToolClass":   string(tool.Spec.BrokeredToolClass),
-		"runtimeSessionID":    string(frame.RuntimeSessionID),
-		"turnID":              string(frame.TurnID),
-		"toolCallID":          frame.ToolCallID,
+		"toolResourceVersion":  tool.ResourceVersion,
+		"toolName":             tool.Name,
+		"brokeredToolClass":    string(tool.Spec.BrokeredToolClass),
+		"runtimeSessionID":     string(frame.RuntimeSessionID),
+		"turnID":               string(frame.TurnID),
+		"toolCallID":           frame.ToolCallID,
+		"transactionAuthority": transactionIdentity,
+		"authSecret":           authSecretIdentity,
+		"outboundPolicy":       outboundPolicyIdentity,
 	})
 	if err != nil {
 		return approvals.ApprovalTarget{}, err
@@ -504,6 +587,161 @@ func (r *TaskReconciler) harnessBrokeredApprovalTarget(
 		"warning",
 		specDigest,
 	)
+}
+
+func (r *TaskReconciler) brokeredApprovalReader() ctrlclient.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *TaskReconciler) harnessBrokeredTransactionAuthorityIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+) (map[string]any, error) {
+	token, scopes, err := r.harnessBrokeredTransactionAuthority(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	return r.harnessBrokeredTransactionAuthorityIdentityFromSnapshot(ctx, task, token, scopes)
+}
+
+func (r *TaskReconciler) harnessBrokeredTransactionAuthorityIdentityFromSnapshot(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	token string,
+	scopes []string,
+) (map[string]any, error) {
+	if task == nil || task.Spec.Transaction == nil {
+		return nil, nil
+	}
+	identity := map[string]any{
+		"transactionID":          task.Spec.Transaction.ID,
+		"scope":                  task.Spec.Transaction.Scope,
+		"scopes":                 scopes,
+		"contextDigest":          task.Spec.Transaction.ContextDigest,
+		"requesterContextDigest": task.Spec.Transaction.RequesterContextDigest,
+	}
+	if token != "" {
+		sum := sha256.Sum256([]byte(token))
+		identity["tokenDigest"] = hex.EncodeToString(sum[:])
+	}
+	if task.Annotations != nil {
+		if secretName := strings.TrimSpace(task.Annotations[labels.AnnotationTransactionTokenSecret]); secretName != "" {
+			secret := &corev1.Secret{}
+			if err := r.brokeredApprovalReader().Get(
+				ctx,
+				ctrlclient.ObjectKey{Namespace: task.Namespace, Name: secretName},
+				secret,
+			); err != nil {
+				return nil, fmt.Errorf("resolve task transaction authority approval identity: %w", err)
+			}
+			identity["secretUID"] = string(secret.UID)
+			identity["secretResourceVersion"] = secret.ResourceVersion
+		}
+	}
+	if config := r.BrokeredTransactionExchange; config != nil {
+		endpointDigest := ""
+		if config.TTS.Endpoint != "" {
+			sum := sha256.Sum256([]byte(config.TTS.Endpoint))
+			endpointDigest = hex.EncodeToString(sum[:])
+		}
+		identity["exchange"] = map[string]any{
+			"endpointDigest": endpointDigest,
+			"audience":       config.TTS.Audience,
+			"timeout":        config.TTS.Timeout.String(),
+			"tokenSource":    config.TTS.TokenSource,
+			"toolTokenTTL":   config.TTS.ToolTokenTTL.String(),
+			"subjectType":    config.SubjectTokenType,
+			"outboundScope":  config.OutboundScope,
+		}
+	}
+	return identity, nil
+}
+
+func (r *TaskReconciler) harnessBrokeredAuthSecretSnapshot(
+	ctx context.Context,
+	tool *corev1alpha1.Tool,
+) (string, map[string]string, error) {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.AuthSecretRef == nil {
+		return "", nil, nil
+	}
+	secret := &corev1.Secret{}
+	ref := tool.Spec.HTTP.AuthSecretRef
+	key := ctrlclient.ObjectKey{Namespace: tool.Namespace, Name: ref.Name}
+	if err := r.brokeredApprovalReader().Get(ctx, key, secret); err != nil {
+		return "", nil, fmt.Errorf("resolve Tool auth Secret approval identity: %w", err)
+	}
+	value := strings.TrimSpace(string(secret.Data[ref.Key]))
+	if value == "" {
+		return "", nil, errors.New("tool auth Secret key is missing or empty")
+	}
+	return value, map[string]string{
+		"uid":             string(secret.UID),
+		"resourceVersion": secret.ResourceVersion,
+	}, nil
+}
+
+func (r *TaskReconciler) harnessBrokeredOutboundPolicyIdentity(ctx context.Context, tool *corev1alpha1.Tool) (map[string]any, error) {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+		return nil, nil
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	key := ctrlclient.ObjectKey{Namespace: tool.Namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}
+	if err := r.brokeredApprovalReader().Get(ctx, key, policy); err != nil {
+		return nil, fmt.Errorf("resolve outbound access policy approval identity: %w", err)
+	}
+	secretRefs := []*corev1alpha1.NamespacedSecretKeySelector{}
+	appendTLS := func(config *corev1alpha1.OutboundTLSConfig) {
+		if config != nil && config.CASecretRef != nil {
+			secretRefs = append(secretRefs, config.CASecretRef)
+		}
+	}
+	if direct := policy.Spec.Direct; direct != nil {
+		secretRefs = append(secretRefs, direct.Subject.SecretRef)
+		if direct.Actor != nil {
+			secretRefs = append(secretRefs, direct.Actor.SecretRef)
+		}
+		if auth := direct.ClientAuthentication; auth != nil {
+			secretRefs = append(secretRefs, auth.ClientSecretRef, auth.PrivateKeyRef)
+		}
+		appendTLS(direct.TokenEndpoint.TLS)
+	}
+	if gateway := policy.Spec.Gateway; gateway != nil {
+		appendTLS(gateway.TLS)
+	}
+	versions := make([]string, 0, len(secretRefs))
+	for _, ref := range secretRefs {
+		if ref == nil || strings.TrimSpace(ref.Name) == "" {
+			continue
+		}
+		namespace := strings.TrimSpace(ref.Namespace)
+		if namespace == "" {
+			namespace = policy.Namespace
+		}
+		secret := &corev1.Secret{}
+		if err := r.brokeredApprovalReader().Get(
+			ctx,
+			ctrlclient.ObjectKey{Namespace: namespace, Name: ref.Name},
+			secret,
+		); err != nil {
+			return nil, fmt.Errorf("resolve outbound access credential approval identity: %w", err)
+		}
+		versions = append(versions, namespace+"/"+ref.Name+"\x00"+string(secret.UID)+"\x00"+secret.ResourceVersion)
+	}
+	slices.Sort(versions)
+	secretDigest := ""
+	if len(versions) > 0 {
+		sum := sha256.Sum256([]byte(strings.Join(versions, "\n")))
+		secretDigest = hex.EncodeToString(sum[:])
+	}
+	return map[string]any{
+		"uid":             string(policy.UID),
+		"generation":      policy.Generation,
+		"resourceVersion": policy.ResourceVersion,
+		"secretsDigest":   secretDigest,
+	}, nil
 }
 
 func (r *TaskReconciler) harnessBrokeredApprovalState(

@@ -14,7 +14,7 @@
 # wired cluster Demo 70 can drive. The e2e's own task exercises run as a
 # built-in smoke test (a few seconds each) before it hands the cluster back.
 #
-# Unlike install-kontxt.sh / install-agent-sandbox.sh (which attach to the
+# Unlike install-agent-sandbox.sh (which attach to the
 # shared demo-magic kind cluster), Substrate needs its OWN cluster: it uses
 # Substrate's create-kind-cluster.sh (custom registry + gVisor node config),
 # so it cannot bolt onto an existing cluster.

@@ -127,9 +127,8 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Demos
 
 .PHONY: demo-cluster-up
-demo-cluster-up: ## Bootstrap a kind cluster with Orka + kontxt + agent-sandbox
+demo-cluster-up: ## Bootstrap a kind cluster with Orka + agent-sandbox
 	hack/demos/cluster/cluster-up.sh
-	hack/demos/cluster/install-kontxt.sh
 	hack/demos/cluster/install-agent-sandbox.sh
 	hack/demos/cluster/install-demo-model.sh
 
@@ -146,9 +145,8 @@ demo-substrate-down: ## Tear down the Agent Substrate demo cluster (Demo 70)
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-cluster-up-all
-demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs ALL demos (00-70)
+demo-cluster-up-all: ## ONE substrate-flavored kind cluster that runs the local demos (00-40, 60-70)
 	hack/demos/cluster/install-substrate.sh
-	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-kontxt.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-demo-model.sh
 	ORKA_DEMO_CLUSTER=$${KIND_CLUSTER:-orka-agent-substrate-e2e} hack/demos/cluster/install-agent-sandbox.sh
 
@@ -157,9 +155,7 @@ demo-cluster-up-all-down: ## Tear down the unified demo cluster
 	kind delete cluster --name $${KIND_CLUSTER:-orka-agent-substrate-e2e}
 
 .PHONY: demo-images
-demo-images: ## Build + kind-load demo-only images (kontxt-caller + sandbox runtime)
-	docker build -t ghcr.io/orka-agents/orka/kontxt-caller:demo hack/demos/images/kontxt-caller
-	kind load docker-image ghcr.io/orka-agents/orka/kontxt-caller:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
+demo-images: ## Build + kind-load demo-only sandbox runtime image
 	docker build -t orka-sandbox-runtime:demo -f hack/demos/images/sandbox-runtime/Dockerfile .
 	kind load docker-image orka-sandbox-runtime:demo --name $${ORKA_DEMO_CLUSTER:-orka-demo}
 

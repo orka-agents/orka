@@ -8,25 +8,22 @@ package contexttoken
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
-
 	"github.com/orka-agents/orka/internal/metrics"
-	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/tokenexchange"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 )
 
 const (
-	// HeaderName is the default HTTP header used by kontxt TxTokens.
-	HeaderName = kontxttoken.HeaderName
+	// HeaderName is the default HTTP header used by transaction tokens.
+	HeaderName = transactiontoken.HeaderName
 
 	// TTSTokenSourceNone disables Orka-initiated token exchanges.
 	TTSTokenSourceNone = "none"
@@ -37,15 +34,18 @@ const (
 )
 
 const (
+	metricResultFailure        = "failure"
+	metricReasonInvalidRequest = "invalid_request"
+
 	defaultTTSTimeout     = 5 * time.Second
 	defaultChildTokenTTL  = 5 * time.Minute
 	defaultToolTokenTTL   = 2 * time.Minute
 	defaultTTSTokenSource = TTSTokenSourceServiceAccount
 )
 
-// TTSConfig controls optional kontxt TTS token exchange integration.
+// TTSConfig controls optional vendor-neutral transaction-token service integration.
 type TTSConfig struct {
-	URL           string
+	Endpoint      string
 	Audience      string
 	Timeout       time.Duration
 	TokenSource   string
@@ -55,11 +55,13 @@ type TTSConfig struct {
 
 // Enabled reports whether Orka should perform TTS exchanges.
 func (c TTSConfig) Enabled() bool {
-	return c.URL != "" && c.TokenSource != TTSTokenSourceNone
+	return c.Endpoint != "" && c.TokenSource != TTSTokenSourceNone
 }
 
-// NewTTSConfig builds TTS integration config from flag/env values.
+// NewTTSConfig builds TTS integration config from flag/env values. Endpoint is
+// the exact OAuth token endpoint; Orka never appends a provider-specific path.
 func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL string) (TTSConfig, error) {
+	rawEndpoint := endpoint
 	endpoint = strings.TrimSpace(endpoint)
 	audience = strings.TrimSpace(audience)
 	timeout = strings.TrimSpace(timeout)
@@ -75,9 +77,17 @@ func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL st
 			return TTSConfig{TokenSource: TTSTokenSourceNone}, nil
 		}
 		if audience != "" || timeout != "" || childTTL != "" || toolTTL != "" || tokenSource != defaultTTSTokenSource {
-			return TTSConfig{}, errors.New("context-token-tts-url is required when TTS settings are provided")
+			return TTSConfig{}, errors.New("context-token-tts-endpoint is required when TTS settings are provided")
 		}
 		return TTSConfig{TokenSource: TTSTokenSourceNone}, nil
+	}
+	if endpoint != rawEndpoint {
+		return TTSConfig{}, errors.New("context-token-tts-endpoint must not contain surrounding whitespace")
+	}
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil || parsedEndpoint.Host == "" || (parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https") ||
+		parsedEndpoint.User != nil || parsedEndpoint.Fragment != "" || strings.Contains(endpoint, "#") || parsedEndpoint.String() != endpoint {
+		return TTSConfig{}, errors.New("context-token-tts-endpoint must be an absolute HTTP(S) URL without userinfo or fragment")
 	}
 
 	timeoutDuration, err := parseOptionalDuration(timeout, defaultTTSTimeout, "context-token-tts-timeout")
@@ -98,7 +108,7 @@ func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL st
 		return TTSConfig{}, fmt.Errorf("unsupported context-token TTS token source %q", tokenSource)
 	}
 	return TTSConfig{
-		URL:           strings.TrimRight(endpoint, "/"),
+		Endpoint:      endpoint,
 		Audience:      audience,
 		Timeout:       timeoutDuration,
 		TokenSource:   tokenSource,
@@ -112,9 +122,9 @@ func NewTTSConfig(endpoint, audience, timeout, tokenSource, childTTL, toolTTL st
 func SubjectTokenTypeForSource(tokenSource string) string {
 	switch tokenSource {
 	case TTSTokenSourceServiceAccount:
-		return kontxttoken.SubjectTokenTypeAccessToken
+		return transactiontoken.SubjectTokenTypeAccessToken
 	default:
-		return kontxttoken.SubjectTokenTypeTxnToken
+		return transactiontoken.SubjectTokenTypeTransactionToken
 	}
 }
 
@@ -139,20 +149,21 @@ type ExchangeRequest struct {
 	RequestContext   map[string]any
 }
 
-// Exchanger exchanges subject tokens for kontxt TxTokens.
+// Exchanger exchanges subject tokens for transaction tokens.
 type Exchanger interface {
 	Exchange(ctx context.Context, req ExchangeRequest) (string, error)
 }
 
-// KontxtTTSClient is an RFC 8693 Token Transaction Service client.
-type KontxtTTSClient struct {
-	endpoint string
-	audience string
-	client   *http.Client
+// TTSClient is a strict RFC 8693 transaction-token service client.
+type TTSClient struct {
+	endpoint  string
+	audience  string
+	timeout   time.Duration
+	exchanger tokenexchange.Exchanger
 }
 
-// NewKontxtTTSClient creates a TTS client for the configured endpoint.
-func NewKontxtTTSClient(cfg TTSConfig) (*KontxtTTSClient, error) {
+// NewTTSClient creates a TTS client for the configured exact endpoint.
+func NewTTSClient(cfg TTSConfig) (*TTSClient, error) {
 	if !cfg.Enabled() {
 		return nil, errors.New("context token TTS is not configured")
 	}
@@ -160,115 +171,120 @@ func NewKontxtTTSClient(cfg TTSConfig) (*KontxtTTSClient, error) {
 	if timeout <= 0 {
 		timeout = defaultTTSTimeout
 	}
-	return &KontxtTTSClient{
-		endpoint: strings.TrimRight(cfg.URL, "/"),
-		audience: strings.TrimSpace(cfg.Audience),
-		client: &http.Client{
-			Timeout: timeout,
-		},
+	return &TTSClient{
+		endpoint:  strings.TrimSpace(cfg.Endpoint),
+		audience:  strings.TrimSpace(cfg.Audience),
+		timeout:   timeout,
+		exchanger: tokenexchange.NewClient(tokenexchange.ClientOptions{}),
 	}, nil
 }
 
-// Exchange exchanges the subject token for a kontxt transaction token.
-func (c *KontxtTTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token string, err error) {
+// NewTTSClientWithExchanger creates a TTS client using an injected exchange
+// implementation. It is intended for conformance tests and internal adapters.
+func NewTTSClientWithExchanger(cfg TTSConfig, exchanger tokenexchange.Exchanger) (*TTSClient, error) {
+	client, err := NewTTSClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if exchanger == nil {
+		return nil, errors.New("token exchanger is required")
+	}
+	client.exchanger = exchanger
+	return client, nil
+}
+
+// Exchange exchanges the subject token for a transaction token and requires
+// the strict txn_token/N_A response profile.
+func (c *TTSClient) Exchange(ctx context.Context, req ExchangeRequest) (token string, err error) {
 	start := time.Now()
 	result, reason := "success", "ok"
 	defer func() {
 		metrics.RecordContextTokenTTSExchange(result, reason, time.Since(start).Seconds())
 	}()
 
-	if c == nil || c.client == nil || strings.TrimSpace(c.endpoint) == "" {
-		result, reason = "failure", "not_configured"
+	if c == nil || c.exchanger == nil || strings.TrimSpace(c.endpoint) == "" {
+		result, reason = metricResultFailure, "not_configured"
 		return "", errors.New("context token TTS is not configured")
 	}
-
-	token, err = c.exchange(ctx, req)
-	if err != nil {
-		result, reason = "failure", "exchange_error"
-		return "", err
-	}
-	return token, nil
-}
-
-func (c *KontxtTTSClient) exchange(ctx context.Context, req ExchangeRequest) (string, error) {
-	subjectTokenType := strings.TrimSpace(req.SubjectTokenType)
-	if subjectTokenType == "" {
-		subjectTokenType = kontxttoken.SubjectTokenTypeTxnToken
+	if strings.TrimSpace(req.SubjectToken) == "" {
+		result, reason = metricResultFailure, metricReasonInvalidRequest
+		return "", errors.New("context token TTS subject token is required")
 	}
 
-	form := url.Values{}
-	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
-	form.Set("requested_token_type", kontxttoken.SubjectTokenTypeTxnToken)
-	form.Set("subject_token", req.SubjectToken)
-	form.Set("subject_token_type", subjectTokenType)
-	form.Set("scope", req.Scope)
-	if c.audience != "" {
-		form.Set("audience", c.audience)
-	}
+	additional := make(map[string]string, 3)
 	if req.RequestedTTL > 0 {
 		ttlSeconds := int64((req.RequestedTTL + time.Second - 1) / time.Second)
 		ttlSeconds = max(ttlSeconds, 1)
-		form.Set("requested_expires_in", strconv.FormatInt(ttlSeconds, 10))
+		additional["requested_expires_in"] = fmt.Sprintf("%d", ttlSeconds)
 	}
 	if req.RequestDetails != nil {
-		data, err := json.Marshal(req.RequestDetails)
-		if err != nil {
-			return "", fmt.Errorf("marshal request_details: %w", err)
+		data, marshalErr := json.Marshal(req.RequestDetails)
+		if marshalErr != nil {
+			result, reason = metricResultFailure, metricReasonInvalidRequest
+			return "", fmt.Errorf("marshal request_details: %w", marshalErr)
 		}
-		form.Set("request_details", string(data))
+		additional["request_details"] = string(data)
 	}
 	if req.RequestContext != nil {
-		data, err := json.Marshal(req.RequestContext)
-		if err != nil {
-			return "", fmt.Errorf("marshal request_context: %w", err)
+		data, marshalErr := json.Marshal(req.RequestContext)
+		if marshalErr != nil {
+			result, reason = metricResultFailure, metricReasonInvalidRequest
+			return "", fmt.Errorf("marshal request_context: %w", marshalErr)
 		}
-		form.Set("request_context", string(data))
+		additional["request_context"] = string(data)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/token_endpoint", strings.NewReader(form.Encode()))
+	subjectTokenType := strings.TrimSpace(req.SubjectTokenType)
+	if subjectTokenType == "" {
+		subjectTokenType = transactiontoken.SubjectTokenTypeTransactionToken
+	}
+	audiences := []string(nil)
+	if c.audience != "" {
+		audiences = []string{c.audience}
+	}
+	exchangeResult, exchangeErr := c.exchanger.Exchange(ctx, tokenexchange.Request{
+		Adapter:                 transactiontoken.ProfileName,
+		Endpoint:                c.endpoint,
+		Timeout:                 c.timeout,
+		GrantType:               tokenexchange.GrantTypeTokenExchange,
+		SubjectToken:            req.SubjectToken,
+		SubjectTokenType:        subjectTokenType,
+		SubjectExpiresAt:        unverifiedJWTExpiry(req.SubjectToken),
+		Audiences:               audiences,
+		Scopes:                  strings.Fields(req.Scope),
+		RequestedTokenType:      transactiontoken.RequestedTokenType,
+		AdditionalParameters:    additional,
+		ExpectedIssuedTokenType: transactiontoken.RequestedTokenType,
+		RequiredTokenType:       transactiontoken.ResponseTokenType,
+		CacheNamespace:          transactiontoken.ProfileName,
+	})
+	if exchangeErr != nil {
+		result, reason = metricResultFailure, "exchange_error"
+		return "", exchangeErr
+	}
+	return exchangeResult.AccessToken, nil
+}
+
+func unverifiedJWTExpiry(token string) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", err
+		return time.Time{}
 	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("Accept", "application/json")
-
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return "", err
+	var claims struct {
+		Expiration json.Number `json:"exp"`
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.UseNumber()
+	if decoder.Decode(&claims) != nil || claims.Expiration == "" {
+		return time.Time{}
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		var errorResp struct {
-			Error            string `json:"error"`
-			ErrorDescription string `json:"error_description"`
-		}
-		if err := json.Unmarshal(body, &errorResp); err == nil && errorResp.Error != "" {
-			if errorResp.ErrorDescription != "" {
-				return "", fmt.Errorf("TTS error: %s - %s", redact.SensitiveText(errorResp.Error), redact.SensitiveText(errorResp.ErrorDescription))
-			}
-			return "", fmt.Errorf("TTS error: %s", redact.SensitiveText(errorResp.Error))
-		}
-		return "", fmt.Errorf("TTS exchange failed with status %d: %s", resp.StatusCode, redact.SensitiveText(strings.TrimSpace(string(body))))
+	seconds, err := claims.Expiration.Int64()
+	if err != nil || seconds <= 0 {
+		return time.Time{}
 	}
-
-	var tokenResp struct {
-		AccessToken     string `json:"access_token"`
-		IssuedTokenType string `json:"issued_token_type"`
-		TokenType       string `json:"token_type"`
-		ExpiresIn       int    `json:"expires_in,omitempty"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", fmt.Errorf("decode TTS response: %w", err)
-	}
-	if tokenResp.AccessToken == "" {
-		return "", errors.New("TTS response missing access_token")
-	}
-	return tokenResp.AccessToken, nil
+	return time.Unix(seconds, 0)
 }

@@ -31,13 +31,17 @@ import (
 )
 
 const (
-	approvalAuthInjectBody                         = "body"
-	approvalIdempotencyHeader                      = "Idempotency-Key"
-	approvalAuthRefUIDAnnotation                   = "orka.ai/approval-auth-ref-uid"
-	approvalAuthRefResourceVersionAnnotation       = "orka.ai/approval-auth-ref-resource-version"
-	legacyApprovalAuthRefUIDAnnotation             = "orka.fibey.io/approval-auth-ref-uid"
-	legacyApprovalAuthRefResourceVersionAnnotation = "orka.fibey.io/approval-auth-ref-resource-version"
-	approvalTargetURLField                         = "__orkaApprovalURL"
+	approvalAuthInjectBody                          = "body"
+	approvalIdempotencyHeader                       = "Idempotency-Key"
+	approvalAuthRefUIDAnnotation                    = "orka.ai/approval-auth-ref-uid"
+	approvalAuthRefResourceVersionAnnotation        = "orka.ai/approval-auth-ref-resource-version"
+	approvalOutboundPolicyUIDAnnotation             = "orka.ai/approval-outbound-policy-uid"
+	approvalOutboundPolicyGenerationAnnotation      = "orka.ai/approval-outbound-policy-generation"
+	approvalOutboundPolicyResourceVersionAnnotation = "orka.ai/approval-outbound-policy-resource-version"
+	approvalOutboundPolicySecretsDigestAnnotation   = "orka.ai/approval-outbound-policy-secrets-digest"
+	legacyApprovalAuthRefUIDAnnotation              = "orka.fibey.io/approval-auth-ref-uid"
+	legacyApprovalAuthRefResourceVersionAnnotation  = "orka.fibey.io/approval-auth-ref-resource-version"
+	approvalTargetURLField                          = "__orkaApprovalURL"
 )
 
 var approvalMountRoots = []string{"/secrets/task", "/secrets/agent"}
@@ -50,7 +54,7 @@ type approvalGate struct {
 	required         map[string]struct{}
 	resolved         []approvals.ResolvedApproval
 	blockingOverflow bool
-	refreshTarget    func(context.Context, string, *corev1alpha1.Tool)
+	refreshTarget    func(context.Context, string, *corev1alpha1.Tool) error
 	firedKeys        map[string]bool
 	recorder         common.EventRecorder
 }
@@ -73,7 +77,7 @@ func newApprovalGateFromEnv(recorder common.EventRecorder, baseToolCtx *tools.To
 	if len(required) > 0 && strings.TrimSpace(taskUID) == "" {
 		return nil, fmt.Errorf("%s is required for approval-required tools", workerenv.TaskUID)
 	}
-	var refreshTarget func(context.Context, string, *corev1alpha1.Tool)
+	var refreshTarget func(context.Context, string, *corev1alpha1.Tool) error
 	if baseToolCtx != nil {
 		refreshTarget = baseToolCtx.ApprovalTargetRefresh
 	}
@@ -266,7 +270,9 @@ func (g *approvalGate) targetForCall(
 	customTool *corev1alpha1.Tool,
 ) (approvals.ApprovalTarget, error) {
 	if customTool != nil && g.refreshTarget != nil {
-		g.refreshTarget(ctx, toolName, customTool)
+		if err := g.refreshTarget(ctx, toolName, customTool); err != nil {
+			return approvals.ApprovalTarget{}, err
+		}
 	}
 	targetArgs, err := approvalTargetArguments(args, customTool)
 	if err != nil {
@@ -384,8 +390,8 @@ func approvalAuthBodyKey(customTool *corev1alpha1.Tool) string {
 	return strings.TrimSpace(customTool.Spec.HTTP.AuthBodyKey)
 }
 
-func approvalTTSURLIdentity(value string) (string, string) {
-	value = strings.TrimRight(strings.TrimSpace(value), "/")
+func approvalTTSEndpointIdentity(value string) (string, string) {
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", ""
 	}
@@ -413,6 +419,29 @@ func approvalTTSURLIdentity(value string) (string, string) {
 	return parsed.String(), hex.EncodeToString(sum[:])
 }
 
+type approvalOutboundPolicyIdentity struct {
+	UID             string `json:"uid,omitempty"`
+	Generation      string `json:"generation,omitempty"`
+	ResourceVersion string `json:"resourceVersion,omitempty"`
+	SecretsDigest   string `json:"secretsDigest,omitempty"`
+}
+
+func approvalOutboundPolicyVersion(customTool *corev1alpha1.Tool) *approvalOutboundPolicyIdentity {
+	if customTool == nil || customTool.Annotations == nil {
+		return nil
+	}
+	identity := &approvalOutboundPolicyIdentity{
+		UID:             strings.TrimSpace(customTool.Annotations[approvalOutboundPolicyUIDAnnotation]),
+		Generation:      strings.TrimSpace(customTool.Annotations[approvalOutboundPolicyGenerationAnnotation]),
+		ResourceVersion: strings.TrimSpace(customTool.Annotations[approvalOutboundPolicyResourceVersionAnnotation]),
+		SecretsDigest:   strings.TrimSpace(customTool.Annotations[approvalOutboundPolicySecretsDigestAnnotation]),
+	}
+	if *identity == (approvalOutboundPolicyIdentity{}) {
+		return nil
+	}
+	return identity
+}
+
 func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 	if customTool == nil {
 		return "", nil
@@ -421,12 +450,13 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		return "", err
 	}
 	uid, resourceVersion := approvalAuthRefVersion(customTool)
+	outboundPolicy := approvalOutboundPolicyVersion(customTool)
 	txAuthority, err := approvalTransactionAuthorityIdentity()
 	if err != nil {
 		return "", err
 	}
 	if customTool.Spec.MCP == nil || customTool.Spec.MCP.SubstrateActor == nil {
-		if uid == "" && resourceVersion == "" && txAuthority == nil {
+		if uid == "" && resourceVersion == "" && outboundPolicy == nil && txAuthority == nil {
 			digest, err := approvals.TargetSpecDigest(customTool.Spec)
 			if err != nil {
 				return "", fmt.Errorf("digest tool %q approval target spec: %w", customTool.Name, err)
@@ -437,11 +467,13 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 			Spec                   corev1alpha1.ToolSpec              `json:"spec"`
 			AuthRefUID             string                             `json:"authRefUID,omitempty"`
 			AuthRefResourceVersion string                             `json:"authRefResourceVersion,omitempty"`
+			OutboundPolicy         *approvalOutboundPolicyIdentity    `json:"outboundPolicy,omitempty"`
 			TxAuthority            *approvalTransactionAuthorityShape `json:"txAuthority,omitempty"`
 		}{
 			Spec:                   customTool.Spec,
 			AuthRefUID:             uid,
 			AuthRefResourceVersion: resourceVersion,
+			OutboundPolicy:         outboundPolicy,
 			TxAuthority:            txAuthority,
 		}
 		digest, err := approvals.TargetSpecDigest(targetIdentity)
@@ -456,12 +488,14 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 		StatusRouteHost        string                             `json:"statusRouteHost,omitempty"`
 		AuthRefUID             string                             `json:"authRefUID,omitempty"`
 		AuthRefResourceVersion string                             `json:"authRefResourceVersion,omitempty"`
+		OutboundPolicy         *approvalOutboundPolicyIdentity    `json:"outboundPolicy,omitempty"`
 		TxAuthority            *approvalTransactionAuthorityShape `json:"txAuthority,omitempty"`
 	}{
 		Spec:                   customTool.Spec,
 		StatusEndpoint:         strings.TrimSpace(customTool.Status.Endpoint),
 		AuthRefUID:             uid,
 		AuthRefResourceVersion: resourceVersion,
+		OutboundPolicy:         outboundPolicy,
 		TxAuthority:            txAuthority,
 	}
 	if customTool.Status.Actor != nil {
@@ -475,45 +509,45 @@ func approvalTargetSpecDigest(customTool *corev1alpha1.Tool) (string, error) {
 }
 
 type approvalTransactionAuthorityShape struct {
-	TransactionID              string `json:"transactionID,omitempty"`
-	TransactionScope           string `json:"transactionScope,omitempty"`
-	TransactionScopes          string `json:"transactionScopes,omitempty"`
-	TransactionContextDigest   string `json:"transactionContextDigest,omitempty"`
-	TransactionRequesterDigest string `json:"transactionRequesterDigest,omitempty"`
-	KontxtOutboundScope        string `json:"kontxtOutboundScope,omitempty"`
-	KontxtTTSURL               string `json:"kontxtTTSURL,omitempty"`
-	KontxtTTSURLExtraSHA256    string `json:"kontxtTTSURLExtraSHA256,omitempty"`
-	KontxtTTSAudience          string `json:"kontxtTTSAudience,omitempty"`
-	KontxtTTSSource            string `json:"kontxtTTSSource,omitempty"`
-	KontxtSubjectType          string `json:"kontxtSubjectType,omitempty"`
-	KontxtToolTTL              string `json:"kontxtToolTTL,omitempty"`
-	MountedAuthoritySHA256     string `json:"mountedAuthoritySHA256,omitempty"`
+	TransactionID                     string `json:"transactionID,omitempty"`
+	TransactionScope                  string `json:"transactionScope,omitempty"`
+	TransactionScopes                 string `json:"transactionScopes,omitempty"`
+	TransactionContextDigest          string `json:"transactionContextDigest,omitempty"`
+	TransactionRequesterDigest        string `json:"transactionRequesterDigest,omitempty"`
+	TransactionOutboundScope          string `json:"transactionOutboundScope,omitempty"`
+	TransactionTTSEndpoint            string `json:"transactionTTSEndpoint,omitempty"`
+	TransactionTTSEndpointExtraSHA256 string `json:"transactionTTSEndpointExtraSHA256,omitempty"`
+	TransactionTTSAudience            string `json:"transactionTTSAudience,omitempty"`
+	TransactionTTSSource              string `json:"transactionTTSSource,omitempty"`
+	TransactionSubjectType            string `json:"transactionSubjectType,omitempty"`
+	TransactionToolTTL                string `json:"transactionToolTTL,omitempty"`
+	MountedAuthoritySHA256            string `json:"mountedAuthoritySHA256,omitempty"`
 }
 
 func approvalTransactionAuthorityIdentity() (*approvalTransactionAuthorityShape, error) {
-	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
+	ttsEndpoint := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSEndpoint))
 	ttsSource := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSTokenSource))
-	if ttsURL != "" && ttsSource == "" {
+	if ttsEndpoint != "" && ttsSource == "" {
 		ttsSource = contexttoken.TTSTokenSourceServiceAccount
 	}
 	subjectType := strings.TrimSpace(os.Getenv(workerenv.ContextTokenSubjectTokenType))
-	if ttsURL != "" && subjectType == "" {
+	if ttsEndpoint != "" && subjectType == "" {
 		subjectType = contexttoken.SubjectTokenTypeForSource(ttsSource)
 	}
-	ttsSafeURL, ttsURLExtraDigest := approvalTTSURLIdentity(ttsURL)
+	ttsSafeURL, ttsEndpointExtraDigest := approvalTTSEndpointIdentity(ttsEndpoint)
 	identity := &approvalTransactionAuthorityShape{
-		TransactionID:              strings.TrimSpace(os.Getenv(workerenv.TransactionID)),
-		TransactionScope:           strings.TrimSpace(os.Getenv(workerenv.TransactionScope)),
-		TransactionScopes:          strings.TrimSpace(os.Getenv(workerenv.TransactionScopes)),
-		TransactionContextDigest:   strings.TrimSpace(os.Getenv(workerenv.TransactionContextDigest)),
-		TransactionRequesterDigest: strings.TrimSpace(os.Getenv(workerenv.TransactionRequesterContextDigest)),
-		KontxtOutboundScope:        strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope)),
-		KontxtTTSURL:               ttsSafeURL,
-		KontxtTTSURLExtraSHA256:    ttsURLExtraDigest,
-		KontxtTTSAudience:          strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSAudience)),
-		KontxtTTSSource:            ttsSource,
-		KontxtSubjectType:          subjectType,
-		KontxtToolTTL:              strings.TrimSpace(os.Getenv(workerenv.ContextTokenToolTokenTTL)),
+		TransactionID:                     strings.TrimSpace(os.Getenv(workerenv.TransactionID)),
+		TransactionScope:                  strings.TrimSpace(os.Getenv(workerenv.TransactionScope)),
+		TransactionScopes:                 strings.TrimSpace(os.Getenv(workerenv.TransactionScopes)),
+		TransactionContextDigest:          strings.TrimSpace(os.Getenv(workerenv.TransactionContextDigest)),
+		TransactionRequesterDigest:        strings.TrimSpace(os.Getenv(workerenv.TransactionRequesterContextDigest)),
+		TransactionOutboundScope:          strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope)),
+		TransactionTTSEndpoint:            ttsSafeURL,
+		TransactionTTSEndpointExtraSHA256: ttsEndpointExtraDigest,
+		TransactionTTSAudience:            strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSAudience)),
+		TransactionTTSSource:              ttsSource,
+		TransactionSubjectType:            subjectType,
+		TransactionToolTTL:                strings.TrimSpace(os.Getenv(workerenv.ContextTokenToolTokenTTL)),
 	}
 	if path := strings.TrimSpace(os.Getenv(workerenv.TransactionTokenFile)); path != "" {
 		data, err := os.ReadFile(path)
@@ -628,7 +662,7 @@ func approvalAuthRefVersion(customTool *corev1alpha1.Tool) (string, string) {
 
 func approvalTargetSpecDigestFromCustomTools(
 	customTools map[string]*corev1alpha1.Tool,
-	refresh ...func(context.Context, string, *corev1alpha1.Tool),
+	refresh ...func(context.Context, string, *corev1alpha1.Tool) error,
 ) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, targetTool string) (string, error) {
 		targetTool = strings.TrimSpace(targetTool)
@@ -637,7 +671,9 @@ func approvalTargetSpecDigestFromCustomTools(
 			return "", fmt.Errorf("targetTool %q is not an enabled custom tool", targetTool)
 		}
 		if len(refresh) > 0 && refresh[0] != nil {
-			refresh[0](ctx, targetTool, customTool)
+			if err := refresh[0](ctx, targetTool, customTool); err != nil {
+				return "", err
+			}
 		}
 		return approvalTargetSpecDigest(customTool)
 	}
@@ -922,8 +958,9 @@ func prepareApprovalToolContext(baseToolCtx *tools.ToolContext, recorder common.
 		baseToolCtxCopy.TaskUID = os.Getenv(workerenv.TaskUID)
 	}
 	if baseToolCtxCopy.ApprovalTargetRefresh == nil && baseToolCtxCopy.Client != nil {
-		baseToolCtxCopy.ApprovalTargetRefresh = func(ctx context.Context, _ string, tool *corev1alpha1.Tool) {
+		baseToolCtxCopy.ApprovalTargetRefresh = func(ctx context.Context, _ string, tool *corev1alpha1.Tool) error {
 			bindApprovalAuthRefVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
+			return bindApprovalOutboundAccessPolicyVersion(ctx, baseToolCtxCopy.Client, baseToolCtxCopy.Namespace, tool)
 		}
 	}
 	return &baseToolCtxCopy

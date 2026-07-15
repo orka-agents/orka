@@ -32,7 +32,7 @@ func TestContextTokenAuthenticationRecordsMetrics(t *testing.T) {
 
 	validToken := issueTestContextToken(t, provider, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set(KontxtHeaderName, validToken)
+	req.Header.Set(TransactionTokenHeaderName, validToken)
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("valid context-token request failed: %v", err)
@@ -43,7 +43,7 @@ func TestContextTokenAuthenticationRecordsMetrics(t *testing.T) {
 
 	invalidToken := issueTestContextToken(t, provider, nil, map[string]any{"aud": "not-orka"})
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set(KontxtHeaderName, invalidToken)
+	req.Header.Set(TransactionTokenHeaderName, invalidToken)
 	resp, err = app.Test(req)
 	if err != nil {
 		t.Fatalf("invalid context-token request failed unexpectedly: %v", err)
@@ -52,10 +52,10 @@ func TestContextTokenAuthenticationRecordsMetrics(t *testing.T) {
 		t.Fatalf("invalid context-token status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 
-	if count := testCounterValue(t, metrics.ContextTokenAuthTotal, ContextTokenProfileKontxt, "success"); count != 1 {
+	if count := testCounterValue(t, metrics.ContextTokenAuthTotal, ContextTokenProfileTransactionToken, "success"); count != 1 {
 		t.Fatalf("context-token auth success metric = %v, want 1", count)
 	}
-	if count := testCounterValue(t, metrics.ContextTokenAuthTotal, ContextTokenProfileKontxt, "failure"); count != 1 {
+	if count := testCounterValue(t, metrics.ContextTokenAuthTotal, ContextTokenProfileTransactionToken, "failure"); count != 1 {
 		t.Fatalf("context-token auth failure metric = %v, want 1", count)
 	}
 }
@@ -76,7 +76,7 @@ func TestContextTokenAuthorizationRecordsMetrics(t *testing.T) {
 	allowedBytes, _ := json.Marshal(allowedBody)
 	allowedToken := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeTaskCreate})
 	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(allowedBytes))
-	req.Header.Set(KontxtHeaderName, allowedToken)
+	req.Header.Set(TransactionTokenHeaderName, allowedToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	if err != nil {
@@ -95,7 +95,7 @@ func TestContextTokenAuthorizationRecordsMetrics(t *testing.T) {
 	deniedBytes, _ := json.Marshal(deniedBody)
 	deniedToken := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeTaskGet})
 	req = httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(deniedBytes))
-	req.Header.Set(KontxtHeaderName, deniedToken)
+	req.Header.Set(TransactionTokenHeaderName, deniedToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = app.Test(req)
 	if err != nil {

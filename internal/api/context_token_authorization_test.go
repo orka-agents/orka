@@ -10,6 +10,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -488,7 +490,7 @@ func TestContextStringSupportsStructuredMaps(t *testing.T) {
 func TestAuthorizeAndStampToolTaskCreateStampsContextTokenProvenance(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 	token := &ContextToken{
-		Profile:            ContextTokenProfileKontxt,
+		Profile:            ContextTokenProfileTransactionToken,
 		Issuer:             "https://issuer.example.test",
 		Subject:            testContextTokenSubject,
 		Audience:           []string{"orka"},
@@ -620,4 +622,48 @@ func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t
 	if !strings.Contains(got, "[REDACTED]") {
 		t.Fatalf("redacted failures = %q, want redaction marker", got)
 	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "team-a"},
+		Spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+			Subject: corev1alpha1.OutboundTokenSource{
+				Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+				TokenType: "urn:example:assertion",
+				SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "resource-assertion", Key: "token"},
+			},
+			TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{URL: "https://identity.example.test/token"},
+			ExpectedIssuedTokenType: "urn:example:resource",
+		}},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+		}},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+	token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+
+	token.TransactionContext = map[string]any{"secret": "different-secret"}
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "resource-assertion")
 }

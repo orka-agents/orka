@@ -87,21 +87,23 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage                string
-	GeneralWorkerImage           string
-	InitImage                    string
-	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
-	ContextTokenTTSURL           string
-	ContextTokenTTSAudience      string
-	ContextTokenTTSTimeout       string
-	ContextTokenTTSTokenSource   string
-	ContextTokenSubjectTokenType string
-	ContextTokenChildScope       string
-	ContextTokenOutboundScope    string
-	ContextTokenChildTokenTTL    string
-	ContextTokenToolTokenTTL     string
-	EnableTelemetry              bool
-	directSecrets                directRuntimeSecretPolicy
+	AIWorkerImage                              string
+	GeneralWorkerImage                         string
+	InitImage                                  string
+	ControllerURL                              string // e.g. http://orka-controller.orka-system.svc:8080
+	ContextTokenTTSEndpoint                    string
+	ContextTokenTTSAudience                    string
+	ContextTokenTTSTimeout                     string
+	ContextTokenTTSTokenSource                 string
+	ContextTokenSubjectTokenType               string
+	ContextTokenChildScope                     string
+	ContextTokenOutboundScope                  string
+	ContextTokenChildTokenTTL                  string
+	ContextTokenToolTokenTTL                   string
+	OutboundAccessTrustedGatewayServices       string
+	OutboundAccessTrustedTokenEndpointServices string
+	EnableTelemetry                            bool
+	directSecrets                              directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -1130,8 +1132,10 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 	injectTTS := b.shouldInjectContextTokenTTS(task, secretName)
 	for i := range job.Spec.Template.Spec.Containers {
 		container := &job.Spec.Template.Spec.Containers[i]
+		container.Env = setControllerEnv(container.Env, workerenv.OutboundAccessTrustedGatewayServices, b.OutboundAccessTrustedGatewayServices)
+		container.Env = setControllerEnv(container.Env, workerenv.OutboundAccessTrustedTokenEndpointServices, b.OutboundAccessTrustedTokenEndpointServices)
 		if injectTTS {
-			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSURL, b.ContextTokenTTSURL)
+			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSEndpoint, b.ContextTokenTTSEndpoint)
 			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSAudience, b.ContextTokenTTSAudience)
 			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTimeout, b.ContextTokenTTSTimeout)
 			container.Env = setControllerEnv(container.Env, workerenv.ContextTokenTTSTokenSource, b.ContextTokenTTSTokenSource)
@@ -1191,7 +1195,7 @@ func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alp
 }
 
 func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secretName string) bool {
-	if b.ContextTokenTTSURL == "" {
+	if b.ContextTokenTTSEndpoint == "" {
 		return false
 	}
 	if secretName != "" {
@@ -1205,7 +1209,7 @@ func (b *JobBuilder) shouldInjectContextTokenTTS(task *corev1alpha1.Task, secret
 
 func contextTokenTTSEnvNames() []string {
 	return []string{
-		workerenv.ContextTokenTTSURL,
+		workerenv.ContextTokenTTSEndpoint,
 		workerenv.ContextTokenTTSAudience,
 		workerenv.ContextTokenTTSTimeout,
 		workerenv.ContextTokenTTSTokenSource,

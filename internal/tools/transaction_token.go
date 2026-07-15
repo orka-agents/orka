@@ -52,7 +52,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	}
 	scope := strings.TrimSpace(os.Getenv(workerenv.ContextTokenChildScope))
 	if scope == "" {
-		return fmt.Errorf("%s is required when %s is set for child task tokens", workerenv.ContextTokenChildScope, workerenv.ContextTokenTTSURL)
+		return fmt.Errorf("%s is required when %s is set for child task tokens", workerenv.ContextTokenChildScope, workerenv.ContextTokenTTSEndpoint)
 	}
 	if err := validateChildTransactionScope(parentTask, scope); err != nil {
 		return err
@@ -73,7 +73,7 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 	if parentTask.Spec.Transaction != nil && parentTask.Spec.Transaction.ID != "" {
 		requestDetails["txn"] = parentTask.Spec.Transaction.ID
 	}
-	ttsClient, err := contexttoken.NewKontxtTTSClient(ttsConfig)
+	ttsClient, err := contexttoken.NewTTSClient(ttsConfig)
 	if err != nil {
 		return fmt.Errorf("configuring child transaction token exchange: %w", err)
 	}
@@ -122,12 +122,12 @@ func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, 
 }
 
 func childTransactionTokenExchangeConfig() (contexttoken.TTSConfig, bool, error) {
-	ttsURL := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSURL))
-	if ttsURL == "" {
+	ttsEndpoint := strings.TrimSpace(os.Getenv(workerenv.ContextTokenTTSEndpoint))
+	if ttsEndpoint == "" {
 		return contexttoken.TTSConfig{}, false, nil
 	}
 	ttsConfig, err := contexttoken.NewTTSConfig(
-		ttsURL,
+		ttsEndpoint,
 		os.Getenv(workerenv.ContextTokenTTSAudience),
 		os.Getenv(workerenv.ContextTokenTTSTimeout),
 		os.Getenv(workerenv.ContextTokenTTSTokenSource),

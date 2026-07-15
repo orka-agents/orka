@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -399,6 +402,9 @@ func loadCustomTools(
 			continue
 		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
+		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
+			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
+		}
 
 		customTools[name] = tool
 	}
@@ -452,6 +458,96 @@ func bindApprovalAuthRefVersion(
 	}
 	tool.Annotations[approvalAuthRefUIDAnnotation] = string(secret.UID)
 	tool.Annotations[approvalAuthRefResourceVersionAnnotation] = secret.ResourceVersion
+}
+
+func clearApprovalOutboundAccessPolicyVersion(tool *corev1alpha1.Tool) {
+	if tool == nil || tool.Annotations == nil {
+		return
+	}
+	delete(tool.Annotations, approvalOutboundPolicyUIDAnnotation)
+	delete(tool.Annotations, approvalOutboundPolicyGenerationAnnotation)
+	delete(tool.Annotations, approvalOutboundPolicyResourceVersionAnnotation)
+	delete(tool.Annotations, approvalOutboundPolicySecretsDigestAnnotation)
+}
+
+func bindApprovalOutboundAccessPolicyVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+) error {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+		return nil
+	}
+	clearApprovalOutboundAccessPolicyVersion(tool)
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	key := client.ObjectKey{Namespace: namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}
+	if err := k8sClient.Get(ctx, key, policy); err != nil {
+		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
+	}
+	secretRefs := approvalOutboundPolicySecretRefs(policy)
+	secretVersions := make([]string, 0, len(secretRefs))
+	for _, ref := range secretRefs {
+		if ref == nil || strings.TrimSpace(ref.Name) == "" {
+			continue
+		}
+		refNamespace := strings.TrimSpace(ref.Namespace)
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: refNamespace, Name: ref.Name}, secret); err != nil {
+			return fmt.Errorf("read outbound access Secret %q for approval binding: %w", ref.Name, err)
+		}
+		secretVersions = append(
+			secretVersions,
+			refNamespace+"/"+ref.Name+"\x00"+string(secret.UID)+"\x00"+secret.ResourceVersion,
+		)
+	}
+	sort.Strings(secretVersions)
+	secretsDigest := ""
+	if len(secretVersions) > 0 {
+		sum := sha256.Sum256([]byte(strings.Join(secretVersions, "\n")))
+		secretsDigest = hex.EncodeToString(sum[:])
+	}
+	if tool.Annotations == nil {
+		tool.Annotations = map[string]string{}
+	}
+	tool.Annotations[approvalOutboundPolicyUIDAnnotation] = string(policy.UID)
+	tool.Annotations[approvalOutboundPolicyGenerationAnnotation] = strconv.FormatInt(policy.Generation, 10)
+	tool.Annotations[approvalOutboundPolicyResourceVersionAnnotation] = policy.ResourceVersion
+	if secretsDigest != "" {
+		tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation] = secretsDigest
+	}
+	return nil
+}
+
+func approvalOutboundPolicySecretRefs(
+	policy *corev1alpha1.OutboundAccessPolicy,
+) []*corev1alpha1.NamespacedSecretKeySelector {
+	if policy == nil {
+		return nil
+	}
+	refs := []*corev1alpha1.NamespacedSecretKeySelector{}
+	appendTLS := func(config *corev1alpha1.OutboundTLSConfig) {
+		if config != nil && config.CASecretRef != nil {
+			refs = append(refs, config.CASecretRef)
+		}
+	}
+	if direct := policy.Spec.Direct; direct != nil {
+		refs = append(refs, direct.Subject.SecretRef)
+		if direct.Actor != nil {
+			refs = append(refs, direct.Actor.SecretRef)
+		}
+		if auth := direct.ClientAuthentication; auth != nil {
+			refs = append(refs, auth.ClientSecretRef, auth.PrivateKeyRef)
+		}
+		appendTLS(direct.TokenEndpoint.TLS)
+	}
+	if gateway := policy.Spec.Gateway; gateway != nil {
+		appendTLS(gateway.TLS)
+	}
+	return refs
 }
 
 // buildLLMTools builds the combined tool list for the LLM

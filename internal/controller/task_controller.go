@@ -43,9 +43,11 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerpkg "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -101,6 +103,8 @@ type TaskReconciler struct {
 	WebhookNotifier                    *WebhookNotifier
 	Recorder                           record.EventRecorder
 	KubeClient                         kubernetes.Interface
+	OutboundAccessResolver             outboundaccess.Resolver
+	BrokeredTransactionExchange        *workerpkg.TransactionExchangeConfig
 	ResultStore                        store.ResultStore
 	PlanStore                          store.PlanStore
 	MessageStore                       store.MessageStore

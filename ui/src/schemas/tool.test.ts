@@ -32,6 +32,23 @@ describe('httpExecutionSchema', () => {
     expect(httpExecutionSchema.parse(data)).toEqual(data)
   })
 
+  it('accepts an outbound access policy reference', () => {
+    const data = {
+      url: 'https://api.example.com',
+      outboundAccessPolicyRef: { name: 'resource-api' },
+    }
+    expect(httpExecutionSchema.parse(data)).toEqual(data)
+  })
+
+  it('rejects an empty outbound access policy reference name', () => {
+    expect(() =>
+      httpExecutionSchema.parse({
+        url: 'https://api.example.com',
+        outboundAccessPolicyRef: { name: '' },
+      })
+    ).toThrow()
+  })
+
   it('rejects wrong types', () => {
     expect(() => httpExecutionSchema.parse({ url: 123 })).toThrow()
     expect(() => httpExecutionSchema.parse({ url: 'http://x', headers: 'invalid' })).toThrow()

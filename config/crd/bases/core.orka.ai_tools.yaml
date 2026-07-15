@@ -113,6 +113,17 @@ spec:
                     - PATCH
                     - DELETE
                     type: string
+                  outboundAccessPolicyRef:
+                    description: OutboundAccessPolicyRef references an OutboundAccessPolicy
+                      in the same namespace.
+                    properties:
+                      name:
+                        description: Name is the referenced object name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   timeout:
                     description: 'Timeout is the request timeout (default: 30s)'
                     type: string

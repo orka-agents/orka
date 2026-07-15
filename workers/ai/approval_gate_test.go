@@ -370,8 +370,9 @@ func TestApprovalGateTargetForCallRefreshesAuthRefBeforeRequestingApproval(t *te
 		namespace: "default",
 		taskName:  "incident-task",
 		taskUID:   "task-uid-1",
-		refreshTarget: func(_ context.Context, _ string, tool *corev1alpha1.Tool) {
+		refreshTarget: func(_ context.Context, _ string, tool *corev1alpha1.Tool) error {
 			tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+			return nil
 		},
 	}
 
@@ -453,8 +454,9 @@ func TestApprovalGatePrepareApprovedCallRefreshesAuthRefBeforeConsumingApproval(
 		required:  map[string]struct{}{gatedDispatchTool: {}},
 		resolved:  []approvals.ResolvedApproval{resolvedApprovalForTarget(target)},
 		firedKeys: map[string]bool{},
-		refreshTarget: func(_ context.Context, _ string, tool *corev1alpha1.Tool) {
+		refreshTarget: func(_ context.Context, _ string, tool *corev1alpha1.Tool) error {
 			tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+			return nil
 		},
 	}
 
@@ -826,7 +828,7 @@ func TestApprovalTargetSpecDigestIncludesTransactionAuthorityDigest(t *testing.T
 
 func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
 	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
-	t.Setenv(workerenv.ContextTokenTTSURL, "https://tts-a.example.test/exchange?nonce=one#frag")
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, "https://tts-a.example.test/exchange?nonce=one#frag")
 	t.Setenv(workerenv.ContextTokenTTSAudience, "aud-1")
 	t.Setenv(workerenv.ContextTokenToolTokenTTL, "5m")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
@@ -836,7 +838,7 @@ func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
 		t.Fatalf("approvalTargetSpecDigest() error = %v", err)
 	}
 
-	t.Setenv(workerenv.ContextTokenTTSURL, "https://tts-b.example.test/exchange?nonce=two#frag")
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, "https://tts-b.example.test/exchange?nonce=two#frag")
 	changedEndpoint, err := approvalTargetSpecDigest(tool)
 	if err != nil {
 		t.Fatalf("approvalTargetSpecDigest() endpoint error = %v", err)
@@ -845,13 +847,13 @@ func TestApprovalTargetSpecDigestIncludesTTSAuthorityMetadata(t *testing.T) {
 		t.Fatal("TTS endpoint change did not affect approval target digest")
 	}
 
-	t.Setenv(workerenv.ContextTokenTTSURL, "https://tts-a.example.test/exchange?nonce=changed#other")
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, "https://tts-a.example.test/exchange?nonce=changed#other")
 	sameSafeEndpoint, err := approvalTargetSpecDigest(tool)
 	if err != nil {
 		t.Fatalf("approvalTargetSpecDigest() sanitized endpoint error = %v", err)
 	}
 	if sameSafeEndpoint == first {
-		t.Fatal("TTS URL query/fragment change did not affect approval target digest")
+		t.Fatal("TTS endpoint query/fragment change did not affect approval target digest")
 	}
 
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceServiceAccount)
@@ -1520,8 +1522,9 @@ func TestExplicitApprovalTargetRefreshesBeforeDigest(t *testing.T) {
 		Namespace: "default",
 		TaskID:    "incident-task",
 		TaskUID:   "task-uid-1",
-		ApprovalTargetRefresh: func(_ context.Context, _ string, tool *corev1alpha1.Tool) {
+		ApprovalTargetRefresh: func(_ context.Context, _ string, tool *corev1alpha1.Tool) error {
 			tool.Annotations[approvalAuthRefResourceVersionAnnotation] = "11"
+			return nil
 		},
 	}
 	call := llm.ToolCall{
@@ -2383,5 +2386,67 @@ func TestApprovalGateDeclinedExplicitApprovalTargetDoesNotExecuteWithoutRequired
 	}
 	if executions.Load() != 0 {
 		t.Fatalf("declined explicit approval target executed gated tool")
+	}
+}
+
+func TestApprovalTargetSpecDigestIncludesOutboundAccessPolicyIdentity(t *testing.T) {
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Spec.HTTP.OutboundAccessPolicyRef = &corev1alpha1.LocalObjectReference{Name: "resource-api"}
+	tool.Annotations = map[string]string{
+		approvalOutboundPolicyUIDAnnotation:             "policy-uid",
+		approvalOutboundPolicyGenerationAnnotation:      "3",
+		approvalOutboundPolicyResourceVersionAnnotation: "10",
+		approvalOutboundPolicySecretsDigestAnnotation:   "secret-digest-a",
+	}
+	first, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.Annotations[approvalOutboundPolicyResourceVersionAnnotation] = "11"
+	second, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("outbound access policy resourceVersion change did not affect approval target digest")
+	}
+	tool.Annotations[approvalOutboundPolicyResourceVersionAnnotation] = "10"
+	tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation] = "secret-digest-b"
+	third, err := approvalTargetSpecDigest(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == third {
+		t.Fatal("outbound access credential Secret rotation did not affect approval target digest")
+	}
+}
+
+func TestBindApprovalOutboundAccessPolicyVersionFailsClosedOnMissingCredentialSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "tenant"},
+		Spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+			Subject: corev1alpha1.OutboundTokenSource{
+				Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+				TokenType: "urn:example:assertion",
+				SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "missing", Key: "token"},
+			},
+		}},
+	}
+	client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build()
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Namespace = "tenant"
+	tool.Spec.HTTP.OutboundAccessPolicyRef = &corev1alpha1.LocalObjectReference{Name: policy.Name}
+	if err := bindApprovalOutboundAccessPolicyVersion(context.Background(), client, "tenant", tool); err == nil {
+		t.Fatal("missing outbound credential Secret did not fail approval binding")
+	}
+	if tool.Annotations[approvalOutboundPolicyUIDAnnotation] != "" {
+		t.Fatal("partial outbound policy identity was retained after failed binding")
 	}
 }

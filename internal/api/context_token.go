@@ -16,25 +16,25 @@ import (
 	"slices"
 	"strings"
 
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
 	"github.com/gofiber/fiber/v3"
+	"github.com/orka-agents/orka/internal/transactiontoken"
 )
 
 const (
 	// AuthTypeContextToken identifies generic transaction/context token authentication.
 	AuthTypeContextToken = "contextToken"
 
-	// ContextTokenProfileKontxt identifies the built-in kontxt transaction token profile.
-	ContextTokenProfileKontxt = "kontxt"
+	// ContextTokenProfileTransactionToken identifies Orka's strict transaction-token profile.
+	ContextTokenProfileTransactionToken = transactiontoken.ProfileName
 
-	// KontxtHeaderName is the default HTTP header used by kontxt transaction tokens.
-	KontxtHeaderName = kontxttoken.HeaderName
+	// TransactionTokenHeaderName is the default HTTP transaction-token header.
+	TransactionTokenHeaderName = transactiontoken.HeaderName
 
-	// KontxtJWTType is the JWT typ header expected by kontxt transaction tokens.
-	KontxtJWTType = kontxttoken.TypeHeader
+	// TransactionTokenJWTType is the JWT typ header required by the profile.
+	TransactionTokenJWTType = transactiontoken.JWTType
 )
 
-var kontxtRequiredClaims = []string{"sub", "exp", "iat", "txn", "scope", "req_wl"}
+var transactionTokenRequiredClaims = append([]string(nil), transactiontoken.RequiredClaims...)
 
 // TokenHeaderConfig describes one HTTP header location from which a token can be extracted.
 type TokenHeaderConfig struct {
@@ -116,21 +116,21 @@ func NewContextTokenConfig(profile, issuer, audience, jwksURL, headers string) (
 	}
 
 	switch profile {
-	case ContextTokenProfileKontxt:
+	case ContextTokenProfileTransactionToken:
 		if len(headerCfg) == 0 {
-			headerCfg = []TokenHeaderConfig{{Name: KontxtHeaderName}}
+			headerCfg = []TokenHeaderConfig{{Name: TransactionTokenHeaderName}}
 		}
 		if jwksURL == "" {
 			jwksURL = strings.TrimRight(issuer, "/") + "/.well-known/jwks.json"
 		}
 		return ContextTokenConfig{Profiles: []ContextTokenProfileConfig{{
-			Name:           ContextTokenProfileKontxt,
+			Name:           ContextTokenProfileTransactionToken,
 			Issuer:         issuer,
 			Audience:       audience,
 			JWKSURL:        jwksURL,
 			Headers:        headerCfg,
-			ExpectedType:   KontxtJWTType,
-			RequiredClaims: append([]string{}, kontxtRequiredClaims...),
+			ExpectedType:   TransactionTokenJWTType,
+			RequiredClaims: append([]string{}, transactionTokenRequiredClaims...),
 		}}}, nil
 	default:
 		return ContextTokenConfig{}, fmt.Errorf("unsupported context-token profile %q", profile)

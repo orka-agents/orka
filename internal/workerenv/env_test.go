@@ -23,7 +23,7 @@ func TestAIWorkerEnvRoundTrip(t *testing.T) {
 			ControllerURL:      "http://controller",
 			AgentName:          "agent-a",
 			TransactionID:      "txn-123",
-			TransactionProfile: "kontxt",
+			TransactionProfile: "transaction-token",
 		},
 		Provider:        "openai",
 		Model:           "gpt-5",
@@ -336,16 +336,16 @@ func TestTransactionLogFields(t *testing.T) {
 	if got := TransactionLogFields("", ""); got != "" {
 		t.Fatalf("TransactionLogFields empty = %q, want empty", got)
 	}
-	got := TransactionLogFields("txn-123", "kontxt")
-	want := ` transactionID="txn-123" contextTokenProfile="kontxt"`
+	got := TransactionLogFields("txn-123", "transaction-token")
+	want := ` transactionID="txn-123" contextTokenProfile="transaction-token"`
 	if got != want {
 		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
 	}
 }
 
 func TestTransactionLogFields_EscapesLogForgingCharacters(t *testing.T) {
-	got := TransactionLogFields("txn 123", "kontxt\nforged=true")
-	want := ` transactionID="txn 123" contextTokenProfile="kontxt\nforged=true"`
+	got := TransactionLogFields("txn 123", "transaction-token\nforged=true")
+	want := ` transactionID="txn 123" contextTokenProfile="transaction-token\nforged=true"`
 	if got != want {
 		t.Fatalf("TransactionLogFields() = %q, want %q", got, want)
 	}

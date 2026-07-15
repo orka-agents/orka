@@ -18,13 +18,13 @@ Authentication modes:
 
 - **Kubernetes ServiceAccount token** — default mode. Tokens are validated with the Kubernetes TokenReview API.
 - **OIDC JWT** — enabled when the controller is configured with `--oidc-issuer` and `--oidc-audience` (or `ORKA_OIDC_ISSUER` / `ORKA_OIDC_AUDIENCE`). Tokens are validated against the issuer, audience, expiration, RS256 signature, and `--oidc-allowed-subjects`; authorized OIDC callers are assigned `--oidc-namespace` for namespace isolation. If `--oidc-jwks-url` is omitted, Orka discovers the JWKS URL from the issuer metadata.
-- **Context token / `kontxt` TxToken** — enabled with `--context-token-profile=kontxt`, `--context-token-issuer`, and `--context-token-audience` (or the matching `ORKA_CONTEXT_TOKEN_*` env vars). The built-in profile validates RS256 TxTokens with `typ: txntoken+jwt`, issuer/audience/time claims, `kid`, and required `iat`, `txn`, `scope`, and `req_wl` claims. By default tokens are read from the raw `Txn-Token` header; `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer`.
+- **Context token / `transaction-token` TxToken** — enabled with `--context-token-profile=transaction-token`, `--context-token-issuer`, and `--context-token-audience` (or the matching `ORKA_CONTEXT_TOKEN_*` env vars). The built-in profile validates RS256 TxTokens with `typ: txntoken+jwt`, issuer/audience/time claims, `kid`, and required `iat`, `txn`, `scope`, and `req_wl` claims. By default tokens are read from the raw `Txn-Token` header; `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer`.
 
 ```http
 Txn-Token: <txntoken+jwt>
 ```
 
-When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Kontxt TxToken integration](../concepts/kontxt.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
+When a Task is created through OIDC or context-token authentication, Orka stamps the verified caller identity into immutable `spec.requestedBy` (`subject`, `issuer`, `username`, `email`, `groups`, and `roles` when present). Context-token Task creation also stamps immutable `spec.transaction` plus transaction labels/annotations for audit correlation. Clients cannot provide or override `requestedBy` or `transaction`; requests containing top-level or nested `spec.requestedBy`/`spec.transaction` are rejected with `400`. See [Transaction Token integration](../concepts/transaction-tokens.md) for scope/`tctx` authorization, TTS exchange, delegation, and audit behavior.
 
 ## Webhooks
 
@@ -229,7 +229,8 @@ spec:
 | `spec.http.method` | string | default `POST`; allowed `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | HTTP method for plain HTTP tools. MCP actor-backed tools use `POST`. |
 | `spec.http.headers` | map | empty | Static headers sent with the request. Reserved token propagation headers cannot be overridden when outbound TxToken propagation is enabled. |
 | `spec.http.timeout` | duration | default `30s` | Per-call request timeout. |
-| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. |
+| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. Cannot coexist with a direct OutboundAccessPolicy. |
+| `spec.http.outboundAccessPolicyRef.name` | string | empty | Same-namespace `OutboundAccessPolicy` required to be Accepted with ResolvedRefs. |
 | `spec.http.authInject` | string | default `header`; allowed `header`, `body` | `header` sends `Authorization: Bearer <token>`. `body` injects the token into the JSON request body and is invalid for MCP actor-backed tools. |
 | `spec.http.authBodyKey` | string | empty | JSON key used when `authInject: body`. |
 | `spec.mcp.path` | string | `/mcp` | HTTP path exposed by the MCP server inside the actor. |
@@ -243,6 +244,30 @@ spec:
 | `status.actor` | object | empty | Safe actor metadata, including provider, actor ID, route host, resolved template, and pool reference. |
 
 MCP actor-backed tools require Substrate support to be enabled on the controller. If transport auth is needed for an MCP endpoint, set `spec.http.authSecretRef`, keep `authInject` as `header` or omit it, and omit `spec.http.url`.
+
+## OutboundAccessPolicy
+
+`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: resource-api
+  namespace: default
+spec:
+  direct:
+    grant: TokenExchange
+    tokenEndpoint:
+      url: https://identity.example.test/oauth/token
+    subject:
+      source: TransactionToken
+    scopes: [api.read]
+    requestedTokenType: urn:ietf:params:oauth:token-type:access_token
+    expectedIssuedTokenType: urn:ietf:params:oauth:token-type:access_token
+```
+
+Policy status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. Secret references are key-specific and same-namespace. Cross-namespace Service refs require exact controller allowlist entries. See [Outbound Access Policies](../concepts/outbound-access.md).
 
 ## Security
 

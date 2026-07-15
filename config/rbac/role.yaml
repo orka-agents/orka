@@ -52,6 +52,7 @@ rules:
   - ""
   resources:
   - pods/portforward
+  - serviceaccounts/token
   verbs:
   - create
 - apiGroups:
@@ -181,6 +182,7 @@ rules:
   resources:
   - agentruntimes/status
   - agents/status
+  - outboundaccesspolicies/status
   - providers/status
   - repositorymonitors/status
   - repositoryscans/status
@@ -192,6 +194,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - outboundaccesspolicies
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:

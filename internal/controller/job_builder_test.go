@@ -241,7 +241,7 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 				{Name: workerenv.TransactionScopes, Value: "spoofed"},
 			},
 			Transaction: &corev1alpha1.TaskTransaction{
-				Profile:                "kontxt",
+				Profile:                "transaction-token",
 				ID:                     testTransactionID,
 				Issuer:                 "https://issuer.example.test",
 				Subject:                "spiffe://example.test/ns/default/sa/client",
@@ -266,8 +266,8 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 		if meta.Labels[labels.LabelTransactionID] != labels.SelectorValue(testTransactionID) {
 			t.Fatalf("%s transaction label = %q, want txn-123", name, meta.Labels[labels.LabelTransactionID])
 		}
-		if meta.Labels[labels.LabelAuthProfile] != "kontxt" {
-			t.Fatalf("%s auth profile label = %q, want kontxt", name, meta.Labels[labels.LabelAuthProfile])
+		if meta.Labels[labels.LabelAuthProfile] != "transaction-token" {
+			t.Fatalf("%s auth profile label = %q, want transaction-token", name, meta.Labels[labels.LabelAuthProfile])
 		}
 		if meta.Annotations[labels.AnnotationTransactionID] != testTransactionID {
 			t.Fatalf("%s transaction annotation = %q, want txn-123", name, meta.Annotations[labels.AnnotationTransactionID])
@@ -280,7 +280,7 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 	envVars := job.Spec.Template.Spec.Containers[0].Env
 	wantEnv := map[string]string{
 		workerenv.TransactionID:                     testTransactionID,
-		workerenv.TransactionProfile:                "kontxt",
+		workerenv.TransactionProfile:                "transaction-token",
 		workerenv.TransactionIssuer:                 "https://issuer.example.test",
 		workerenv.TransactionSubject:                "spiffe://example.test/ns/default/sa/client",
 		workerenv.TransactionRequestingWorkload:     "spiffe://example.test/ns/default/sa/client",
@@ -305,7 +305,7 @@ func TestJobBuilder_Build_PropagatesTransactionMetadata(t *testing.T) {
 
 func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
-	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSEndpoint = "https://tts.example.test"
 	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceIncoming
 	builder.ContextTokenTTSAudience = testTTSAudience
 	builder.ContextTokenTTSTimeout = "7s"
@@ -356,7 +356,7 @@ func TestJobBuilder_Build_MountsTransactionTokenSecret(t *testing.T) {
 		t.Fatalf("missing %s env var", workerenv.ContextTokenSubjectTokenFile)
 	}
 	for name, want := range map[string]string{
-		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSEndpoint:      "https://tts.example.test",
 		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceIncoming,
 		workerenv.ContextTokenTTSAudience:      testTTSAudience,
 		workerenv.ContextTokenTTSTimeout:       "7s",
@@ -416,7 +416,7 @@ func TestJobBuilder_AddTransactionTokenSecretExposesToAllContainers(t *testing.T
 
 func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSecret(t *testing.T) {
 	builder := setupJobBuilder()
-	builder.ContextTokenTTSURL = "https://tts.example.test"
+	builder.ContextTokenTTSEndpoint = "https://tts.example.test"
 	builder.ContextTokenTTSTokenSource = contexttoken.TTSTokenSourceServiceAccount
 	builder.ContextTokenTTSAudience = testTTSAudience
 	builder.ContextTokenTTSTimeout = "7s"
@@ -448,7 +448,7 @@ func TestJobBuilder_Build_InjectsContextTokenTTSConfigWithoutTransactionTokenSec
 
 	container := job.Spec.Template.Spec.Containers[0]
 	for name, want := range map[string]string{
-		workerenv.ContextTokenTTSURL:           "https://tts.example.test",
+		workerenv.ContextTokenTTSEndpoint:      "https://tts.example.test",
 		workerenv.ContextTokenTTSTokenSource:   contexttoken.TTSTokenSourceServiceAccount,
 		workerenv.ContextTokenTTSAudience:      testTTSAudience,
 		workerenv.ContextTokenTTSTimeout:       "7s",

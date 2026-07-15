@@ -24,8 +24,8 @@ Most commands accept these global flags:
 | `--server`, `-s` | Orka API server URL. Defaults to `http://localhost:8080`. |
 | `--namespace`, `-n` | Kubernetes namespace. Defaults to `default` unless config or kubeconfig sets one. |
 | `--token`, `-t` | Bearer token for API authentication. Prefer config or kubeconfig over passing real tokens in shell history. |
-| `--txn-token` | Kontxt transaction token sent with the `Txn-Token` header. |
-| `--txn-token-file` | Read a Kontxt transaction token from a file, or `-` for stdin. |
+| `--txn-token` | Transaction-token token sent with the `Txn-Token` header. |
+| `--txn-token-file` | Read a Transaction-token token from a file, or `-` for stdin. |
 | `--kubeconfig` | Kubeconfig path used for local discovery/token extraction fallback. |
 
 The CLI reads persistent config from `~/.orka/config.yaml`:
@@ -312,7 +312,7 @@ Regenerate completions after upgrading `orka` if commands or flags change.
 | `orka status` | Show health, readiness, task counts, and agent count. |
 | `orka models list --compat openai` / `anthropic` | List model IDs in provider-compatible formats. |
 | `orka workspace status TASK` | Inspect task workspace status. |
-| `orka audit trace TRANSACTION_ID` | Show tasks correlated by Kontxt transaction ID. |
+| `orka audit trace TRANSACTION_ID` | Show tasks correlated by Transaction-token ID. |
 
 ## Binary e2e coverage matrix
 

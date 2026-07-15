@@ -52,7 +52,7 @@ The repository has additional GitHub Actions workflows in addition to the normal
 - `Live Copilot Proxy E2E` — exercises live model-backed Orka paths through the copilot-proxy harness.
 - `Live Agent Sandbox E2E` — installs the pinned upstream `agent-sandbox` release in Kind, builds the PR controller plus fake Claude/sandbox-runtime and upstream router images, then validates workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing without model access.
 - `Live GitHub Label Trigger E2E` — builds the PR controller image, deploys it to Kind, configures a generated webhook secret and synthetic runtime Agent, then verifies signed label webhooks create scoped agent Tasks while invalid signatures and duplicate deliveries are handled correctly. This workflow is manual, model-free, and secret-free.
-- `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, then generates a real `kontxt` TxToken against an in-cluster JWKS endpoint. It verifies `spec.requestedBy` stamping for both auth modes, rejects client tampering, and rejects a tampered TxToken.
+- `Live GitHub OIDC E2E` — builds the PR controller image, deploys it to Kind, authenticates to Orka with a real GitHub Actions OIDC token, and verifies `spec.requestedBy` stamping plus client provenance-tampering rejection.
 - `Repository Monitor Smoke` — runs automatically on PRs and pushes touching monitor-relevant Go, CRD/config, worker, or dependency paths. It creates the UI embed stub and runs focused Go tests for monitor store/API/controller behavior, GitHub pull request event queueing, targeted single-PR inventory runs, read-only review task job construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling.
 - `Agent Substrate E2E` — installs Agent Substrate and Orka into a fresh Kind cluster, creates Orka-compatible `WorkerPool`/`ActorTemplate` resources, validates direct Substrate actor execution, runs default and pooled Orka Tasks through the Substrate workspace provider, exercises pooled MCP actor-backed Tools, and checks workspace placement/density telemetry. This workflow is secret-free.
 
@@ -74,7 +74,7 @@ go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/agent
 
 The agent sandbox live script does not require provider credentials or model access. It uses a deterministic fake `claude` CLI in the sandbox runtime image so CI can verify Orka's sandbox plumbing independently from external LLM availability.
 
-The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. The `kontxt` portion is self-contained: it generates an ephemeral RSA key/JWKS and TxToken during the run, so no external kontxt service or secret is required.
+The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manual `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails fast before creating a cluster. Transaction-token provider E2E now lives in the external integration repository.
 
 Run the Agent Substrate E2E locally with:
 
@@ -159,8 +159,8 @@ For interactive presentations and asciinema recordings of `hack/demos/`,
 a one-shot bootstrap is available:
 
 ```bash
-make demo-cluster-up      # kind cluster + Orka + kontxt + agent-sandbox
-make demo-images          # build + load the kontxt-caller image (Demo 50)
+make demo-cluster-up      # kind cluster + Orka + agent-sandbox
+make demo-images          # build + load demo runtime images
 hack/demos/00-preflight.sh
 # ... run ./hack/demos/10-chat-pr.sh, 20-..., etc.
 make demo-cluster-down

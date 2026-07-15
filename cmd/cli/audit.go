@@ -27,7 +27,7 @@ func newAuditTraceCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "trace <transaction-id>",
-		Short: "Show tasks correlated by kontxt transaction ID",
+		Short: "Show tasks correlated by transaction ID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			transactionID := args[0]
