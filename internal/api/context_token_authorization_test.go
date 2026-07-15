@@ -627,18 +627,15 @@ func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t
 func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
-	policy := &corev1alpha1.OutboundAccessPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "team-a"},
-		Spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
-			Subject: corev1alpha1.OutboundTokenSource{
-				Source:    corev1alpha1.OutboundTokenSourceSecretRef,
-				TokenType: "urn:example:assertion",
-				SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "resource-assertion", Key: "token"},
-			},
-			TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{URL: "https://identity.example.test/token"},
-			ExpectedIssuedTokenType: "urn:example:resource",
-		}},
-	}
+	policy := readyContextTokenOutboundPolicy("resource-api", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Subject: corev1alpha1.OutboundTokenSource{
+			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+			TokenType: "urn:example:assertion",
+			SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "resource-assertion", Key: "token"},
+		},
+		TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{URL: "https://identity.example.test/token"},
+		ExpectedIssuedTokenType: "urn:example:resource",
+	}})
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
 		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
@@ -736,10 +733,10 @@ func TestContextTokenTaskToolCredentialFailuresForServiceAccountSources(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1alpha1.AddToScheme(scheme))
-			policy := &corev1alpha1.OutboundAccessPolicy{
-				ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "team-a"},
-				Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &tt.direct},
-			}
+			policy := readyContextTokenOutboundPolicy(
+				"resource-api",
+				corev1alpha1.OutboundAccessPolicySpec{Direct: &tt.direct},
+			)
 			tool := &corev1alpha1.Tool{
 				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
 				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
@@ -766,5 +763,94 @@ func TestContextTokenTaskToolCredentialFailuresForServiceAccountSources(t *testi
 			require.NoError(t, err)
 			require.Empty(t, failures)
 		})
+	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresRejectsStaleOrRejectedOutboundAccessPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.OutboundAccessPolicy)
+	}{
+		{
+			name: "stale observed generation",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.ObservedGeneration--
+			},
+		},
+		{
+			name: "rejected",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.Conditions[0].Status = metav1.ConditionFalse
+			},
+		},
+		{
+			name: "unresolved references",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.Conditions[1].Status = metav1.ConditionFalse
+			},
+		},
+		{
+			name: "stale condition",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.Conditions[0].ObservedGeneration--
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			policy := readyContextTokenOutboundPolicy("resource-api", corev1alpha1.OutboundAccessPolicySpec{
+				Direct: &corev1alpha1.DirectOutboundAccess{
+					Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+				},
+			})
+			tt.mutate(policy)
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy.Name},
+				}},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+			authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate, ContextTokenScopeSecretsCredentialsRead}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(
+				context.Background(),
+				client,
+				token,
+				enforceContextTokenAuthorizationConfig(),
+				authzCtx,
+			)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], "unresolved OutboundAccessPolicy")
+		})
+	}
+}
+
+func readyContextTokenOutboundPolicy(
+	name string,
+	spec corev1alpha1.OutboundAccessPolicySpec,
+) *corev1alpha1.OutboundAccessPolicy {
+	generation := int64(2)
+	return &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a", Generation: generation},
+		Spec:       spec,
+		Status: corev1alpha1.OutboundAccessPolicyStatus{
+			ObservedGeneration: generation,
+			Conditions: []metav1.Condition{
+				{
+					Type: corev1alpha1.OutboundAccessPolicyConditionAccepted, Status: metav1.ConditionTrue,
+					ObservedGeneration: generation,
+				},
+				{
+					Type: corev1alpha1.OutboundAccessPolicyConditionResolvedRefs, Status: metav1.ConditionTrue,
+					ObservedGeneration: generation,
+				},
+			},
+		},
 	}
 }

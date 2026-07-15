@@ -207,6 +207,50 @@ func TestKubernetesResolverServiceAccountSubject(t *testing.T) {
 	}
 }
 
+func TestKubernetesResolverServiceAccountActorExpiry(t *testing.T) {
+	scheme := resolverScheme(t)
+	expires := metav1.NewTime(time.Now().Add(10 * time.Minute))
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:         corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+		Subject: corev1alpha1.OutboundTokenSource{
+			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+			TokenType: tokenexchange.TokenTypeAccessToken,
+			SecretRef: secretRef("subject", "token"),
+		},
+		Actor: &corev1alpha1.OutboundTokenSource{
+			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: "workload"},
+		},
+		ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+	}})
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "subject", Namespace: "tenant"},
+		Data:       map[string][]byte{"token": []byte("subject-token")},
+	}
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant"}}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, secret, serviceAccount).Build()
+	clientset := k8sfake.NewSimpleClientset()
+	clientset.PrependReactor("create", "serviceaccounts", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "token" {
+			return false, nil, nil
+		}
+		return true, &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{
+			Token: "service-account-actor", ExpirationTimestamp: expires,
+		}}, nil
+	})
+	exchanger := &captureExchanger{result: tokenexchange.Result{
+		AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer",
+	}}
+	resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger}
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct"}); err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if exchanger.request.ActorToken != "service-account-actor" || !exchanger.request.ActorExpiresAt.Equal(expires.Time) {
+		t.Fatalf("actor exchange = %#v", exchanger.request)
+	}
+}
+
 func TestKubernetesResolverReusesDefaultExchanger(t *testing.T) {
 	resolver := &KubernetesResolver{}
 	first := resolver.exchanger()

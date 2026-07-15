@@ -208,6 +208,8 @@ func TestClientExchangeRejectsReservedParametersAndInvalidResponses(t *testing.T
 		{name: "N A resource result", body: `{"access_token":"token","issued_token_type":"urn:example:resource","token_type":"N_A"}`, want: "token_type"},
 		{name: "mismatched issued type", body: `{"access_token":"token","issued_token_type":"urn:other","token_type":"Bearer"}`, want: "issued_token_type"},
 		{name: "malformed JSON", body: `{`, want: "decode"},
+		{name: "trailing bytes", body: `{"access_token":"token","issued_token_type":"urn:example:resource","token_type":"Bearer"} trailing`, want: "decode"},
+		{name: "second JSON value", body: `{"access_token":"token","issued_token_type":"urn:example:resource","token_type":"Bearer"} {}`, want: "decode"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -301,8 +303,11 @@ func TestClientCacheUsesDigestsCapsExpiryAndCollapsesConcurrentMisses(t *testing
 	client := NewClient(ClientOptions{HTTPClient: server.Client(), MaxCacheEntries: 2, Now: func() time.Time { return now }})
 	req := validResourceRequest(server.URL)
 	req.SubjectToken = "raw-subject-token-must-not-be-a-key"
+	req.ActorToken = "raw-actor-token-must-not-be-a-key"
+	req.ActorTokenType = TokenTypeAccessToken
 	req.CacheNamespace = "policy-generation-digest-a"
 	req.SubjectExpiresAt = now.Add(30 * time.Second)
+	req.ActorExpiresAt = now.Add(20 * time.Second)
 
 	const goroutines = 8
 	errs := make(chan error, goroutines)
@@ -327,12 +332,12 @@ func TestClientCacheUsesDigestsCapsExpiryAndCollapsesConcurrentMisses(t *testing
 		t.Fatalf("cache entries = %d, want 1", len(client.cache))
 	}
 	for key, element := range client.cache {
-		if strings.Contains(key, req.SubjectToken) || len(key) != sha256HexLength {
+		if strings.Contains(key, req.SubjectToken) || strings.Contains(key, req.ActorToken) || len(key) != sha256HexLength {
 			t.Fatalf("unsafe cache key = %q", key)
 		}
 		entry := element.Value.(*cacheEntry)
-		if !entry.expiresAt.Equal(req.SubjectExpiresAt) {
-			t.Fatalf("cache expiry = %s, want subject expiry %s", entry.expiresAt, req.SubjectExpiresAt)
+		if !entry.expiresAt.Equal(req.ActorExpiresAt) {
+			t.Fatalf("cache expiry = %s, want actor expiry %s", entry.expiresAt, req.ActorExpiresAt)
 		}
 	}
 	client.mu.Unlock()
@@ -720,6 +725,24 @@ func TestSubjectExpiryParticipatesInCacheIdentity(t *testing.T) {
 	}
 }
 
+func TestActorExpiryParticipatesInCacheIdentity(t *testing.T) {
+	req := validResourceRequest("https://issuer.example.test/token")
+	req.ActorToken = "actor"
+	req.ActorTokenType = TokenTypeAccessToken
+	first, err := digestRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ActorExpiresAt = time.Now().Add(time.Minute).UTC()
+	second, err := digestRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("actor expiration did not affect cache identity")
+	}
+}
+
 func TestClientRejectsEndpointWhitespace(t *testing.T) {
 	req := validResourceRequest(" https://issuer.example.test/token")
 	_, err := NewClient(ClientOptions{}).Exchange(context.Background(), req)
@@ -786,7 +809,7 @@ func TestCacheHitHonorsCancellationWhileWaitingForCacheLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.store(key, Result{AccessToken: "cached", ExpiresAt: now.Add(time.Minute)}, time.Time{})
+	client.store(key, Result{AccessToken: "cached", ExpiresAt: now.Add(time.Minute)}, time.Time{}, time.Time{})
 	client.mu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

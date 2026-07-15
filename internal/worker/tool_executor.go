@@ -360,28 +360,35 @@ func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS toke
 		client.Timeout = timeout.Duration
 	}
 
-	if len(gatewayTLS.CAPEM) > 0 || strings.TrimSpace(gatewayTLS.ServerName) != "" {
+	configureGatewayTLS := len(gatewayTLS.CAPEM) > 0 || strings.TrimSpace(gatewayTLS.ServerName) != ""
+	if gateway || configureGatewayTLS {
 		transport := base.Transport
 		if transport == nil {
 			transport = http.DefaultTransport
 		}
 		httpTransport, ok := transport.(*http.Transport)
 		if !ok {
-			return nil, errors.New("gateway TLS settings require an *http.Transport")
+			return nil, errors.New("gateway routing requires an *http.Transport")
 		}
 		clone := httpTransport.Clone()
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: strings.TrimSpace(gatewayTLS.ServerName)}
-		if len(gatewayTLS.CAPEM) > 0 {
-			roots, err := x509.SystemCertPool()
-			if err != nil || roots == nil {
-				roots = x509.NewCertPool()
-			}
-			if !roots.AppendCertsFromPEM(gatewayTLS.CAPEM) {
-				return nil, errors.New("gateway CA Secret does not contain a valid PEM certificate")
-			}
-			tlsConfig.RootCAs = roots
+		if gateway {
+			clone.Proxy = nil
+			clone.DisableKeepAlives = true
 		}
-		clone.TLSClientConfig = tlsConfig
+		if configureGatewayTLS {
+			tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: strings.TrimSpace(gatewayTLS.ServerName)}
+			if len(gatewayTLS.CAPEM) > 0 {
+				roots, err := x509.SystemCertPool()
+				if err != nil || roots == nil {
+					roots = x509.NewCertPool()
+				}
+				if !roots.AppendCertsFromPEM(gatewayTLS.CAPEM) {
+					return nil, errors.New("gateway CA Secret does not contain a valid PEM certificate")
+				}
+				tlsConfig.RootCAs = roots
+			}
+			clone.TLSClientConfig = tlsConfig
+		}
 		client.Transport = clone
 	}
 

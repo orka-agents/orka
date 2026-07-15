@@ -2603,6 +2603,46 @@ func TestToolHTTPClientStripsSensitiveHeadersOnRedirect(t *testing.T) {
 	}
 }
 
+func TestToolHTTPClientGatewayBypassesConfiguredProxy(t *testing.T) {
+	proxyCalled := false
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyCalled = true
+		http.Error(w, "proxy must not receive gateway credentials", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+	gatewayCalled := false
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gatewayCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	proxyURL, err := neturl.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := gateway.Client()
+	transport := base.Transport.(*http.Transport).Clone()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	base.Transport = transport
+	client, err := toolHTTPClient(base, nil, tokenexchange.TLSConfig{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayTransport := client.Transport.(*http.Transport)
+	if gatewayTransport.Proxy != nil || !gatewayTransport.DisableKeepAlives {
+		t.Fatalf("gateway transport uses proxy = %t, disable keep-alives = %t", gatewayTransport.Proxy != nil, gatewayTransport.DisableKeepAlives)
+	}
+	resp, err := client.Get(gateway.URL)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if !gatewayCalled || proxyCalled {
+		t.Fatalf("gateway called = %t, proxy called = %t", gatewayCalled, proxyCalled)
+	}
+}
+
 func TestToolHTTPClientDoesNotFollowGatewayRedirect(t *testing.T) {
 	called := false
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

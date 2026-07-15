@@ -23,6 +23,8 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1367,6 +1369,10 @@ func contextTokenTaskToolCredentialFailures(
 			}
 			return nil, fmt.Errorf("resolve OutboundAccessPolicy %q: %w", policyName, err)
 		}
+		if !outboundAccessPolicyReadyForContextAuthorization(policy) {
+			failures = append(failures, fmt.Sprintf("Tool %q references unresolved OutboundAccessPolicy %q", toolName, policyName))
+			continue
+		}
 		if policy.Spec.Direct == nil {
 			continue
 		}
@@ -1393,6 +1399,22 @@ func contextTokenTaskToolCredentialFailures(
 		}
 	}
 	return failures, nil
+}
+
+func outboundAccessPolicyReadyForContextAuthorization(policy *corev1alpha1.OutboundAccessPolicy) bool {
+	if policy == nil || policy.Status.ObservedGeneration != policy.Generation {
+		return false
+	}
+	for _, conditionType := range []string{
+		corev1alpha1.OutboundAccessPolicyConditionAccepted,
+		corev1alpha1.OutboundAccessPolicyConditionResolvedRefs,
+	} {
+		condition := meta.FindStatusCondition(policy.Status.Conditions, conditionType)
+		if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != policy.Generation {
+			return false
+		}
+	}
+	return true
 }
 
 func outboundAccessUsesServiceAccount(direct *corev1alpha1.DirectOutboundAccess) bool {

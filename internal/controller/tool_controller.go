@@ -1426,6 +1426,15 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 	if tool == nil || tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
+	if ref := tool.Spec.HTTP.OutboundAccessPolicyRef; ref != nil {
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: tool.Namespace, Name: ref.Name}, policy); err != nil {
+			return fmt.Errorf("failed to resolve outbound access policy for health check: %w", err)
+		}
+		if policy.Spec.Gateway != nil {
+			return nil
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, tool.Spec.HTTP.URL, nil)
 	if err != nil {

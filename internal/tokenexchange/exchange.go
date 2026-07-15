@@ -125,6 +125,7 @@ type Request struct {
 	SubjectExpiresAt time.Time
 	ActorToken       string
 	ActorTokenType   string
+	ActorExpiresAt   time.Time
 
 	Audiences            []string
 	Scopes               []string
@@ -341,7 +342,7 @@ func (c *Client) runFlight(ctx context.Context, flightKey, cacheKey string, req 
 	if !ok {
 		result, err = c.exchange(ctx, req)
 		if err == nil {
-			c.store(cacheKey, result, req.SubjectExpiresAt)
+			c.store(cacheKey, result, req.SubjectExpiresAt, req.ActorExpiresAt)
 		}
 	}
 	c.flightMu.Lock()
@@ -524,6 +525,9 @@ func (c *Client) exchange(ctx context.Context, req Request) (Result, error) {
 	decoder.UseNumber()
 	if err := decoder.Decode(&decoded); err != nil {
 		return Result{}, fmt.Errorf("decode token endpoint response: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return Result{}, errors.New("decode token endpoint response: trailing data")
 	}
 	if strings.TrimSpace(decoded.AccessToken) == "" {
 		return Result{}, errors.New("token endpoint response missing access_token")
@@ -1018,6 +1022,7 @@ func digestRequest(req Request) (string, error) {
 		SubjectExpiresAt      int64
 		ActorDigest           string
 		ActorType             string
+		ActorExpiresAt        int64
 		Audiences             []string
 		Scopes                []string
 		Resources             []string
@@ -1045,6 +1050,7 @@ func digestRequest(req Request) (string, error) {
 		SubjectExpiresAt:      req.SubjectExpiresAt.UnixNano(),
 		ActorDigest:           digestString(req.ActorToken),
 		ActorType:             req.ActorTokenType,
+		ActorExpiresAt:        req.ActorExpiresAt.UnixNano(),
 		Audiences:             append([]string(nil), req.Audiences...),
 		Scopes:                append([]string(nil), req.Scopes...),
 		Resources:             append([]string(nil), req.Resources...),
@@ -1098,13 +1104,15 @@ func (c *Client) cached(key string) (Result, bool) {
 	return entry.result, true
 }
 
-func (c *Client) store(key string, result Result, subjectExpiresAt time.Time) {
+func (c *Client) store(key string, result Result, subjectExpiresAt, actorExpiresAt time.Time) {
 	expiresAt := result.ExpiresAt
 	if expiresAt.IsZero() || !expiresAt.After(c.now()) {
 		return
 	}
-	if !subjectExpiresAt.IsZero() && subjectExpiresAt.Before(expiresAt) {
-		expiresAt = subjectExpiresAt
+	for _, authorityExpiresAt := range []time.Time{subjectExpiresAt, actorExpiresAt} {
+		if !authorityExpiresAt.IsZero() && authorityExpiresAt.Before(expiresAt) {
+			expiresAt = authorityExpiresAt
+		}
 	}
 	if !expiresAt.After(c.now()) {
 		return

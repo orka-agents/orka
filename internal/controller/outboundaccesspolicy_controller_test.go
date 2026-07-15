@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -143,6 +144,44 @@ func TestOutboundAccessPolicyReferenceMapping(t *testing.T) {
 	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/agentgateway:8080")
 	if err != nil || !trusted.Allows(gateway.Spec.Gateway.ServiceRef, gateway.Namespace) {
 		t.Fatalf("trusted gateway parse = %#v, %v", trusted, err)
+	}
+}
+
+type outboundPolicyRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f outboundPolicyRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestToolReconcilerGatewayPolicySkipsDirectHealthCheck(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	gateway := readyControllerPolicy("tenant", "gateway", corev1alpha1.OutboundAccessPolicySpec{
+		Gateway: &corev1alpha1.GatewayOutboundAccess{},
+	})
+	client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+	called := false
+	reconciler := &ToolReconciler{
+		Client: client,
+		HTTPClient: &http.Client{Transport: outboundPolicyRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			called = true
+			return nil, context.Canceled
+		})},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "gateway-tool", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     "https://downstream.example.test/resource",
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: gateway.Name},
+		}},
+	}
+	if err := reconciler.healthCheck(context.Background(), tool); err != nil {
+		t.Fatalf("healthCheck() error = %v", err)
+	}
+	if called {
+		t.Fatal("gateway-backed Tool health check called the original downstream URL")
 	}
 }
 

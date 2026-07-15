@@ -161,6 +161,7 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 	}
 	result, err := r.exchanger().Exchange(ctx, tokenexchange.Request{
 		Adapter:                 AdapterDirect,
+		ActorExpiresAt:          actor.expiresAt,
 		Endpoint:                endpoint,
 		TLS:                     endpointTLS,
 		RequirePublicEndpoint:   direct.TokenEndpoint.URL != "",
