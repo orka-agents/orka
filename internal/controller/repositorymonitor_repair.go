@@ -269,6 +269,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		}
 		job = existing
 	}
+	pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")
+	if _, err := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: command.ID, Operation: "push_branch", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: pr.Number, TargetSHA: pr.HeadSHA, Reason: command.Intent, GitHubURL: pr.HeadBranch}); err != nil {
+		return 0, err
+	}
 	priority := int32(820)
 	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
 	repairer := *monitor.Spec.Agents.Repairer
@@ -425,23 +429,34 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 			job.Phase = repositoryMonitorRepairPhaseFailed
 			job.LastError = fmt.Sprintf("task ended in phase %s", task.Status.Phase)
 		}
+		commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
+		pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")
+		pushMutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, pushMutationID)
+		if err != nil {
+			return ingested, err
+		}
+		pushMutation.CommandEventID = commandID
+		pushMutation.ExternalID = job.PushedSHA
+		pushMutation.GitHubURL = job.Branch
+		pushMutation.Error = job.LastError
+		pushMutation.Status = repositoryMonitorRunPhaseSucceeded
+		if job.Phase != repositoryMonitorRepairPhaseSucceeded {
+			pushMutation.Status = repositoryMonitorRunPhaseFailed
+		}
+		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, pushMutation); err != nil {
+			return ingested, err
+		}
 		completedAt := time.Now()
 		job.CompletedAt = &completedAt
 		if err := r.Store.UpdateRepairJob(ctx, &job); err != nil {
 			return ingested, err
 		}
-		commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
 		workStatus := repositoryMonitorWorkActionStatusSucceeded
 		if job.Phase != repositoryMonitorRepairPhaseSucceeded {
 			workStatus = repositoryMonitorWorkActionStatusFailed
 		}
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, &store.CommandEvent{ID: commandID, Intent: job.Intent}, repositoryMonitorPullRequestKind, job.PRNumber, job.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(job.Intent), workStatus, job.Phase, job.TaskName, job.LastError); err != nil {
 			return ingested, err
-		}
-		if job.Phase == repositoryMonitorRepairPhaseSucceeded {
-			_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(job.ID+"-push"), CommandEventID: commandID, Operation: "push_branch", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: job.PRNumber, TargetSHA: job.HeadSHA, Reason: job.Intent, GitHubURL: job.Branch, ExternalID: job.PushedSHA, Status: "succeeded"})
-		} else {
-			_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(job.ID+"-push-failed"), CommandEventID: commandID, Operation: "push_branch", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: job.PRNumber, TargetSHA: job.HeadSHA, Reason: job.Intent, GitHubURL: job.Branch, Status: "failed", Error: job.LastError})
 		}
 		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(job.PRNumber, 10))
 		if err == nil {

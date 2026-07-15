@@ -255,32 +255,36 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor workflow action: %v", err))
 	}
 	if consumeAcceptedCommandLabel {
+		mutation := &store.GitHubMutationRecord{
+			ID:             "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label"))),
+			CommandEventID: command.ID,
+			Operation:      "remove_label",
+			TargetKind:     target.Kind,
+			TargetNumber:   int64(target.Number),
+			TargetSHA:      target.HeadSHA,
+			Reason:         "consume_command_label",
+			RequestDigest:  "sha256:" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(payload.Label.Name))),
+			Status:         "started",
+		}
+		if err := h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
+			return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record command label mutation: %v", err))
+		}
 		if err := h.consumeRepositoryMonitorCommandLabel(c.Context(), monitor, payload.Repository, target, payload.Label.Name); err != nil {
-			_ = h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, &store.GitHubMutationRecord{
-				ID:             "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label|failed"))),
-				CommandEventID: command.ID,
-				Operation:      "remove_label",
-				TargetKind:     target.Kind,
-				TargetNumber:   int64(target.Number),
-				TargetSHA:      target.HeadSHA,
-				Reason:         "consume_command_label",
-				Status:         "failed",
-				Error:          err.Error(),
-			})
+			mutation.Status = repositoryMonitorRunPhaseFailed
+			mutation.Error = err.Error()
+			if auditErr := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); auditErr != nil {
+				return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to consume command label: %v; audit update failed: %v", err, auditErr))
+			}
 			command.Error = fmt.Sprintf("accepted, but failed to consume command label: %v", err)
-			_ = h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command)
+			if updateErr := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); updateErr != nil {
+				return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update monitor command: %v", updateErr))
+			}
 		} else {
-			_ = h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, &store.GitHubMutationRecord{
-				ID:             "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label|succeeded"))),
-				CommandEventID: command.ID,
-				Operation:      "remove_label",
-				TargetKind:     target.Kind,
-				TargetNumber:   int64(target.Number),
-				TargetSHA:      target.HeadSHA,
-				Reason:         "consume_command_label",
-				RequestDigest:  "sha256:" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(payload.Label.Name))),
-				Status:         "succeeded",
-			})
+			mutation.Status = "succeeded"
+			mutation.Error = ""
+			if err := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
+				return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to finalize command label mutation: %v", err))
+			}
 		}
 	}
 	return command, false, nil
@@ -764,6 +768,23 @@ func (h *Handlers) recordRepositoryMonitorGitHubMutation(ctx context.Context, mo
 		record.CreatedAt = time.Now()
 	}
 	if err := h.repositoryMonitorStore.CreateGitHubMutationRecord(ctx, record); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {
+		return err
+	}
+	metrics.RecordRepositoryMonitorGitHubMutation(record.Operation, record.Status)
+	return nil
+}
+
+func (h *Handlers) updateRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {
+	if monitor == nil || record == nil || h.repositoryMonitorStore == nil {
+		return nil
+	}
+	record.MonitorNamespace = monitor.Namespace
+	record.MonitorName = monitor.Name
+	record.MonitorGeneration = monitor.Generation
+	if record.Actor == "" {
+		record.Actor = "orka-controller"
+	}
+	if err := h.repositoryMonitorStore.UpdateGitHubMutationRecord(ctx, record); err != nil {
 		return err
 	}
 	metrics.RecordRepositoryMonitorGitHubMutation(record.Operation, record.Status)

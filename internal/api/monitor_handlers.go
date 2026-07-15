@@ -1007,6 +1007,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if err := h.repositoryMonitorStore.CreateCommandEvent(c.Context(), event); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor command: %v", err))
 	}
+	metrics.RecordRepositoryMonitorCommand(event.Intent, event.Status)
 	runID := ""
 	if event.Status == githubCommandStatusAccepted {
 		runID = "monrun-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(event.ID+"|run")))
