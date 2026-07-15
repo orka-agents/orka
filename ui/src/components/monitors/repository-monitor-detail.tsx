@@ -87,6 +87,7 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+        <div className="min-w-0 space-y-4">
         <Card>
           <CardHeader>
             <CardTitle>PR Queue</CardTitle>
@@ -186,7 +187,7 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
           </CardContent>
         </Card>
 
-
+        </div>
         <div className="space-y-4">
           <Card>
             <CardHeader>

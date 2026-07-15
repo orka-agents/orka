@@ -128,6 +128,9 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand && command.Intent == repositoryMonitorCommandIntentResume {
 			// Explicit resume clears only an explicit maintainer stop.
 		} else {
+			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, repositoryMonitorIssuePhaseBlocked, "", item.SkipReason); err != nil {
+				return 0, err
+			}
 			return 0, r.Store.UpsertMonitorItem(ctx, item)
 		}
 	}

@@ -724,7 +724,9 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 			case repositoryMonitorRunPhaseQueued, "leased", "running":
 				command.Status = githubCommandStatusCompleted
 				command.Error = "coalesced with active workflow action " + candidate.ID
-				_ = h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
+				if err := h.repositoryMonitorStore.UpdateCommandEvent(ctx, command); err != nil {
+					return err
+				}
 				return nil
 			}
 		}
