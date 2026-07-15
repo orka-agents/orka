@@ -547,6 +547,9 @@ func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.Repositor
 	if !repositoryMonitorReadOnlyCommandIntent(intent) {
 		return repositoryMonitorPermissionAllowed(monitor, permission)
 	}
+	// AllowedRepositoryPermissions is intentionally a write-command allowlist
+	// (the CRD only permits write, maintain, and admin). Read-only commands use
+	// the lower triage-or-better threshold instead of that write-only policy.
 	permission = strings.ToLower(strings.TrimSpace(permission))
 	return repositoryMonitorPermissionInList(permission, []string{githubPermissionTriage, githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin})
 }
