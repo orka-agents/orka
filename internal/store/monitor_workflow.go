@@ -19,19 +19,14 @@ const (
 
 // RepositoryMonitorDesiredActionForIntent maps public command intents to durable workflow action names.
 func RepositoryMonitorDesiredActionForIntent(intent string) string {
-	switch strings.TrimSpace(intent) {
+	intent = strings.TrimSpace(intent)
+	switch intent {
 	case "approve_plan":
 		return "approve"
-	case "triage", "research", "plan", "implement", "review", repositoryMonitorDesiredActionRepair, "fix", "fix_ci", "update_branch", "readiness", "automerge", "stop", "resume", repositoryMonitorDesiredActionDecompose:
-		if intent == "fix" {
-			return repositoryMonitorDesiredActionRepair
-		}
-		if intent == "decompose" {
-			return "decompose"
-		}
-		return strings.TrimSpace(intent)
+	case "fix":
+		return repositoryMonitorDesiredActionRepair
 	default:
-		return strings.TrimSpace(intent)
+		return intent
 	}
 }
 
