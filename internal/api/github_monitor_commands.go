@@ -75,10 +75,16 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 			if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, ""); err != nil {
 				return result, true, err
 			}
+			if err := h.ensureRepositoryMonitorCommandLabelConsumed(c, monitor, command, payload, target); err != nil {
+				return result, true, err
+			}
 			continue
 		}
 		run, queued, err := h.queueRepositoryMonitorCommandRun(c, monitor, command, target)
 		if err != nil {
+			return result, true, err
+		}
+		if err := h.ensureRepositoryMonitorCommandLabelConsumed(c, monitor, command, payload, target); err != nil {
 			return result, true, err
 		}
 		if queued {
@@ -211,9 +217,6 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery)
 	commandID := repositoryMonitorCommandID(dedupe)
 	if existing, err := h.repositoryMonitorStore.GetCommandEvent(c.Context(), monitor.Namespace, commandID); err == nil {
-		if err := h.ensureRepositoryMonitorCommandLabelConsumed(c, monitor, existing, payload, target); err != nil {
-			return nil, true, err
-		}
 		return existing, true, nil
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor command: %v", err))
@@ -267,15 +270,14 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command: %v", err))
 	}
 	metrics.RecordRepositoryMonitorCommand(command.Intent, command.Status)
-	if err := h.ensureRepositoryMonitorCommandLabelConsumed(c, monitor, command, payload, target); err != nil {
-		return nil, false, err
-	}
-
 	return command, false, nil
 }
 
 func (h *Handlers) ensureRepositoryMonitorCommandLabelConsumed(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, payload githubLabelWebhookPayload, target githubLabelTarget) error {
-	if command == nil || command.Status != githubCommandStatusAccepted || !monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+	if command == nil || !monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+		return nil
+	}
+	if command.Status != githubCommandStatusAccepted && command.Status != githubCommandStatusCompleted && command.Status != githubCommandStatusProcessed {
 		return nil
 	}
 	mutationID := "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label")))
@@ -302,22 +304,12 @@ func (h *Handlers) ensureRepositoryMonitorCommandLabelConsumed(c fiber.Ctx, moni
 		if auditErr := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); auditErr != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to consume command label: %v; audit update failed: %v", err, auditErr))
 		}
-		command.Error = fmt.Sprintf("accepted, but failed to consume command label: %v", err)
-		if updateErr := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); updateErr != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update monitor command: %v", updateErr))
-		}
 		return fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("failed to consume command label: %v", err))
 	}
 	mutation.Status = githubMutationStatusSucceeded
 	mutation.Error = ""
 	if err := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to finalize command label mutation: %v", err))
-	}
-	if command.Error != "" {
-		command.Error = ""
-		if err := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to clear command error: %v", err))
-		}
 	}
 	return nil
 }
@@ -398,7 +390,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 					return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to reset repository monitor command run: %v", updateErr))
 				}
 				if err := h.annotateRepositoryMonitorRunRequest(c, monitor, existing); err != nil {
-					_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, existing.ID, err)
+					_ = h.markRepositoryMonitorCommandWorkActionRetryPending(c.Context(), monitor, command, existing.ID, err)
 					if failErr := h.markRepositoryMonitorRunSignalFailed(c, existing, err); failErr != nil {
 						return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
 					}
@@ -408,7 +400,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 			}
 			if existing.Phase == repositoryMonitorRunPhaseQueued {
 				if err := h.annotateRepositoryMonitorRunRequest(c, monitor, existing); err != nil {
-					_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, existing.ID, err)
+					_ = h.markRepositoryMonitorCommandWorkActionRetryPending(c.Context(), monitor, command, existing.ID, err)
 					if failErr := h.markRepositoryMonitorRunSignalFailed(c, existing, err); failErr != nil {
 						return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
 					}
@@ -418,13 +410,13 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 			}
 			return existing, false, nil
 		}
-		if errors.Is(err, store.ErrConflict) {
-			return run, false, nil
+		if failErr := h.markRepositoryMonitorCommandWorkActionRetryPending(c.Context(), monitor, command, run.ID, err); failErr != nil {
+			return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor command run: %v; additionally failed to mark workflow action retry-pending: %v", err, failErr))
 		}
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor command run: %v", err))
 	}
 	if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
-		_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, run.ID, err)
+		_ = h.markRepositoryMonitorCommandWorkActionRetryPending(c.Context(), monitor, command, run.ID, err)
 		if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
 			return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
 		}
@@ -712,7 +704,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID
 		}
-		if status == repositoryMonitorRunPhaseQueued && existing.Status == repositoryMonitorRunPhaseFailed && existing.BlockedReason == "run_signal_failed" {
+		if status == repositoryMonitorRunPhaseQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
 			existing.Status = repositoryMonitorRunPhaseQueued
 			existing.Phase = phase
 			existing.BlockedReason = ""
@@ -782,7 +774,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 }
 
 func (h *Handlers) repositoryMonitorActiveWorkActionByDedupe(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, dedupe string) (*store.WorkAction, error) {
-	for _, status := range []string{repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning} {
+	for _, status := range []string{repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning, store.RepositoryMonitorWorkActionStatusRetryPending} {
 		actions, _, err := h.repositoryMonitorStore.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, DedupeKey: dedupe, Status: status, Limit: 1})
 		if err != nil {
 			return nil, err
@@ -811,7 +803,7 @@ func (h *Handlers) persistRepositoryMonitorCoalescedWorkAction(ctx context.Conte
 	return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 }
 
-func (h *Handlers) failRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string, cause error) error {
+func (h *Handlers) markRepositoryMonitorCommandWorkActionRetryPending(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string, cause error) error {
 	if monitor == nil || command == nil || h.repositoryMonitorStore == nil || cause == nil {
 		return nil
 	}
@@ -826,13 +818,12 @@ func (h *Handlers) failRepositoryMonitorCommandWorkAction(ctx context.Context, m
 		}
 		return err
 	}
-	now := time.Now()
-	action.Status = repositoryMonitorRunPhaseFailed
-	action.Phase = repositoryMonitorRunPhaseFailed
+	action.Status = store.RepositoryMonitorWorkActionStatusRetryPending
+	action.Phase = store.RepositoryMonitorWorkActionStatusRetryPending
 	action.RunID = runID
 	action.Error = cause.Error()
-	action.BlockedReason = "run_signal_failed"
-	action.CompletedAt = &now
+	action.BlockedReason = store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed
+	action.CompletedAt = nil
 	return h.repositoryMonitorStore.UpdateWorkAction(ctx, action)
 }
 

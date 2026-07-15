@@ -15,7 +15,6 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -92,7 +91,8 @@ const (
 	repositoryMonitorIssueJSONDecodeAttempts               = 32
 	repositoryMonitorRuntimeAuthMetadataName               = "runtimeAuthName"
 	repositoryMonitorRuntimeAuthMetadataUID                = "runtimeAuthUID"
-	repositoryMonitorRuntimeAuthMetadataDigest             = "runtimeAuthDigest"
+	repositoryMonitorRuntimeAuthMetadataResourceVersion    = "runtimeAuthResourceVersion"
+	repositoryMonitorRuntimeAuthMetadataLegacyDigest       = "runtimeAuthDigest"
 	repositoryMonitorRuntimeAuthMetadataFields             = "runtimeAuthFields"
 	repositoryMonitorRuntimeAuthMetadataAgentUID           = "runtimeAuthAgentUID"
 	repositoryMonitorRuntimeAuthMetadataAgentGeneration    = "runtimeAuthAgentGeneration"
@@ -474,8 +474,8 @@ type repositoryMonitorRuntimeCredentialBinding struct {
 	agentUID        string
 	agentGeneration int64
 	secretUID       string
+	resourceVersion string
 	authFields      []string
-	dataDigest      string
 }
 
 //nolint:gocyclo // Binding validates and snapshots each credential boundary explicitly.
@@ -551,7 +551,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorImplementationRuntimeCred
 			return nil, fmt.Errorf("read existing implementation runtime auth snapshot %s/%s: %w", monitor.Namespace, snapshotName, err)
 		}
 	}
-	validSnapshot := snapshot.Immutable != nil && *snapshot.Immutable && metav1.IsControlledBy(snapshot, monitor) &&
+	validSnapshot := (snapshot.UID != "" || strings.TrimSpace(snapshot.ResourceVersion) != "") &&
+		snapshot.Immutable != nil && *snapshot.Immutable && metav1.IsControlledBy(snapshot, monitor) &&
 		snapshot.Labels[labels.LabelRepositoryMonitor] == labels.SelectorValue(monitor.Name) &&
 		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthTask] == taskName &&
 		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthSourceUID] == string(source.UID) &&
@@ -569,25 +570,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorImplementationRuntimeCred
 		agentUID:        string(agent.UID),
 		agentGeneration: agent.Generation,
 		secretUID:       string(snapshot.UID),
+		resourceVersion: snapshot.ResourceVersion,
 		authFields:      presentAuthFields,
-		dataDigest:      repositoryMonitorRuntimeAuthDataDigest(snapshot.Data),
 	}, nil
-}
-
-func repositoryMonitorRuntimeAuthDataDigest(data map[string][]byte) string {
-	keys := make([]string, 0, len(data))
-	for key := range data {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	hash := sha256.New()
-	for _, key := range keys {
-		_, _ = hash.Write([]byte(key))
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write(data[key])
-		_, _ = hash.Write([]byte{0})
-	}
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
 func (r *RepositoryMonitorReconciler) loadRepositoryMonitorRuntimeAuthBinding(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, taskName string) (*repositoryMonitorRuntimeCredentialBinding, bool, error) {
@@ -607,23 +592,26 @@ func (r *RepositoryMonitorReconciler) loadRepositoryMonitorRuntimeAuthBinding(ct
 		return nil, false, err
 	}
 	name := stringField(metadata, repositoryMonitorRuntimeAuthMetadataName)
-	digest := stringField(metadata, repositoryMonitorRuntimeAuthMetadataDigest)
+	uid := stringField(metadata, repositoryMonitorRuntimeAuthMetadataUID)
+	resourceVersion := stringField(metadata, repositoryMonitorRuntimeAuthMetadataResourceVersion)
 	fieldsText := stringField(metadata, repositoryMonitorRuntimeAuthMetadataFields)
-	if name == "" && digest == "" && fieldsText == "" {
+	if name == "" && uid == "" && resourceVersion == "" && fieldsText == "" {
 		return nil, false, nil
 	}
-	if name == "" || digest == "" || fieldsText == "" || strings.TrimSpace(action.TaskName) != taskName {
+	if name == "" || fieldsText == "" || (uid == "" && resourceVersion == "") || strings.TrimSpace(action.TaskName) != taskName {
 		return nil, false, fmt.Errorf("%w: persisted runtime auth binding is incomplete", errRepositoryMonitorRuntimeAuthBindingInvalid)
 	}
 	var snapshot corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: name}, &snapshot); err != nil {
 		return nil, false, err
 	}
-	uid := stringField(metadata, repositoryMonitorRuntimeAuthMetadataUID)
+	identityMatches := string(snapshot.UID) == uid
+	if uid == "" {
+		identityMatches = snapshot.UID == "" && snapshot.ResourceVersion == resourceVersion
+	}
 	if snapshot.Immutable == nil || !*snapshot.Immutable || !metav1.IsControlledBy(&snapshot, monitor) ||
 		snapshot.Labels[labels.LabelRepositoryMonitor] != labels.SelectorValue(monitor.Name) ||
-		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthTask] != taskName ||
-		(uid != "" && string(snapshot.UID) != uid) || repositoryMonitorRuntimeAuthDataDigest(snapshot.Data) != digest {
+		snapshot.Annotations[repositoryMonitorIssueAnnotationRuntimeAuthTask] != taskName || !identityMatches {
 		return nil, false, fmt.Errorf("%w: persisted runtime auth snapshot is invalid", errRepositoryMonitorRuntimeAuthBindingInvalid)
 	}
 	generation, err := strconv.ParseInt(stringField(metadata, repositoryMonitorRuntimeAuthMetadataAgentGeneration), 10, 64)
@@ -644,8 +632,8 @@ func (r *RepositoryMonitorReconciler) loadRepositoryMonitorRuntimeAuthBinding(ct
 		agentUID:        stringField(metadata, repositoryMonitorRuntimeAuthMetadataAgentUID),
 		agentGeneration: generation,
 		secretUID:       uid,
+		resourceVersion: resourceVersion,
 		authFields:      fields,
-		dataDigest:      digest,
 	}, true, nil
 }
 
@@ -666,7 +654,8 @@ func (r *RepositoryMonitorReconciler) persistRepositoryMonitorRuntimeAuthBinding
 	metadata["actionKind"] = repositoryMonitorIssueActionImplementation
 	metadata[repositoryMonitorRuntimeAuthMetadataName] = binding.authRef.Name
 	metadata[repositoryMonitorRuntimeAuthMetadataUID] = binding.secretUID
-	metadata[repositoryMonitorRuntimeAuthMetadataDigest] = binding.dataDigest
+	metadata[repositoryMonitorRuntimeAuthMetadataResourceVersion] = binding.resourceVersion
+	delete(metadata, repositoryMonitorRuntimeAuthMetadataLegacyDigest)
 	metadata[repositoryMonitorRuntimeAuthMetadataFields] = strings.Join(binding.authFields, ",")
 	metadata[repositoryMonitorRuntimeAuthMetadataAgentUID] = binding.agentUID
 	metadata[repositoryMonitorRuntimeAuthMetadataAgentGeneration] = strconv.FormatInt(binding.agentGeneration, 10)
@@ -685,7 +674,8 @@ func clearRepositoryMonitorRuntimeAuthMetadata(action *store.WorkAction, clearTa
 	for _, key := range []string{
 		repositoryMonitorRuntimeAuthMetadataName,
 		repositoryMonitorRuntimeAuthMetadataUID,
-		repositoryMonitorRuntimeAuthMetadataDigest,
+		repositoryMonitorRuntimeAuthMetadataResourceVersion,
+		repositoryMonitorRuntimeAuthMetadataLegacyDigest,
 		repositoryMonitorRuntimeAuthMetadataFields,
 		repositoryMonitorRuntimeAuthMetadataAgentUID,
 		repositoryMonitorRuntimeAuthMetadataAgentGeneration,

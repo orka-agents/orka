@@ -92,7 +92,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 		}
 		for _, candidate := range active {
 			switch candidate.Status {
-			case repositoryMonitorWorkActionStatusQueued, "leased", repositoryMonitorWorkActionStatusRunning:
+			case repositoryMonitorWorkActionStatusQueued, "leased", repositoryMonitorWorkActionStatusRunning, store.RepositoryMonitorWorkActionStatusRetryPending:
 				return nil
 			}
 		}

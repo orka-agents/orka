@@ -60,6 +60,7 @@ const (
 	githubCommandStatusRejected                = "rejected"
 	githubCommandStatusBlocked                 = "blocked"
 	githubCommandStatusCompleted               = "completed"
+	githubCommandStatusProcessed               = "processed"
 	githubMonitorEventTypeExactRunQueued       = "exact_event_run_queued"
 	githubWebhookDefaultTimeout                = 30 * time.Minute
 	githubWebhookDefaultMaxTurns         int32 = 100

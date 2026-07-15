@@ -1049,27 +1049,15 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor command: %v", err))
 	}
 	metrics.RecordRepositoryMonitorCommand(event.Intent, event.Status)
-	runID := ""
-	if event.Status == githubCommandStatusAccepted {
-		runID = "monrun-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(event.ID+"|run")))
-	}
-	if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, event, runID); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor workflow action: %v", err))
-	}
 	if event.Status != githubCommandStatusAccepted {
+		if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, event, ""); err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor workflow action: %v", err))
+		}
 		return c.Status(fiber.StatusCreated).JSON(event)
 	}
-	run := &store.MonitorRun{ID: runID, MonitorNamespace: namespace, MonitorName: monitor.Name, Trigger: githubMonitorTriggerLabelCommand, TargetKind: req.Kind, TargetNumber: req.Number, TargetSHA: req.TargetSHA, CommandEventID: event.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}
-	if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err == nil {
-		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
-			_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, event, run.ID, err)
-			if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
-				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
-			}
-			return err
-		}
-	} else if !errors.Is(err, store.ErrConflict) {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to queue monitor command run: %v", err))
+	target := githubLabelTarget{Kind: req.Kind, Number: int(req.Number), HeadSHA: req.TargetSHA}
+	if _, _, err := h.queueRepositoryMonitorCommandRun(c, monitor, event, target); err != nil {
+		return err
 	}
 	return c.Status(fiber.StatusCreated).JSON(event)
 }

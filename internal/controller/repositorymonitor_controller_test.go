@@ -4532,6 +4532,7 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	if runtimeSnapshot.Immutable == nil || !*runtimeSnapshot.Immutable || string(runtimeSnapshot.Data[workerenv.OpenAIAPIKey]) != "x" || !metav1.IsControlledBy(&runtimeSnapshot, monitor) {
 		t.Fatalf("runtime auth snapshot = %#v, want immutable monitor-owned scoped copy", runtimeSnapshot)
 	}
+	assertRepositoryMonitorRuntimeAuthMetadata(t, ctx, monitorStore, command.ID, &runtimeSnapshot)
 	if err := cl.Delete(ctx, &implementationTask); err != nil {
 		t.Fatalf("Delete implementation task error = %v", err)
 	}
@@ -4540,6 +4541,25 @@ func TestRepositoryMonitorIssueActionTaskResultModes(t *testing.T) {
 	}
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: defaultNS, Name: runtimeSnapshot.Name}, &corev1.Secret{}); err == nil || crclient.IgnoreNotFound(err) != nil {
 		t.Fatalf("runtime auth snapshot cleanup error = %v, want deleted snapshot", err)
+	}
+}
+
+func assertRepositoryMonitorRuntimeAuthMetadata(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, commandID string, snapshot *corev1.Secret) {
+	t.Helper()
+	actionID := store.RepositoryMonitorWorkActionID(commandID, store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorIssueActionImplementation))
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction(implementation) error = %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(action.MetadataJSON), &metadata); err != nil {
+		t.Fatalf("runtime auth metadata decode error = %v", err)
+	}
+	if _, exists := metadata[repositoryMonitorRuntimeAuthMetadataLegacyDigest]; exists {
+		t.Fatalf("runtime auth metadata contains credential-derived legacy digest: %s", action.MetadataJSON)
+	}
+	if got := stringField(metadata, repositoryMonitorRuntimeAuthMetadataResourceVersion); got != snapshot.ResourceVersion {
+		t.Fatalf("runtime auth resourceVersion = %q, want %q", got, snapshot.ResourceVersion)
 	}
 }
 
@@ -6859,6 +6879,52 @@ func TestRepositoryMonitorTransientCommandRunRetriesWithBackoff(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorRunCreateFailureRemainsRetryable(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "create-retry", Namespace: defaultNS}}
+	command := &store.CommandEvent{ID: "cmd-create-retry", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 8, Intent: "review", HeadSHA: "head-8", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent))
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{
+		ID:               actionID,
+		MonitorNamespace: defaultNS,
+		MonitorName:      monitor.Name,
+		RunID:            runID,
+		CommandEventID:   command.ID,
+		DesiredAction:    command.Intent,
+		Status:           store.RepositoryMonitorWorkActionStatusRetryPending,
+		Phase:            store.RepositoryMonitorWorkActionStatusRetryPending,
+		BlockedReason:    store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed,
+		Error:            "injected monitor run create failure",
+		CreatedAt:        command.CreatedAt,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	queued, err := reconciler.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor)
+	if err != nil || !queued {
+		t.Fatalf("enqueueAcceptedRepositoryMonitorCommands() queued=%v err=%v", queued, err)
+	}
+	run, err := monitorStore.GetMonitorRun(ctx, defaultNS, runID)
+	if err != nil {
+		t.Fatalf("GetMonitorRun() error = %v", err)
+	}
+	if run.Phase != repositoryMonitorRunPhaseQueued || run.CommandEventID != command.ID {
+		t.Fatalf("recovered run = %#v, want queued command run", run)
+	}
+	persisted, err := monitorStore.GetCommandEvent(ctx, defaultNS, command.ID)
+	if err != nil {
+		t.Fatalf("GetCommandEvent() error = %v", err)
+	}
+	if persisted.Status != "accepted" {
+		t.Fatalf("command status = %q, want accepted until recovered run completes", persisted.Status)
+	}
+}
+
 func TestRepositoryMonitorRunSignalFailureRemainsRetryable(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6868,6 +6934,10 @@ func TestRepositoryMonitorRunSignalFailureRemainsRetryable(t *testing.T) {
 	completedAt := time.Now()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "failed to signal repository monitor run: conflict"}); err != nil {
 		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent))
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, RunID: runID, CommandEventID: command.ID, DesiredAction: command.Intent, Status: store.RepositoryMonitorWorkActionStatusRetryPending, Phase: store.RepositoryMonitorWorkActionStatusRetryPending, BlockedReason: store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, Error: "failed to signal repository monitor run: conflict", CreatedAt: completedAt}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
 	}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
 	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)

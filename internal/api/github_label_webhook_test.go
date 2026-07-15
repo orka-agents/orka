@@ -1603,11 +1603,10 @@ func TestGitHubWebhook_DuplicateAcceptedCommandRetriesFailedRunSignal(t *testing
 		TargetNumber:     22,
 		Intent:           command.Intent,
 		DesiredAction:    store.RepositoryMonitorDesiredActionForIntent(command.Intent),
-		Status:           repositoryMonitorRunPhaseFailed,
-		Phase:            repositoryMonitorRunPhaseFailed,
-		BlockedReason:    "run_signal_failed",
+		Status:           store.RepositoryMonitorWorkActionStatusRetryPending,
+		Phase:            store.RepositoryMonitorWorkActionStatusRetryPending,
+		BlockedReason:    store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed,
 		Error:            "failed to signal repository monitor run: conflict",
-		CompletedAt:      &completedAt,
 	}); err != nil {
 		t.Fatalf("CreateWorkAction(failed) error = %v", err)
 	}

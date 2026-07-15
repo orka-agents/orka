@@ -1,8 +1,6 @@
 package store
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -10,6 +8,13 @@ import (
 const (
 	repositoryMonitorDesiredActionDecompose = "decompose"
 	repositoryMonitorDesiredActionRepair    = "repair"
+
+	// RepositoryMonitorWorkActionStatusRetryPending marks durable command handoffs
+	// that must be retried before a MonitorRun can safely proceed.
+	RepositoryMonitorWorkActionStatusRetryPending = "retry_pending"
+	// RepositoryMonitorWorkActionBlockedReasonRunSignalFailed identifies retryable
+	// failures between durable command intake and MonitorRun signaling.
+	RepositoryMonitorWorkActionBlockedReasonRunSignalFailed = "run_signal_failed"
 )
 
 // RepositoryMonitorDesiredActionForIntent maps public command intents to durable workflow action names.
@@ -60,8 +65,11 @@ func RepositoryMonitorDesiredActionForActionKind(actionKind string) string {
 
 // RepositoryMonitorWorkActionID deterministically identifies one command/action handoff.
 func RepositoryMonitorWorkActionID(commandID, desiredAction string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(commandID) + "|" + strings.TrimSpace(desiredAction)))
-	return "wa-" + hex.EncodeToString(sum[:])[:16]
+	commandID = strings.TrimSpace(commandID)
+	desiredAction = strings.TrimSpace(desiredAction)
+	// The length prefix keeps the two components unambiguous without treating
+	// command identifiers as credentials that need password hashing.
+	return fmt.Sprintf("wa-%d-%s-%s", len(commandID), commandID, desiredAction)
 }
 
 // RepositoryMonitorWorkActionDedupeKey returns a monitor-scoped coalescing key.
