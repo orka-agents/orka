@@ -72,6 +72,9 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 		}
 		result.CommandIDs = append(result.CommandIDs, command.ID)
 		if command.Status != githubCommandStatusAccepted {
+			if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, ""); err != nil {
+				return result, true, err
+			}
 			continue
 		}
 		run, queued, err := h.queueRepositoryMonitorCommandRun(c, monitor, command, target)
@@ -691,7 +694,9 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	if existing, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
 		if existing.Status == "cancelled" && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
-			return nil
+			command.Status = githubCommandStatusCompleted
+			command.Error = "workflow action was cancelled"
+			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID
@@ -721,7 +726,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 		}
 		for _, candidate := range active {
 			switch candidate.Status {
-			case repositoryMonitorRunPhaseQueued, "leased", "running":
+			case repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning:
 				command.Status = githubCommandStatusCompleted
 				command.Error = "coalesced with active workflow action " + candidate.ID
 				if err := h.repositoryMonitorStore.UpdateCommandEvent(ctx, command); err != nil {
@@ -759,6 +764,18 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 			existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)
 			if getErr == nil && existing.CommandEventID == command.ID && existing.DedupeKey == dedupe {
 				return nil
+			}
+			active, _, listErr := h.repositoryMonitorStore.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, DedupeKey: dedupe, Limit: 5})
+			if listErr != nil {
+				return listErr
+			}
+			for _, candidate := range active {
+				switch candidate.Status {
+				case repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning:
+					command.Status = githubCommandStatusCompleted
+					command.Error = "coalesced with active workflow action " + candidate.ID
+					return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
+				}
 			}
 		}
 		return err
