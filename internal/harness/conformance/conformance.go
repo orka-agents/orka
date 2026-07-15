@@ -165,22 +165,25 @@ func runReadinessProbes(
 	if capabilities == nil {
 		return
 	}
-	if slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeObserved) {
-		runTurnProbe(ctx, target, result, baseURL, controlTimeout)
-		return
-	}
-	if !slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeBrokered) {
+	observed := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeObserved)
+	brokered := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeBrokered)
+	if !observed && !brokered {
 		result.addFailure("runtime does not advertise a probeable tool execution mode")
 		return
 	}
-	seen := make(map[harness.BrokeredToolClass]struct{}, len(capabilities.BrokeredToolClasses))
-	for _, class := range capabilities.BrokeredToolClasses {
-		if _, duplicate := seen[class]; duplicate {
-			continue
+	if observed {
+		runTurnProbe(ctx, target, result, baseURL, controlTimeout)
+	}
+	if brokered {
+		seen := make(map[harness.BrokeredToolClass]struct{}, len(capabilities.BrokeredToolClasses))
+		for _, class := range capabilities.BrokeredToolClasses {
+			if _, duplicate := seen[class]; duplicate {
+				continue
+			}
+			seen[class] = struct{}{}
+			probeTarget := brokeredReadinessTarget(target, class)
+			runBrokeredProbe(ctx, probeTarget, result, baseURL, controlTimeout, class)
 		}
-		seen[class] = struct{}{}
-		probeTarget := brokeredReadinessTarget(target, class)
-		runBrokeredProbe(ctx, probeTarget, result, baseURL, controlTimeout, class)
 	}
 }
 

@@ -802,6 +802,29 @@ func TestCheckReadinessProbesEveryBrokeredOnlyClass(t *testing.T) {
 	}
 }
 
+func TestCheckReadinessProbesObservedAndEveryBrokeredClass(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClasses = []harness.BrokeredToolClass{
+		harness.BrokeredToolClassRead,
+		harness.BrokeredToolClassWrite,
+	}
+	defer server.Close()
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+	server.mu.Lock()
+	turns := len(server.turns)
+	continued := len(server.continued)
+	server.mu.Unlock()
+	if turns != 3 {
+		t.Fatalf("turns = %d, want 1 observed and 2 brokered probes", turns)
+	}
+	if continued != 2 {
+		t.Fatalf("continued turns = %d, want 2 brokered profiles", continued)
+	}
+}
+
 func TestBrokeredProbeCancelsAfterInvalidStartResponse(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.brokeredClass = harness.BrokeredToolClassRead
