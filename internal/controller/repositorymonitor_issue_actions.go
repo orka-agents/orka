@@ -213,6 +213,13 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequireApprovedPlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhaseApproved {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
+	if !repositoryMonitorIssuePhaseTransitionAllowed(item.WorkflowPhase, phase) {
+		reason := fmt.Sprintf("phase_transition_not_allowed:%s_to_%s", item.WorkflowPhase, phase)
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, actionKind, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
+			return 0, err
+		}
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d command blocked: %s", item.Number, reason), map[string]any{"actionKind": actionKind, "fromPhase": item.WorkflowPhase, "toPhase": phase})
+	}
 	if !repositoryMonitorIssuePhaseEnabled(monitor, actionKind) {
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 		item.SkipReason = "issue_workflow_phase_disabled"

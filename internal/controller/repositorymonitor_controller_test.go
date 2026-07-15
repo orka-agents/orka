@@ -6517,6 +6517,30 @@ func TestRepositoryMonitorIssueStatusCommentNeutralizesActiveText(t *testing.T) 
 	}
 }
 
+func TestRepositoryMonitorIssueCommandBlocksInvalidPhaseTransition(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "phase-guard", Namespace: defaultNS}}
+	item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "42", Number: 42, SnapshotDigest: "sha256:phase", WorkflowPhase: repositoryMonitorIssuePhaseTriageQueued}
+	command := &store.CommandEvent{ID: "cmd-research-over-triage", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Intent: "research", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	run := &store.MonitorRun{ID: "run-phase-guard", CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number}
+	created, err := reconciler.processIssueCommandRun(ctx, monitor, run, item, "orka-agents", "orka")
+	if err != nil || created != 0 {
+		t.Fatalf("processIssueCommandRun() created=%d err=%v", created, err)
+	}
+	if item.WorkflowPhase != repositoryMonitorIssuePhaseTriageQueued {
+		t.Fatalf("item phase = %q, want active triage phase preserved", item.WorkflowPhase)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, store.RepositoryMonitorWorkActionID(command.ID, "research"))
+	if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || !strings.HasPrefix(action.BlockedReason, "phase_transition_not_allowed:") {
+		t.Fatalf("blocked action = %#v err=%v", action, err)
+	}
+}
+
 func TestRepositoryMonitorIssueInventoryPreservesStatusCommentIdentity(t *testing.T) {
 	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "default"}}
 	issue := repositoryMonitorIssue{Number: 44, Title: "x", State: "open"}
