@@ -667,3 +667,104 @@ func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testin
 	require.Len(t, failures, 1)
 	require.Contains(t, failures[0], "resource-assertion")
 }
+
+func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedOutboundAccessPolicy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+		}},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "search")
+	require.Contains(t, failures[0], "resource-api")
+}
+
+func TestContextTokenTaskToolCredentialFailuresForServiceAccountSources(t *testing.T) {
+	serviceAccountSource := func() corev1alpha1.OutboundTokenSource {
+		return corev1alpha1.OutboundTokenSource{
+			Source: corev1alpha1.OutboundTokenSourceServiceAccount,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{
+				Name: "workload",
+			},
+		}
+	}
+	transactionTokenSource := corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken}
+
+	tests := []struct {
+		name                    string
+		direct                  corev1alpha1.DirectOutboundAccess
+		requiresCredentialScope bool
+	}{
+		{
+			name: "subject ServiceAccount",
+			direct: corev1alpha1.DirectOutboundAccess{
+				Subject: serviceAccountSource(),
+			},
+			requiresCredentialScope: true,
+		},
+		{
+			name: "actor ServiceAccount",
+			direct: corev1alpha1.DirectOutboundAccess{
+				Subject: transactionTokenSource,
+				Actor: func() *corev1alpha1.OutboundTokenSource {
+					source := serviceAccountSource()
+					return &source
+				}(),
+			},
+			requiresCredentialScope: true,
+		},
+		{
+			name: "transaction token only",
+			direct: corev1alpha1.DirectOutboundAccess{
+				Subject: transactionTokenSource,
+			},
+			requiresCredentialScope: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			policy := &corev1alpha1.OutboundAccessPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "team-a"},
+				Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &tt.direct},
+			}
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+				}},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+			cfg := enforceContextTokenAuthorizationConfig()
+			cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+			authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			if !tt.requiresCredentialScope {
+				require.Empty(t, failures)
+				return
+			}
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+			token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+		})
+	}
+}

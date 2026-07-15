@@ -369,8 +369,8 @@ func main() {
 		"Comma-separated context-token scopes that authorize Secret metadata reads. Defaults to orka:secrets:read.")
 	flag.StringVar(&contextTokenSecretCredentialReadScopes, "context-token-secret-credential-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_SECRET_CREDENTIAL_READ_SCOPES"),
-		"Comma-separated context-token scopes that authorize using Secret data as outbound credentials. "+
-			"Defaults to orka:secrets:credentials:read.")
+		"Comma-separated context-token scopes that authorize using Secret data or ServiceAccount tokens "+
+			"as outbound credentials. Defaults to orka:secrets:credentials:read.")
 	flag.StringVar(&contextTokenConfigMapReadScopes, "context-token-configmap-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONFIGMAP_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize ConfigMap reads used as operation inputs. "+

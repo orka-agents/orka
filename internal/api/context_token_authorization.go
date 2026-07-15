@@ -54,7 +54,7 @@ const (
 	ContextTokenScopeProvidersUse = "orka:providers:use"
 	// ContextTokenScopeSecretsRead authorizes context-token callers to read Secret metadata.
 	ContextTokenScopeSecretsRead = "orka:secrets:read"
-	// ContextTokenScopeSecretsCredentialsRead authorizes use of Secret data as outbound credentials.
+	// ContextTokenScopeSecretsCredentialsRead authorizes use of cluster-managed outbound credential material, including Secret data and ServiceAccount tokens.
 	ContextTokenScopeSecretsCredentialsRead = "orka:secrets:credentials:read"
 	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
 	ContextTokenScopeAgentsRead = "orka:agents:read"
@@ -1330,6 +1330,8 @@ func contextTokenTaskToolCredentialFailures(
 	toolNames = append(toolNames, contextTokenRuntimeToolConstraints(authzCtx)...)
 	seenTools := map[string]struct{}{}
 	credentialSecrets := map[string]struct{}{}
+	requiresCredentialScope := false
+	failures := []string{}
 	for _, toolName := range toolNames {
 		toolName = strings.TrimSpace(toolName)
 		if toolName == "" {
@@ -1350,27 +1352,35 @@ func contextTokenTaskToolCredentialFailures(
 			continue
 		}
 		if tool.Spec.HTTP.AuthSecretRef != nil {
+			requiresCredentialScope = true
 			credentialSecrets[tool.Spec.HTTP.AuthSecretRef.Name] = struct{}{}
 		}
 		if tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
 			continue
 		}
+		policyName := strings.TrimSpace(tool.Spec.HTTP.OutboundAccessPolicyRef.Name)
 		policy := &corev1alpha1.OutboundAccessPolicy{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}, policy); err != nil {
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: policyName}, policy); err != nil {
 			if apierrors.IsNotFound(err) {
+				failures = append(failures, fmt.Sprintf("Tool %q references unresolved OutboundAccessPolicy %q", toolName, policyName))
 				continue
 			}
-			return nil, fmt.Errorf("resolve OutboundAccessPolicy %q: %w", tool.Spec.HTTP.OutboundAccessPolicyRef.Name, err)
+			return nil, fmt.Errorf("resolve OutboundAccessPolicy %q: %w", policyName, err)
 		}
 		if policy.Spec.Direct == nil {
 			continue
 		}
 		collectOutboundCredentialSecrets(credentialSecrets, policy.Spec.Direct)
+		if outboundAccessUsesServiceAccount(policy.Spec.Direct) {
+			requiresCredentialScope = true
+		}
 	}
-	if len(credentialSecrets) == 0 {
-		return nil, nil
+	if len(credentialSecrets) > 0 {
+		requiresCredentialScope = true
 	}
-	failures := []string{}
+	if !requiresCredentialScope {
+		return failures, nil
+	}
 	requiredScopes := cfg.SecretCredentialReadScopes()
 	if !hasAnyScope(token.Scopes, requiredScopes) {
 		failures = append(failures, fmt.Sprintf("Tool outbound credentials require one of scopes %q", strings.Join(requiredScopes, ",")))
@@ -1383,6 +1393,16 @@ func contextTokenTaskToolCredentialFailures(
 		}
 	}
 	return failures, nil
+}
+
+func outboundAccessUsesServiceAccount(direct *corev1alpha1.DirectOutboundAccess) bool {
+	if direct == nil {
+		return false
+	}
+	if direct.Subject.Source == corev1alpha1.OutboundTokenSourceServiceAccount {
+		return true
+	}
+	return direct.Actor != nil && direct.Actor.Source == corev1alpha1.OutboundTokenSourceServiceAccount
 }
 
 func collectOutboundCredentialSecrets(names map[string]struct{}, direct *corev1alpha1.DirectOutboundAccess) {

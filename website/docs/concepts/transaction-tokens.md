@@ -30,7 +30,7 @@ The token must be an RS256 JWT with `typ: txntoken+jwt`, a matching issuer/audie
 
 ## Default scopes
 
-When authorization is enabled, Orka defaults to operation-specific scopes such as `orka:tasks:create`, `orka:tasks:get`, `orka:tasks:list`, `orka:tasks:delete`, `orka:tools:read`, `orka:tools:use`, `orka:providers:use`, `orka:agents:read`, `orka:agents:write`, `orka:memory:read`, `orka:memory:write`, `orka:sessions:read`, `orka:sessions:write`, `orka:security:read`, `orka:security:write`, `orka:monitors:read`, `orka:monitors:write`, `orka:monitors:operate`, `orka:skills:read`, and `orka:skills:write`. Credential-bearing Secret use requires `orka:secrets:credentials:read`. Every default can be replaced with its `--context-token-*-scopes` flag or matching environment/Helm value.
+When authorization is enabled, Orka defaults to operation-specific scopes such as `orka:tasks:create`, `orka:tasks:get`, `orka:tasks:list`, `orka:tasks:delete`, `orka:tools:read`, `orka:tools:use`, `orka:providers:use`, `orka:agents:read`, `orka:agents:write`, `orka:memory:read`, `orka:memory:write`, `orka:sessions:read`, `orka:sessions:write`, `orka:security:read`, `orka:security:write`, `orka:monitors:read`, `orka:monitors:write`, `orka:monitors:operate`, `orka:skills:read`, and `orka:skills:write`. Using credential-bearing Secrets or minting ServiceAccount tokens for outbound access requires `orka:secrets:credentials:read`. Every default can be replaced with its `--context-token-*-scopes` flag or matching environment/Helm value.
 
 ## Exact TTS endpoint
 
