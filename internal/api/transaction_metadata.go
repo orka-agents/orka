@@ -35,6 +35,7 @@ var safeTransactionContextKeys = []string{
 	"allowedModels",
 	"e2e",
 	"trace_id",
+	"secret",
 }
 
 const maxSafeTransactionContextValueLength = 1024

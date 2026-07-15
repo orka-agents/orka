@@ -44,13 +44,16 @@ const (
 // ResolveRequest contains trusted execution-time context that is not stored in
 // the policy object.
 type ResolveRequest struct {
-	Namespace               string
-	PolicyName              string
-	TransactionToken        string
-	TransactionTokenSource  func() (string, error)
-	ParentTransactionScopes []string
-	HasAuthSecretRef        bool
-	TargetScheme            string
+	Namespace                   string
+	PolicyName                  string
+	TransactionToken            string
+	TransactionTokenSource      func() (string, error)
+	ParentTransactionScopes     []string
+	HasAuthSecretRef            bool
+	TargetScheme                string
+	CredentialAuthorityEnforced bool
+	CredentialScopeAllowed      bool
+	CredentialSecret            string
 }
 
 // Resolution describes how ToolExecutor should modify a prepared request.
@@ -109,6 +112,9 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		return Resolution{}, err
 	} else if issue != nil {
 		return Resolution{}, issue
+	}
+	if err := validatePolicyCredentialAuthority(req, policy); err != nil {
+		return Resolution{}, err
 	}
 	needsTransactionToken := policy.Spec.Gateway != nil
 	if direct := policy.Spec.Direct; direct != nil {
@@ -462,6 +468,61 @@ func policyConditionCurrentTrue(policy *corev1alpha1.OutboundAccessPolicy, condi
 		}
 	}
 	return false
+}
+
+func validatePolicyCredentialAuthority(req ResolveRequest, policy *corev1alpha1.OutboundAccessPolicy) error {
+	if !req.CredentialAuthorityEnforced || policy == nil {
+		return nil
+	}
+	credentialSecrets := []string{}
+	usesServiceAccount := false
+	if direct := policy.Spec.Direct; direct != nil {
+		credentialSecrets = append(credentialSecrets, policyCredentialSecretNames(direct)...)
+		usesServiceAccount = tokenSourceUsesServiceAccount(direct.Subject) ||
+			(direct.Actor != nil && tokenSourceUsesServiceAccount(*direct.Actor))
+	}
+	if gateway := policy.Spec.Gateway; gateway != nil && gateway.TLS != nil && gateway.TLS.CASecretRef != nil {
+		credentialSecrets = append(credentialSecrets, strings.TrimSpace(gateway.TLS.CASecretRef.Name))
+	}
+	if (len(credentialSecrets) > 0 || usesServiceAccount) && !req.CredentialScopeAllowed {
+		return errors.New("outbound credentials are not authorized by task transaction authority")
+	}
+	if constraint := strings.TrimSpace(req.CredentialSecret); constraint != "" {
+		for _, name := range credentialSecrets {
+			if name != "" && name != constraint {
+				return errors.New("outbound credential Secret does not match task transaction authority")
+			}
+		}
+	}
+	return nil
+}
+
+func tokenSourceUsesServiceAccount(source corev1alpha1.OutboundTokenSource) bool {
+	return source.Source == corev1alpha1.OutboundTokenSourceServiceAccount
+}
+
+func policyCredentialSecretNames(direct *corev1alpha1.DirectOutboundAccess) []string {
+	if direct == nil {
+		return nil
+	}
+	names := []string{}
+	appendRef := func(ref *corev1alpha1.NamespacedSecretKeySelector) {
+		if ref != nil && strings.TrimSpace(ref.Name) != "" {
+			names = append(names, strings.TrimSpace(ref.Name))
+		}
+	}
+	appendRef(direct.Subject.SecretRef)
+	if direct.Actor != nil {
+		appendRef(direct.Actor.SecretRef)
+	}
+	if direct.ClientAuthentication != nil {
+		appendRef(direct.ClientAuthentication.ClientSecretRef)
+		appendRef(direct.ClientAuthentication.PrivateKeyRef)
+	}
+	if direct.TokenEndpoint.TLS != nil {
+		appendRef(direct.TokenEndpoint.TLS.CASecretRef)
+	}
+	return names
 }
 
 func policyCacheNamespace(policy *corev1alpha1.OutboundAccessPolicy) string {

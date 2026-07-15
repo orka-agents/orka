@@ -61,6 +61,32 @@ func ParseTrustedServiceReferences(value string) (TrustedServiceReferences, erro
 	return refs, nil
 }
 
+type TrustedServiceReference struct {
+	Namespace string
+	Name      string
+	Port      int32
+}
+
+func (r TrustedServiceReferences) References() []TrustedServiceReference {
+	out := make([]TrustedServiceReference, 0, len(r))
+	for key := range r {
+		namespacedName, portText, ok := strings.Cut(key, ":")
+		if !ok {
+			continue
+		}
+		namespace, name, ok := strings.Cut(namespacedName, "/")
+		if !ok {
+			continue
+		}
+		port, err := strconv.ParseInt(portText, 10, 32)
+		if err != nil {
+			continue
+		}
+		out = append(out, TrustedServiceReference{Namespace: namespace, Name: name, Port: int32(port)})
+	}
+	return out
+}
+
 func (r TrustedServiceReferences) Allows(ref corev1alpha1.OutboundServiceReference, policyNamespace string) bool {
 	namespace := strings.TrimSpace(ref.Namespace)
 	if namespace == "" {

@@ -2470,7 +2470,7 @@ func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *
 		CredentialValue:  "Bearer resource-credential",
 		SensitiveValues:  []string{"resource-credential"},
 	}}
-	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
 		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
@@ -2513,7 +2513,7 @@ func TestToolExecutorDirectOutboundAccessRejectsHeaderCollision(t *testing.T) {
 		CredentialValue:  "Bearer exchanged",
 		SensitiveValues:  []string{"exchanged"},
 	}}
-	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     server.URL,
 		Headers:                 map[string]string{"Authorization": "Bearer static"},
@@ -2554,7 +2554,7 @@ func TestToolExecutorGatewayDialsGatewayAndPreservesOriginalRequest(t *testing.T
 		GatewayScheme: gatewayURL.Scheme,
 		GatewayHost:   gatewayURL.Host,
 	}}
-	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "https://api.example.test/v1/items?limit=2",
 		Method:                  http.MethodPost,
@@ -2718,7 +2718,7 @@ func TestToolExecutorGatewayRedactsExplicitAuthorizationFromErrors(t *testing.T)
 		GatewayScheme: gatewayURL.Scheme,
 		GatewayHost:   gatewayURL.Host,
 	}}
-	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "https://api.example.test/v1",
 		Headers:                 map[string]string{"Authorization": "Bearer explicit-tool-auth"},
@@ -2744,7 +2744,7 @@ func TestToolExecutorDirectOutboundAccessRedactsCredentialFromSuccessfulResult(t
 		CredentialValue:  "Bearer resource-credential",
 		SensitiveValues:  []string{"resource-credential"},
 	}}
-	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     server.URL,
 		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "direct"},
@@ -2803,7 +2803,7 @@ func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
 		GatewayScheme: gatewayURL.Scheme,
 		GatewayHost:   gatewayURL.Host,
 	}}
-	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	executor.SetTransactionAuthority("task-scoped-transaction", []string{"reports.read,reports.write"})
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "https://api.example.test/v1",
@@ -2835,7 +2835,7 @@ func TestToolExecutorGatewayFailsClosedWithoutTaskTransactionAuthority(t *testin
 		GatewayScheme: "http",
 		GatewayHost:   "gateway.example.test:8080",
 	}}
-	executor := &ToolExecutor{namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	executor.SetTransactionAuthority("", []string{"api.read"})
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "https://api.example.test/v1",
@@ -2921,10 +2921,36 @@ func TestToolExecutorCredentialOnlyDirectPolicyDoesNotRequireTransactionExchange
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	defer server.Close()
 	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{Adapter: outboundaccess.AdapterDirect, CredentialHeader: "Authorization", CredentialValue: "Bearer resource"}}
-	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
 	executor.SetTransactionExchangeConfig(&TransactionExchangeConfig{TTS: contexttoken.TTSConfig{Endpoint: "https://tts.example.test", TokenSource: contexttoken.TTSTokenSourceServiceAccount}, Exchanger: failingContextTokenExchanger{}})
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "direct"}}}}
 	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestDirectCredentialHTTPClientDisablesProxyAndValidatesDialAddresses(t *testing.T) {
+	base := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+	client, err := directCredentialHTTPClient(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := client.Transport.(*http.Transport)
+	if transport.Proxy != nil || transport.DialContext == nil || !transport.DisableKeepAlives {
+		t.Fatalf("direct transport proxy=%t dial=%t keepalives=%t", transport.Proxy != nil, transport.DialContext != nil, !transport.DisableKeepAlives)
+	}
+}
+
+func TestGatewayMCPErrorHidesMessageAndPreservesClassification(t *testing.T) {
+	original := ToolRequestAttemptedError{Err: fmt.Errorf("gateway leaked credential: %w", context.Canceled)}
+	err := gatewayMCPError{Err: original}
+	if err.Error() != "gateway MCP request failed" {
+		t.Fatalf("Error() = %q", err.Error())
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("gateway error lost cancellation classification")
+	}
+	if !ToolRequestWasAttempted(err) {
+		t.Fatal("gateway error lost attempted-request classification")
 	}
 }

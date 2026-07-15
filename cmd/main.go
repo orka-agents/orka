@@ -95,6 +95,7 @@ func main() {
 	var watchNamespace string
 	var generalWorkerImage string
 	var aiWorkerClusterRoleName string
+	var aiWorkerTokenRequestClusterRoleName string
 	var vendorWorkerClusterRoleName string
 	var containerWorkerClusterRoleName string
 	var workerClusterRoleBindingNamePrefix string
@@ -212,6 +213,9 @@ func main() {
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
 	flag.StringVar(&aiWorkerClusterRoleName, "ai-worker-cluster-role-name",
 		controller.DefaultAIWorkerClusterRoleName, "ClusterRole name for AI worker tasks.")
+	flag.StringVar(&aiWorkerTokenRequestClusterRoleName, "ai-worker-tokenrequest-cluster-role-name",
+		controller.DefaultAIWorkerTokenRequestClusterRoleName,
+		"Namespaced TokenRequest ClusterRole name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerClusterRoleName, "vendor-worker-cluster-role-name",
 		controller.DefaultVendorWorkerClusterRoleName, "ClusterRole name for vendor worker tasks.")
 	flag.StringVar(&containerWorkerClusterRoleName, "container-worker-cluster-role-name",
@@ -754,30 +758,32 @@ func main() {
 	// Setup Task controller with helper components
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	if err := (&controller.TaskReconciler{
-		Client:                             mgr.GetClient(),
-		Scheme:                             mgr.GetScheme(),
-		JobBuilder:                         jobBuilder,
-		SessionManager:                     sessionManager,
-		WebhookNotifier:                    webhookNotifier,
-		KubeClient:                         kubeClient,
-		OutboundAccessResolver:             outboundAccessResolver,
-		BrokeredTransactionExchange:        brokeredTransactionExchange,
-		ResultStore:                        sqliteStore,
-		PlanStore:                          sqliteStore,
-		MessageStore:                       sqliteStore,
-		ArtifactStore:                      sqliteStore,
-		ExecutionEventStore:                sqliteStore,
-		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
-		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
-		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
-		AgentSandboxEnabled:                agentSandboxEnabled,
-		AgentSandboxConfig:                 agentSandboxConfig,
-		SubstrateEnabled:                   substrateEnabled,
-		SubstrateConfig:                    substrateConfig,
-		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
-		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
-		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,
-		WorkerClusterRoleBindingNamePrefix: workerClusterRoleBindingNamePrefix,
+		Client:                              mgr.GetClient(),
+		Scheme:                              mgr.GetScheme(),
+		JobBuilder:                          jobBuilder,
+		SessionManager:                      sessionManager,
+		WebhookNotifier:                     webhookNotifier,
+		KubeClient:                          kubeClient,
+		OutboundAccessResolver:              outboundAccessResolver,
+		BrokeredTransactionExchange:         brokeredTransactionExchange,
+		ResultStore:                         sqliteStore,
+		PlanStore:                           sqliteStore,
+		MessageStore:                        sqliteStore,
+		ArtifactStore:                       sqliteStore,
+		ExecutionEventStore:                 sqliteStore,
+		EnforceNamespaceIsolation:           enforceNamespaceIsolation,
+		MaxTasksPerNamespace:                maxTasksPerNamespaceValue,
+		ExecutionWorkspaceDefaultProvider:   executionWorkspaceDefaultProvider,
+		AgentSandboxEnabled:                 agentSandboxEnabled,
+		AgentSandboxConfig:                  agentSandboxConfig,
+		SubstrateEnabled:                    substrateEnabled,
+		SubstrateConfig:                     substrateConfig,
+		AIWorkerClusterRoleName:             aiWorkerClusterRoleName,
+		VendorWorkerClusterRoleName:         vendorWorkerClusterRoleName,
+		ContainerWorkerClusterRoleName:      containerWorkerClusterRoleName,
+		WorkerClusterRoleBindingNamePrefix:  workerClusterRoleBindingNamePrefix,
+		AIWorkerTokenRequestClusterRoleName: aiWorkerTokenRequestClusterRoleName,
+		OutboundAccessTrust:                 outboundAccessTrust,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)

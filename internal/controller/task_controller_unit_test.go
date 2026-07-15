@@ -8,12 +8,15 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +45,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
@@ -7278,5 +7282,55 @@ func TestTaskEventWriteFailureDoesNotBreakStatusUpdate(t *testing.T) {
 	}
 	if updated.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Fatalf("phase = %s, want Pending despite event write failure", updated.Status.Phase)
+	}
+}
+
+func TestEnsureWorkerRBACTokenRequestAlwaysUsesNamespacedRoleBinding(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.EnforceNamespaceIsolation = false
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	name := workerClusterRoleBindingName("", "ai-tokenrequest", testNS)
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: testNS}, rb); err != nil {
+		t.Fatalf("get RoleBinding: %v", err)
+	}
+	if rb.RoleRef.Name != DefaultAIWorkerTokenRequestClusterRoleName {
+		t.Fatalf("roleRef=%q", rb.RoleRef.Name)
+	}
+	crb := &rbacv1.ClusterRoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name}, crb); !apierrors.IsNotFound(err) {
+		t.Fatalf("unexpected ClusterRoleBinding: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(testNS + "\x00infra\x00gateway"))
+	name := "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
+	role := &rbacv1.Role{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); err != nil {
+		t.Fatal(err)
+	}
+	if len(role.Rules) != 1 || !slices.Equal(role.Rules[0].ResourceNames, []string{"gateway"}) || !slices.Equal(role.Rules[0].Verbs, []string{"get"}) {
+		t.Fatalf("rules=%#v", role.Rules)
+	}
+	rb := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, rb); err != nil {
+		t.Fatal(err)
+	}
+	if len(rb.Subjects) != 1 || rb.Subjects[0].Namespace != testNS || rb.Subjects[0].Name != AIWorkerServiceAccount {
+		t.Fatalf("subjects=%#v", rb.Subjects)
 	}
 }

@@ -2952,3 +2952,12 @@ func BenchmarkJobBuilderBuildResourcesDefaults(b *testing.B) {
 		benchmarkResourceRequirementsSink = builder.buildResources(task, nil)
 	}
 }
+
+func TestAddTransactionEnvVarsIncludesCredentialSecretConstraint(t *testing.T) {
+	tx := &corev1alpha1.TaskTransaction{Context: map[string]string{"secret": "resource-credential"}}
+	env := addTransactionEnvVars(nil, tx)
+	got, ok := findEnvVar(env, workerenv.TransactionCredentialSecret)
+	if !ok || got.Value != "resource-credential" {
+		t.Fatalf("env = %#v", env)
+	}
+}

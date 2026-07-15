@@ -8,6 +8,9 @@ package outboundaccess
 
 import (
 	"context"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -53,7 +56,7 @@ func TestKubernetesResolverDirectSecretExchange(t *testing.T) {
 	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource-credential", IssuedTokenType: "urn:example:resource", TokenType: "Bearer"}}
 	resolver := &KubernetesResolver{Reader: reader, Exchanger: exchanger}
 
-	resolution, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"})
+	resolution, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialScopeAllowed: true})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -77,6 +80,7 @@ func TestKubernetesResolverTransactionScopeSubset(t *testing.T) {
 	_, err := resolver.Resolve(context.Background(), ResolveRequest{
 		Namespace:               "tenant",
 		PolicyName:              "direct",
+		CredentialScopeAllowed:  true,
 		TargetScheme:            "https",
 		TransactionToken:        "transaction-token",
 		ParentTransactionScopes: []string{"write"},
@@ -113,6 +117,7 @@ func TestKubernetesResolverActorTransactionScopeSubset(t *testing.T) {
 	_, err := resolver.Resolve(context.Background(), ResolveRequest{
 		Namespace:               "tenant",
 		PolicyName:              "direct",
+		CredentialScopeAllowed:  true,
 		TargetScheme:            "https",
 		TransactionToken:        "transaction-token",
 		ParentTransactionScopes: []string{"api.write"},
@@ -208,7 +213,7 @@ func TestKubernetesResolverServiceAccountSubject(t *testing.T) {
 	})
 	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
 	resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger}
-	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"}); err != nil {
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialScopeAllowed: true}); err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if exchanger.request.SubjectToken != "service-account-subject" || exchanger.request.SubjectTokenType != tokenexchange.TokenTypeAccessToken {
@@ -255,7 +260,7 @@ func TestKubernetesResolverServiceAccountActorExpiry(t *testing.T) {
 		AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer",
 	}}
 	resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger}
-	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https"}); err != nil {
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialScopeAllowed: true}); err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if exchanger.request.ActorToken != "service-account-actor" || !exchanger.request.ActorExpiresAt.Equal(expires.Time) {
@@ -285,7 +290,7 @@ func TestKubernetesResolverServiceEndpointIdentityChangesCacheNamespace(t *testi
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, secret, service).Build()
 	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
 	resolver := &KubernetesResolver{Reader: reader, Exchanger: exchanger}
-	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https"}); err != nil {
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https", CredentialScopeAllowed: true}); err != nil {
 		t.Fatal(err)
 	}
 	first := exchanger.request.CacheNamespace
@@ -298,10 +303,60 @@ func TestKubernetesResolverServiceEndpointIdentityChangesCacheNamespace(t *testi
 	if err := reader.Create(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https"}); err != nil {
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https", CredentialScopeAllowed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if first == exchanger.request.CacheNamespace {
 		t.Fatal("Service recreation did not change exchange cache namespace")
+	}
+}
+
+func TestKubernetesResolverEnforcesImmutableCredentialAuthority(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:                   corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+		Subject:                 corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceSecretRef, TokenType: tokenexchange.TokenTypeAccessToken, SecretRef: secretRef("subject", "token")},
+		ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+	}})
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "subject", Namespace: "tenant"}, Data: map[string][]byte{"token": []byte("assertion")}}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, secret).Build()
+	resolver := &KubernetesResolver{Reader: reader, Exchanger: &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}}
+	base := ResolveRequest{Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialAuthorityEnforced: true}
+	if _, err := resolver.Resolve(context.Background(), base); err == nil || !containsFold(err.Error(), "not authorized") {
+		t.Fatalf("missing scope error = %v", err)
+	}
+	base.CredentialScopeAllowed = true
+	base.CredentialSecret = "different"
+	if _, err := resolver.Resolve(context.Background(), base); err == nil || !containsFold(err.Error(), "does not match") {
+		t.Fatalf("secret constraint error = %v", err)
+	}
+	base.CredentialSecret = "subject"
+	if _, err := resolver.Resolve(context.Background(), base); err != nil {
+		t.Fatalf("authorized Resolve() error = %v", err)
+	}
+}
+
+func TestKubernetesResolverEnforcesGatewayTLSCredentialAuthority(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("gateway-tls", corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{
+		ServiceRef: serviceRef("gateway", "", 8443), Scheme: "https",
+		TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: secretRef("gateway-ca", "ca.crt")},
+	}})
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "tenant"}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 8443}}}}
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer tlsServer.Close()
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsServer.TLS.Certificates[0].Certificate[0]})
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "gateway-ca", Namespace: "tenant"}, Data: map[string][]byte{"ca.crt": caPEM}}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, service, secret).Build()
+	resolver := &KubernetesResolver{Reader: reader}
+	req := ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, CredentialAuthorityEnforced: true}
+	if _, err := resolver.Resolve(context.Background(), req); err == nil || !containsFold(err.Error(), "not authorized") {
+		t.Fatalf("missing scope error = %v", err)
+	}
+	req.CredentialScopeAllowed = true
+	req.CredentialSecret = "different"
+	if _, err := resolver.Resolve(context.Background(), req); err == nil || !containsFold(err.Error(), "does not match") {
+		t.Fatalf("constraint error = %v", err)
 	}
 }

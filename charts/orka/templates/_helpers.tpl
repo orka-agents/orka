@@ -85,6 +85,10 @@ Create release-scoped worker ClusterRole names.
 {{- printf "%s-ai-worker-role" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "orka.aiWorkerTokenRequestClusterRoleName" -}}
+{{- printf "%s-ai-worker-tokenrequest" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "orka.vendorWorkerClusterRoleName" -}}
 {{- printf "%s-vendor-worker-role" (include "orka.fullname" .) | trunc 253 | trimSuffix "-" }}
 {{- end }}

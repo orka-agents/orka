@@ -887,6 +887,7 @@ func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransac
 	envVars = setControllerEnv(envVars, workerenv.TransactionScopes, workerenv.JoinCSV(tx.Scopes))
 	envVars = setControllerEnv(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
 	envVars = setControllerEnv(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
+	envVars = setControllerEnv(envVars, workerenv.TransactionCredentialSecret, tx.Context["secret"])
 	return envVars
 }
 

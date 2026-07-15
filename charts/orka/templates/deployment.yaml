@@ -190,6 +190,7 @@ spec:
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
             - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
+            - --ai-worker-tokenrequest-cluster-role-name={{ include "orka.aiWorkerTokenRequestClusterRoleName" . }}
             - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
             - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
             - --worker-cluster-role-binding-prefix={{ include "orka.fullname" . }}

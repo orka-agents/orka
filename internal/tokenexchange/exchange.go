@@ -707,6 +707,11 @@ func disableHTTP2(transport *http.Transport) {
 	}
 }
 
+// PublicEndpointDialContext resolves and dials only globally routable addresses.
+func PublicEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return publicEndpointDialContext(ctx, network, address)
+}
+
 func publicEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {

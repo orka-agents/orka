@@ -93,17 +93,21 @@ func toolCallIDFromContext(ctx context.Context) string {
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
 type ToolExecutor struct {
-	client           *http.Client
-	secretPath       string
-	namespace        string
-	k8sClient        kubernetes.Interface
-	outboundResolver outboundaccess.Resolver
+	client                     *http.Client
+	secretPath                 string
+	namespace                  string
+	k8sClient                  kubernetes.Interface
+	outboundResolver           outboundaccess.Resolver
+	skipDirectPublicValidation bool
 
-	transactionAuthoritySet bool
-	transactionToken        string
-	transactionScopes       []string
-	transactionExchange     *TransactionExchangeConfig
-	authSecretValues        map[string]string
+	transactionAuthoritySet     bool
+	transactionToken            string
+	transactionScopes           []string
+	credentialAuthorityEnforced bool
+	credentialScopeAllowed      bool
+	credentialSecret            string
+	transactionExchange         *TransactionExchangeConfig
+	authSecretValues            map[string]string
 
 	ttsMu        sync.Mutex
 	ttsClient    *contexttoken.TTSClient
@@ -128,6 +132,16 @@ func (e *ToolExecutor) SetTransactionAuthority(token string, scopes []string) {
 	e.transactionAuthoritySet = true
 	e.transactionToken = strings.TrimSpace(token)
 	e.transactionScopes = append([]string(nil), scopes...)
+}
+
+// SetTransactionCredentialAuthority sets immutable Task authorization for outbound credentials.
+func (e *ToolExecutor) SetTransactionCredentialAuthority(enforced, allowed bool, secret string) {
+	if e == nil {
+		return
+	}
+	e.credentialAuthorityEnforced = enforced
+	e.credentialScopeAllowed = allowed
+	e.credentialSecret = strings.TrimSpace(secret)
 }
 
 // SetTransactionExchangeConfig supplies controller-resolved TTS settings.
@@ -186,14 +200,21 @@ func NewToolExecutor() *ToolExecutor {
 		}
 	}
 
+	credentialScopes := workerenv.SplitCSV(os.Getenv(workerenv.TransactionScopes))
+	if len(credentialScopes) == 0 {
+		credentialScopes = strings.Fields(os.Getenv(workerenv.TransactionScope))
+	}
 	return &ToolExecutor{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		secretPath:       "/secrets/tools",
-		namespace:        namespace,
-		k8sClient:        k8sClient,
-		outboundResolver: resolver,
+		secretPath:                  "/secrets/tools",
+		namespace:                   namespace,
+		k8sClient:                   k8sClient,
+		outboundResolver:            resolver,
+		credentialAuthorityEnforced: strings.TrimSpace(os.Getenv(workerenv.TransactionID)) != "",
+		credentialScopeAllowed:      slices.Contains(credentialScopes, "orka:secrets:credentials:read"),
+		credentialSecret:            strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret)),
 	}
 }
 
@@ -339,16 +360,57 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		return "", err
 	}
 
-	if prepared.mcp {
-		return e.executeMCPToolCall(ctx, httpClient, prepared)
+	if prepared.direct && !e.skipDirectPublicValidation {
+		httpClient, err = directCredentialHTTPClient(httpClient)
+		if err != nil {
+			return "", err
+		}
 	}
 
-	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.redactionSecrets...)
+	if prepared.mcp {
+		result, err := e.executeMCPToolCall(ctx, httpClient, prepared)
+		if err != nil && prepared.gateway {
+			return "", gatewayMCPError{Err: err}
+		}
+		return result, err
+	}
+
+	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.gateway, prepared.redactionSecrets...)
 	if err != nil {
 		return "", ToolRequestAttemptedError{Err: err}
 	}
 
 	return string(respBody), nil
+}
+
+func directCredentialHTTPClient(base *http.Client) (*http.Client, error) {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	client := *base
+	transport := base.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("direct outbound access requires an *http.Transport")
+	}
+	clone := httpTransport.Clone()
+	clone.Proxy = nil
+	clone.DisableKeepAlives = true
+	clone.DialTLS = nil //nolint:staticcheck
+	clone.DialTLSContext = nil
+	clone.DialContext = tokenexchange.PublicEndpointDialContext
+	if clone.TLSClientConfig != nil {
+		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
+	} else {
+		clone.TLSClientConfig = &tls.Config{}
+	}
+	clone.TLSClientConfig.MinVersion = max(clone.TLSClientConfig.MinVersion, tls.VersionTLS12)
+	clone.TLSClientConfig.InsecureSkipVerify = false
+	client.Transport = clone
+	return &client, nil
 }
 
 func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS tokenexchange.TLSConfig, gateway bool) (*http.Client, error) {
@@ -443,6 +505,11 @@ func normalizedHTTPHost(u *neturl.URL) string {
 	return net.JoinHostPort(host, port)
 }
 
+type gatewayMCPError struct{ Err error }
+
+func (e gatewayMCPError) Error() string { return "gateway MCP request failed" }
+func (e gatewayMCPError) Unwrap() error { return e.Err }
+
 // ToolRequestAttemptedError wraps errors that occur after a custom tool request
 // may already have reached the remote endpoint.
 type ToolRequestAttemptedError struct {
@@ -531,7 +598,7 @@ func injectTraceHeaders(ctx context.Context, header http.Header) {
 	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
 }
 
-func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets ...string) ([]byte, error) {
+func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, suppressErrorBody bool, secrets ...string) ([]byte, error) {
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, safeToolTransportError(req.Context(), err, secrets...)
@@ -543,6 +610,9 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if suppressErrorBody {
+			return nil, fmt.Errorf("gateway returned HTTP %d", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("tool returned HTTP %d: %s", resp.StatusCode, redactToolHTTPErrorBody(string(respBody), secrets...))
 	}
 	return []byte(redactToolSensitiveText(string(respBody), secrets...)), nil
@@ -590,6 +660,7 @@ type preparedToolRequest struct {
 	redactionSecrets []string
 	gatewayTLS       tokenexchange.TLSConfig
 	gateway          bool
+	direct           bool
 	mcp              bool
 }
 
@@ -762,13 +833,16 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		targetScheme = prepared.request.URL.Scheme
 	}
 	resolution, err := e.outboundResolver.Resolve(ctx, outboundaccess.ResolveRequest{
-		Namespace:               e.namespace,
-		PolicyName:              ref.Name,
-		TransactionToken:        prepared.transactionToken,
-		TransactionTokenSource:  transactionTokenSource,
-		ParentTransactionScopes: parentScopes,
-		HasAuthSecretRef:        prepared.httpConfig.AuthSecretRef != nil,
-		TargetScheme:            targetScheme,
+		Namespace:                   e.namespace,
+		PolicyName:                  ref.Name,
+		TransactionToken:            prepared.transactionToken,
+		TransactionTokenSource:      transactionTokenSource,
+		ParentTransactionScopes:     parentScopes,
+		HasAuthSecretRef:            prepared.httpConfig.AuthSecretRef != nil,
+		TargetScheme:                targetScheme,
+		CredentialAuthorityEnforced: e.credentialAuthorityEnforced,
+		CredentialScopeAllowed:      e.credentialScopeAllowed,
+		CredentialSecret:            e.credentialSecret,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
@@ -776,6 +850,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
 	case outboundaccess.AdapterDirect:
+		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
 			return errors.New("direct outbound access requires an HTTPS Tool URL")
 		}

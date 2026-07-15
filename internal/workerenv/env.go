@@ -44,6 +44,7 @@ const (
 	TransactionScopes                          = "ORKA_TRANSACTION_SCOPES"
 	TransactionContextDigest                   = "ORKA_TRANSACTION_CONTEXT_DIGEST"
 	TransactionRequesterContextDigest          = "ORKA_TRANSACTION_REQUESTER_CONTEXT_DIGEST"
+	TransactionCredentialSecret                = "ORKA_TRANSACTION_CREDENTIAL_SECRET"
 	TransactionTokenFile                       = "ORKA_TRANSACTION_TOKEN_FILE"
 	ContextTokenTTSEndpoint                    = "ORKA_CONTEXT_TOKEN_TTS_ENDPOINT"
 	ContextTokenTTSAudience                    = "ORKA_CONTEXT_TOKEN_TTS_AUDIENCE"

@@ -96,32 +96,34 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                          client.Reader
-	Scheme                             *runtime.Scheme
-	JobBuilder                         *JobBuilder
-	SessionManager                     *SessionManager
-	WebhookNotifier                    *WebhookNotifier
-	Recorder                           record.EventRecorder
-	KubeClient                         kubernetes.Interface
-	OutboundAccessResolver             outboundaccess.Resolver
-	BrokeredTransactionExchange        *workerpkg.TransactionExchangeConfig
-	ResultStore                        store.ResultStore
-	PlanStore                          store.PlanStore
-	MessageStore                       store.MessageStore
-	ArtifactStore                      store.ArtifactStore
-	ExecutionEventStore                store.ExecutionEventStore
-	EnforceNamespaceIsolation          bool
-	MaxTasksPerNamespace               int32
-	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
-	AgentSandboxEnabled                bool
-	AgentSandboxConfig                 AgentSandboxConfig
-	SubstrateEnabled                   bool
-	SubstrateConfig                    SubstrateConfig
-	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
-	AIWorkerClusterRoleName            string
-	VendorWorkerClusterRoleName        string
-	ContainerWorkerClusterRoleName     string
-	WorkerClusterRoleBindingNamePrefix string
+	APIReader                           client.Reader
+	Scheme                              *runtime.Scheme
+	JobBuilder                          *JobBuilder
+	SessionManager                      *SessionManager
+	WebhookNotifier                     *WebhookNotifier
+	Recorder                            record.EventRecorder
+	KubeClient                          kubernetes.Interface
+	OutboundAccessResolver              outboundaccess.Resolver
+	BrokeredTransactionExchange         *workerpkg.TransactionExchangeConfig
+	ResultStore                         store.ResultStore
+	PlanStore                           store.PlanStore
+	MessageStore                        store.MessageStore
+	ArtifactStore                       store.ArtifactStore
+	ExecutionEventStore                 store.ExecutionEventStore
+	EnforceNamespaceIsolation           bool
+	MaxTasksPerNamespace                int32
+	ExecutionWorkspaceDefaultProvider   corev1alpha1.WorkspaceProvider
+	AgentSandboxEnabled                 bool
+	AgentSandboxConfig                  AgentSandboxConfig
+	SubstrateEnabled                    bool
+	SubstrateConfig                     SubstrateConfig
+	SubstrateExecutorFactory            func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	AIWorkerClusterRoleName             string
+	VendorWorkerClusterRoleName         string
+	ContainerWorkerClusterRoleName      string
+	WorkerClusterRoleBindingNamePrefix  string
+	AIWorkerTokenRequestClusterRoleName string
+	OutboundAccessTrust                 outboundaccess.TrustConfig
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -153,9 +155,10 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;roles;rolebindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;ai-worker-tokenrequest-role;vendor-worker-role;container-worker-role,verbs=bind
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list
 // +kubebuilder:rbac:groups=ate.dev,resources=actortemplates,verbs=get;list;watch
@@ -3238,9 +3241,10 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 const (
-	DefaultAIWorkerClusterRoleName        = "orka-ai-worker-role"
-	DefaultVendorWorkerClusterRoleName    = "orka-vendor-worker-role"
-	DefaultContainerWorkerClusterRoleName = "orka-container-worker-role"
+	DefaultAIWorkerClusterRoleName             = "orka-ai-worker-role"
+	DefaultAIWorkerTokenRequestClusterRoleName = "orka-ai-worker-tokenrequest-role"
+	DefaultVendorWorkerClusterRoleName         = "orka-vendor-worker-role"
+	DefaultContainerWorkerClusterRoleName      = "orka-container-worker-role"
 
 	maxWorkerClusterRoleBindingNameLength = 253
 	workerClusterRoleBindingHashLength    = 10
@@ -3306,6 +3310,17 @@ func workerClusterRoleBindingName(prefix, tier, namespace string) string {
 // ensureWorkerRBAC ensures each worker ServiceAccount and worker role binding
 // exists in the given namespace so that task jobs have trust-tiered permissions.
 func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string) error {
+	tokenRequestSpec := workerRBACSpec{
+		serviceAccountName:     AIWorkerServiceAccount,
+		clusterRoleName:        workerClusterRoleName(r.AIWorkerTokenRequestClusterRoleName, DefaultAIWorkerTokenRequestClusterRoleName),
+		clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "ai-tokenrequest", namespace),
+	}
+	if err := r.ensureWorkerRoleBinding(ctx, namespace, tokenRequestSpec); err != nil {
+		return err
+	}
+	if err := r.ensureTrustedServiceReadBindings(ctx, namespace); err != nil {
+		return err
+	}
 	for _, spec := range r.workerRBACSpecs(namespace) {
 		if err := r.ensureWorkerServiceAccount(ctx, namespace, spec.serviceAccountName); err != nil {
 			return err
@@ -3326,6 +3341,66 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 	}
 
 	return nil
+}
+
+func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, taskNamespace string) error {
+	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
+	seen := map[string]struct{}{}
+	for _, ref := range refs {
+		if ref.Namespace == "" || ref.Namespace == taskNamespace {
+			continue
+		}
+		key := ref.Namespace + "/" + ref.Name
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		sum := sha256.Sum256([]byte(taskNamespace + "\x00" + ref.Namespace + "\x00" + ref.Name))
+		name := "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
+		role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ref.Namespace}, Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{ref.Name}, Verbs: []string{"get"}}}}
+		if err := r.createOrUpdateTrustedServiceRole(ctx, role); err != nil {
+			return err
+		}
+		binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ref.Namespace}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name}, Subjects: []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: taskNamespace}}}
+		if err := r.createOrUpdateTrustedServiceRoleBinding(ctx, binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *TaskReconciler) createOrUpdateTrustedServiceRole(ctx context.Context, desired *rbacv1.Role) error {
+	current := &rbacv1.Role{}
+	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	current.Rules = desired.Rules
+	current.Labels = desired.Labels
+	return r.Update(ctx, current)
+}
+
+func (r *TaskReconciler) createOrUpdateTrustedServiceRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
+	current := &rbacv1.RoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	if current.RoleRef != desired.RoleRef {
+		if err := r.Delete(ctx, current); err != nil {
+			return err
+		}
+		return r.Create(ctx, desired)
+	}
+	current.Subjects = desired.Subjects
+	current.Labels = desired.Labels
+	return r.Update(ctx, current)
 }
 
 func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespace, name string) error {
