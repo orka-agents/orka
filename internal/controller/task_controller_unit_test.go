@@ -8,16 +8,16 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -7317,8 +7317,7 @@ func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
 	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256([]byte(testNS + "\x00infra\x00gateway"))
-	name := "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
 	role := &rbacv1.Role{}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); err != nil {
 		t.Fatal(err)
@@ -7326,11 +7325,462 @@ func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
 	if len(role.Rules) != 1 || !slices.Equal(role.Rules[0].ResourceNames, []string{"gateway"}) || !slices.Equal(role.Rules[0].Verbs, []string{"get"}) {
 		t.Fatalf("rules=%#v", role.Rules)
 	}
+	if role.Labels[trustedServiceReaderLabelKey] != trustedServiceReaderLabelValue || role.Labels[trustedServiceReaderTaskNamespaceLabelKey] != testNS {
+		t.Fatalf("role labels=%#v", role.Labels)
+	}
 	rb := &rbacv1.RoleBinding{}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, rb); err != nil {
 		t.Fatal(err)
 	}
 	if len(rb.Subjects) != 1 || rb.Subjects[0].Namespace != testNS || rb.Subjects[0].Name != AIWorkerServiceAccount {
 		t.Fatalf("subjects=%#v", rb.Subjects)
+	}
+	if rb.Labels[trustedServiceReaderLabelKey] != trustedServiceReaderLabelValue || rb.Labels[trustedServiceReaderTaskNamespaceLabelKey] != testNS {
+		t.Fatalf("RoleBinding labels=%#v", rb.Labels)
+	}
+}
+
+func startTrustedServiceReadCleanupRunnableForTest(
+	t *testing.T,
+	runnable *trustedServiceReadCleanupRunnable,
+	condition func() bool,
+) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runnable.Start(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !condition() {
+		cancel()
+		t.Fatal("startup cleanup condition did not become true")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("startup cleanup runnable returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup cleanup runnable did not stop after cancellation")
+	}
+}
+
+func TestTrustedServiceReadCleanupAfterFinalTaskRemovalDeletesGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "final-task-tenant"
+	removed := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "final-task", Namespace: namespace}}
+	r := newUnitReconciler(scheme, removed)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if err := r.Delete(context.Background(), removed); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("final Task removal left trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("final Task removal left trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupAfterTaskRemovalPreservesGrantForRemainingTask(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "multi-task-tenant"
+	removed := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "removed-task", Namespace: namespace}}
+	remaining := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "remaining-task", Namespace: namespace}}
+	r := newUnitReconciler(scheme, removed, remaining)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if err := r.Delete(context.Background(), removed); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("remaining Task lost trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("remaining Task lost trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupPreservesSameNameReplacementTaskGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "replacement-task-tenant"
+	oldTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "replaceable-task", Namespace: namespace, UID: types.UID("old-task-uid")},
+	}
+	r := newUnitReconciler(scheme, oldTask)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if err := r.Delete(context.Background(), oldTask); err != nil {
+		t.Fatal(err)
+	}
+	replacement := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: oldTask.Name, Namespace: namespace, UID: types.UID("replacement-task-uid")},
+	}
+	if err := r.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupTrustedServiceReadBindingsAfterTaskRemoval(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("same-name replacement Task lost trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("same-name replacement Task lost trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTaskReconcileNotFoundCleansTrustedServiceGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const namespace = "not-found-tenant"
+	r := newUnitReconciler(scheme)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), namespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(namespace, "infra", "gateway")
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: namespace,
+		Name:      "already-deleted-task",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("NotFound reconciliation left trusted Service Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("NotFound reconciliation left trusted Service RoleBinding: %v", err)
+	}
+}
+
+func TestTrustedServiceReadStartupCleanupSerializesFreshGrantReconciliation(t *testing.T) {
+	scheme := newTestScheme()
+	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	taskSnapshotDone := make(chan struct{})
+	cleanupAtBindings := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var taskSnapshotOnce sync.Once
+	var bindingListOnce sync.Once
+	intercepted := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *corev1alpha1.TaskList:
+				err := c.List(ctx, list, opts...)
+				if err == nil {
+					taskSnapshotOnce.Do(func() { close(taskSnapshotDone) })
+				}
+				return err
+			case *rbacv1.RoleBindingList:
+				bindingListOnce.Do(func() {
+					close(cleanupAtBindings)
+					<-releaseCleanup
+				})
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r := &TaskReconciler{Client: intercepted}
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	cleanupDone := make(chan error, 1)
+	go func() { cleanupDone <- r.pruneTrustedServiceReadBindingsOnce(context.Background()) }()
+	select {
+	case <-taskSnapshotDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup cleanup did not snapshot Task namespaces")
+	}
+	select {
+	case <-cleanupAtBindings:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup cleanup did not reach RoleBinding discovery")
+	}
+
+	const newNamespace = "new-tenant"
+	if err := base.Create(context.Background(), &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-task", Namespace: newNamespace},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	grantDone := make(chan error, 1)
+	go func() { grantDone <- r.ensureTrustedServiceReadBindings(context.Background(), newNamespace) }()
+	select {
+	case err := <-grantDone:
+		t.Fatalf("grant reconciliation bypassed startup cleanup lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCleanup)
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-grantDone; err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(newNamespace, "infra", "gateway")
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("fresh trusted Service Role missing after startup cleanup: %v", err)
+	}
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("fresh trusted Service RoleBinding missing after startup cleanup: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupRunnablePrunesWithoutTaskReconciliation(t *testing.T) {
+	scheme := newTestScheme()
+	const inactiveNamespace = "inactive-no-task"
+	name := trustedServiceReadBindingName(inactiveNamespace, "infra", "gateway")
+	objectLabels := trustedServiceReadBindingLabels(inactiveNamespace)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"gateway"}, Verbs: []string{"get"},
+		}},
+	}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: inactiveNamespace,
+		}},
+	}
+	r := newUnitReconciler(scheme, role, binding)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	runnable := &trustedServiceReadCleanupRunnable{reconciler: r}
+	if !runnable.NeedLeaderElection() {
+		t.Fatal("startup cleanup must run only on the elected manager")
+	}
+	startTrustedServiceReadCleanupRunnableForTest(t, runnable, func() bool {
+		roleErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{})
+		bindingErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{})
+		return apierrors.IsNotFound(roleErr) && apierrors.IsNotFound(bindingErr)
+	})
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("startup cleanup left stale Role without any Task reconciliation: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("startup cleanup left stale RoleBinding without any Task reconciliation: %v", err)
+	}
+}
+
+func TestTrustedServiceReadCleanupRunnablePreservesActiveTaskNamespaceGrant(t *testing.T) {
+	scheme := newTestScheme()
+	const activeNamespace = "active-tenant"
+	name := trustedServiceReadBindingName(activeNamespace, "infra", "gateway")
+	objectLabels := trustedServiceReadBindingLabels(activeNamespace)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"gateway"}, Verbs: []string{"get"},
+		}},
+	}
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "infra", Labels: maps.Clone(objectLabels)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: activeNamespace,
+		}},
+	}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-task", Namespace: activeNamespace}}
+	r := newUnitReconciler(scheme, role, binding, task)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	startTrustedServiceReadCleanupRunnableForTest(t, &trustedServiceReadCleanupRunnable{reconciler: r}, func() bool {
+		r.trustedServiceCleanupMu.RLock()
+		cleanupDone := r.trustedServiceCleanupDone
+		r.trustedServiceCleanupMu.RUnlock()
+		if !cleanupDone {
+			return false
+		}
+		roleErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{})
+		bindingErr := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{})
+		return roleErr == nil && bindingErr == nil
+	})
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("startup cleanup removed active namespace Role: %v", err)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("startup cleanup removed active namespace RoleBinding: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBACStartupPrunesManagedTrustedServiceGrantForInactiveNamespace(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const inactiveNamespace = "inactive-tenant"
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureWorkerRBAC(context.Background(), inactiveNamespace); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(inactiveNamespace, "infra", "gateway")
+
+	restarted := &TaskReconciler{Client: r.Client, OutboundAccessTrust: outboundaccess.TrustConfig{}}
+	if err := restarted.pruneTrustedServiceReadBindingsOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	role := &rbacv1.Role{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); !apierrors.IsNotFound(err) {
+		t.Fatalf("inactive namespace stale Role still exists: %v", err)
+	}
+	binding := &rbacv1.RoleBinding{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, binding); !apierrors.IsNotFound(err) {
+		t.Fatalf("inactive namespace stale RoleBinding still exists: %v", err)
+	}
+}
+
+func TestEnsureWorkerRBACPrunesRemovedTrustedServiceReadBindingAfterRestart(t *testing.T) {
+	scheme := newTestScheme()
+	activeTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "active-task", Namespace: testNS}}
+	r := newUnitReconciler(scheme, activeTask)
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.OutboundAccessTrust = outboundaccess.TrustConfig{Gateways: trusted}
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	legacyRole := &rbacv1.Role{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, legacyRole); err != nil {
+		t.Fatal(err)
+	}
+	legacyRole.Labels = nil
+	if err := r.Update(context.Background(), legacyRole); err != nil {
+		t.Fatal(err)
+	}
+	legacyBinding := &rbacv1.RoleBinding{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, legacyBinding); err != nil {
+		t.Fatal(err)
+	}
+	legacyBinding.Labels = nil
+	if err := r.Update(context.Background(), legacyBinding); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedName := "orka-outbound-service-unrelated"
+	unrelatedRole := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: unrelatedName, Namespace: "infra"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services"}, ResourceNames: []string{"unrelated"}, Verbs: []string{"get"},
+		}},
+	}
+	if err := r.Create(context.Background(), unrelatedRole); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: unrelatedName, Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: unrelatedName},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS,
+		}},
+	}
+	if err := r.Create(context.Background(), unrelatedBinding); err != nil {
+		t.Fatal(err)
+	}
+	missingName := trustedServiceReadBindingName(testNS, "infra", "missing")
+	missingBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: missingName, Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: missingName},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS,
+		}},
+	}
+	if err := r.Create(context.Background(), missingBinding); err != nil {
+		t.Fatal(err)
+	}
+	driftedName := trustedServiceReadBindingName(testNS, "infra", "drifted")
+	driftedRole := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: driftedName, Namespace: "infra"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""}, Resources: []string{"services", "secrets"}, Verbs: []string{"get"},
+		}},
+	}
+	if err := r.Create(context.Background(), driftedRole); err != nil {
+		t.Fatal(err)
+	}
+	driftedBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: driftedName, Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: driftedName},
+		Subjects: []rbacv1.Subject{{
+			Kind: rbacv1.ServiceAccountKind, Name: AIWorkerServiceAccount, Namespace: testNS,
+		}},
+	}
+	if err := r.Create(context.Background(), driftedBinding); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &TaskReconciler{Client: r.Client, OutboundAccessTrust: outboundaccess.TrustConfig{}}
+	if err := restarted.pruneTrustedServiceReadBindingsOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	role := &rbacv1.Role{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, role); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale Role still exists: %v", err)
+	}
+	rb := &rbacv1.RoleBinding{}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, rb); !apierrors.IsNotFound(err) {
+		t.Fatalf("stale RoleBinding still exists: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: missingName, Namespace: "infra"}, missingBinding); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy RoleBinding with missing Role still exists: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: driftedName, Namespace: "infra"}, driftedBinding); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy RoleBinding with drifted Role still exists: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: driftedName, Namespace: "infra"}, driftedRole); err != nil {
+		t.Fatalf("drifted legacy Role was removed: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: unrelatedName, Namespace: "infra"}, unrelatedRole); err != nil {
+		t.Fatalf("unrelated prefixed Role was removed: %v", err)
+	}
+	if err := restarted.Get(context.Background(), types.NamespacedName{Name: unrelatedName, Namespace: "infra"}, unrelatedBinding); err != nil {
+		t.Fatalf("unrelated prefixed RoleBinding was removed: %v", err)
 	}
 }
