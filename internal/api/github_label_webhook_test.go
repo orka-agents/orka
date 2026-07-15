@@ -1659,3 +1659,17 @@ func TestRepositoryMonitorPermissionAllowedEnforcesMinimumAndPolicy(t *testing.T
 		t.Fatal("custom role_name should fall back to effective admin permission")
 	}
 }
+
+func TestGitHubIssueSnapshotDigestIgnoresVolatileUpdatedAt(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	target := githubLabelTarget{Kind: repositoryMonitorTargetKindIssue, Number: 42, Title: "Title", Body: "Body", Labels: []string{"bug"}, UpdatedAt: time.Unix(100, 0)}
+	first := githubIssueSnapshotDigest(monitor, target)
+	target.UpdatedAt = time.Unix(200, 0)
+	if second := githubIssueSnapshotDigest(monitor, target); second != first {
+		t.Fatalf("digest changed for identical agent input: first=%s second=%s", first, second)
+	}
+	target.Body = "Changed body"
+	if changed := githubIssueSnapshotDigest(monitor, target); changed == first {
+		t.Fatal("digest did not change when issue body changed")
+	}
+}

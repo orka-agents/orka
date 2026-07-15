@@ -641,13 +641,15 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 		labels = append(labels, trimmed)
 	}
 	slicesSortStringsFold(labels)
+	// Hash exactly the issue content supplied to agent workflows. GitHub's
+	// updated_at also changes when one-shot command labels are consumed/re-added,
+	// so including it would defeat active-action coalescing for identical input.
 	payload := struct {
-		Number    int       `json:"number"`
-		Title     string    `json:"title"`
-		Body      string    `json:"body"`
-		Labels    []string  `json:"labels"`
-		UpdatedAt time.Time `json:"updatedAt"`
-	}{Number: target.Number, Title: target.Title, Body: target.Body, Labels: labels, UpdatedAt: target.UpdatedAt.UTC()}
+		Number int      `json:"number"`
+		Title  string   `json:"title"`
+		Body   string   `json:"body"`
+		Labels []string `json:"labels"`
+	}{Number: target.Number, Title: target.Title, Body: target.Body, Labels: labels}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
