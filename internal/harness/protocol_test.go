@@ -237,3 +237,66 @@ func TestToolRequestIdempotencyKey(t *testing.T) {
 		t.Fatalf("ToolRequestIdempotencyKey() = %q", got)
 	}
 }
+
+func TestCapabilitiesBrokeredModeRequiresContinuation(t *testing.T) {
+	capabilities := CapabilitiesResponse{
+		Version:             ProtocolVersion,
+		ProtocolVersion:     ProtocolVersion,
+		Transport:           HTTPTransport,
+		RuntimeName:         "brokered-runtime",
+		ProviderKind:        ProviderKindRemote,
+		ToolExecutionModes:  []ToolExecutionMode{ToolExecutionModeBrokered},
+		BrokeredToolClasses: []BrokeredToolClass{BrokeredToolClassRead},
+	}
+	if err := capabilities.Validate(); err == nil || !strings.Contains(err.Error(), "supportsContinuation") {
+		t.Fatalf("Capabilities Validate() = %v, want continuation requirement", err)
+	}
+	capabilities.SupportsContinuation = true
+	if err := capabilities.Validate(); err != nil {
+		t.Fatalf("Capabilities Validate() error = %v", err)
+	}
+}
+
+func TestContinueTurnRequestRejectsDuplicateAndNonCanonicalToolResults(t *testing.T) {
+	base := ToolCallResult{
+		Version:          ProtocolVersion,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		ToolCallID:       "tool-a",
+		IdempotencyKey:   ToolRequestIdempotencyKey("runtime-a", "turn-a", "tool-a"),
+		Output:           json.RawMessage(`{"ok":true}`),
+	}
+	request := ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "correlation-a",
+		ToolResults:      []ToolCallResult{base, base},
+	}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "duplicates tool call id") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want duplicate rejection", err)
+	}
+	request.ToolResults = []ToolCallResult{base}
+	request.ToolResults[0].IdempotencyKey = "unrelated-key"
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "canonical key") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want canonical key rejection", err)
+	}
+}
+
+func TestCapabilitiesBrokeredModeRequiresToolClass(t *testing.T) {
+	capabilities := CapabilitiesResponse{
+		Version:              ProtocolVersion,
+		ProtocolVersion:      ProtocolVersion,
+		Transport:            HTTPTransport,
+		RuntimeName:          "brokered-runtime",
+		ProviderKind:         ProviderKindRemote,
+		ToolExecutionModes:   []ToolExecutionMode{ToolExecutionModeBrokered},
+		SupportsContinuation: true,
+	}
+	if err := capabilities.Validate(); err == nil || !strings.Contains(err.Error(), "brokeredToolClass") {
+		t.Fatalf("Capabilities Validate() = %v, want brokered class requirement", err)
+	}
+}

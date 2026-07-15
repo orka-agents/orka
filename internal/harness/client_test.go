@@ -301,3 +301,125 @@ func TestClientTimeoutOnStream(t *testing.T) {
 		t.Fatal("StreamFrames() error = nil, want timeout")
 	}
 }
+
+func TestClientPreservesEscapedTurnID(t *testing.T) {
+	var requestedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL + "/adapter")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if err := client.StreamFrames(context.Background(), "turn 1", 0, func(HarnessEventFrame) error { return nil }); err != nil {
+		t.Fatalf("StreamFrames() error = %v", err)
+	}
+	if requestedPath != "/adapter/v1/turns/turn%201/events" {
+		t.Fatalf("requested path = %q", requestedPath)
+	}
+}
+
+func TestReadSSEFramesRejectsOversizedMultiLineEvent(t *testing.T) {
+	line := "data: " + strings.Repeat("x", 64*1024) + "\n"
+	payload := strings.Repeat(line, maxHarnessSSEEventBytes/(64*1024)+1) + "\n"
+	err := readSSEFrames(strings.NewReader(payload), func(HarnessEventFrame) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "exceeds harness frame limit") {
+		t.Fatalf("readSSEFrames() error = %v, want cumulative size rejection", err)
+	}
+}
+
+func TestReadSSEFramesAcceptsAdvertisedResultAfterJSONExpansion(t *testing.T) {
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameTurnCompleted,
+		RuntimeSessionID: "runtime-1",
+		TurnID:           "turn-1",
+		CorrelationID:    "correlation-1",
+		Seq:              1,
+		Completed:        &TurnCompleted{Result: strings.Repeat("\x00", 1<<20)},
+	}
+	payload := httptest.NewRecorder()
+	if err := WriteSSEFrame(payload, frame); err != nil {
+		t.Fatalf("WriteSSEFrame() error = %v", err)
+	}
+	var got HarnessEventFrame
+	if err := readSSEFrames(payload.Body, func(value HarnessEventFrame) error {
+		got = value
+		return nil
+	}); err != nil {
+		t.Fatalf("readSSEFrames() error = %v", err)
+	}
+	if len(got.Completed.Result) != 1<<20 {
+		t.Fatalf("result length = %d", len(got.Completed.Result))
+	}
+}
+
+func TestClientRejectsOversizedJSONControlResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"value":"`))
+		_, _ = w.Write([]byte(strings.Repeat("x", maxHarnessControlResponseBytes)))
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	var response map[string]any
+	if err := client.getJSON(context.Background(), "/oversized", &response); err == nil ||
+		!strings.Contains(err.Error(), "exceeds harness control limit") {
+		t.Fatalf("getJSON() error = %v, want response size rejection", err)
+	}
+	if err := client.postJSON(context.Background(), "/oversized", map[string]string{"input": "safe"}, &response); err == nil ||
+		!strings.Contains(err.Error(), "exceeds harness control limit") {
+		t.Fatalf("postJSON() error = %v, want response size rejection", err)
+	}
+}
+
+func TestClientControlTimeoutOverridesLaterParentDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		WriteJSON(w, http.StatusOK, HealthResponse{
+			Version: ProtocolVersion,
+			Status:  HealthStatusOK,
+			Ready:   true,
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithControlTimeout(10*time.Millisecond))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	started := time.Now()
+	_, err = client.Health(ctx)
+	if err == nil {
+		t.Fatal("Health() error = nil, want control timeout")
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("Health() elapsed = %s, control timeout was not enforced", elapsed)
+	}
+}
+
+func TestReadSSEFramesDoesNotEmitBufferedDataAfterScannerFailure(t *testing.T) {
+	frame := `{"version":"` + ProtocolVersion + `","type":"TurnStarted","runtimeSessionID":"r","turnID":"t","correlationID":"c","seq":1}`
+	payload := "data: " + frame + "\n" + strings.Repeat("x", maxHarnessSSELineBytes+1)
+	emitted := false
+	err := readSSEFrames(strings.NewReader(payload), func(HarnessEventFrame) error {
+		emitted = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("readSSEFrames() error = nil, want scanner failure")
+	}
+	if emitted {
+		t.Fatal("readSSEFrames() emitted a partial event after scanner failure")
+	}
+}
