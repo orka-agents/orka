@@ -7340,6 +7340,54 @@ func TestEnsureWorkerRBACCreatesExactTrustedServiceReadBinding(t *testing.T) {
 	}
 }
 
+func TestEnsureTrustedServiceReadBindingsUsesAPIReaderForCrossNamespaceRBAC(t *testing.T) {
+	scheme := newTestScheme()
+	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cachedRBACRead := false
+	restrictedCache := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch obj.(type) {
+			case *rbacv1.Role, *rbacv1.RoleBinding:
+				cachedRBACRead = true
+				return errors.New("cross-namespace RBAC read attempted through restricted cache")
+			default:
+				return c.Get(ctx, key, obj, opts...)
+			}
+		},
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			switch list.(type) {
+			case *rbacv1.RoleList, *rbacv1.RoleBindingList:
+				cachedRBACRead = true
+				return errors.New("cross-namespace RBAC list attempted through restricted cache")
+			default:
+				return c.List(ctx, list, opts...)
+			}
+		},
+	})
+	trusted, err := outboundaccess.ParseTrustedServiceReferences("infra/gateway:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &TaskReconciler{
+		Client:              restrictedCache,
+		APIReader:           base,
+		OutboundAccessTrust: outboundaccess.TrustConfig{Gateways: trusted},
+	}
+	if err := r.ensureTrustedServiceReadBindings(context.Background(), testNS); err != nil {
+		t.Fatal(err)
+	}
+	if cachedRBACRead {
+		t.Fatal("trusted Service RBAC used the restricted cached reader")
+	}
+	name := trustedServiceReadBindingName(testNS, "infra", "gateway")
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.Role{}); err != nil {
+		t.Fatalf("uncached reader did not resolve created Role: %v", err)
+	}
+	if err := base.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "infra"}, &rbacv1.RoleBinding{}); err != nil {
+		t.Fatalf("uncached reader did not resolve created RoleBinding: %v", err)
+	}
+}
+
 func startTrustedServiceReadCleanupRunnableForTest(
 	t *testing.T,
 	runnable *trustedServiceReadCleanupRunnable,

@@ -3374,6 +3374,13 @@ func (r *TaskReconciler) ensureWorkerRBAC(ctx context.Context, namespace string)
 	return nil
 }
 
+func (r *TaskReconciler) trustedServiceReadReader() client.Reader {
+	if r != nil && r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *TaskReconciler) ensureTrustedServiceReadBindings(ctx context.Context, taskNamespace string) error {
 	r.trustedServiceCleanupMu.RLock()
 	defer r.trustedServiceCleanupMu.RUnlock()
@@ -3436,7 +3443,7 @@ func (r *TaskReconciler) pruneTrustedServiceReadBindings(
 		trustedServiceReaderTaskNamespaceLabelKey: taskNamespace,
 	}
 	bindings := &rbacv1.RoleBindingList{}
-	if err := r.List(ctx, bindings, selector); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, bindings, selector); err != nil {
 		return fmt.Errorf("listing trusted Service RoleBindings for namespace %q: %w", taskNamespace, err)
 	}
 	for i := range bindings.Items {
@@ -3450,7 +3457,7 @@ func (r *TaskReconciler) pruneTrustedServiceReadBindings(
 		}
 	}
 	roles := &rbacv1.RoleList{}
-	if err := r.List(ctx, roles, selector); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, roles, selector); err != nil {
 		return fmt.Errorf("listing trusted Service Roles for namespace %q: %w", taskNamespace, err)
 	}
 	for i := range roles.Items {
@@ -3477,7 +3484,7 @@ func (r *TaskReconciler) pruneTrustedServiceReadBindingsOnce(ctx context.Context
 		return err
 	}
 	bindings := &rbacv1.RoleBindingList{}
-	if err := r.List(ctx, bindings); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, bindings); err != nil {
 		return fmt.Errorf("listing trusted Service RoleBindings during startup cleanup: %w", err)
 	}
 	for i := range bindings.Items {
@@ -3496,7 +3503,7 @@ func (r *TaskReconciler) pruneTrustedServiceReadBindingsOnce(ctx context.Context
 		}
 	}
 	roles := &rbacv1.RoleList{}
-	if err := r.List(ctx, roles, client.MatchingLabels{
+	if err := r.trustedServiceReadReader().List(ctx, roles, client.MatchingLabels{
 		orkaManagedByLabelKey:        managedByLabelValue,
 		trustedServiceReaderLabelKey: trustedServiceReaderLabelValue,
 	}); err != nil {
@@ -3523,7 +3530,7 @@ func (r *TaskReconciler) pruneTrustedServiceReadBindingsOnce(ctx context.Context
 
 func (r *TaskReconciler) activeTaskNamespaces(ctx context.Context) (map[string]struct{}, error) {
 	tasks := &corev1alpha1.TaskList{}
-	if err := r.List(ctx, tasks); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, tasks); err != nil {
 		return nil, fmt.Errorf("listing Tasks during trusted Service RBAC startup cleanup: %w", err)
 	}
 	active := make(map[string]struct{}, len(tasks.Items))
@@ -3549,7 +3556,7 @@ func (r *TaskReconciler) cleanupTrustedServiceReadBindingsAfterTaskRemoval(
 	r.trustedServiceCleanupMu.Lock()
 	defer r.trustedServiceCleanupMu.Unlock()
 	tasks := &corev1alpha1.TaskList{}
-	if err := r.List(ctx, tasks, client.InNamespace(taskNamespace)); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, tasks, client.InNamespace(taskNamespace)); err != nil {
 		return fmt.Errorf("listing Tasks before trusted Service RBAC cleanup for namespace %q: %w", taskNamespace, err)
 	}
 	for i := range tasks.Items {
@@ -3570,7 +3577,7 @@ func (r *TaskReconciler) deleteTrustedServiceReadBindingsForNamespaceLocked(
 		trustedServiceReaderTaskNamespaceLabelKey: taskNamespace,
 	}
 	bindings := &rbacv1.RoleBindingList{}
-	if err := r.List(ctx, bindings, selector); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, bindings, selector); err != nil {
 		return fmt.Errorf("listing trusted Service RoleBindings for inactive namespace %q: %w", taskNamespace, err)
 	}
 	for i := range bindings.Items {
@@ -3583,7 +3590,7 @@ func (r *TaskReconciler) deleteTrustedServiceReadBindingsForNamespaceLocked(
 		}
 	}
 	roles := &rbacv1.RoleList{}
-	if err := r.List(ctx, roles, selector); err != nil {
+	if err := r.trustedServiceReadReader().List(ctx, roles, selector); err != nil {
 		return fmt.Errorf("listing trusted Service Roles for inactive namespace %q: %w", taskNamespace, err)
 	}
 	for i := range roles.Items {
@@ -3617,7 +3624,7 @@ func (r *TaskReconciler) deleteLegacyTrustedServiceReadBindingsForNamespaceLocke
 		}
 		seen[key] = struct{}{}
 		binding := &rbacv1.RoleBinding{}
-		if err := r.Get(ctx, key, binding); apierrors.IsNotFound(err) {
+		if err := r.trustedServiceReadReader().Get(ctx, key, binding); apierrors.IsNotFound(err) {
 			continue
 		} else if err != nil {
 			return fmt.Errorf("getting legacy trusted Service RoleBinding %s/%s: %w", key.Namespace, key.Name, err)
@@ -3656,7 +3663,7 @@ func (r *TaskReconciler) deleteTrustedServiceReadGrant(
 ) error {
 	key := types.NamespacedName{Namespace: binding.Namespace, Name: binding.Name}
 	role := &rbacv1.Role{}
-	if err := r.Get(ctx, key, role); err == nil {
+	if err := r.trustedServiceReadReader().Get(ctx, key, role); err == nil {
 		if trustedServiceReadRoleOwned(role, taskNamespace) {
 			if err := r.Delete(ctx, role); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("deleting trusted Service Role %s/%s: %w", role.Namespace, role.Name, err)
@@ -3736,7 +3743,7 @@ func legacyTrustedServiceReadRole(role *rbacv1.Role, taskNamespace string) bool 
 
 func (r *TaskReconciler) createOrUpdateTrustedServiceRole(ctx context.Context, desired *rbacv1.Role) error {
 	current := &rbacv1.Role{}
-	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}
@@ -3750,7 +3757,7 @@ func (r *TaskReconciler) createOrUpdateTrustedServiceRole(ctx context.Context, d
 
 func (r *TaskReconciler) createOrUpdateTrustedServiceRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
 	current := &rbacv1.RoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
+	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}

@@ -44,6 +44,7 @@ const (
 	testOutboundToolScope      = "orka:tools:http"
 	testTokenEndpointPath      = "/token_endpoint"
 	testParentTransactionToken = "parent-tx-token"
+	testTaskScopedTransaction  = "task-scoped-transaction"
 )
 
 func TestNewToolExecutor(t *testing.T) {
@@ -2617,7 +2618,7 @@ func TestToolExecutorGatewayRejectsNonPublicOriginalTarget(t *testing.T) {
 		GatewayHost:   gatewayURL.Host,
 	}}
 	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
-	executor.SetTransactionAuthority("task-scoped-transaction", nil)
+	executor.SetTransactionAuthority(testTaskScopedTransaction, nil)
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "http://127.0.0.1/latest/meta-data",
 		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "agentgateway"},
@@ -2891,7 +2892,7 @@ func TestToolHTTPClientRejectsCrossOriginRedirectWithoutCredentials(t *testing.T
 
 func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get(transactiontoken.HeaderName); got != "task-scoped-transaction" {
+		if got := r.Header.Get(transactiontoken.HeaderName); got != testTaskScopedTransaction {
 			t.Fatalf("%s = %q", transactiontoken.HeaderName, got)
 		}
 		w.WriteHeader(http.StatusOK)
@@ -2907,7 +2908,7 @@ func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
 		GatewayHost:   gatewayURL.Host,
 	}}
 	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
-	executor.SetTransactionAuthority("task-scoped-transaction", []string{"reports.read,reports.write"})
+	executor.SetTransactionAuthority(testTaskScopedTransaction, []string{"reports.read,reports.write"})
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "https://api.example.test/v1",
 		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "gateway"},
@@ -2915,7 +2916,7 @@ func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
 	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if resolver.request.TransactionToken != "task-scoped-transaction" ||
+	if resolver.request.TransactionToken != testTaskScopedTransaction ||
 		len(resolver.request.ParentTransactionScopes) != 1 ||
 		resolver.request.ParentTransactionScopes[0] != "reports.read,reports.write" {
 		t.Fatalf("resolver request = %#v", resolver.request)
@@ -2961,6 +2962,70 @@ func TestToolExecutorIncomingTTSDoesNotFallbackAfterTaskAuthorityIsSet(t *testin
 	_, err := executor.outboundTTSSubjectToken(contexttoken.TTSTokenSourceIncoming)
 	if err == nil || !strings.Contains(err.Error(), "task-scoped incoming") {
 		t.Fatalf("outboundTTSSubjectToken() error = %v", err)
+	}
+}
+
+type captureContextTokenExchanger struct {
+	request contexttoken.ExchangeRequest
+}
+
+func (e *captureContextTokenExchanger) Exchange(_ context.Context, req contexttoken.ExchangeRequest) (string, error) {
+	e.request = req
+	return "exchanged-transaction-token", nil
+}
+
+func TestToolExecutorBrokeredTTSFallsBackToTaskTransactionScopes(t *testing.T) {
+	t.Setenv(workerenv.ContextTokenOutboundScope, "")
+	t.Setenv(workerenv.TransactionScope, "")
+	t.Setenv(workerenv.TransactionScopes, "")
+	exchanger := &captureContextTokenExchanger{}
+	executor := &ToolExecutor{namespace: "tenant"}
+	executor.SetTransactionAuthority(testTaskScopedTransaction, []string{"reports.read", "reports.write"})
+	executor.SetTransactionExchangeConfig(&TransactionExchangeConfig{
+		TTS: contexttoken.TTSConfig{
+			Endpoint:    "https://issuer.example.test/oauth/token",
+			TokenSource: contexttoken.TTSTokenSourceIncoming,
+		},
+		Exchanger: exchanger,
+	})
+	token, err := executor.outboundTransactionToken(context.Background(), &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "reports", Namespace: "tenant"},
+	})
+	if err != nil {
+		t.Fatalf("outboundTransactionToken() error = %v", err)
+	}
+	if token != "exchanged-transaction-token" {
+		t.Fatalf("token = %q", token)
+	}
+	if exchanger.request.SubjectToken != testTaskScopedTransaction {
+		t.Fatalf("subject token = %q", exchanger.request.SubjectToken)
+	}
+	if exchanger.request.Scope != "reports.read reports.write" {
+		t.Fatalf("scope = %q, want task transaction scopes", exchanger.request.Scope)
+	}
+}
+
+func TestToolExecutorBrokeredTTSConfiguredOutboundScopePrecedesTaskScopes(t *testing.T) {
+	t.Setenv(workerenv.ContextTokenOutboundScope, "reports.read")
+	t.Setenv(workerenv.TransactionScope, "")
+	t.Setenv(workerenv.TransactionScopes, "")
+	exchanger := &captureContextTokenExchanger{}
+	executor := &ToolExecutor{namespace: "tenant"}
+	executor.SetTransactionAuthority(testTaskScopedTransaction, []string{"reports.read", "reports.write"})
+	executor.SetTransactionExchangeConfig(&TransactionExchangeConfig{
+		TTS: contexttoken.TTSConfig{
+			Endpoint:    "https://issuer.example.test/oauth/token",
+			TokenSource: contexttoken.TTSTokenSourceIncoming,
+		},
+		Exchanger: exchanger,
+	})
+	if _, err := executor.outboundTransactionToken(context.Background(), &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "reports", Namespace: "tenant"},
+	}); err != nil {
+		t.Fatalf("outboundTransactionToken() error = %v", err)
+	}
+	if exchanger.request.Scope != "reports.read" {
+		t.Fatalf("scope = %q, want configured outbound scope", exchanger.request.Scope)
 	}
 }
 

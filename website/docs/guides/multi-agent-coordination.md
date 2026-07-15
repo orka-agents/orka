@@ -109,7 +109,7 @@ When a coordinator Task has transaction metadata, delegated Tasks inherit the sa
 Required worker environment for child-token exchange:
 
 ```bash
-ORKA_CONTEXT_TOKEN_TTS_ENDPOINT=https://transaction-token-tts.transaction-token-system.svc
+ORKA_CONTEXT_TOKEN_TTS_ENDPOINT=https://transaction-token-tts.transaction-token-system.svc/oauth/token
 ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE=/var/run/orka/transaction-token/token
 ORKA_CONTEXT_TOKEN_CHILD_SCOPE=orka:agents:run
 ```

@@ -243,9 +243,10 @@ make demo-substrate-down                              # tear it down
 ### One cluster for everything (`demo-cluster-up-all`)
 
 Because the Substrate cluster is the superset (custom registry + gVisor nodes),
-a single bootstrap can host **all** demos (00–70) on it:
+a single bootstrap can host the current demos (00–40 and 60–70) on it:
 
 ```bash
+make demo-cluster-up-all        # substrate cluster + Orka + agent-sandbox + vekil + Provider/secrets
                                 # (one-time GitHub device-code login for vekil — follow the log prompt)
 ```
 
@@ -260,7 +261,6 @@ a single bootstrap can host **all** demos (00–70) on it:
 ```bash
 # Workspace demos bring their own namespace/env:
 kubectl config use-context kind-orka-agent-substrate-e2e
-
 
 # Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
 # (orka-live-template) and the sandbox-model-key Secret into `demo-magic`, so
@@ -285,9 +285,9 @@ make demo-cluster-up-all-down     # tear it all down
 
 Notes: `install-agent-sandbox.sh` runs **last** in the bootstrap because it sets
 the controller's default workspace provider to `agent-sandbox` (Demo 60 relies
-on that default; Demo 70 sets `provider: substrate` explicitly, so it's
-header, so the other demos (which send normal ServiceAccount tokens) are
-unaffected — they coexist safely.
+on that default). Demo 70 sets `provider: substrate` explicitly, while the
+model-backed demos continue to use their normal ServiceAccount authentication,
+so the scenarios coexist safely.
 
 Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
 release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error
@@ -333,10 +333,12 @@ An explicit `DEMO_CHAT_REQUEST` / `DEMO_MANUAL_REQUEST` env var or
 
 ### Bootstrapping a demo cluster
 
-For Demos 50 / 60 (and a clean rerun of 10–40) you can spin up a dedicated
-kind cluster:
+For Demo 60 (and a clean rerun of 10–40) you can spin up a dedicated kind
+cluster and load the sandbox runtime image:
 
 ```bash
+make demo-cluster-up
+make demo-images
 # ... run demos ...
 make demo-cluster-down
 ```

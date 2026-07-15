@@ -1693,6 +1693,9 @@ func (e *ToolExecutor) outboundTransactionToken(ctx context.Context, tool *corev
 	if scope == "" {
 		scope = strings.TrimSpace(os.Getenv(workerenv.ContextTokenOutboundScope))
 	}
+	if scope == "" && e != nil && e.transactionAuthoritySet {
+		scope = strings.Join(e.currentParentTransactionScopes(), " ")
+	}
 	if scope == "" {
 		scope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
 	}
