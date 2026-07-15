@@ -13,6 +13,7 @@ import (
 const (
 	defaultClaudePath     = "claude"
 	defaultClaudeMaxTurns = 50
+	claudeEffortEnv       = "ORKA_CLAUDE_EFFORT"
 )
 
 type ClaudeAdapter struct {
@@ -27,6 +28,10 @@ func (a *ClaudeAdapter) Name() string { return RuntimeClaude }
 
 func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
+	effort, err := claudeEffort(turn.Env)
+	if err != nil {
+		return nil, err
+	}
 	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
 	if dir == "" {
 		dir = DefaultWrapperWorkDir
@@ -42,7 +47,7 @@ func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comm
 
 	return &CommandSpec{
 		Path:  firstNonEmpty(a.config.Path, os.Getenv(workerenv.ClaudeCLIPath), defaultClaudePath),
-		Args:  buildClaudeArgs(agentCfg, turn),
+		Args:  buildClaudeArgs(agentCfg, turn, effort),
 		Env:   buildClaudeEnv(turn.Env),
 		Dir:   dir,
 		Stdin: nil,
@@ -53,13 +58,16 @@ func (a *ClaudeAdapter) ParseResult(_ context.Context, _ TurnContext, run Comman
 	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeClaude}}, nil
 }
 
-func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
+func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []string {
 	if cfg == nil {
 		cfg = &agentEnvConfig{MaxTurns: defaultClaudeMaxTurns}
 	}
 	args := []string{"--print", "--verbose"}
 	if model := strings.TrimSpace(cfg.Model); model != "" {
 		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if systemPrompt := strings.TrimSpace(cfg.SystemPrompt); systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
@@ -96,6 +104,22 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
 	}
 	args = append(args, "-p", turn.Prompt)
 	return args
+}
+
+func claudeEffort(turnEnv []string) (string, error) {
+	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		envEntryValue(turnEnv, claudeEffortEnv),
+		os.Getenv(claudeEffortEnv),
+	)))
+	if effort == "" {
+		return "", nil
+	}
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+		return effort, nil
+	default:
+		return "", fmt.Errorf("invalid %s %q: expected low, medium, high, xhigh, or max", claudeEffortEnv, effort)
+	}
 }
 
 func buildClaudeEnv(extra []string) []string {

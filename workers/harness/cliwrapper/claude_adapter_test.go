@@ -14,7 +14,7 @@ import (
 
 func TestClaudeAdapterBuildsMinimalArgs(t *testing.T) {
 	turn := TurnContext{Prompt: "hello world", Metadata: map[string]string{"maxTurns": "50"}}
-	args := buildClaudeArgs(agentConfigFromTurn(turn), turn)
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
 	assertContains(t, args, "--print")
 	assertContains(t, args, "--verbose")
 	assertFlagValue(t, args, "--max-turns", "50")
@@ -35,8 +35,9 @@ func TestClaudeAdapterBuildsFullArgs(t *testing.T) {
 			"disallowedTools": "Bash",
 		},
 	}
-	args := buildClaudeArgs(agentConfigFromTurn(turn), turn)
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "high")
 	assertFlagValue(t, args, "--model", "claude-sonnet-4-20250514")
+	assertFlagValue(t, args, "--effort", "high")
 	assertFlagValue(t, args, "--append-system-prompt", "You are a code reviewer")
 	assertFlagValue(t, args, "--max-turns", "100")
 	assertFlagValue(t, args, "--tools", "Read,Write")
@@ -50,10 +51,19 @@ func TestClaudeAdapterBuildsFullArgs(t *testing.T) {
 	}
 }
 
+func TestClaudeAdapterRejectsInvalidEffort(t *testing.T) {
+	t.Setenv(claudeEffortEnv, "maximum")
+	adapter := NewClaudeAdapter(ClaudeAdapterConfig{Path: "/fake/claude", WorkDir: t.TempDir()})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{})
+	if err == nil || !strings.Contains(err.Error(), claudeEffortEnv) {
+		t.Fatalf("BuildCommand error = %v, want effort validation", err)
+	}
+}
+
 func TestClaudeAdapterBuildsAllowBashArgs(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	turn := TurnContext{Prompt: "hello", Metadata: map[string]string{"allowBash": "true"}}
-	args := buildClaudeArgs(agentConfigFromTurn(turn), turn)
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
 	assertContains(t, args, "--dangerously-skip-permissions")
 }
 
@@ -77,7 +87,7 @@ func TestClaudeAdapterScopesReadOnlyPermissions(t *testing.T) {
 		},
 		WorkDir: "/repo-root",
 	}
-	args := buildClaudeArgs(agentConfigFromTurn(turn), turn)
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
 	assertContains(t, args, "--bare")
 	assertFlagValue(t, args, "--setting-sources", "")
 	assertFlagValue(t, args, "--permission-mode", "dontAsk")
