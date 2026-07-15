@@ -753,26 +753,34 @@ func newMonitorPRRepairsCmd() *cobra.Command {
 		Short: "List repair jobs for a PR",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			q := mergeQuery(map[string]string{}, "name", args[0], "kind", "pull_request", "number", args[1], "limit", "100")
 			c := newClientFromCmd(cmd)
-			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/work-actions", q, nil)
-			if err != nil {
-				return err
-			}
-			if body, ok := result.(map[string]any); ok {
-				if items, ok := body["items"].([]any); ok {
-					filtered := make([]any, 0, len(items))
-					for _, raw := range items {
-						item, _ := raw.(map[string]any)
-						switch fmt.Sprint(item["desiredAction"]) {
-						case "repair", "fix_ci", "update_branch":
-							filtered = append(filtered, raw)
-						}
+			filtered := []any{}
+			cursor := ""
+			for {
+				q := mergeQuery(map[string]string{}, "name", args[0], "kind", "pull_request", "number", args[1], "limit", "100", "continue", cursor)
+				result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/work-actions", q, nil)
+				if err != nil {
+					return err
+				}
+				body, ok := result.(map[string]any)
+				if !ok {
+					return fmt.Errorf("unexpected work-action response shape")
+				}
+				items, _ := body["items"].([]any)
+				for _, raw := range items {
+					item, _ := raw.(map[string]any)
+					switch fmt.Sprint(item["desiredAction"]) {
+					case "repair", "fix_ci", "update_branch":
+						filtered = append(filtered, raw)
 					}
-					body["items"] = filtered
+				}
+				metadata, _ := body["metadata"].(map[string]any)
+				cursor = strings.TrimSpace(fmt.Sprint(metadata["continue"]))
+				if cursor == "" || cursor == "<nil>" {
+					break
 				}
 			}
-			return printStructured(cmd, result)
+			return printStructured(cmd, map[string]any{"items": filtered, "metadata": map[string]any{"continue": ""}})
 		},
 	}
 	addOutputFlag(cmd, outputTable)

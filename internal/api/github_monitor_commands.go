@@ -306,7 +306,7 @@ func (h *Handlers) ensureRepositoryMonitorCommandLabelConsumed(c fiber.Ctx, moni
 		if updateErr := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); updateErr != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update monitor command: %v", updateErr))
 		}
-		return nil
+		return fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("failed to consume command label: %v", err))
 	}
 	mutation.Status = githubMutationStatusSucceeded
 	mutation.Error = ""
@@ -642,11 +642,12 @@ func githubIssueSnapshotDigest(monitor *corev1alpha1.RepositoryMonitor, target g
 	}
 	slicesSortStringsFold(labels)
 	payload := struct {
-		Number int      `json:"number"`
-		Title  string   `json:"title"`
-		Body   string   `json:"body"`
-		Labels []string `json:"labels"`
-	}{Number: target.Number, Title: target.Title, Body: target.Body, Labels: labels}
+		Number    int       `json:"number"`
+		Title     string    `json:"title"`
+		Body      string    `json:"body"`
+		Labels    []string  `json:"labels"`
+		UpdatedAt time.Time `json:"updatedAt"`
+	}{Number: target.Number, Title: target.Title, Body: target.Body, Labels: labels, UpdatedAt: target.UpdatedAt.UTC()}
 	data, _ := json.Marshal(payload)
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
