@@ -353,6 +353,9 @@ func (h *Handlers) consumeRepositoryMonitorCommandLabel(ctx context.Context, mon
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil
+		}
 		return fmt.Errorf("GitHub label removal returned %d: %s", resp.StatusCode, string(bytes.TrimSpace(data)))
 	}
 	return nil
@@ -395,6 +398,16 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 					return nil, false, err
 				}
 				return existing, true, nil
+			}
+			if existing.Phase == repositoryMonitorRunPhaseQueued {
+				if err := h.annotateRepositoryMonitorRunRequest(c, monitor, existing); err != nil {
+					_ = h.failRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, existing.ID, err)
+					if failErr := h.markRepositoryMonitorRunSignalFailed(c, existing, err); failErr != nil {
+						return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
+					}
+					return nil, false, err
+				}
+				return existing, false, nil
 			}
 			return existing, false, nil
 		}
