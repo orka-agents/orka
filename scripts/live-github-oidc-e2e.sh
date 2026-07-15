@@ -27,13 +27,24 @@ workdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/orka-oidc-e2e.XXXXXX")"
 kustomization="${repo_root}/config/manager/kustomization.yaml"
 backup="${workdir}/kustomization.yaml"
 api_pf_pid=""
+api_pf_log="${workdir}/api-port-forward.log"
 
 cleanup() {
   status=$?
-  if [[ -n "${api_pf_pid}" ]]; then kill "${api_pf_pid}" >/dev/null 2>&1 || true; fi
+  if [[ -n "${api_pf_pid}" ]]; then
+    kill "${api_pf_pid}" >/dev/null 2>&1 || true
+    wait "${api_pf_pid}" 2>/dev/null || true
+  fi
   if [[ -f "${backup}" ]]; then cp "${backup}" "${kustomization}"; fi
   if [[ ${status} -ne 0 ]]; then
-    { kubectl -n "${namespace}" get pods 2>/dev/null || true; kubectl -n "${namespace}" logs deployment/"${deployment}" --tail=200 2>/dev/null || true; } | redact >&2
+    {
+      kubectl -n "${namespace}" get pods 2>/dev/null || true
+      kubectl -n "${namespace}" logs deployment/"${deployment}" --tail=200 2>/dev/null || true
+      if [[ -f "${api_pf_log}" ]]; then
+        printf '%s\n' '--- API port-forward log ---'
+        cat "${api_pf_log}"
+      fi
+    } | redact >&2
   fi
   kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true
   rm -rf "${workdir}"
@@ -54,6 +65,30 @@ fetch_token() {
 request() {
   method="$1"; url="$2"; output="$3"; shift 3
   curl -sS -o "${output}" -w '%{http_code}' -X "${method}" "${url}" "$@"
+}
+
+start_api_port_forward() {
+  kubectl -n "${namespace}" port-forward service/orka-api "${port}:8080" >>"${api_pf_log}" 2>&1 &
+  api_pf_pid=$!
+}
+
+wait_for_api() {
+  local attempts_remaining=90
+
+  while (( attempts_remaining > 0 )); do
+    if curl -fsS --connect-timeout 5 --max-time 10 "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ -n "${api_pf_pid}" ]] && ! kill -0 "${api_pf_pid}" 2>/dev/null; then
+      wait "${api_pf_pid}" 2>/dev/null || true
+      api_pf_pid=""
+      start_api_port_forward
+    fi
+    attempts_remaining=$((attempts_remaining - 1))
+    sleep 2
+  done
+
+  die "Orka API did not become ready"
 }
 
 for cmd in make go docker kind kubectl curl jq; do require_cmd "${cmd}"; done
@@ -80,10 +115,8 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_CONTEXT_TOKEN_ISSUER- \
   ORKA_CONTEXT_TOKEN_AUDIENCE-
 kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout=5m
-kubectl -n "${namespace}" port-forward service/orka-api "${port}:8080" >"${workdir}/port-forward.log" 2>&1 &
-api_pf_pid=$!
-for _ in $(seq 1 60); do curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null || die "Orka API did not become ready"
+start_api_port_forward
+wait_for_api
 
 payload="${workdir}/task.json"
 response="${workdir}/response.json"
