@@ -416,3 +416,29 @@ func TestHarnessBrokeredOutboundPolicyIdentityChangesOnServiceAccountRecreation(
 		t.Fatal("ServiceAccount recreation did not change brokered approval identity")
 	}
 }
+
+func TestToolReconcilerDirectPolicyDefersMCPResolvedEndpointValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	policy := readyControllerPolicy("tenant", "direct-mcp", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}})
+	client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build()
+	reconciler := &ToolReconciler{Client: client}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "mcp", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{
+			HTTP: &corev1alpha1.HTTPExecution{OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy.Name}},
+			MCP:  &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{}},
+		},
+	}
+	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err != nil {
+		t.Fatalf("unresolved endpoint error = %v", err)
+	}
+	tool.Status.Endpoint = "https://actor.example.test/mcp"
+	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err != nil {
+		t.Fatalf("HTTPS endpoint error = %v", err)
+	}
+	tool.Status.Endpoint = "http://actor.example.test/mcp"
+	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil {
+		t.Fatal("plaintext resolved endpoint accepted")
+	}
+}

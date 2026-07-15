@@ -705,12 +705,16 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 		return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q", transactiontoken.HeaderName)
 	}
 
-	transactionToken, err := e.outboundTransactionToken(ctx, tool)
-	if err != nil {
-		return preparedToolRequest{}, err
-	}
-	if transactionToken != "" {
-		req.Header.Set(transactiontoken.HeaderName, transactionToken)
+	transactionToken := ""
+	policyBacked := tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil
+	if !policyBacked {
+		transactionToken, err = e.outboundTransactionToken(ctx, tool)
+		if err != nil {
+			return preparedToolRequest{}, err
+		}
+		if transactionToken != "" {
+			req.Header.Set(transactiontoken.HeaderName, transactionToken)
+		}
 	}
 
 	prepared := preparedToolRequest{
@@ -738,6 +742,21 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		return errors.New("outbound access policy reference name is required")
 	}
 	parentScopes := e.currentParentTransactionScopes()
+	transactionTokenSource := func() (string, error) {
+		if strings.TrimSpace(prepared.transactionToken) != "" {
+			return prepared.transactionToken, nil
+		}
+		token, err := e.outboundTransactionToken(ctx, tool)
+		if err != nil {
+			return "", err
+		}
+		prepared.transactionToken = token
+		prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, token)...)
+		if token != "" {
+			prepared.request.Header.Set(transactiontoken.HeaderName, token)
+		}
+		return token, nil
+	}
 	targetScheme := ""
 	if prepared.request != nil && prepared.request.URL != nil {
 		targetScheme = prepared.request.URL.Scheme
@@ -746,6 +765,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		Namespace:               e.namespace,
 		PolicyName:              ref.Name,
 		TransactionToken:        prepared.transactionToken,
+		TransactionTokenSource:  transactionTokenSource,
 		ParentTransactionScopes: parentScopes,
 		HasAuthSecretRef:        prepared.httpConfig.AuthSecretRef != nil,
 		TargetScheme:            targetScheme,
@@ -775,6 +795,11 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		prepared.request.Header.Del(transactiontoken.HeaderName)
 		prepared.request.Header.Set(header, resolution.CredentialValue)
 	case outboundaccess.AdapterGateway:
+		if strings.TrimSpace(prepared.transactionToken) == "" {
+			if _, err := transactionTokenSource(); err != nil {
+				return err
+			}
+		}
 		if len(parentScopes) > 0 && strings.TrimSpace(prepared.transactionToken) == "" {
 			return errors.New("gateway outbound access requires task-scoped transaction authority")
 		}

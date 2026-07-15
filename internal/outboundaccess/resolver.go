@@ -47,6 +47,7 @@ type ResolveRequest struct {
 	Namespace               string
 	PolicyName              string
 	TransactionToken        string
+	TransactionTokenSource  func() (string, error)
 	ParentTransactionScopes []string
 	HasAuthSecretRef        bool
 	TargetScheme            string
@@ -109,6 +110,18 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	} else if issue != nil {
 		return Resolution{}, issue
 	}
+	needsTransactionToken := policy.Spec.Gateway != nil
+	if direct := policy.Spec.Direct; direct != nil {
+		needsTransactionToken = direct.Subject.Source == corev1alpha1.OutboundTokenSourceTransactionToken ||
+			(direct.Actor != nil && direct.Actor.Source == corev1alpha1.OutboundTokenSourceTransactionToken)
+	}
+	if needsTransactionToken && strings.TrimSpace(req.TransactionToken) == "" && req.TransactionTokenSource != nil {
+		token, err := req.TransactionTokenSource()
+		if err != nil {
+			return Resolution{}, err
+		}
+		req.TransactionToken = token
+	}
 	if policy.Spec.Direct != nil {
 		if !strings.EqualFold(strings.TrimSpace(req.TargetScheme), schemeHTTPS) {
 			return Resolution{}, errors.New("direct outbound access requires an HTTPS Tool URL")
@@ -151,7 +164,7 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 			return Resolution{}, err
 		}
 	}
-	endpoint, endpointTLS, err := r.resolveTokenEndpoint(ctx, policy.Namespace, direct.TokenEndpoint)
+	endpoint, endpointTLS, endpointIdentity, err := r.resolveTokenEndpoint(ctx, policy.Namespace, direct.TokenEndpoint)
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -184,7 +197,7 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 		ClientAuthentication:    clientAuth,
 		ExpectedIssuedTokenType: direct.ExpectedIssuedTokenType,
 		RequiredTokenType:       "Bearer",
-		CacheNamespace:          policyCacheNamespace(policy),
+		CacheNamespace:          policyCacheNamespace(policy) + endpointIdentity,
 	})
 	if err != nil {
 		return Resolution{}, fmt.Errorf("outbound resource token exchange failed: %w", err)
@@ -290,13 +303,13 @@ func (r *KubernetesResolver) resolveTokenSource(ctx context.Context, namespace s
 	}
 }
 
-func (r *KubernetesResolver) resolveTokenEndpoint(ctx context.Context, namespace string, endpoint corev1alpha1.OutboundTokenEndpoint) (string, tokenexchange.TLSConfig, error) {
+func (r *KubernetesResolver) resolveTokenEndpoint(ctx context.Context, namespace string, endpoint corev1alpha1.OutboundTokenEndpoint) (string, tokenexchange.TLSConfig, string, error) {
 	tlsConfig, err := r.resolveTLS(ctx, namespace, endpoint.TLS)
 	if err != nil {
-		return "", tokenexchange.TLSConfig{}, err
+		return "", tokenexchange.TLSConfig{}, "", err
 	}
 	if endpoint.URL != "" {
-		return strings.TrimSpace(endpoint.URL), tlsConfig, nil
+		return strings.TrimSpace(endpoint.URL), tlsConfig, "", nil
 	}
 	serviceNamespace := strings.TrimSpace(endpoint.ServiceRef.Namespace)
 	if serviceNamespace == "" {
@@ -312,8 +325,15 @@ func (r *KubernetesResolver) resolveTokenEndpoint(ctx context.Context, namespace
 	}
 	parsedPath, err := url.ParseRequestURI(path)
 	if err != nil {
-		return "", tokenexchange.TLSConfig{}, errors.New("token endpoint Service path is invalid")
+		return "", tokenexchange.TLSConfig{}, "", errors.New("token endpoint Service path is invalid")
 	}
+	service := &corev1.Service{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: serviceNamespace, Name: endpoint.ServiceRef.Name}, service); err != nil {
+		return "", tokenexchange.TLSConfig{}, "", fmt.Errorf("resolve token endpoint Service identity: %w", err)
+	}
+	identityData, _ := json.Marshal([]any{serviceNamespace, service.Name, string(service.UID), service.ResourceVersion, endpoint.ServiceRef.Port})
+	identitySum := sha256.Sum256(identityData)
+	endpointIdentity := hex.EncodeToString(identitySum[:])
 	endpointURL := url.URL{
 		Scheme:   scheme,
 		Host:     net.JoinHostPort(endpoint.ServiceRef.Name+"."+serviceNamespace+".svc", fmt.Sprintf("%d", endpoint.ServiceRef.Port)),
@@ -321,7 +341,7 @@ func (r *KubernetesResolver) resolveTokenEndpoint(ctx context.Context, namespace
 		RawPath:  parsedPath.RawPath,
 		RawQuery: parsedPath.RawQuery,
 	}
-	return endpointURL.String(), tlsConfig, nil
+	return endpointURL.String(), tlsConfig, endpointIdentity, nil
 }
 
 func (r *KubernetesResolver) resolveClientAuthentication(ctx context.Context, namespace string, auth *corev1alpha1.OutboundClientAuthentication) (tokenexchange.ClientAuthentication, []string, error) {

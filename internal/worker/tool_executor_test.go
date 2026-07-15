@@ -2402,6 +2402,13 @@ type fakeOutboundAccessResolver struct {
 }
 
 func (r *fakeOutboundAccessResolver) Resolve(_ context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	if r.err == nil && r.resolution.Adapter == outboundaccess.AdapterGateway && req.TransactionTokenSource != nil {
+		token, err := req.TransactionTokenSource()
+		if err != nil {
+			return outboundaccess.Resolution{}, err
+		}
+		req.TransactionToken = token
+	}
 	r.request = req
 	return r.resolution, r.err
 }
@@ -2484,7 +2491,8 @@ func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *
 	if transactionHeader != "" {
 		t.Fatalf("%s = %q", transactiontoken.HeaderName, transactionHeader)
 	}
-	if resolver.request.PolicyName != "resource-api" || resolver.request.TransactionToken != "parent-transaction-token" || resolver.request.TargetScheme != "https" {
+	if resolver.request.PolicyName != "resource-api" || resolver.request.TransactionToken != "" ||
+		resolver.request.TransactionTokenSource == nil || resolver.request.TargetScheme != "https" {
 		t.Fatalf("resolver request = %#v", resolver.request)
 	}
 	if got := resolver.request.ParentTransactionScopes; len(got) != 2 || got[0] != "api.read" || got[1] != "api.write" {
@@ -2900,5 +2908,23 @@ func TestToolExecutorUsesExactInjectedAuthSecretSnapshot(t *testing.T) {
 	}
 	if authorization != "Bearer approved-snapshot" {
 		t.Fatalf("Authorization = %q", authorization)
+	}
+}
+
+type failingContextTokenExchanger struct{}
+
+func (failingContextTokenExchanger) Exchange(context.Context, contexttoken.ExchangeRequest) (string, error) {
+	return "", errors.New("TTS unavailable")
+}
+
+func TestToolExecutorCredentialOnlyDirectPolicyDoesNotRequireTransactionExchange(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	defer server.Close()
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{Adapter: outboundaccess.AdapterDirect, CredentialHeader: "Authorization", CredentialValue: "Bearer resource"}}
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor.SetTransactionExchangeConfig(&TransactionExchangeConfig{TTS: contexttoken.TTSConfig{Endpoint: "https://tts.example.test", TokenSource: contexttoken.TTSTokenSourceServiceAccount}, Exchanger: failingContextTokenExchanger{}})
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "direct"}}}}
+	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
 }

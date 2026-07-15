@@ -271,3 +271,37 @@ func TestKubernetesResolverReusesDefaultExchanger(t *testing.T) {
 		t.Fatalf("default exchanger was not reused: %p != %p", first, second)
 	}
 }
+
+func TestKubernetesResolverServiceEndpointIdentityChangesCacheNamespace(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("service-direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:                   corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{ServiceRef: &corev1alpha1.OutboundServiceReference{Name: "issuer", Port: 8443}},
+		Subject:                 corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceSecretRef, TokenType: tokenexchange.TokenTypeAccessToken, SecretRef: secretRef("subject", "token")},
+		ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+	}})
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "subject", Namespace: "tenant"}, Data: map[string][]byte{"token": []byte("assertion")}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "issuer", Namespace: "tenant", UID: "service-a", ResourceVersion: "1"}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 8443}}}}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, secret, service).Build()
+	exchanger := &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
+	resolver := &KubernetesResolver{Reader: reader, Exchanger: exchanger}
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https"}); err != nil {
+		t.Fatal(err)
+	}
+	first := exchanger.request.CacheNamespace
+	if err := reader.Delete(context.Background(), service); err != nil {
+		t.Fatal(err)
+	}
+	replacement := service.DeepCopy()
+	replacement.ResourceVersion = ""
+	replacement.UID = "service-b"
+	if err := reader.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), ResolveRequest{Namespace: "tenant", PolicyName: policy.Name, TargetScheme: "https"}); err != nil {
+		t.Fatal(err)
+	}
+	if first == exchanger.request.CacheNamespace {
+		t.Fatal("Service recreation did not change exchange cache namespace")
+	}
+}

@@ -230,7 +230,14 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 			if tool.Spec.HTTP.AuthSecretRef != nil {
 				return fmt.Errorf("direct outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
-			parsed, err := url.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+			targetURL := strings.TrimSpace(tool.Spec.HTTP.URL)
+			if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
+				targetURL = strings.TrimSpace(tool.Status.Endpoint)
+				if targetURL == "" {
+					return nil
+				}
+			}
+			parsed, err := url.Parse(targetURL)
 			if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
 				return fmt.Errorf("direct outbound access policy %q requires an HTTPS Tool URL", ref.Name)
 			}
