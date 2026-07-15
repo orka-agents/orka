@@ -39,6 +39,9 @@ const (
 	AdapterGateway = "gateway"
 	schemeHTTP     = "http"
 	schemeHTTPS    = "https"
+
+	// DefaultCredentialReadScope authorizes use of cluster-managed credential material.
+	DefaultCredentialReadScope = "orka:secrets:credentials:read"
 )
 
 // ResolveRequest contains trusted execution-time context that is not stored in
@@ -470,8 +473,33 @@ func policyConditionCurrentTrue(policy *corev1alpha1.OutboundAccessPolicy, condi
 	return false
 }
 
+// ValidateCredentialAuthority enforces immutable transaction authorization for
+// Secret- and ServiceAccount-backed outbound credentials.
+func ValidateCredentialAuthority(enforced, scopeAllowed bool, constraint string, secretNames []string, usesServiceAccount bool) error {
+	if !enforced {
+		return nil
+	}
+	names := make([]string, 0, len(secretNames))
+	for _, name := range secretNames {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	if (len(names) > 0 || usesServiceAccount) && !scopeAllowed {
+		return errors.New("outbound credentials are not authorized by task transaction authority")
+	}
+	if constraint = strings.TrimSpace(constraint); constraint != "" {
+		for _, name := range names {
+			if name != constraint {
+				return errors.New("outbound credential Secret does not match task transaction authority")
+			}
+		}
+	}
+	return nil
+}
+
 func validatePolicyCredentialAuthority(req ResolveRequest, policy *corev1alpha1.OutboundAccessPolicy) error {
-	if !req.CredentialAuthorityEnforced || policy == nil {
+	if policy == nil {
 		return nil
 	}
 	credentialSecrets := []string{}
@@ -484,17 +512,13 @@ func validatePolicyCredentialAuthority(req ResolveRequest, policy *corev1alpha1.
 	if gateway := policy.Spec.Gateway; gateway != nil && gateway.TLS != nil && gateway.TLS.CASecretRef != nil {
 		credentialSecrets = append(credentialSecrets, strings.TrimSpace(gateway.TLS.CASecretRef.Name))
 	}
-	if (len(credentialSecrets) > 0 || usesServiceAccount) && !req.CredentialScopeAllowed {
-		return errors.New("outbound credentials are not authorized by task transaction authority")
-	}
-	if constraint := strings.TrimSpace(req.CredentialSecret); constraint != "" {
-		for _, name := range credentialSecrets {
-			if name != "" && name != constraint {
-				return errors.New("outbound credential Secret does not match task transaction authority")
-			}
-		}
-	}
-	return nil
+	return ValidateCredentialAuthority(
+		req.CredentialAuthorityEnforced,
+		req.CredentialScopeAllowed,
+		req.CredentialSecret,
+		credentialSecrets,
+		usesServiceAccount,
+	)
 }
 
 func tokenSourceUsesServiceAccount(source corev1alpha1.OutboundTokenSource) bool {

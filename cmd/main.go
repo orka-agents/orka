@@ -735,6 +735,10 @@ func main() {
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
+	jobBuilder.TransactionCredentialReadScopes = append(
+		[]string(nil),
+		contextTokenAuthzConfig.SecretCredentialReadScopes()...,
+	)
 	jobBuilder.OutboundAccessTrustedGatewayServices = outboundAccessTrustedGatewayServices
 	jobBuilder.OutboundAccessTrustedTokenEndpointServices = outboundAccessTrustedTokenEndpointServices
 	// Auto-discover controller URL from in-cluster service if not explicitly set
@@ -783,7 +787,11 @@ func main() {
 		ContainerWorkerClusterRoleName:      containerWorkerClusterRoleName,
 		WorkerClusterRoleBindingNamePrefix:  workerClusterRoleBindingNamePrefix,
 		AIWorkerTokenRequestClusterRoleName: aiWorkerTokenRequestClusterRoleName,
-		OutboundAccessTrust:                 outboundAccessTrust,
+		TransactionCredentialReadScopes: append(
+			[]string(nil),
+			contextTokenAuthzConfig.SecretCredentialReadScopes()...,
+		),
+		OutboundAccessTrust: outboundAccessTrust,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)

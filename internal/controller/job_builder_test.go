@@ -2953,11 +2953,15 @@ func BenchmarkJobBuilderBuildResourcesDefaults(b *testing.B) {
 	}
 }
 
-func TestAddTransactionEnvVarsIncludesCredentialSecretConstraint(t *testing.T) {
+func TestAddTransactionEnvVarsIncludesCredentialAuthority(t *testing.T) {
 	tx := &corev1alpha1.TaskTransaction{Context: map[string]string{"secret": "resource-credential"}}
-	env := addTransactionEnvVars(nil, tx)
+	env := addTransactionEnvVars(nil, tx, []string{"tenant:outbound-credentials:read"})
 	got, ok := findEnvVar(env, workerenv.TransactionCredentialSecret)
 	if !ok || got.Value != "resource-credential" {
-		t.Fatalf("env = %#v", env)
+		t.Fatalf("credential constraint env = %#v", env)
+	}
+	got, ok = findEnvVar(env, workerenv.TransactionCredentialReadScopes)
+	if !ok || got.Value != "tenant:outbound-credentials:read" {
+		t.Fatalf("credential scopes env = %#v", env)
 	}
 }

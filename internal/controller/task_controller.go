@@ -123,6 +123,7 @@ type TaskReconciler struct {
 	ContainerWorkerClusterRoleName      string
 	WorkerClusterRoleBindingNamePrefix  string
 	AIWorkerTokenRequestClusterRoleName string
+	TransactionCredentialReadScopes     []string
 	OutboundAccessTrust                 outboundaccess.TrustConfig
 }
 

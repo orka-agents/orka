@@ -100,6 +100,7 @@ type JobBuilder struct {
 	ContextTokenOutboundScope                  string
 	ContextTokenChildTokenTTL                  string
 	ContextTokenToolTokenTTL                   string
+	TransactionCredentialReadScopes            []string
 	OutboundAccessTrustedGatewayServices       string
 	OutboundAccessTrustedTokenEndpointServices string
 	EnableTelemetry                            bool
@@ -618,7 +619,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
-	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction)
+	envVars = addTransactionEnvVars(envVars, task.Spec.Transaction, b.TransactionCredentialReadScopes)
 
 	// Add prior task env vars for iterative coordination
 	if task.Spec.PriorTaskRef != nil {
@@ -874,7 +875,11 @@ func isReservedTraceContextEnv(name string) bool {
 	}
 }
 
-func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransaction) []corev1.EnvVar {
+func addTransactionEnvVars(
+	envVars []corev1.EnvVar,
+	tx *corev1alpha1.TaskTransaction,
+	credentialReadScopes []string,
+) []corev1.EnvVar {
 	if tx == nil {
 		return envVars
 	}
@@ -888,6 +893,11 @@ func addTransactionEnvVars(envVars []corev1.EnvVar, tx *corev1alpha1.TaskTransac
 	envVars = setControllerEnv(envVars, workerenv.TransactionContextDigest, tx.ContextDigest)
 	envVars = setControllerEnv(envVars, workerenv.TransactionRequesterContextDigest, tx.RequesterContextDigest)
 	envVars = setControllerEnv(envVars, workerenv.TransactionCredentialSecret, tx.Context["secret"])
+	envVars = setControllerEnv(
+		envVars,
+		workerenv.TransactionCredentialReadScopes,
+		workerenv.JoinCSV(credentialReadScopes),
+	)
 	return envVars
 }
 

@@ -63,7 +63,7 @@ Direct mode rejects reserved OAuth additional parameters, `Txn-Token` as the out
 
 Gateway mode selects an exact Kubernetes Service namespace/name/port, scheme, and optional TLS server name/CA Secret. Orka dials that Service while preserving the original Tool authority, path, query, method, body, protocol headers, idempotency key, transaction token, and explicit Tool authorization. Same-namespace Services are allowed automatically. Cross-namespace Services require an exact entry in the appropriate gateway allowlist; wildcards are forbidden.
 
-The original Tool URL still passes SSRF validation. Only the explicitly trusted gateway dial target bypasses public-host validation. Gateway redirects are not followed.
+The original Tool URL still passes SSRF validation. Only the explicitly trusted gateway dial target bypasses public-host validation. Gateway redirects are not followed. Because Orka dials only the trusted Service, that gateway is the enforcement boundary that binds the preserved authority to an operator-configured upstream; it must not act as an unrestricted DNS forward proxy. Orka's execution-time hostname check is defense in depth against stale or newly mutated Tool definitions, not a replacement for gateway route policy.
 
 ### Trusted Service configuration
 

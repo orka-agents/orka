@@ -883,6 +883,19 @@ func TestClientRejectsExpiresInOverflow(t *testing.T) {
 	}
 }
 
+func TestValidatePublicEndpointHostRejectsPrivateLiteral(t *testing.T) {
+	err := ValidatePublicEndpointHost(context.Background(), "127.0.0.1")
+	if err == nil || !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("ValidatePublicEndpointHost() error = %v, want non-public address rejection", err)
+	}
+}
+
+func TestValidatePublicEndpointHostAllowsPublicLiteral(t *testing.T) {
+	if err := ValidatePublicEndpointHost(context.Background(), "8.8.8.8"); err != nil {
+		t.Fatalf("ValidatePublicEndpointHost() error = %v", err)
+	}
+}
+
 func TestValidatePublicEndpointAddressesBoundsDNSFanout(t *testing.T) {
 	addresses := make([]net.IPAddr, maxPublicEndpointAddresses+1)
 	for i := range addresses {

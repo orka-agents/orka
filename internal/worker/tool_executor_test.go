@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,16 @@ func TestNewToolExecutor(t *testing.T) {
 	}
 	if executor.namespace == "" {
 		t.Error("namespace should have a default value")
+	}
+}
+
+func TestNewToolExecutorUsesConfiguredCredentialReadScopes(t *testing.T) {
+	t.Setenv(workerenv.TransactionID, "txn-1")
+	t.Setenv(workerenv.TransactionScopes, "tenant:outbound-credentials:read")
+	t.Setenv(workerenv.TransactionCredentialReadScopes, "tenant:outbound-credentials:read")
+	executor := NewToolExecutor()
+	if !executor.credentialAuthorityEnforced || !executor.credentialScopeAllowed {
+		t.Fatalf("credential authority = enforced %t allowed %t", executor.credentialAuthorityEnforced, executor.credentialScopeAllowed)
 	}
 }
 
@@ -2525,6 +2536,98 @@ func TestToolExecutorDirectOutboundAccessRejectsHeaderCollision(t *testing.T) {
 	}
 	if called {
 		t.Fatal("downstream called despite credential header collision")
+	}
+}
+
+func TestToolExecutorGetSecretKeyEnforcesTransactionCredentialAuthority(t *testing.T) {
+	tests := []struct {
+		name       string
+		enforced   bool
+		allowed    bool
+		constraint string
+		wantErr    string
+	}{
+		{name: "non transaction", wantErr: ""},
+		{name: "missing scope", enforced: true, wantErr: "not authorized"},
+		{name: "constraint mismatch", enforced: true, allowed: true, constraint: "other", wantErr: "does not match"},
+		{name: "authorized", enforced: true, allowed: true, constraint: "resource-auth", wantErr: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &ToolExecutor{
+				credentialAuthorityEnforced: tt.enforced,
+				credentialScopeAllowed:      tt.allowed,
+				credentialSecret:            tt.constraint,
+				authSecretValues:            map[string]string{"resource-auth\x00token": "credential-value"},
+			}
+			value, err := executor.getSecretKey(context.Background(), "resource-auth", "token")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("getSecretKey() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || value != "credential-value" {
+				t.Fatalf("getSecretKey() = %q, %v", value, err)
+			}
+		})
+	}
+}
+
+func TestValidateGatewayOriginalTargetUsesForwardedAuthority(t *testing.T) {
+	requestURL, err := neturl.Parse("https://8.8.8.8/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = validateGatewayOriginalTarget(context.Background(), requestURL, "127.0.0.1", false)
+	if err == nil || !strings.Contains(err.Error(), "public original Tool URL") {
+		t.Fatalf("validateGatewayOriginalTarget() error = %v, want forwarded authority rejection", err)
+	}
+}
+
+func TestValidateGatewayOriginalTargetAllowsControllerResolvedActorRoute(t *testing.T) {
+	requestURL, err := neturl.Parse("http://127.0.0.1:8080/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGatewayOriginalTarget(
+		context.Background(),
+		requestURL,
+		"actor-1.actors.resources.substrate.ate.dev",
+		true,
+	); err != nil {
+		t.Fatalf("validateGatewayOriginalTarget() error = %v", err)
+	}
+}
+
+func TestToolExecutorGatewayRejectsNonPublicOriginalTarget(t *testing.T) {
+	var gatewayCalled atomic.Bool
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gatewayCalled.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+	gatewayURL, err := neturl.Parse(gateway.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{
+		Adapter:       outboundaccess.AdapterGateway,
+		GatewayScheme: gatewayURL.Scheme,
+		GatewayHost:   gatewayURL.Host,
+	}}
+	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
+	executor.SetTransactionAuthority("task-scoped-transaction", nil)
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+		URL:                     "http://127.0.0.1/latest/meta-data",
+		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "agentgateway"},
+	}}}
+	_, err = executor.Execute(context.Background(), tool, nil)
+	if err == nil || !strings.Contains(err.Error(), "public original Tool URL") {
+		t.Fatalf("Execute() error = %v, want non-public original target rejection", err)
+	}
+	if gatewayCalled.Load() {
+		t.Fatal("gateway received request for a non-public original target")
 	}
 }
 

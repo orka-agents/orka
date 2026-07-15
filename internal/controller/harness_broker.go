@@ -23,6 +23,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	toolspkg "github.com/orka-agents/orka/internal/tools"
 	worker "github.com/orka-agents/orka/internal/worker"
@@ -272,6 +273,29 @@ func (r *TaskReconciler) harnessBrokeredTransactionAuthority(ctx context.Context
 	return token, scopes, nil
 }
 
+func (r *TaskReconciler) harnessBrokeredTransactionCredentialAuthority(task *corev1alpha1.Task) (bool, bool, string) {
+	if task == nil || task.Spec.Transaction == nil {
+		return false, false, ""
+	}
+	tx := task.Spec.Transaction
+	requiredScopes := r.TransactionCredentialReadScopes
+	if len(requiredScopes) == 0 {
+		requiredScopes = []string{outboundaccess.DefaultCredentialReadScope}
+	}
+	allowed := false
+	for _, scope := range requiredScopes {
+		if toolspkg.TransactionHasScope(tx, scope) {
+			allowed = true
+			break
+		}
+	}
+	constraint := ""
+	if tx.Context != nil {
+		constraint = strings.TrimSpace(tx.Context["secret"])
+	}
+	return strings.TrimSpace(tx.ID) != "", allowed, constraint
+}
+
 //nolint:gocyclo // Brokered tool handling is a compact policy/approval/idempotency state machine.
 func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	ctx context.Context,
@@ -401,6 +425,27 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 			ctx, task, frame, events.ExecutionEventTypeToolCallFailed, err.Error(), brokeredToolEventContent(result, nil),
 		)
 	}
+	credentialAuthorityEnforced, credentialScopeAllowed, credentialSecret :=
+		r.harnessBrokeredTransactionCredentialAuthority(task)
+	if tool.Spec.HTTP != nil && tool.Spec.HTTP.AuthSecretRef != nil {
+		if err := outboundaccess.ValidateCredentialAuthority(
+			credentialAuthorityEnforced,
+			credentialScopeAllowed,
+			credentialSecret,
+			[]string{tool.Spec.HTTP.AuthSecretRef.Name},
+			false,
+		); err != nil {
+			result.Error = brokeredToolError("credential_authority_unavailable", err)
+			return result, r.recordHarnessBrokeredToolEvent(
+				ctx,
+				task,
+				frame,
+				events.ExecutionEventTypeToolCallFailed,
+				err.Error(),
+				brokeredToolEventContent(result, nil),
+			)
+		}
+	}
 	transactionIdentity, err := r.harnessBrokeredTransactionAuthorityIdentityFromSnapshot(
 		ctx, task, transactionToken, transactionScopes,
 	)
@@ -473,6 +518,7 @@ func (r *TaskReconciler) handleHarnessBrokeredToolCall(
 	execCtx = worker.WithToolIdempotencyKey(execCtx, execIdempotencyKey)
 	executor := worker.NewToolExecutorForNamespace(task.Namespace, r.KubeClient, nil, r.OutboundAccessResolver)
 	executor.SetTransactionAuthority(transactionToken, transactionScopes)
+	executor.SetTransactionCredentialAuthority(credentialAuthorityEnforced, credentialScopeAllowed, credentialSecret)
 	executor.SetTransactionExchangeConfig(r.BrokeredTransactionExchange)
 	if tool.Spec.HTTP != nil && tool.Spec.HTTP.AuthSecretRef != nil {
 		executor.SetAuthSecretValue(tool.Spec.HTTP.AuthSecretRef.Name, tool.Spec.HTTP.AuthSecretRef.Key, authSecretValue)

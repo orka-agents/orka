@@ -712,6 +712,23 @@ func PublicEndpointDialContext(ctx context.Context, network, address string) (ne
 	return publicEndpointDialContext(ctx, network, address)
 }
 
+// ValidatePublicEndpointHost resolves host and rejects non-public or excessive address sets.
+// It is intended for execution-time validation when another trusted hop performs the dial.
+func ValidatePublicEndpointHost(ctx context.Context, host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return errors.New("public endpoint host is required")
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return errors.New("public endpoint host could not be resolved")
+	}
+	if err := validatePublicEndpointAddresses(addresses); err != nil {
+		return fmt.Errorf("public endpoint validation failed: %w", err)
+	}
+	return nil
+}
+
 func publicEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {

@@ -204,6 +204,10 @@ func NewToolExecutor() *ToolExecutor {
 	if len(credentialScopes) == 0 {
 		credentialScopes = strings.Fields(os.Getenv(workerenv.TransactionScope))
 	}
+	requiredCredentialScopes := workerenv.SplitCSV(os.Getenv(workerenv.TransactionCredentialReadScopes))
+	if len(requiredCredentialScopes) == 0 {
+		requiredCredentialScopes = []string{outboundaccess.DefaultCredentialReadScope}
+	}
 	return &ToolExecutor{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -213,7 +217,7 @@ func NewToolExecutor() *ToolExecutor {
 		k8sClient:                   k8sClient,
 		outboundResolver:            resolver,
 		credentialAuthorityEnforced: strings.TrimSpace(os.Getenv(workerenv.TransactionID)) != "",
-		credentialScopeAllowed:      slices.Contains(credentialScopes, "orka:secrets:credentials:read"),
+		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret)),
 	}
 }
@@ -870,31 +874,86 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		prepared.request.Header.Del(transactiontoken.HeaderName)
 		prepared.request.Header.Set(header, resolution.CredentialValue)
 	case outboundaccess.AdapterGateway:
-		if strings.TrimSpace(prepared.transactionToken) == "" {
-			if _, err := transactionTokenSource(); err != nil {
-				return err
-			}
-		}
-		if len(parentScopes) > 0 && strings.TrimSpace(prepared.transactionToken) == "" {
-			return errors.New("gateway outbound access requires task-scoped transaction authority")
-		}
-		if prepared.request == nil || prepared.request.URL == nil {
-			return errors.New("gateway outbound access requires a prepared Tool request")
-		}
-		originalAuthority := strings.TrimSpace(prepared.request.Host)
-		if originalAuthority == "" {
-			originalAuthority = prepared.request.URL.Host
-		}
-		if originalAuthority == "" || strings.TrimSpace(resolution.GatewayHost) == "" {
-			return errors.New("gateway outbound access could not resolve request authorities")
-		}
-		prepared.request.URL.Scheme = resolution.GatewayScheme
-		prepared.request.URL.Host = resolution.GatewayHost
-		prepared.request.Host = originalAuthority
-		prepared.gatewayTLS = resolution.GatewayTLS
-		prepared.gateway = true
+		return e.applyGatewayOutboundAccess(ctx, prepared, resolution, parentScopes, transactionTokenSource)
 	default:
 		return fmt.Errorf("unsupported outbound access adapter %q", resolution.Adapter)
+	}
+	return nil
+}
+
+func (e *ToolExecutor) applyGatewayOutboundAccess(
+	ctx context.Context,
+	prepared *preparedToolRequest,
+	resolution outboundaccess.Resolution,
+	parentScopes []string,
+	transactionTokenSource func() (string, error),
+) error {
+	if prepared.request == nil || prepared.request.URL == nil {
+		return errors.New("gateway outbound access requires a prepared Tool request")
+	}
+	originalAuthority := strings.TrimSpace(prepared.request.Host)
+	if originalAuthority == "" {
+		originalAuthority = prepared.request.URL.Host
+	}
+	if originalAuthority == "" || strings.TrimSpace(resolution.GatewayHost) == "" {
+		return errors.New("gateway outbound access could not resolve request authorities")
+	}
+	if !e.skipDirectPublicValidation {
+		trustedActorRoute := prepared.mcp && strings.TrimSpace(prepared.request.Host) != ""
+		if err := validateGatewayOriginalTarget(
+			ctx,
+			prepared.request.URL,
+			originalAuthority,
+			trustedActorRoute,
+		); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(prepared.transactionToken) == "" {
+		if _, err := transactionTokenSource(); err != nil {
+			return err
+		}
+	}
+	if len(parentScopes) > 0 && strings.TrimSpace(prepared.transactionToken) == "" {
+		return errors.New("gateway outbound access requires task-scoped transaction authority")
+	}
+	prepared.request.URL.Scheme = resolution.GatewayScheme
+	prepared.request.URL.Host = resolution.GatewayHost
+	prepared.request.Host = originalAuthority
+	prepared.gatewayTLS = resolution.GatewayTLS
+	prepared.gateway = true
+	return nil
+}
+
+func validateGatewayOriginalTarget(
+	ctx context.Context,
+	requestURL *neturl.URL,
+	authority string,
+	trustedActorRoute bool,
+) error {
+	if requestURL == nil {
+		return errors.New("gateway outbound access requires a prepared Tool request")
+	}
+	if !strings.EqualFold(requestURL.Scheme, "http") && !strings.EqualFold(requestURL.Scheme, "https") {
+		return errors.New("gateway outbound access requires an HTTP or HTTPS Tool URL")
+	}
+	if requestURL.User != nil {
+		return errors.New("gateway outbound access Tool URL must not contain embedded credentials")
+	}
+	authorityURL, err := neturl.Parse(requestURL.Scheme + "://" + strings.TrimSpace(authority))
+	if err != nil || authorityURL.Hostname() == "" || authorityURL.Path != "" || authorityURL.RawQuery != "" || authorityURL.Fragment != "" {
+		return errors.New("gateway outbound access original Tool authority is invalid")
+	}
+	if authorityURL.User != nil {
+		return errors.New("gateway outbound access original Tool authority must not contain embedded credentials")
+	}
+	if trustedActorRoute {
+		// Actor route hosts and router endpoints are controller-resolved Tool status,
+		// not caller-selected public Tool URLs. The trusted gateway owns that route.
+		return nil
+	}
+	if err := tokenexchange.ValidatePublicEndpointHost(ctx, authorityURL.Hostname()); err != nil {
+		return fmt.Errorf("gateway outbound access requires a public original Tool URL: %w", err)
 	}
 	return nil
 }
@@ -1572,6 +1631,17 @@ func redactToolHTTPErrorBody(body string, secrets ...string) string {
 
 // getSecretKey reads a key from a secret (mounted path or Kubernetes API)
 func (e *ToolExecutor) getSecretKey(ctx context.Context, secretName, key string) (string, error) {
+	if e != nil {
+		if err := outboundaccess.ValidateCredentialAuthority(
+			e.credentialAuthorityEnforced,
+			e.credentialScopeAllowed,
+			e.credentialSecret,
+			[]string{secretName},
+			false,
+		); err != nil {
+			return "", err
+		}
+	}
 	if e != nil && e.authSecretValues != nil {
 		if value, ok := e.authSecretValues[secretName+"\x00"+key]; ok {
 			if value == "" {
@@ -1681,6 +1751,15 @@ func (e *ToolExecutor) toolTransactionExchangeConfig() (contexttoken.TTSConfig, 
 		os.Getenv(workerenv.ContextTokenToolTokenTTL),
 	)
 	return config, "", "", err
+}
+
+func containsAnyString(actual, required []string) bool {
+	for _, value := range actual {
+		if slices.Contains(required, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *ToolExecutor) currentParentTransactionScopes() []string {

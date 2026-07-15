@@ -55,7 +55,7 @@ spec:
       name: agentgateway
 ```
 
-Orka dials the gateway Service but preserves the original target authority, path, query, method, body, explicit `Authorization`, `Txn-Token`, MCP protocol headers, idempotency key, timeout, and cancellation. The final downstream must not receive the transaction token; configure that stripping and resource-token exchange in the gateway integration.
+Orka dials the gateway Service but preserves the original target authority, path, query, method, body, explicit `Authorization`, `Txn-Token`, MCP protocol headers, idempotency key, timeout, and cancellation. The final downstream must not receive the transaction token; configure that stripping and resource-token exchange in the gateway integration. The allowlisted gateway is also the enforcement boundary that binds each authority to an operator-configured upstream; it must not behave as an unrestricted DNS forward proxy. Orka revalidates public Tool authorities at execution time as defense in depth.
 
 Same-namespace Services are automatic. Cross-namespace Services require exact `namespace/name:port` entries:
 
