@@ -548,11 +548,7 @@ func repositoryMonitorPermissionAllowedForIntent(monitor *corev1alpha1.Repositor
 		return repositoryMonitorPermissionAllowed(monitor, permission)
 	}
 	permission = strings.ToLower(strings.TrimSpace(permission))
-	if !repositoryMonitorPermissionInList(permission, []string{githubPermissionTriage, githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin}) {
-		return false
-	}
-	policyAllowed := monitor.Spec.Policy.AllowedRepositoryPermissions
-	return len(policyAllowed) == 0 || repositoryMonitorPermissionInList(permission, policyAllowed)
+	return repositoryMonitorPermissionInList(permission, []string{githubPermissionTriage, githubPermissionWrite, githubPermissionMaintain, githubPermissionAdmin})
 }
 
 func repositoryMonitorControlCommandIntent(intent string) bool {
@@ -731,6 +727,16 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 		for _, candidate := range active {
 			switch candidate.Status {
 			case repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning:
+				now := time.Now()
+				metadata, _ := json.Marshal(map[string]any{"source": command.Source, "label": command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
+				coalesced := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: githubCommandStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
+				if err := h.repositoryMonitorStore.CreateWorkAction(ctx, coalesced); err != nil {
+					existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)
+					if getErr != nil || existing.DependsOnActionID != candidate.ID || existing.Status != githubCommandStatusCompleted {
+						return err
+					}
+				}
+				metrics.RecordRepositoryMonitorWorkAction(desiredAction, githubCommandStatusCompleted)
 				command.Status = githubCommandStatusCompleted
 				command.Error = "coalesced with active workflow action " + candidate.ID
 				if err := h.repositoryMonitorStore.UpdateCommandEvent(ctx, command); err != nil {
