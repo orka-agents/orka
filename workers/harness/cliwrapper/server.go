@@ -486,6 +486,14 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
 		return
 	}
+	if stripGitCredentials {
+		spec.UnsetEnv = append(spec.UnsetEnv,
+			workerenv.GitToken,
+			workerenv.GitHubToken,
+			workerenv.GitAskpass,
+			workerenv.GitUsername,
+		)
+	}
 	defer removeTempFiles(spec.TempFiles)
 	if spec.Dir != "" {
 		turnCtx.WorkDir = spec.Dir

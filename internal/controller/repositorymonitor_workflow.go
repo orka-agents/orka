@@ -19,6 +19,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -210,7 +211,7 @@ func (r *RepositoryMonitorReconciler) recordImplementationJobQueued(ctx context.
 		ID:                id,
 		MonitorNamespace:  monitor.Namespace,
 		MonitorName:       monitor.Name,
-		Repo:              monitor.Spec.Owner + "/" + monitor.Spec.Repository,
+		Repo:              repositoryMonitorCanonicalRepo(monitor),
 		IssueNumber:       item.Number,
 		PlanID:            planID,
 		SnapshotDigest:    item.SnapshotDigest,
@@ -224,6 +225,16 @@ func (r *RepositoryMonitorReconciler) recordImplementationJobQueued(ctx context.
 		MonitorGeneration: monitor.Generation,
 		CreatedAt:         time.Now(),
 	})
+}
+
+func repositoryMonitorCanonicalRepo(monitor *corev1alpha1.RepositoryMonitor) string {
+	if monitor == nil {
+		return ""
+	}
+	if owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL); err == nil {
+		return owner + "/" + repository
+	}
+	return strings.Trim(strings.TrimSpace(monitor.Spec.Owner)+"/"+strings.TrimSpace(monitor.Spec.Repository), "/")
 }
 
 func (r *RepositoryMonitorReconciler) updateImplementationJobForTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, taskName string, mutate func(*store.ImplementationJob)) error {

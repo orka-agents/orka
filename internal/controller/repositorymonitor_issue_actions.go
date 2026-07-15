@@ -1464,7 +1464,10 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 				item.SkipReason = reason
 			}
 		case repositoryMonitorIssueActionMutateToPR:
-			phase, prNumber, reason := r.finishIssueMutation(ctx, monitor, item, record, task)
+			phase, prNumber, reason, err := r.finishIssueMutation(ctx, monitor, item, record, task)
+			if err != nil {
+				return false, err
+			}
 			item.WorkflowPhase = phase
 			if reason != "" {
 				item.SkipReason = reason
@@ -1732,13 +1735,15 @@ func repositoryMonitorPathPatternMatches(pattern, path string) bool {
 func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, string, string, error) {
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	if strings.TrimSpace(sr.Diff) == "" {
-		_ = r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+		if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 			job.Phase = repositoryMonitorIssuePhaseBlocked
 			job.ValidationState = repositoryMonitorReviewVerdictFailed
 			job.Error = "implementation_patch_missing"
 			now := time.Now()
 			job.CompletedAt = &now
-		})
+		}); err != nil {
+			return "", "", "", err
+		}
 		return repositoryMonitorIssuePhaseBlocked, "", "implementation_patch_missing", nil
 	}
 	reason, err := r.validateAndSaveIssuePatchArtifacts(ctx, monitor, item, record, task, sr)
@@ -1746,21 +1751,25 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 		return "", "", "", err
 	}
 	if reason != "" {
-		_ = r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+		if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 			job.Phase = repositoryMonitorIssuePhaseBlocked
 			job.ValidationState = repositoryMonitorReviewVerdictFailed
 			job.Error = reason
 			now := time.Now()
 			job.CompletedAt = &now
-		})
+		}); err != nil {
+			return "", "", "", err
+		}
 		return repositoryMonitorIssuePhaseBlocked, "", reason, nil
 	}
 	patchArtifact := repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID)
-	_ = r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+	if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 		job.Phase = repositoryMonitorIssuePhasePatchReady
 		job.PatchArtifactID = patchArtifact
 		job.ValidationState = "passed"
-	})
+	}); err != nil {
+		return "", "", "", err
+	}
 	mutationTaskName := repositoryMonitorIssueMutationTaskName(monitor, item, record)
 	mutationCommand := &store.CommandEvent{ID: record.CommandEventID, Intent: r.repositoryMonitorCommandIntentForID(ctx, monitor, record.CommandEventID, item.LastCommandIntent)}
 	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, mutationCommand, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionMutateToPR, repositoryMonitorWorkActionStatusRunning, repositoryMonitorIssuePhaseMutationQueued, mutationTaskName, ""); err != nil {
@@ -1781,16 +1790,20 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	mutationTaskName, err = r.createRepositoryMonitorIssueMutationTask(ctx, monitor, item, record, task, patchDigest)
 	if err != nil {
 		_ = r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, mutationCommand, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionMutateToPR, repositoryMonitorWorkActionStatusBlocked, repositoryMonitorIssuePhaseBlocked, mutationTaskName, "mutation_task_create_failed")
-		_ = r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+		if updateErr := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 			job.Phase = repositoryMonitorIssuePhaseBlocked
 			job.Error = "mutation_task_create_failed"
-		})
+		}); updateErr != nil {
+			return "", "", "", updateErr
+		}
 		return repositoryMonitorIssuePhaseBlocked, "", "mutation_task_create_failed", nil
 	}
-	_ = r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
+	if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 		job.Phase = repositoryMonitorIssuePhaseMutationQueued
 		job.MutationTaskName = mutationTaskName
-	})
+	}); err != nil {
+		return "", "", "", err
+	}
 	return repositoryMonitorIssuePhaseMutationQueued, mutationTaskName, "", nil
 }
 
@@ -1809,59 +1822,66 @@ func (r *RepositoryMonitorReconciler) ensureRepositoryMonitorGitHubMutationStart
 	return mutation, nil
 }
 
-func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, int, string) {
+func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (string, int, string, error) {
 	sr := common.ParseStructuredResult(record.PayloadJSON)
 	configuredBranch := repositoryMonitorIssueTaskPushBranch(task)
 	pushMutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-push-"+configuredBranch)
 	pushMutation, auditErr := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: pushMutationID, CommandEventID: record.CommandEventID, Operation: "push_branch", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: "issue_implementation_mutation", GitHubURL: configuredBranch})
 	if auditErr != nil {
-		return repositoryMonitorIssuePhaseBlocked, 0, "mutation_audit_lookup_failed"
+		return "", 0, "", auditErr
 	}
-	blockImplementationJob := func(reason string) {
+	blockImplementationJob := func(reason string) error {
 		if task.Spec.PriorTaskRef != nil {
-			_ = r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
+			return r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
 				job.Phase = repositoryMonitorIssuePhaseBlocked
 				job.Error = reason
 				now := time.Now()
 				job.CompletedAt = &now
 			})
 		}
+		return nil
 	}
 	if strings.TrimSpace(sr.PushError) != "" {
 		pushMutation.Status = repositoryMonitorRunPhaseFailed
 		pushMutation.Error = sr.PushError
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, pushMutation); err != nil {
-			return repositoryMonitorIssuePhaseBlocked, 0, repositoryMonitorMutationAuditUpdateFailed
+			return "", 0, "", err
 		}
-		blockImplementationJob("implementation_push_failed")
-		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_failed"
+		if err := blockImplementationJob("implementation_push_failed"); err != nil {
+			return "", 0, "", err
+		}
+		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_failed", nil
 	}
 	if configuredBranch == "" {
-		blockImplementationJob("implementation_push_missing")
-		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_missing"
+		if err := blockImplementationJob("implementation_push_missing"); err != nil {
+			return "", 0, "", err
+		}
+		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_missing", nil
 	}
 	if strings.TrimSpace(sr.PushBranch) != "" && strings.TrimSpace(sr.PushBranch) != configuredBranch {
-		blockImplementationJob("implementation_push_branch_mismatch")
-		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_branch_mismatch"
+		if err := blockImplementationJob("implementation_push_branch_mismatch"); err != nil {
+			return "", 0, "", err
+		}
+		return repositoryMonitorIssuePhaseBlocked, 0, "implementation_push_branch_mismatch", nil
 	}
 	pushMutation.Status = repositoryMonitorRunPhaseSucceeded
 	pushMutation.Error = ""
 	pushMutation.ExternalID = sr.HeadSHA
 	if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, pushMutation); err != nil {
-		return repositoryMonitorIssuePhaseBlocked, 0, repositoryMonitorMutationAuditUpdateFailed
+		return "", 0, "", err
 	}
 	mutationID := "act-" + repositoryMonitorShortHash(record.ID+"-github")
 	if existing, err := r.Store.GetActionRecord(ctx, monitor.Namespace, mutationID); err == nil {
 		if prNumber := numberFieldFromJSON(existing.PayloadJSON, "pullRequestNumber"); prNumber > 0 {
-			return repositoryMonitorIssuePhasePROpened, int(prNumber), ""
+			return repositoryMonitorIssuePhasePROpened, int(prNumber), "", nil
 		}
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return repositoryMonitorIssuePhasePatchReady, 0, "pr_lookup_failed"
+		return "", 0, "", err
 	}
 	createMutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-create-pr")
 	createMutation, auditErr := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: createMutationID, CommandEventID: record.CommandEventID, Operation: "create_pr", TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, TargetSHA: item.SnapshotDigest, Reason: "issue_implementation_mutation", GitHubURL: configuredBranch})
 	if auditErr != nil {
-		return repositoryMonitorIssuePhaseBlocked, 0, "mutation_audit_create_failed"
+		return "", 0, "", auditErr
 	}
 	prURL := createMutation.GitHubURL
 	prNumber, _ := strconv.Atoi(createMutation.ExternalID)
@@ -1872,32 +1892,36 @@ func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, m
 			createMutation.Status = repositoryMonitorRunPhaseFailed
 			createMutation.Error = err.Error()
 			if auditErr := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, createMutation); auditErr != nil {
-				return repositoryMonitorIssuePhaseBlocked, 0, repositoryMonitorMutationAuditUpdateFailed
+				return "", 0, "", auditErr
 			}
 			if task.Spec.PriorTaskRef != nil {
-				_ = r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
+				if updateErr := r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
 					job.Phase = repositoryMonitorIssuePhaseBlocked
 					job.Error = "pr_creation_failed"
-				})
+				}); updateErr != nil {
+					return "", 0, "", updateErr
+				}
 			}
-			return repositoryMonitorIssuePhaseBlocked, 0, "pr_creation_failed"
+			return repositoryMonitorIssuePhaseBlocked, 0, "pr_creation_failed", nil
 		}
 		createMutation.Status = repositoryMonitorRunPhaseSucceeded
 		createMutation.Error = ""
 		createMutation.GitHubURL = prURL
 		createMutation.ExternalID = strconv.Itoa(prNumber)
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, createMutation); err != nil {
-			return repositoryMonitorIssuePhaseBlocked, 0, repositoryMonitorMutationAuditUpdateFailed
+			return "", 0, "", err
 		}
 	}
 	if task.Spec.PriorTaskRef != nil {
-		_ = r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
+		if err := r.updateImplementationJobForTask(ctx, monitor, task.Spec.PriorTaskRef.Name, func(job *store.ImplementationJob) {
 			job.Phase = repositoryMonitorIssuePhasePROpened
 			job.PRNumber = int64(prNumber)
 			job.Branch = configuredBranch
 			now := time.Now()
 			job.CompletedAt = &now
-		})
+		}); err != nil {
+			return "", 0, "", err
+		}
 	}
 	payload := map[string]any{"pullRequestURL": prURL, "pullRequestNumber": prNumber, "pushBranch": configuredBranch}
 	payloadJSON, _ := json.Marshal(payload)
@@ -1917,8 +1941,10 @@ func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, m
 		PayloadJSON:       string(payloadJSON),
 		CreatedAt:         time.Now(),
 	}
-	_ = r.Store.CreateActionRecord(ctx, mutationRecord)
-	return repositoryMonitorIssuePhasePROpened, prNumber, ""
+	if err := r.Store.CreateActionRecord(ctx, mutationRecord); err != nil && !strings.Contains(strings.ToLower(err.Error()), "constraint") {
+		return "", 0, "", err
+	}
+	return repositoryMonitorIssuePhasePROpened, prNumber, "", nil
 }
 
 //nolint:gocyclo // Patch-format state transitions are explicit to keep the mutation boundary fail-closed.
@@ -2188,13 +2214,21 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sr.Diff)); err != nil {
 		return "patch_diff_artifact_save_failed", nil
 	}
+	planID := ""
+	jobs, _, err := r.Store.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, TaskName: task.Name, Limit: 1})
+	if err != nil {
+		return "", err
+	}
+	if len(jobs) > 0 {
+		planID = jobs[0].PlanID
+	}
 	summary := map[string]any{
 		"schemaVersion":   repositoryMonitorIssuePatchSchemaVersion,
-		"repo":            monitor.Spec.Owner + "/" + monitor.Spec.Repository,
+		"repo":            repositoryMonitorCanonicalRepo(monitor),
 		"baseBranch":      effectiveRepositoryMonitorBranch(monitor),
 		"baseSHA":         sr.BaseSHA,
 		"target":          map[string]any{"kind": repositoryMonitorIssueKind, "number": item.Number, "snapshotDigest": item.SnapshotDigest},
-		"planID":          record.CommandEventID,
+		"planID":          planID,
 		"format":          "git-diff",
 		"patchArtifactID": diffName,
 		"patchDigest":     repositoryMonitorIssuePatchDigest(sr.Diff),
@@ -2489,6 +2523,7 @@ func repositoryMonitorIssueActionUpdatesStatusComment(actionKind, workflowPhase 
 	}
 }
 
+//nolint:gocyclo // Comment creation/update and durable mutation recovery are intentionally explicit.
 func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord) error {
 	if monitor == nil || item == nil || record == nil {
 		return nil
@@ -2523,6 +2558,16 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 		operation = "update_comment"
 		endpoint = fmt.Sprintf("%s/repos/%s/%s/issues/comments/%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(item.StatusCommentID))
 	}
+	mutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"|"+operation)
+	mutation, err := r.ensureRepositoryMonitorGitHubMutationStarted(ctx, monitor, &store.GitHubMutationRecord{ID: mutationID, CommandEventID: record.CommandEventID, Operation: operation, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, Reason: "issue_status_comment"})
+	if err != nil {
+		return err
+	}
+	if mutation.Status == repositoryMonitorRunPhaseSucceeded {
+		item.StatusCommentID = mutation.ExternalID
+		item.StatusCommentURL = mutation.GitHubURL
+		return r.Store.UpsertMonitorItem(ctx, item)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return err
@@ -2531,6 +2576,11 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := repositoryMonitorHTTPClient(r).Do(req)
 	if err != nil {
+		mutation.Status = repositoryMonitorRunPhaseFailed
+		mutation.Error = err.Error()
+		if auditErr := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); auditErr != nil {
+			return fmt.Errorf("status comment request failed: %w; audit update failed: %v", err, auditErr)
+		}
 		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
@@ -2539,6 +2589,11 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		mutation.Status = repositoryMonitorRunPhaseFailed
+		mutation.Error = string(respBody)
+		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+			return err
+		}
 		if method == http.MethodPatch && resp.StatusCode == http.StatusNotFound {
 			item.StatusCommentID = ""
 			item.StatusCommentURL = ""
@@ -2547,7 +2602,6 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 			}
 			return r.upsertRepositoryMonitorIssueStatusComment(ctx, monitor, item, record)
 		}
-		_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(record.ID+operation+"failed"), CommandEventID: record.CommandEventID, Operation: operation, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, Reason: "issue_status_comment", Status: "failed", Error: string(respBody)})
 		return &repositoryMonitorGitHubAPIError{Operation: operation, StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var parsed struct {
@@ -2563,10 +2617,17 @@ func (r *RepositoryMonitorReconciler) upsertRepositoryMonitorIssueStatusComment(
 	if strings.TrimSpace(parsed.HTMLURL) != "" {
 		item.StatusCommentURL = parsed.HTMLURL
 	}
+	mutation.Status = repositoryMonitorRunPhaseSucceeded
+	mutation.Error = ""
+	mutation.GitHubURL = item.StatusCommentURL
+	mutation.ExternalID = item.StatusCommentID
+	if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+		return err
+	}
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return err
 	}
-	return r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{ID: "ghmut-" + repositoryMonitorShortHash(record.ID+operation+item.StatusCommentID), CommandEventID: record.CommandEventID, Operation: operation, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number, Reason: "issue_status_comment", GitHubURL: item.StatusCommentURL, ExternalID: item.StatusCommentID, Status: "succeeded"})
+	return nil
 }
 
 func renderRepositoryMonitorIssueStatusComment(item *store.MonitorItem, record *store.ActionRecord) string {
