@@ -878,6 +878,9 @@ func newMonitorDoctorCmd() *cobra.Command {
 func newMonitorWatchCmd() *cobra.Command {
 	var interval time.Duration
 	cmd := &cobra.Command{Use: "watch <name>", Short: "Watch monitor status", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if interval <= 0 {
+			return fmt.Errorf("watch interval must be greater than zero")
+		}
 		c := newClientFromCmd(cmd)
 		for {
 			result, err := c.DoJSON(context.Background(), http.MethodGet, "/api/v1/monitors/repositories/"+url.PathEscape(args[0]), nil, nil)

@@ -95,6 +95,12 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 	if err != nil || !strings.EqualFold(strings.TrimSpace(repo.FullName), owner+"/"+repository) {
 		return false
 	}
+	if intent == commandIntentStop {
+		if target.IsPR {
+			return repositoryMonitorPullRequestsEnabled(monitor.Spec)
+		}
+		return target.Kind == repositoryMonitorTargetKindIssue && monitor.Spec.Targets.Issues.Enabled
+	}
 	if strings.TrimSpace(target.State) != "" && !strings.EqualFold(strings.TrimSpace(target.State), "open") {
 		return false
 	}

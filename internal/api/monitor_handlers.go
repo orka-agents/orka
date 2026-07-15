@@ -219,7 +219,19 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgents(c fiber.Ctx, namespac
 			return err
 		}
 	}
-	return h.validateRepositoryMonitorImplementerAgent(c, namespace, spec)
+	if err := h.validateRepositoryMonitorImplementerAgent(c, namespace, spec); err != nil {
+		return err
+	}
+	if spec.Repair.Enabled && spec.Agents.Repairer != nil && strings.TrimSpace(spec.Agents.Repairer.Name) != "" {
+		repairSpec := spec
+		repairSpec.Targets.Issues.Enabled = true
+		repairSpec.IssueWorkflow.Implementation.Enabled = nil
+		repairSpec.Agents.Implementer = spec.Agents.Repairer
+		if err := h.validateRepositoryMonitorImplementerAgent(c, namespace, repairSpec); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, strings.ReplaceAll(err.Error(), "implementer", "repairer"))
+		}
+	}
+	return nil
 }
 
 func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace, role string, ref *corev1alpha1.AgentReference) error {

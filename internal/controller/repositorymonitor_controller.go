@@ -212,6 +212,21 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
 		return "", "", true, repositoryMonitorValidationRetry, updateErr
 	}
+	if monitor.Spec.Repair.Enabled && monitor.Spec.Agents.Repairer != nil && strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) != "" {
+		repairMonitor := monitor.DeepCopy()
+		repairMonitor.Spec.Targets.Issues.Enabled = true
+		repairMonitor.Spec.IssueWorkflow.Implementation.Enabled = nil
+		repairMonitor.Spec.Agents.Implementer = monitor.Spec.Agents.Repairer
+		if reason, message, err := r.validateRepositoryMonitorImplementerAgent(ctx, repairMonitor); reason != "" || err != nil {
+			if err != nil {
+				return "", "", false, 0, err
+			}
+			reason = strings.ReplaceAll(reason, "Implementer", "Repairer")
+			message = strings.ReplaceAll(message, "implementer", "repairer")
+			updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
+			return "", "", true, repositoryMonitorValidationRetry, updateErr
+		}
+	}
 	if reason, message, err := r.validateRepositoryMonitorGitSecret(ctx, monitor); reason != "" || err != nil {
 		if err != nil {
 			return "", "", false, 0, err

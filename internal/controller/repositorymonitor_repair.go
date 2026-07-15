@@ -306,6 +306,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 				labels.AnnotationMonitorHeadSHA:           pr.HeadSHA,
 				labels.AnnotationGitHubRepository:         monitoredRepo,
 				repositoryMonitorIssueAnnotationCommandID: command.ID,
+				labels.AnnotationAgentRuntimeAuthOnly:     scheduledRunLabelValue,
 			},
 		},
 		Spec: corev1alpha1.TaskSpec{
