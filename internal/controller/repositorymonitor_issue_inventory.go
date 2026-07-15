@@ -84,6 +84,7 @@ func (r *RepositoryMonitorReconciler) processRepositoryMonitorInventoryRun(ctx c
 	return selected, created, skipped, nil
 }
 
+//nolint:gocyclo // Issue inventory keeps command-target terminalization and inventory policy explicit.
 func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string) (int, int, int, error) {
 	if !monitor.Spec.Targets.Issues.Enabled {
 		return 0, 0, 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, 0, "", "inventory_skipped", "Issue monitoring is disabled", nil)
@@ -95,6 +96,9 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 	issues, err := r.listRepositoryMonitorIssuesForRun(ctx, owner, repository, token, run)
 	if err != nil {
 		return 0, 0, 0, err
+	}
+	if len(issues) == 0 && run != nil && strings.TrimSpace(run.CommandEventID) != "" && strings.TrimSpace(run.TargetKind) == repositoryMonitorIssueKind {
+		return 0, 0, 1, r.blockRepositoryMonitorIssueTargetCommand(ctx, monitor, run, "target_not_open")
 	}
 	seenIssueKeys := repositoryMonitorIssueKeys(issues)
 	issues = filterRepositoryMonitorTargetIssues(issues, run)
@@ -115,6 +119,11 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 	for _, issue := range issues {
 		if issue.IsPR {
 			skipped++
+			if strings.TrimSpace(run.CommandEventID) != "" {
+				if err := r.blockRepositoryMonitorIssueTargetCommand(ctx, monitor, run, repositoryMonitorSkipReasonPullRequest); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+			}
 			continue
 		}
 		existing, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorIssueKind, fmt.Sprintf("%d", issue.Number))
@@ -133,6 +142,15 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 			item.LastVerdict = repositoryMonitorVerdictSkipped
 			item.SkipReason = skipReason
 			item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
+			if strings.TrimSpace(run.CommandEventID) != "" {
+				command, commandErr := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
+				if commandErr != nil {
+					return selected, createdTasks, skipped, commandErr
+				}
+				if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, repositoryMonitorIssuePhaseBlocked, "", skipReason); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+			}
 			if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 				return selected, createdTasks, skipped, err
 			}
@@ -172,6 +190,14 @@ func (r *RepositoryMonitorReconciler) processIssueInventoryRun(ctx context.Conte
 		}
 	}
 	return selected, createdTasks, skipped, nil
+}
+
+func (r *RepositoryMonitorReconciler) blockRepositoryMonitorIssueTargetCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, reason string) error {
+	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, run.CommandEventID)
+	if err != nil {
+		return err
+	}
+	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, run.TargetNumber, "", command.IssueSnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, repositoryMonitorIssuePhaseBlocked, "", reason)
 }
 
 func repositoryMonitorIssueKeys(issues []repositoryMonitorIssue) map[string]struct{} {

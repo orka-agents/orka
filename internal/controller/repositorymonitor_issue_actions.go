@@ -119,6 +119,9 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 		item.SkipReason = "stale_command_snapshot"
 		item.LastVerdict = repositoryMonitorReviewVerdictStale
+		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, repositoryMonitorIssuePhaseBlocked, "", item.SkipReason); err != nil {
+			return 0, err
+		}
 		return 0, r.Store.UpsertMonitorItem(ctx, item)
 	}
 	if item.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && repositoryMonitorIssueBlockStopsCommands(item.SkipReason) {
