@@ -10,7 +10,7 @@ Accepted for the first bring-your-own agent runtime implementation slice.
 
 Orka routes `type: agent` tasks through `AgentRuntime`, an Orka-facing runtime contract backed by `orka.harness.v1`. The remote execution backend may be a generic self-hosted HTTP runtime, AgentKit Serve, Azure AI Foundry hosted agents, or a future backend. Orka should not parse backend authoring formats or accept arbitrary per-Agent images and commands.
 
-Backend-specific protocol skins are adapter-owned. Orka needs a stable Kubernetes-native boundary: the `AgentRuntime` registry, readiness/conformance, runtime routing, task provenance, capability tiers, and brokered-governance hooks.
+Backend-specific protocol skins are adapter-owned and live outside the Orka source tree. Orka keeps only the provider-neutral protocol, public Go aliases, conformance checks, reference fixtures, and facade samples. Orka needs a stable Kubernetes-native boundary: the `AgentRuntime` registry, readiness/conformance, runtime routing, task provenance, capability tiers, and brokered-governance hooks.
 
 ## Decision
 
@@ -35,7 +35,7 @@ Fibey remains one acceptance scenario, but the demo should show the same Orka AP
 - `AgentRuntime` status carries sanitized observed capabilities and `observedGeneration`, which lets task routing fail closed on non-ready or stale runtime definitions.
 - Harness bearer token Secrets must opt in with `orka.ai/agent-runtime-auth: "true"`, may scope themselves to one runtime with `orka.ai/agent-runtime-name`, and must bind to the intended endpoint with `orka.ai/agent-runtime-endpoint`, preventing AgentRuntime authors from using the controller as a generic Secret exfiltration path.
 - Built-in CLI runtime behavior remains backward compatible.
-- External runtimes can prove the cross-repo contract before Orka owns Deployment, ServiceAccount, NetworkPolicy, image policy, or secret-delivery hardening.
+- External runtimes can prove the cross-repo contract without placing provider-specific implementations in the Orka repository or making Orka own Deployment, ServiceAccount, NetworkPolicy, image policy, or secret-delivery hardening.
 - Brokered Orka Tool execution is opt-in by capability and policy; observed mode must not be marketed as full brokered governance.
 
 ## References

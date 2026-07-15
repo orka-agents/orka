@@ -60,4 +60,4 @@ Orka stores this as the standard structured result envelope so parent tasks can 
 
 ## Local validation
 
-Run the reusable conformance package against your adapter. The generic HTTP fixture in `examples/harness/echo` is the reference implementation for observed and brokered read/write profiles.
+Go adapters can import `github.com/orka-agents/orka/pkg/harness` and `github.com/orka-agents/orka/pkg/harness/conformance`. The generic HTTP fixture in `examples/harness/echo` is the reference implementation for observed and brokered read/write profiles. Provider-specific adapters, including the Foundry adapter, live in separate repositories.

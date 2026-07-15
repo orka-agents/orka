@@ -6,7 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: sample-foundry-runtime
 spec:
-  # Namespace-local facade for an operator-deployed Azure AI Foundry hosted-agent adapter.
+  # Namespace-local facade for the separately deployed orka-agents/agent-runtime-foundry-classic adapter.
   # Foundry credentials belong to the adapter Secret. Orka Tool credentials stay in
   # Orka-governed credential sources and are used only by brokered execution.
   contractVersion: orka.harness.v1

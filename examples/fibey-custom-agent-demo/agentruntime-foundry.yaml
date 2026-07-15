@@ -1,4 +1,4 @@
-# Optional namespace-local facade for a Foundry hosted-agent adapter implementing orka.harness.v1.
+# Optional namespace-local facade for github.com/orka-agents/agent-runtime-foundry-classic.
 # Apply this with secret-foundry.yaml and point an Agent runtimeRef at fibey-foundry-runtime
 # after deploying the adapter Service named fibey-foundry-runtime.
 apiVersion: core.orka.ai/v1alpha1

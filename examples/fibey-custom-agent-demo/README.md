@@ -10,7 +10,7 @@ The checked-in backend is a deterministic generic HTTP harness fixture. It adver
 | --- | --- | --- |
 | `fibey-http-runtime` | Generic mock/self-hosted HTTP runtime | Harness bearer token only |
 | `fibey-agentkit-runtime` | AgentKit Serve adapter | Adapter/runtime config only |
-| `fibey-foundry-runtime` | Foundry adapter | Adapter Secret; no Orka Tool production credentials |
+| `fibey-foundry-runtime` | [`orka-agents/agent-runtime-foundry-classic`](https://github.com/orka-agents/agent-runtime-foundry-classic) | Adapter Secret; no Orka Tool production credentials |
 
 `fibey-agentkit-runtime` is intentionally observed-only in the checked-in demo: it should show `toolExecutionModes: [observed]`, `supportsCancel: true`, and `supportsRuntimeSessions: true`, with no `brokeredToolClasses` or `supportsContinuation`. AgentKit brokered read/write/coordination exist only for deployments that explicitly enable those conformance-gated profiles.
 
@@ -107,7 +107,7 @@ kubectl apply -f examples/fibey-custom-agent-demo/agent-agentkit.yaml
 kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-runtime --timeout=60s
 
 # Foundry adapter facade; requires a Service named fibey-foundry-runtime.
-# Build/deploy examples/harness/foundry with ORKA_FOUNDRY_* credentials first.
+# Build/deploy github.com/orka-agents/agent-runtime-foundry-classic with ORKA_FOUNDRY_* credentials first.
 kubectl apply -f examples/fibey-custom-agent-demo/secret-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-foundry.yaml
