@@ -189,6 +189,46 @@ func TestCompletionResponse(t *testing.T) {
 	}
 }
 
+func TestNormalizeCompletionOutcome(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		toolCalls  []ToolCall
+		want       CompletionOutcome
+	}{
+		{name: "empty reason unknown", want: CompletionOutcomeUnknown},
+		{name: "OpenAI stop completes", stopReason: "stop", want: CompletionOutcomeCompleted},
+		{name: "Anthropic end turn completes", stopReason: "end_turn", want: CompletionOutcomeCompleted},
+		{name: "stop sequence completes", stopReason: "stop_sequence", want: CompletionOutcomeCompleted},
+		{name: "tool use with calls", stopReason: "tool_use", toolCalls: []ToolCall{{ID: "call-1"}}, want: CompletionOutcomeToolCalls},
+		{name: "calls override completed reason", stopReason: "stop", toolCalls: []ToolCall{{ID: "call-1"}}, want: CompletionOutcomeToolCalls},
+		{name: "tool reason without calls", stopReason: "tool_calls", want: CompletionOutcomeUnknown},
+		{name: "OpenAI length incomplete", stopReason: "length", want: CompletionOutcomeIncomplete},
+		{name: "Anthropic max tokens incomplete", stopReason: "max_tokens", want: CompletionOutcomeIncomplete},
+		{name: "incomplete overrides calls", stopReason: "max_tokens", toolCalls: []ToolCall{{ID: "call-1"}}, want: CompletionOutcomeIncomplete},
+		{name: "Responses API incomplete", stopReason: "incomplete", want: CompletionOutcomeIncomplete},
+		{name: "Anthropic pause turn incomplete", stopReason: "pause_turn", want: CompletionOutcomeIncomplete},
+		{name: "content filter refused", stopReason: "content_filter", want: CompletionOutcomeRefused},
+		{name: "structured refusal refused", stopReason: "refusal", want: CompletionOutcomeRefused},
+		{name: "failed", stopReason: "failed", want: CompletionOutcomeFailed},
+		{name: "cancelled", stopReason: "cancelled", want: CompletionOutcomeFailed},
+		{name: "unknown reason", stopReason: "unexpected", want: CompletionOutcomeUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &CompletionResponse{StopReason: tt.stopReason, ToolCalls: tt.toolCalls}
+			if got := NormalizeCompletionOutcome(resp); got != tt.want {
+				t.Fatalf("NormalizeCompletionOutcome() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	if got := NormalizeCompletionOutcome(nil); got != CompletionOutcomeUnknown {
+		t.Fatalf("NormalizeCompletionOutcome(nil) = %q, want %q", got, CompletionOutcomeUnknown)
+	}
+}
+
 func TestMessage(t *testing.T) {
 	tests := []struct {
 		name string

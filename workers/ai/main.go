@@ -72,6 +72,17 @@ var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "s
 
 const modelLoopEventTimeout = 250 * time.Millisecond
 
+const finalAnswerRetryPrompt = "Your last response was empty. Return the final answer now using the evidence " +
+	"already gathered. Do not call tools."
+
+type completionDecision int
+
+const (
+	completionDecisionReturn completionDecision = iota
+	completionDecisionToolCalls
+	completionDecisionRetryFinal
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -923,19 +934,9 @@ func executeAgentLoopWithEvents(
 	eventRecorder common.EventRecorder,
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
-	var baseToolCtx *tools.ToolContext
-	if len(baseToolCtxOpt) > 0 {
-		baseToolCtx = baseToolCtxOpt[0]
-	}
-
+	baseToolCtx := optionalToolContext(baseToolCtxOpt)
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
-	maxIterations := 10
-	if coordinationEnv.Enabled {
-		maxIterations = 50
-	}
-	if coordinationEnv.AutonomousMode {
-		maxIterations = 100
-	}
+	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
@@ -946,14 +947,21 @@ func executeAgentLoopWithEvents(
 		return "", err
 	}
 
-	for iteration := range maxIterations {
-		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, llmTools, baseToolCtx)
+	iterationLimit := maxIterations
+	blankFinalRetried := false
+	finalAnswerRetry := false
+	for iteration := 0; iteration < iterationLimit; iteration++ {
+		requestTools := llmTools
+		if finalAnswerRetry {
+			requestTools = nil
+		}
+		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, requestTools, baseToolCtx)
 		req := &llm.CompletionRequest{
 			Model:        model,
 			Messages:     messages,
 			SystemPrompt: systemPrompt,
 			MaxTokens:    4096,
-			Tools:        llmTools,
+			Tools:        requestTools,
 		}
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
@@ -962,7 +970,7 @@ func executeAgentLoopWithEvents(
 				"model":        model,
 				"provider":     llm.ProviderTelemetryName(provider),
 				"messageCount": len(messages),
-				"toolCount":    len(llmTools),
+				"toolCount":    len(requestTools),
 			})),
 		)
 
@@ -1026,10 +1034,28 @@ func executeAgentLoopWithEvents(
 			common.WithEventContentText(resp.Content),
 		)
 
-		// If no tool calls, we're done
-		if len(resp.ToolCalls) == 0 {
+		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
+		if completionErr != nil {
+			stepSpan.RecordError(completionErr)
+			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
+			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(completionErr)))
 			stepSpan.End()
-			return resp.Content, nil
+			return "", completionErr
+		}
+
+		switch decision {
+		case completionDecisionReturn:
+			stepSpan.End()
+			return result, nil
+		case completionDecisionRetryFinal:
+			blankFinalRetried = true
+			finalAnswerRetry = true
+			iterationLimit++
+			messages = append(messages, llm.Message{Role: "user", Content: finalAnswerRetryPrompt})
+			stepSpan.End()
+			continue
+		case completionDecisionToolCalls:
+			finalAnswerRetry = false
 		}
 
 		// Add assistant message with tool calls
@@ -1171,6 +1197,23 @@ func executeAgentLoopWithEvents(
 	return "", fmt.Errorf("max iterations reached without completion")
 }
 
+func optionalToolContext(contexts []*tools.ToolContext) *tools.ToolContext {
+	if len(contexts) == 0 {
+		return nil
+	}
+	return contexts[0]
+}
+
+func agentLoopMaxIterations(coordinationEnv workerenv.CoordinationEnv) int {
+	if coordinationEnv.AutonomousMode {
+		return 100
+	}
+	if coordinationEnv.Enabled {
+		return 50
+	}
+	return 10
+}
+
 func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {
 	if len(coordinationEnv.ApprovalRequiredTools) > 0 {
 		return true
@@ -1246,6 +1289,46 @@ func firstNonBlankOriginal(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func evaluateCompletionResponse(
+	resp *llm.CompletionResponse,
+	finalAnswerRetry bool,
+	blankFinalRetried bool,
+) (completionDecision, string, error) {
+	outcome := llm.NormalizeCompletionOutcome(resp)
+	if finalAnswerRetry && outcome == llm.CompletionOutcomeToolCalls {
+		return completionDecisionReturn, "", fmt.Errorf(
+			"model returned tool calls during final answer retry with tools disabled",
+		)
+	}
+
+	switch outcome {
+	case llm.CompletionOutcomeCompleted:
+		if strings.TrimSpace(resp.Content) != "" {
+			return completionDecisionReturn, resp.Content, nil
+		}
+		if blankFinalRetried {
+			return completionDecisionReturn, "", fmt.Errorf("model returned an empty final response after one retry")
+		}
+		return completionDecisionRetryFinal, "", nil
+	case llm.CompletionOutcomeToolCalls:
+		return completionDecisionToolCalls, "", nil
+	case llm.CompletionOutcomeIncomplete,
+		llm.CompletionOutcomeRefused,
+		llm.CompletionOutcomeFailed,
+		llm.CompletionOutcomeUnknown:
+		return completionDecisionReturn, "", completionOutcomeError(outcome, resp.StopReason)
+	default:
+		return completionDecisionReturn, "", fmt.Errorf("model returned an unsupported completion outcome")
+	}
+}
+
+func completionOutcomeError(outcome llm.CompletionOutcome, stopReason string) error {
+	if strings.TrimSpace(stopReason) == "" {
+		return fmt.Errorf("model returned an unsupported completion outcome")
+	}
+	return fmt.Errorf("model returned %s response with stop reason %q", outcome, stopReason)
 }
 
 // writeResult submits the result to the controller via HTTP POST.

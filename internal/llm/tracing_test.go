@@ -434,6 +434,24 @@ func TestTracingProviderCompleteFailureStopReasonSetsError(t *testing.T) {
 	assertStringAttr(t, attrs, genai.AttrErrorType, "failed")
 }
 
+func TestStopReasonErrorType(t *testing.T) {
+	for _, reason := range []string{"length", "max_tokens", "incomplete", "pause_turn", "content_filter", "refusal", "failed", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			if got := stopReasonErrorType(reason); got != reason {
+				t.Fatalf("stopReasonErrorType(%q) = %q, want %q", reason, got, reason)
+			}
+		})
+	}
+
+	for _, reason := range []string{"", "stop", "end_turn", "tool_use", "tool_calls"} {
+		t.Run("successful_"+reason, func(t *testing.T) {
+			if got := stopReasonErrorType(reason); got != "" {
+				t.Fatalf("stopReasonErrorType(%q) = %q, want empty", reason, got)
+			}
+		})
+	}
+}
+
 func TestTracingProviderCompleteErrorPreservesWrappedProviderTelemetryName(t *testing.T) {
 	h := testutil.NewSpanHarness(t)
 	inner := &telemetryProvider{

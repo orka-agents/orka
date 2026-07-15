@@ -347,8 +347,8 @@ func isStreamingRequiredErr(err error) bool {
 
 func stopReasonErrorType(reason string) string {
 	trimmed := strings.TrimSpace(reason)
-	switch strings.ToLower(trimmed) {
-	case "failed", "incomplete", "cancelled", "canceled", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+	switch completionOutcomeForStopReason(trimmed) {
+	case CompletionOutcomeIncomplete, CompletionOutcomeRefused, CompletionOutcomeFailed:
 		return trimmed
 	default:
 		return ""
