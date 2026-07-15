@@ -114,11 +114,36 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if err := validateRepositoryMonitorReviewPublishSpec(spec.Review.Publish); err != nil {
 		return err
 	}
+	if err := validateRepositoryMonitorCommandLabels(spec); err != nil {
+		return err
+	}
 	if repositoryMonitorPullRequestsEnabled(spec) && (spec.Agents.Reviewer == nil || strings.TrimSpace(spec.Agents.Reviewer.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.agents.reviewer.name is required when pull request monitoring is enabled")
 	}
 	if spec.Triggers.GitHub.Labels.Enabled && (spec.GitSecretRef == nil || strings.TrimSpace(spec.GitSecretRef.Name) == "") {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.gitSecretRef is required when GitHub label triggers are enabled")
+	}
+	return nil
+}
+
+func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorSpec) error {
+	labels := spec.Triggers.GitHub.Labels
+	groups := [][]struct{ intent, label string }{
+		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {commandIntentApprovePlan, labels.Issues.ApprovePlan}, {"implement", labels.Issues.Implement}, {commandIntentDecompose, labels.Issues.Decompose}, {commandIntentStop, labels.Issues.Stop}, {commandIntentResume, labels.Issues.Resume}},
+		{{"review", labels.PullRequests.Review}, {"fix", labels.PullRequests.Fix}, {commandIntentFixCI, labels.PullRequests.FixCI}, {commandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {"automerge", labels.PullRequests.Automerge}, {commandIntentStop, labels.PullRequests.Stop}, {commandIntentResume, labels.PullRequests.Resume}},
+	}
+	for _, group := range groups {
+		seen := map[string]string{}
+		for _, entry := range group {
+			label := strings.ToLower(strings.TrimSpace(entry.label))
+			if label == "" {
+				label = repositoryMonitorDefaultCommandLabel(entry.intent)
+			}
+			if previous := seen[label]; previous != "" {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("command label %q is configured for both %s and %s", label, previous, entry.intent))
+			}
+			seen[label] = entry.intent
+		}
 	}
 	return nil
 }

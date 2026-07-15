@@ -40,12 +40,14 @@ const (
 	repositoryMonitorPhaseError     = "Error"
 	repositoryMonitorPhaseSuspended = "Suspended"
 
-	repositoryMonitorRunPhaseQueued      = "queued"
-	repositoryMonitorRunPhaseRunning     = "running"
-	repositoryMonitorRunPhaseSucceeded   = "succeeded"
-	repositoryMonitorRunPhaseFailed      = "failed"
-	repositoryMonitorRunRetryScheduled   = "retry_scheduled"
-	repositoryMonitorRunFailurePermanent = "run_failed"
+	repositoryMonitorRunPhaseQueued            = "queued"
+	repositoryMonitorRunPhaseRunning           = "running"
+	repositoryMonitorRunPhaseSucceeded         = "succeeded"
+	repositoryMonitorRunPhaseFailed            = "failed"
+	repositoryMonitorRunRetryScheduled         = "retry_scheduled"
+	repositoryMonitorRunFailurePermanent       = "run_failed"
+	repositoryMonitorCommandIntentUpdateBranch = "update_branch"
+	repositoryMonitorCommandIntentDecompose    = "decompose"
 
 	repositoryMonitorRunningRunTimeout = 30 * time.Minute
 	repositoryMonitorValidationRetry   = time.Minute
@@ -198,6 +200,10 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, reason, message)
 		return "", "", true, repositoryMonitorValidationRetry, updateErr
 	}
+	if err := validateRepositoryMonitorCommandLabels(monitor.Spec); err != nil {
+		updateErr := r.updateRepositoryMonitorNotReadyCondition(ctx, monitor, repositoryMonitorPhaseError, "InvalidCommandLabels", err.Error())
+		return "", "", true, repositoryMonitorValidationRetry, updateErr
+	}
 	if reason, message, err := r.validateRepositoryMonitorIssueReadOnlyAgents(ctx, monitor); reason != "" || err != nil {
 		if err != nil {
 			return "", "", false, 0, err
@@ -235,6 +241,43 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorSpec(ctx context.
 		return "", "", true, repositoryMonitorValidationRetry, updateErr
 	}
 	return owner, repository, false, 0, nil
+}
+
+func validateRepositoryMonitorCommandLabels(spec corev1alpha1.RepositoryMonitorSpec) error {
+	labels := spec.Triggers.GitHub.Labels
+	groups := [][]struct{ intent, label string }{
+		{{"triage", labels.Issues.Triage}, {"research", labels.Issues.Research}, {"plan", labels.Issues.Plan}, {"approve_plan", labels.Issues.ApprovePlan}, {"implement", labels.Issues.Implement}, {repositoryMonitorCommandIntentDecompose, labels.Issues.Decompose}, {"stop", labels.Issues.Stop}, {"resume", labels.Issues.Resume}},
+		{{"review", labels.PullRequests.Review}, {"fix", labels.PullRequests.Fix}, {"fix_ci", labels.PullRequests.FixCI}, {repositoryMonitorCommandIntentUpdateBranch, labels.PullRequests.UpdateBranch}, {"automerge", labels.PullRequests.Automerge}, {"stop", labels.PullRequests.Stop}, {"resume", labels.PullRequests.Resume}},
+	}
+	for _, group := range groups {
+		seen := map[string]string{}
+		for _, entry := range group {
+			label := strings.ToLower(strings.TrimSpace(entry.label))
+			if label == "" {
+				label = defaultRepositoryMonitorCommandLabel(entry.intent)
+			}
+			if previous := seen[label]; previous != "" {
+				return fmt.Errorf("command label %q is configured for both %s and %s", label, previous, entry.intent)
+			}
+			seen[label] = entry.intent
+		}
+	}
+	return nil
+}
+
+func defaultRepositoryMonitorCommandLabel(intent string) string {
+	switch intent {
+	case "approve_plan":
+		return "orka:approve-plan"
+	case "fix_ci":
+		return "orka:fix-ci"
+	case repositoryMonitorCommandIntentUpdateBranch:
+		return "orka:update-branch"
+	case repositoryMonitorCommandIntentDecompose:
+		return "orka:to-issues"
+	default:
+		return "orka:" + strings.ReplaceAll(intent, "_", "-")
+	}
 }
 
 func (r *RepositoryMonitorReconciler) validateRepositoryMonitorReviewerAgent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (string, string, error) {

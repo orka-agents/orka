@@ -27,14 +27,15 @@ import (
 )
 
 const (
-	githubAPIBaseURLEnv       = "ORKA_GITHUB_API_BASE_URL"
-	commandIntentStop         = finishReasonStop
-	commandIntentResume       = "resume"
-	commandIntentApprovePlan  = "approve_plan"
-	commandIntentDecompose    = "decompose"
-	commandIntentPlan         = "plan"
-	commandIntentFixCI        = "fix_ci"
-	commandIntentUpdateBranch = "update_branch"
+	githubAPIBaseURLEnv           = "ORKA_GITHUB_API_BASE_URL"
+	commandIntentStop             = finishReasonStop
+	commandIntentResume           = "resume"
+	commandIntentApprovePlan      = "approve_plan"
+	commandIntentDecompose        = "decompose"
+	commandIntentPlan             = "plan"
+	commandIntentFixCI            = "fix_ci"
+	commandIntentUpdateBranch     = "update_branch"
+	githubMutationStatusSucceeded = "succeeded"
 
 	githubPermissionRead     = "read"
 	githubPermissionTriage   = "triage"
@@ -203,6 +204,9 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery)
 	commandID := repositoryMonitorCommandID(dedupe)
 	if existing, err := h.repositoryMonitorStore.GetCommandEvent(c.Context(), monitor.Namespace, commandID); err == nil {
+		if err := h.ensureRepositoryMonitorCommandLabelConsumed(c, monitor, existing, payload, target); err != nil {
+			return nil, true, err
+		}
 		return existing, true, nil
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor command: %v", err))
@@ -256,44 +260,59 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command: %v", err))
 	}
 	metrics.RecordRepositoryMonitorCommand(command.Intent, command.Status)
-	consumeAcceptedCommandLabel := command.Status == githubCommandStatusAccepted && monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels
-	if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, ""); err != nil {
-		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor workflow action: %v", err))
+	if err := h.ensureRepositoryMonitorCommandLabelConsumed(c, monitor, command, payload, target); err != nil {
+		return nil, false, err
 	}
-	if consumeAcceptedCommandLabel {
-		mutation := &store.GitHubMutationRecord{
-			ID:             "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label"))),
-			CommandEventID: command.ID,
-			Operation:      "remove_label",
-			TargetKind:     target.Kind,
-			TargetNumber:   int64(target.Number),
-			TargetSHA:      target.HeadSHA,
-			Reason:         "consume_command_label",
-			RequestDigest:  "sha256:" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(payload.Label.Name))),
-			Status:         "started",
-		}
-		if err := h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
-			return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record command label mutation: %v", err))
-		}
-		if err := h.consumeRepositoryMonitorCommandLabel(c.Context(), monitor, payload.Repository, target, payload.Label.Name); err != nil {
-			mutation.Status = repositoryMonitorRunPhaseFailed
-			mutation.Error = err.Error()
-			if auditErr := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); auditErr != nil {
-				return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to consume command label: %v; audit update failed: %v", err, auditErr))
-			}
-			command.Error = fmt.Sprintf("accepted, but failed to consume command label: %v", err)
-			if updateErr := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); updateErr != nil {
-				return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update monitor command: %v", updateErr))
-			}
-		} else {
-			mutation.Status = "succeeded"
-			mutation.Error = ""
-			if err := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
-				return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to finalize command label mutation: %v", err))
-			}
-		}
-	}
+
 	return command, false, nil
+}
+
+func (h *Handlers) ensureRepositoryMonitorCommandLabelConsumed(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, payload githubLabelWebhookPayload, target githubLabelTarget) error {
+	if command == nil || command.Status != githubCommandStatusAccepted || !monitor.Spec.Triggers.GitHub.Labels.ConsumeCommandLabels {
+		return nil
+	}
+	mutationID := "ghmut-" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(command.ID+"|remove_label")))
+	mutation, err := h.repositoryMonitorStore.GetGitHubMutationRecord(c.Context(), monitor.Namespace, mutationID)
+	if errors.Is(err, store.ErrNotFound) {
+		mutation = &store.GitHubMutationRecord{ID: mutationID, CommandEventID: command.ID, Operation: "remove_label", TargetKind: target.Kind, TargetNumber: int64(target.Number), TargetSHA: target.HeadSHA, Reason: "consume_command_label", RequestDigest: "sha256:" + githubReplayKeySuffix(githubWebhookReplayKey([]byte(payload.Label.Name))), Status: "started"}
+		if err := h.recordRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record command label mutation: %v", err))
+		}
+	} else if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect command label mutation: %v", err))
+	} else if mutation.Status == githubMutationStatusSucceeded {
+		return nil
+	} else {
+		mutation.Status = "started"
+		mutation.Error = ""
+		if err := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to reset command label mutation: %v", err))
+		}
+	}
+	if err := h.consumeRepositoryMonitorCommandLabel(c.Context(), monitor, payload.Repository, target, payload.Label.Name); err != nil {
+		mutation.Status = repositoryMonitorRunPhaseFailed
+		mutation.Error = err.Error()
+		if auditErr := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); auditErr != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to consume command label: %v; audit update failed: %v", err, auditErr))
+		}
+		command.Error = fmt.Sprintf("accepted, but failed to consume command label: %v", err)
+		if updateErr := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); updateErr != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update monitor command: %v", updateErr))
+		}
+		return nil
+	}
+	mutation.Status = githubMutationStatusSucceeded
+	mutation.Error = ""
+	if err := h.updateRepositoryMonitorGitHubMutation(c.Context(), monitor, mutation); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to finalize command label mutation: %v", err))
+	}
+	if command.Error != "" {
+		command.Error = ""
+		if err := h.repositoryMonitorStore.UpdateCommandEvent(c.Context(), command); err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to clear command error: %v", err))
+		}
+	}
+	return nil
 }
 
 func (h *Handlers) consumeRepositoryMonitorCommandLabel(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, label string) error {

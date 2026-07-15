@@ -833,7 +833,8 @@ func validateMonitorTriggerLabels(result any) error {
 		seen := map[string]string{}
 		group, _ := labels[groupName].(map[string]any)
 		for _, entry := range entries {
-			label := strings.ToLower(strings.TrimSpace(fmt.Sprint(group[entry.field])))
+			configured, _ := group[entry.field].(string)
+			label := strings.ToLower(strings.TrimSpace(configured))
 			if label == "" {
 				label = defaultMonitorCommandLabel(entry.intent)
 			}
