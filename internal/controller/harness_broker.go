@@ -711,7 +711,34 @@ func (r *TaskReconciler) harnessBrokeredOutboundPolicyIdentity(ctx context.Conte
 	if gateway := policy.Spec.Gateway; gateway != nil {
 		appendTLS(gateway.TLS)
 	}
-	versions := make([]string, 0, len(secretRefs))
+	serviceAccountNames := []string{}
+	if direct := policy.Spec.Direct; direct != nil {
+		appendSource := func(source *corev1alpha1.OutboundTokenSource) {
+			if source == nil || source.ServiceAccountRef == nil {
+				return
+			}
+			if name := strings.TrimSpace(source.ServiceAccountRef.Name); name != "" {
+				serviceAccountNames = append(serviceAccountNames, name)
+			}
+		}
+		appendSource(&direct.Subject)
+		appendSource(direct.Actor)
+	}
+	versions := make([]string, 0, len(secretRefs)+len(serviceAccountNames))
+	for _, name := range serviceAccountNames {
+		serviceAccount := &corev1.ServiceAccount{}
+		if err := r.brokeredApprovalReader().Get(
+			ctx,
+			ctrlclient.ObjectKey{Namespace: policy.Namespace, Name: name},
+			serviceAccount,
+		); err != nil {
+			return nil, fmt.Errorf("resolve outbound access ServiceAccount approval identity: %w", err)
+		}
+		versions = append(
+			versions,
+			policy.Namespace+"/"+name+"\x00"+string(serviceAccount.UID)+"\x00"+serviceAccount.ResourceVersion,
+		)
+	}
 	for _, ref := range secretRefs {
 		if ref == nil || strings.TrimSpace(ref.Name) == "" {
 			continue

@@ -129,7 +129,9 @@ func (r *KubernetesResolver) exchanger() tokenexchange.Exchanger {
 
 func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
 	direct := policy.Spec.Direct
-	if direct.Subject.Source == corev1alpha1.OutboundTokenSourceTransactionToken {
+	usesTransactionToken := direct.Subject.Source == corev1alpha1.OutboundTokenSourceTransactionToken ||
+		(direct.Actor != nil && direct.Actor.Source == corev1alpha1.OutboundTokenSourceTransactionToken)
+	if usesTransactionToken {
 		if err := validateRequestedScopeSubset(direct.Scopes, req.ParentTransactionScopes); err != nil {
 			return Resolution{}, err
 		}

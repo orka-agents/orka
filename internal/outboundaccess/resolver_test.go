@@ -85,6 +85,41 @@ func TestKubernetesResolverTransactionScopeSubset(t *testing.T) {
 	}
 }
 
+func TestKubernetesResolverActorTransactionScopeSubset(t *testing.T) {
+	scheme := resolverScheme(t)
+	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Grant:         corev1alpha1.OutboundGrantTokenExchange,
+		TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+		Subject: corev1alpha1.OutboundTokenSource{
+			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+			TokenType: tokenexchange.TokenTypeAccessToken,
+			SecretRef: secretRef("subject", "token"),
+		},
+		Actor:                   &corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+		Scopes:                  []string{"api.read"},
+		ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+	}})
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "subject", Namespace: "tenant"},
+		Data:       map[string][]byte{"token": []byte("subject-token")},
+	}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, secret).Build()
+	resolver := &KubernetesResolver{
+		Reader:    reader,
+		Exchanger: &captureExchanger{result: tokenexchange.Result{AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}},
+	}
+
+	_, err := resolver.Resolve(context.Background(), ResolveRequest{
+		Namespace:               "tenant",
+		PolicyName:              "direct",
+		TransactionToken:        "transaction-token",
+		ParentTransactionScopes: []string{"api.write"},
+	})
+	if err == nil || !containsFold(err.Error(), "not present") {
+		t.Fatalf("Resolve() error = %v, want actor scope expansion denial", err)
+	}
+}
+
 func TestKubernetesResolverGatewayPreservesExactServiceTuple(t *testing.T) {
 	scheme := resolverScheme(t)
 	policy := readyPolicy("gateway", corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{

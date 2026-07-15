@@ -170,14 +170,14 @@ func TestToolExecutor_Execute_CustomTransportReadsZeroContentLengthBody(t *testi
 	}
 }
 
-func TestToolExecutor_Execute_CustomTransportAllowsEmptyBodyWithContentLength(t *testing.T) {
+func TestToolExecutor_Execute_CustomTransportAllowsBodylessOversizedRepresentation(t *testing.T) {
 	executor := &ToolExecutor{
 		client: &http.Client{Transport: zeroLengthRoundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode:    http.StatusOK,
 				Header:        make(http.Header),
 				Body:          io.NopCloser(strings.NewReader(``)),
-				ContentLength: 42,
+				ContentLength: toolHTTPResponseBodyLimit + 1,
 			}, nil
 		})},
 		namespace:  "default",
@@ -2128,10 +2128,10 @@ func TestToolExecutor_Execute_URLInterpolation_NoPlaceholders(t *testing.T) {
 }
 
 func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
-	// Create a server that returns more than 10MB
+	// Create a chunked response larger than the configured limit.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		// Write 11MB of data (10MB limit should truncate it)
+		// Write 11MB of data without a Content-Length header.
 		chunk := make([]byte, 1024*1024) // 1MB
 		for range 11 {
 			w.Write(chunk) //nolint:errcheck
@@ -2154,18 +2154,11 @@ func TestToolExecutor_Execute_ResponseSizeLimit(t *testing.T) {
 	}
 
 	result, err := executor.Execute(context.Background(), tool, nil)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "response body exceeds") {
+		t.Fatalf("Execute() error = %v, want response size failure", err)
 	}
-
-	// Verify response was limited to 10MB
-	if len(result) > 10*1024*1024 {
-		t.Errorf("response size = %d bytes, want <= 10MB", len(result))
-	}
-
-	// Should be exactly 10MB
-	if len(result) != 10*1024*1024 {
-		t.Errorf("response size = %d bytes, want exactly 10MB", len(result))
+	if result != "" {
+		t.Fatalf("Execute() result length = %d, want no truncated result", len(result))
 	}
 }
 
@@ -2413,13 +2406,48 @@ func (r *fakeOutboundAccessResolver) Resolve(_ context.Context, req outboundacce
 	return r.resolution, r.err
 }
 
+func TestToolExecutorTimeoutCoversOutboundResolutionWithTelemetry(t *testing.T) {
+	if _, err := tracing.Init("test", false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	_ = testutil.NewSpanHarness(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	timeout := metav1.Duration{Duration: 100 * time.Millisecond}
+	executor := &ToolExecutor{
+		client:           server.Client(),
+		namespace:        "tenant",
+		outboundResolver: blockingOutboundAccessResolver{},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "timed"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL:                     server.URL,
+			Timeout:                 &timeout,
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+		}},
+	}
+
+	started := time.Now()
+	_, err := executor.Execute(context.Background(), tool, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Execute() elapsed = %s, want outbound resolution bounded by Tool timeout", elapsed)
+	}
+}
+
 func TestToolExecutorDirectOutboundAccessInjectsAndRedactsResourceCredential(t *testing.T) {
 	txnPath := filepath.Join(t.TempDir(), "transaction-token")
 	if err := os.WriteFile(txnPath, []byte("parent-transaction-token"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(workerenv.TransactionTokenFile, txnPath)
-	t.Setenv(workerenv.TransactionScopes, "api.read api.write")
+	t.Setenv(workerenv.TransactionScopes, "api.read,api.write")
 
 	var authorization, transactionHeader string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2728,7 +2756,7 @@ func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
 		GatewayHost:   gatewayURL.Host,
 	}}
 	executor := &ToolExecutor{client: gateway.Client(), namespace: "tenant", outboundResolver: resolver}
-	executor.SetTransactionAuthority("task-scoped-transaction", []string{"api.read"})
+	executor.SetTransactionAuthority("task-scoped-transaction", []string{"reports.read,reports.write"})
 	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		URL:                     "https://api.example.test/v1",
 		OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "gateway"},
@@ -2736,8 +2764,20 @@ func TestToolExecutorUsesExplicitTaskTransactionAuthority(t *testing.T) {
 	if _, err := executor.Execute(context.Background(), tool, nil); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if resolver.request.TransactionToken != "task-scoped-transaction" || len(resolver.request.ParentTransactionScopes) != 1 {
+	if resolver.request.TransactionToken != "task-scoped-transaction" ||
+		len(resolver.request.ParentTransactionScopes) != 1 ||
+		resolver.request.ParentTransactionScopes[0] != "reports.read,reports.write" {
 		t.Fatalf("resolver request = %#v", resolver.request)
+	}
+}
+
+func TestToolExecutorParentTransactionScopesPreferRawScope(t *testing.T) {
+	t.Setenv(workerenv.TransactionScope, "reports.read,reports.write audit")
+	t.Setenv(workerenv.TransactionScopes, "reports.read,reports.write,audit")
+
+	got := (&ToolExecutor{}).currentParentTransactionScopes()
+	if len(got) != 2 || got[0] != "reports.read,reports.write" || got[1] != "audit" {
+		t.Fatalf("parent scopes = %#v, want raw scope tokens preserved", got)
 	}
 }
 

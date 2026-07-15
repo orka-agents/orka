@@ -223,6 +223,11 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 
 // Execute executes a Tool CRD by making an HTTP request.
 func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (result string, err error) {
+	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, tool.Spec.HTTP.Timeout.Duration)
+		defer cancel()
+	}
 	if toolExecutorTelemetryDisabled() {
 		return e.executeToolRequest(ctx, tool, args)
 	}
@@ -318,11 +323,6 @@ func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string)
 }
 
 func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (string, error) {
-	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, tool.Spec.HTTP.Timeout.Duration)
-		defer cancel()
-	}
 	prepared, err := e.prepareRequest(ctx, tool, args)
 	if err != nil {
 		return "", err
@@ -542,14 +542,18 @@ func executeToolHTTPRequest(httpClient *http.Client, req *http.Request, secrets 
 }
 
 func readLimitedHTTPResponseBody(body io.Reader, contentLength int64) ([]byte, error) {
-	limited := io.LimitReader(body, toolHTTPResponseBodyLimit)
+	limited := io.LimitReader(body, toolHTTPResponseBodyLimit+1)
+	var respBody bytes.Buffer
 	if contentLength > 0 && contentLength <= toolHTTPResponseBodyLimit {
-		var respBody bytes.Buffer
 		respBody.Grow(int(contentLength))
-		_, err := respBody.ReadFrom(limited)
-		return respBody.Bytes(), err
 	}
-	return io.ReadAll(limited)
+	if _, err := respBody.ReadFrom(limited); err != nil {
+		return nil, err
+	}
+	if respBody.Len() > toolHTTPResponseBodyLimit {
+		return nil, fmt.Errorf("response body exceeds %d-byte limit", toolHTTPResponseBodyLimit)
+	}
+	return respBody.Bytes(), nil
 }
 
 type toolIdempotencyKeyContextKey struct{}
@@ -1567,11 +1571,10 @@ func (e *ToolExecutor) currentParentTransactionScopes() []string {
 	if e != nil && e.transactionAuthoritySet {
 		return normalizeToolScopes(e.transactionScopes)
 	}
-	parentScope := strings.TrimSpace(os.Getenv(workerenv.TransactionScopes))
-	if parentScope == "" {
-		parentScope = strings.TrimSpace(os.Getenv(workerenv.TransactionScope))
+	if parentScope := strings.TrimSpace(os.Getenv(workerenv.TransactionScope)); parentScope != "" {
+		return normalizeToolScopes([]string{parentScope})
 	}
-	return normalizeToolScopes([]string{parentScope})
+	return normalizeToolScopes(workerenv.SplitCSV(os.Getenv(workerenv.TransactionScopes)))
 }
 
 func normalizeToolScopes(values []string) []string {

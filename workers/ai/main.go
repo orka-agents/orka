@@ -486,7 +486,26 @@ func bindApprovalOutboundAccessPolicyVersion(
 		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
 	}
 	secretRefs := approvalOutboundPolicySecretRefs(policy)
-	secretVersions := make([]string, 0, len(secretRefs))
+	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
+	secretVersions := make([]string, 0, len(secretRefs)+len(serviceAccountNames))
+	serviceAccountNamespace := strings.TrimSpace(policy.Namespace)
+	if serviceAccountNamespace == "" {
+		serviceAccountNamespace = namespace
+	}
+	for _, name := range serviceAccountNames {
+		serviceAccount := &corev1.ServiceAccount{}
+		if err := k8sClient.Get(
+			ctx,
+			client.ObjectKey{Namespace: serviceAccountNamespace, Name: name},
+			serviceAccount,
+		); err != nil {
+			return fmt.Errorf("read outbound access ServiceAccount %q for approval binding: %w", name, err)
+		}
+		secretVersions = append(
+			secretVersions,
+			serviceAccountNamespace+"/"+name+"\x00"+string(serviceAccount.UID)+"\x00"+serviceAccount.ResourceVersion,
+		)
+	}
 	for _, ref := range secretRefs {
 		if ref == nil || strings.TrimSpace(ref.Name) == "" {
 			continue
@@ -520,6 +539,24 @@ func bindApprovalOutboundAccessPolicyVersion(
 		tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation] = secretsDigest
 	}
 	return nil
+}
+
+func approvalOutboundPolicyServiceAccountNames(policy *corev1alpha1.OutboundAccessPolicy) []string {
+	if policy == nil || policy.Spec.Direct == nil {
+		return nil
+	}
+	names := []string{}
+	appendSource := func(source *corev1alpha1.OutboundTokenSource) {
+		if source == nil || source.ServiceAccountRef == nil {
+			return
+		}
+		if name := strings.TrimSpace(source.ServiceAccountRef.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	appendSource(&policy.Spec.Direct.Subject)
+	appendSource(policy.Spec.Direct.Actor)
+	return names
 }
 
 func approvalOutboundPolicySecretRefs(

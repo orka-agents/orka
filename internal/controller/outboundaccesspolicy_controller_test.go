@@ -304,3 +304,63 @@ func TestHarnessBrokeredTransactionAuthorityIdentityChangesOnSecretRotation(t *t
 		t.Fatal("transaction authority Secret rotation did not change brokered approval identity")
 	}
 }
+
+func TestHarnessBrokeredOutboundPolicyIdentityChangesOnServiceAccountRecreation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "resource-api", Namespace: "tenant", UID: types.UID("policy-uid"), ResourceVersion: "10", Generation: 2,
+		},
+		Spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+			Subject: corev1alpha1.OutboundTokenSource{
+				Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+				ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: "workload"},
+			},
+		}},
+	}
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant", UID: types.UID("service-account-a"), ResourceVersion: "1"},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "dispatch", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy.Name},
+		}},
+	}
+	client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, serviceAccount).Build()
+	reconciler := &TaskReconciler{Client: client, APIReader: client}
+	first, err := reconciler.harnessBrokeredOutboundPolicyIdentity(context.Background(), tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDigest, err := approvals.TargetSpecDigest(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Delete(context.Background(), serviceAccount); err != nil {
+		t.Fatal(err)
+	}
+	replacement := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant", UID: types.UID("service-account-b")},
+	}
+	if err := client.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	second, err := reconciler.harnessBrokeredOutboundPolicyIdentity(context.Background(), tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := approvals.TargetSpecDigest(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest == secondDigest {
+		t.Fatal("ServiceAccount recreation did not change brokered approval identity")
+	}
+}

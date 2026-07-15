@@ -2421,6 +2421,54 @@ func TestApprovalTargetSpecDigestIncludesOutboundAccessPolicyIdentity(t *testing
 	}
 }
 
+func TestBindApprovalOutboundAccessPolicyVersionIncludesServiceAccountIdentity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "tenant"},
+		Spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+			Subject: corev1alpha1.OutboundTokenSource{
+				Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+				ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: "workload"},
+			},
+		}},
+	}
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant", UID: "service-account-a", ResourceVersion: "1"},
+	}
+	client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, serviceAccount).Build()
+	tool := approvalTestCustomTool("https://tools.example.test/dispatch")
+	tool.Namespace = "tenant"
+	tool.Spec.HTTP.OutboundAccessPolicyRef = &corev1alpha1.LocalObjectReference{Name: policy.Name}
+	if err := bindApprovalOutboundAccessPolicyVersion(context.Background(), client, "tenant", tool); err != nil {
+		t.Fatal(err)
+	}
+	first := tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation]
+	if first == "" {
+		t.Fatal("ServiceAccount approval identity digest is empty")
+	}
+	if err := client.Delete(context.Background(), serviceAccount); err != nil {
+		t.Fatal(err)
+	}
+	replacement := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant", UID: "service-account-b"},
+	}
+	if err := client.Create(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindApprovalOutboundAccessPolicyVersion(context.Background(), client, "tenant", tool); err != nil {
+		t.Fatal(err)
+	}
+	if second := tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation]; second == "" || second == first {
+		t.Fatalf("ServiceAccount approval identity digest = %q after recreation, want a new digest", second)
+	}
+}
+
 func TestBindApprovalOutboundAccessPolicyVersionFailsClosedOnMissingCredentialSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
