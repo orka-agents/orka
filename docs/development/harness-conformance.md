@@ -1,6 +1,6 @@
 # Harness conformance suite
 
-`internal/harness/conformance` is the controller implementation of the reusable `orka.harness.v1` conformance library. External Go adapters use its public facade at `pkg/harness/conformance`. Both return condition-ready results: pass/fail, sanitized messages, and observed capabilities.
+`internal/harness/conformance` is the controller implementation of the reusable `orka.harness.v1` conformance library. Its public facade at `pkg/harness/conformance` makes the same checks available to external Go adapters. Both return condition-ready results: pass/fail, sanitized messages, and observed capabilities.
 
 `internal/harness/harnesstest` remains the Go test fixture layer. It supplies fake harness behaviors and wraps the reusable checks for provider tests.
 
@@ -38,7 +38,7 @@ The suite expects an HTTP+SSE harness endpoint implementing:
 - `POST /v1/turns/{turnID}/continue` for brokered profiles (bearer-authenticated)
 - `POST /v1/turns/{turnID}/cancel` when `supportsCancel=true` (bearer-authenticated)
 
-Orka's `internal/harness/protocol.go` is the source of truth for `orka.harness.v1`; external Go adapters consume the alias-only public surface in `pkg/harness`. External runtimes — including generic HTTP adapters, AgentKit Serve, and Foundry adapters — must match these DTOs rather than expecting Orka to accept backend-specific compatibility JSON.
+Orka's `internal/harness/protocol.go` is the source of truth for `orka.harness.v1`. External Go adapters can consume the alias-only public surface in `pkg/harness`; adapters implemented independently must keep their wire DTOs compatible with it. External runtimes — including generic HTTP adapters, AgentKit Serve, and Foundry adapters — must match these DTOs rather than expecting Orka to accept backend-specific compatibility JSON.
 
 Required wire fields include:
 

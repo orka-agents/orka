@@ -861,13 +861,80 @@ func TestBrokeredReadinessPreservesCustomProbeTemplate(t *testing.T) {
 }
 
 func TestProbeStreamContextExtendsEarlierParentDeadlineForDrain(t *testing.T) {
-	parent, cancelParent := context.WithDeadline(context.Background(), time.Now().Add(20*time.Millisecond))
+	parentDeadline := time.Now().Add(20 * time.Millisecond)
+	parent, cancelParent := context.WithDeadline(context.Background(), parentDeadline)
 	defer cancelParent()
 	stream, cancelStream := probeStreamContext(parent, time.Second)
 	defer cancelStream()
 	deadline, ok := stream.Deadline()
-	if !ok || time.Until(deadline) < postTerminalDrainTimeout {
-		t.Fatalf("stream deadline = %v, want parent deadline plus drain interval", deadline)
+	want := parentDeadline.Add(postTerminalDrainTimeout)
+	if !ok || !deadline.Equal(want) {
+		t.Fatalf("stream deadline = %v, want %v", deadline, want)
+	}
+}
+
+func TestBrokeredProbeStreamPreservesDecodedTerminalDuringCancellation(t *testing.T) {
+	framesCh := make(chan harness.HarnessEventFrame)
+	errCh := make(chan error, 1)
+	decoded := make(chan struct{})
+	producerDone := make(chan struct{})
+	emitFrame := newBrokeredProbeFrameEmitter(framesCh)
+	go func() {
+		defer close(producerDone)
+		close(decoded)
+		if err := emitFrame(harness.HarnessEventFrame{Type: harness.FrameTurnCompleted}); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- context.Canceled
+	}()
+	<-decoded
+	cancelled := false
+	terminalSeen := false
+	streamErr, drained := stopProbeStreamAndDrainFrames(
+		func() { cancelled = true },
+		framesCh,
+		errCh,
+		func(frame harness.HarnessEventFrame) bool {
+			terminalSeen = isProbeTerminalFrame(frame.Type)
+			return true
+		},
+	)
+	if !cancelled {
+		t.Fatal("stream cancel was not called")
+	}
+	if !drained {
+		t.Fatal("in-flight frames were not drained")
+	}
+	if !errors.Is(streamErr, context.Canceled) {
+		t.Fatalf("stream error = %v, want context canceled", streamErr)
+	}
+	if !terminalSeen {
+		t.Fatal("decoded terminal frame was not recorded")
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("stream producer did not exit")
+	}
+}
+
+func TestStopProbeStreamAndDrainFramesTimesOutWhenProducerDoesNotExit(t *testing.T) {
+	started := time.Now()
+	streamErr, drained := stopProbeStreamAndDrainFrames(
+		func() {},
+		make(chan harness.HarnessEventFrame),
+		make(chan error),
+		func(harness.HarnessEventFrame) bool { return true },
+	)
+	if !drained {
+		t.Fatal("drain unexpectedly failed")
+	}
+	if !errors.Is(streamErr, errProbeStreamShutdownTimeout) {
+		t.Fatalf("stream error = %v, want shutdown timeout", streamErr)
+	}
+	if elapsed := time.Since(started); elapsed < postTerminalDrainTimeout || elapsed > time.Second {
+		t.Fatalf("shutdown wait = %v, want bounded drain interval", elapsed)
 	}
 }
 

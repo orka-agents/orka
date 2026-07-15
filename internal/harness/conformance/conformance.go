@@ -25,6 +25,8 @@ const (
 	maxProbeFrameBytes       = 8 << 20
 )
 
+var errProbeStreamShutdownTimeout = errors.New("timed out waiting for brokered stream shutdown")
+
 // Target identifies a harness endpoint to probe. BearerToken is used only for
 // authenticated control-plane endpoints and is never included in Result.
 type Target struct {
@@ -383,29 +385,9 @@ func runBrokeredProbe(
 	defer streamCancel()
 	framesCh := make(chan harness.HarnessEventFrame, maxProbeFrames)
 	errCh := make(chan error, 1)
+	emitFrame := newBrokeredProbeFrameEmitter(framesCh)
 	go func() {
-		var frameBytes int
-		var frameCount int
-		err := client.StreamFrames(streamCtx, request.TurnID, 0, func(frame harness.HarnessEventFrame) error {
-			if frameCount >= maxProbeFrames {
-				return fmt.Errorf("conformance probe frame count exceeded %d", maxProbeFrames)
-			}
-			frameCount++
-			frameBytes += approximateProbeFrameBytes(frame)
-			if frameBytes > maxProbeFrameBytes {
-				return fmt.Errorf("conformance probe frame bytes exceeded %d", maxProbeFrameBytes)
-			}
-			select {
-			case framesCh <- frame:
-			case <-streamCtx.Done():
-				return streamCtx.Err()
-			}
-			if isProbeTerminalFrame(frame.Type) {
-				return nil
-			}
-			return nil
-		})
-		errCh <- err
+		errCh <- client.StreamFrames(streamCtx, request.TurnID, 0, emitFrame)
 	}()
 
 	var requested *harness.HarnessEventFrame
@@ -603,30 +585,26 @@ func runBrokeredProbe(
 			finish()
 			return
 		case <-terminalDrain:
-			streamCancel()
-			select {
-			case err := <-errCh:
-				if err != nil && !probeStreamStoppedByContext(err) {
-					result.addFailure(fmt.Sprintf("stream brokered frames failed: %v", err))
-					return
-				}
-			case <-time.After(postTerminalDrainTimeout):
+			streamErr, drained := stopProbeStreamAndDrainFrames(streamCancel, framesCh, errCh, recordFrame)
+			if !drained {
+				return
 			}
-			for len(framesCh) > 0 {
-				if !recordFrame(<-framesCh) {
-					return
-				}
+			if streamErr != nil && !probeStreamStoppedByContext(streamErr) {
+				result.addFailure(fmt.Sprintf("stream brokered frames failed: %v", streamErr))
+				return
 			}
 			finish()
 			return
 		case <-continueStreamCtx.Done():
+			streamErr, drained := stopProbeStreamAndDrainFrames(streamCancel, framesCh, errCh, recordFrame)
+			if !drained {
+				return
+			}
+			if streamErr != nil && (!terminalSeen || !probeStreamStoppedByContext(streamErr)) {
+				result.addFailure(fmt.Sprintf("stream brokered frames failed: %v", streamErr))
+				return
+			}
 			if terminalSeen {
-				streamCancel()
-				for len(framesCh) > 0 {
-					if !recordFrame(<-framesCh) {
-						return
-					}
-				}
 				finish()
 				return
 			}
@@ -635,6 +613,72 @@ func runBrokeredProbe(
 		}
 	}
 
+}
+
+func newBrokeredProbeFrameEmitter(
+	framesCh chan<- harness.HarnessEventFrame,
+) func(harness.HarnessEventFrame) error {
+	frameCount := 0
+	frameBytes := 0
+	return func(frame harness.HarnessEventFrame) error {
+		if frameCount >= maxProbeFrames {
+			return fmt.Errorf("conformance probe frame count exceeded %d", maxProbeFrames)
+		}
+		frameCount++
+		frameBytes += approximateProbeFrameBytes(frame)
+		if frameBytes > maxProbeFrameBytes {
+			return fmt.Errorf("conformance probe frame bytes exceeded %d", maxProbeFrameBytes)
+		}
+		// The production channel can hold every permitted frame, so publish an
+		// already-decoded frame before StreamFrames observes cancellation. Selecting
+		// on the stream context here could discard a terminal frame at the deadline.
+		framesCh <- frame
+		return nil
+	}
+}
+
+func stopProbeStreamAndDrainFrames(
+	streamCancel context.CancelFunc,
+	framesCh <-chan harness.HarnessEventFrame,
+	errCh <-chan error,
+	recordFrame func(harness.HarnessEventFrame) bool,
+) (error, bool) {
+	streamCancel()
+	shutdownTimer := time.NewTimer(postTerminalDrainTimeout)
+	defer shutdownTimer.Stop()
+	for {
+		select {
+		case frame := <-framesCh:
+			if !recordFrame(frame) {
+				return nil, false
+			}
+		case streamErr := <-errCh:
+			for len(framesCh) > 0 {
+				if !recordFrame(<-framesCh) {
+					return streamErr, false
+				}
+			}
+			return streamErr, true
+		case <-shutdownTimer.C:
+			for {
+				select {
+				case frame := <-framesCh:
+					if !recordFrame(frame) {
+						return errProbeStreamShutdownTimeout, false
+					}
+				case streamErr := <-errCh:
+					for len(framesCh) > 0 {
+						if !recordFrame(<-framesCh) {
+							return streamErr, false
+						}
+					}
+					return streamErr, true
+				default:
+					return errProbeStreamShutdownTimeout, true
+				}
+			}
+		}
+	}
 }
 
 func expectedBrokeredProbeToolName(profile harness.BrokeredToolClass) string {
