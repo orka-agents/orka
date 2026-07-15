@@ -20,6 +20,7 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1273,27 +1274,12 @@ func memoryToolNames() []string {
 
 func coordinationToolNames() []string {
 	return []string{
-		"delegate_task",
-		"wait_for_tasks",
-		"create_container_task",
-		"cancel_task",
-		"send_message",
-		"check_messages",
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-		"create_pull_request",
-		"list_pull_requests",
-		"check_pr_review_marker",
-		"check_pull_request_ci",
-		"merge_pull_request",
-		"auto_merge_pull_request",
-		"review_pull_request",
-		"post_review_comment",
-		"create_agent",
-		"delete_agent",
-		"update_plan",
+		"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task",
+		"send_message", "check_messages", "recall_memory", "remember",
+		"propose_memory", "search_transcript", "create_pull_request",
+		"list_pull_requests", "check_pr_review_marker", "check_pull_request_ci",
+		"merge_pull_request", "auto_merge_pull_request", "review_pull_request",
+		"post_review_comment", "create_agent", "delete_agent", "update_plan",
 	}
 }
 
@@ -1329,7 +1315,21 @@ func contextTokenTaskToolCredentialFailures(
 		return nil, nil
 	}
 	toolNames := append([]string{}, authzCtx.EffectiveAITools...)
-	toolNames = append(toolNames, contextTokenRuntimeToolConstraints(authzCtx)...)
+	runtimeToolNames := contextTokenRuntimeToolConstraints(authzCtx)
+	toolNames = append(toolNames, runtimeToolNames...)
+	requiresResolution := make(map[string]bool, len(toolNames))
+	for _, name := range authzCtx.EffectiveAITools {
+		name = strings.TrimSpace(name)
+		if name != "" && !contextTokenPlatformAIToolName(authzCtx, name) {
+			requiresResolution[name] = true
+		}
+	}
+	for _, name := range runtimeToolNames {
+		name = strings.TrimSpace(name)
+		if name != "" && !contextTokenNativeRuntimeToolName(authzCtx, name) {
+			requiresResolution[name] = true
+		}
+	}
 	seenTools := map[string]struct{}{}
 	credentialSecrets := map[string]struct{}{}
 	requiresCredentialScope := false
@@ -1343,9 +1343,13 @@ func contextTokenTaskToolCredentialFailures(
 			continue
 		}
 		seenTools[toolName] = struct{}{}
+		if !requiresResolution[toolName] {
+			continue
+		}
 		tool := &corev1alpha1.Tool{}
 		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: toolName}, tool); err != nil {
 			if apierrors.IsNotFound(err) {
+				failures = append(failures, fmt.Sprintf("Tool %q is unresolved", toolName))
 				continue
 			}
 			return nil, fmt.Errorf("resolve Tool %q credential policy: %w", toolName, err)
@@ -1586,6 +1590,57 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 		}
 	}
 	return failures
+}
+
+func contextTokenPlatformAIToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
+	if slices.Contains(memoryToolNames(), name) {
+		return true
+	}
+	if slices.Contains(toolspkg.CoordinationToolNames(), name) {
+		coordinationEnabled := authzCtx.Agent != nil && authzCtx.Agent.Spec.Coordination != nil && authzCtx.Agent.Spec.Coordination.Enabled
+		return coordinationEnabled || slices.Contains(toolspkg.ChatToolNames(), name)
+	}
+	_, builtin := toolspkg.DefaultRegistry.Get(name)
+	return builtin
+}
+
+func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
+	base := strings.TrimSpace(name)
+	if index := strings.IndexByte(base, '('); index >= 0 {
+		base = strings.TrimSpace(base[:index])
+	}
+	runtime := (*corev1alpha1.AgentCLIRuntime)(nil)
+	if authzCtx.Agent != nil {
+		runtime = authzCtx.Agent.Spec.Runtime
+	}
+	if runtime != nil && runtime.RuntimeRef != nil {
+		brokeredOverride := authzCtx.Request.AgentRuntime != nil && hasNonEmptyToolNames(authzCtx.Request.AgentRuntime.AllowedTools)
+		if !brokeredOverride {
+			return true
+		}
+		if slices.Contains([]string{"delegate_task", "wait_for_tasks", "cancel_task", "send_message", "check_messages"}, base) {
+			return true
+		}
+		explicitBash := slices.ContainsFunc(authzCtx.Request.AgentRuntime.AllowedTools, func(value string) bool {
+			return strings.TrimSpace(value) == "Bash"
+		})
+		return base == "Bash" && !explicitBash
+	}
+	if _, builtin := toolspkg.DefaultRegistry.Get(base); builtin {
+		return true
+	}
+	if runtime != nil && runtime.Type != "" {
+		return true
+	}
+	if slices.Contains(toolspkg.CoordinationToolNames(), base) {
+		return true
+	}
+	switch strings.ToLower(base) {
+	case "bash", "read", "write", "edit", "glob", "grep", "websearch", "webfetch", "ls", "create_file", "web_search":
+		return true
+	default:
+		return false
+	}
 }
 
 func contextTokenRuntimeToolConstraints(authzCtx contextTokenTaskCreateAuthorizationContext) []string {

@@ -854,3 +854,93 @@ func readyContextTokenOutboundPolicy(
 		},
 	}
 }
+
+func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedCustomTool(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"custom-search"}}
+	failures, err := contextTokenTaskToolCredentialFailures(
+		context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{`Tool "custom-search" is unresolved`}, failures)
+}
+
+func TestContextTokenTaskToolCredentialFailuresAllowsUnresolvedBuiltinAndRuntimeTools(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Namespace: "team-a", EffectiveAITools: []string{"web_search"}, RuntimeAllowedTools: []string{"Bash"},
+	}
+	failures, err := contextTokenTaskToolCredentialFailures(
+		context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
+	)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedBrokeredRuntimeTool(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", RuntimeAllowedTools: []string{"read_incident"}}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
+	require.NoError(t, err)
+	require.Equal(t, []string{`Tool "read_incident" is unresolved`}, failures)
+}
+
+func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	builtinAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}}}
+	remoteAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "remote"}}}}
+	tests := []struct {
+		name        string
+		ctx         contextTokenTaskCreateAuthorizationContext
+		wantFailure string
+	}{
+		{name: "AI name matching native tool still resolves", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"Read"}}, wantFailure: "Read"},
+		{name: "AI coordination tool is builtin when coordination is enabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, EffectiveAITools: []string{"list_issues"}}},
+		{name: "AI coordination name resolves as custom without coordination", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"list_issues"}}, wantFailure: "list_issues"},
+		{name: "AI explicit coordination tool remains builtin when injection disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, Request: CreateTaskRequest{Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"list_pull_requests"}}},
+		{name: "controller proxy coordination name resolves as custom when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"create_pull_request"}}, wantFailure: "create_pull_request"},
+		{name: "dual-registered coordination name remains builtin when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"cancel_task"}}},
+		{name: "built-in runtime accepts scoped native syntax", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: builtinAgent, RuntimeAllowedTools: []string{"Read(/workspace/**)"}}},
+		{name: "runtimeRef observed defaults remain backend-owned", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, RuntimeAllowedTools: []string{"analyze"}}},
+		{name: "runtimeRef brokered coordination tool is builtin", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"delegate_task"}}}, RuntimeAllowedTools: []string{"delegate_task"}, RuntimeAllowBash: true}},
+		{name: "runtimeRef brokered override must resolve", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}}, RuntimeAllowedTools: []string{"read_incident"}, RuntimeAllowBash: true}, wantFailure: "read_incident"},
+		{name: "runtimeRef brokered registry collision must resolve", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"web_search"}}}, RuntimeAllowedTools: []string{"web_search"}}, wantFailure: "web_search"},
+		{name: "runtimeRef explicit Bash must resolve", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Bash"}}}, RuntimeAllowedTools: []string{"Bash"}, RuntimeAllowBash: true}, wantFailure: "Bash"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), tt.ctx)
+			require.NoError(t, err)
+			if tt.wantFailure == "" {
+				require.Empty(t, failures)
+			} else {
+				require.Len(t, failures, 1)
+				require.Contains(t, failures[0], tt.wantFailure)
+			}
+		})
+	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSyntheticNativeBash(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	bashTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "team-a"}}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bashTool).Build()
+	remoteAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "remote"}}}}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Namespace: "team-a", Agent: remoteAgent,
+		Request:             CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"bash"}}},
+		RuntimeAllowedTools: []string{"bash"}, RuntimeAllowBash: true,
+	}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+}
