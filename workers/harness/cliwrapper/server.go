@@ -463,6 +463,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
+	turnCtx.HomeDir = turnHome
 	turnCtx.Env = setEnv(turnCtx.Env, "HOME", turnHome)
 	stripGitCredentials := strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["readOnly"]), "true") ||
 		strings.EqualFold(strings.TrimSpace(turnCtx.Metadata["runtimeAuthOnly"]), "true")

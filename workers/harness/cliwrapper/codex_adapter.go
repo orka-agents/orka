@@ -30,11 +30,15 @@ func (a *CodexAdapter) Name() string { return RuntimeCodex }
 func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
 	readOnly := strings.EqualFold(strings.TrimSpace(turn.Metadata["readOnly"]), "true")
+	readOnlyHome := strings.TrimSpace(turn.HomeDir)
 	if !agentCfg.AllowBash && !readOnly {
 		return nil, fmt.Errorf(
 			"codex runtime requires %s=true unless trusted read-only metadata forces the read-only sandbox",
 			workerenv.AllowBash,
 		)
+	}
+	if readOnly && readOnlyHome == "" {
+		return nil, fmt.Errorf("read-only Codex requires a wrapper-managed home directory")
 	}
 	reasoningEffort, err := codexReasoningEffort(turn.Metadata)
 	if err != nil {
@@ -90,10 +94,23 @@ func (a *CodexAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comma
 	if readOnly || strings.EqualFold(strings.TrimSpace(turn.Metadata["runtimeAuthOnly"]), "true") {
 		baseURL = firstNonEmpty(envEntryValue(turn.Env, workerenv.OpenAIBaseURL), codexOpenAIBaseURL())
 	}
+	if readOnly {
+		codexHome := filepath.Join(readOnlyHome, ".codex")
+		if err := os.MkdirAll(codexHome, 0o700); err != nil {
+			_ = os.Remove(outputPath)
+			cleanupInstructions()
+			return nil, fmt.Errorf("create read-only Codex home: %w", err)
+		}
+		if err := prepareHomeForChild(codexHome); err != nil {
+			_ = os.Remove(outputPath)
+			cleanupInstructions()
+			return nil, fmt.Errorf("prepare read-only Codex home: %w", err)
+		}
+	}
 	return &CommandSpec{
 		Path:       firstNonEmpty(a.config.Path, os.Getenv(workerenv.CodexCLIPath), defaultCodexPath),
 		Args:       buildCodexArgs(agentCfg, outputPath, instructionsPath, false, baseURL, reasoningEffort, readOnly),
-		Env:        buildCodexEnv(turn.Env, baseURL, readOnly),
+		Env:        buildCodexEnv(turn.Env, baseURL, readOnly, readOnlyHome),
 		UnsetEnv:   codexUnsetEnv(readOnly),
 		ClearEnv:   readOnly,
 		Dir:        dir,
@@ -245,9 +262,9 @@ func buildCodexInstructions(cfg *agentEnvConfig) string {
 	return strings.TrimSpace(strings.Join(sections, "\n\n"))
 }
 
-func buildCodexEnv(extra []string, baseURL string, readOnly bool) []string {
+func buildCodexEnv(extra []string, baseURL string, readOnly bool, readOnlyHome string) []string {
 	if readOnly {
-		return buildReadOnlyCodexEnv(extra, baseURL)
+		return buildReadOnlyCodexEnv(extra, baseURL, readOnlyHome)
 	}
 	// Codex receives the turn prompt on stdin. Remove the explicit copy here;
 	// BuildCommand also unsets any inherited copy after the final environment merge.
@@ -269,8 +286,7 @@ func buildCodexEnv(extra []string, baseURL string, readOnly bool) []string {
 	return env
 }
 
-func buildReadOnlyCodexEnv(extra []string, baseURL string) []string {
-	home := firstNonEmpty(envEntryValue(extra, "HOME"), "/home/worker")
+func buildReadOnlyCodexEnv(extra []string, baseURL, home string) []string {
 	env := []string{
 		"HOME=" + home,
 		"CODEX_HOME=" + filepath.Join(home, ".codex"),

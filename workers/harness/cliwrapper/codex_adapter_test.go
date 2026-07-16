@@ -57,10 +57,13 @@ func TestCodexAdapterBuildsLegacyCompatibleArgs(t *testing.T) {
 func TestCodexAdapterForcesHardenedReadOnlyCommand(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	t.Setenv(workerenv.CodexSandboxMode, "danger-full-access")
+	home := t.TempDir()
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
 	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		HomeDir:  home,
 		Metadata: map[string]string{"allowBash": "false", "readOnly": "true", "reasoningEffort": "high"},
 		Env: []string{
+			"HOME=" + home,
 			workerenv.AgentReadOnly + "=true",
 			"NODE_OPTIONS=--require=/workspace/payload.cjs",
 			"CODEX_HOME=/workspace/.codex",
@@ -94,8 +97,12 @@ func TestCodexAdapterForcesHardenedReadOnlyCommand(t *testing.T) {
 			t.Fatalf("UnsetEnv = %#v, missing %s", spec.UnsetEnv, name)
 		}
 	}
-	if !containsEnv(spec.Env, "CODEX_HOME=/home/worker/.codex") {
+	codexHome := filepath.Join(home, ".codex")
+	if !containsEnv(spec.Env, "CODEX_HOME="+codexHome) {
 		t.Fatalf("env = %#v, want trusted read-only CODEX_HOME", spec.Env)
+	}
+	if stat, err := os.Stat(codexHome); err != nil || !stat.IsDir() {
+		t.Fatalf("read-only CODEX_HOME stat = %#v, %v, want existing directory", stat, err)
 	}
 	if !spec.ClearEnv {
 		t.Fatal("ClearEnv = false, want read-only Codex to drop inherited wrapper environment")
@@ -107,6 +114,15 @@ func TestCodexAdapterForcesHardenedReadOnlyCommand(t *testing.T) {
 		if strings.Contains(strings.Join(spec.Env, "\n"), unwanted) {
 			t.Fatalf("env = %#v, retained untrusted read-only value %q", spec.Env, unwanted)
 		}
+	}
+}
+
+func TestCodexAdapterReadOnlyRequiresWrapperManagedHome(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	adapter := NewCodexAdapter(CodexAdapterConfig{})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{Metadata: map[string]string{"readOnly": "true"}})
+	if err == nil || !strings.Contains(err.Error(), "wrapper-managed home") {
+		t.Fatalf("BuildCommand error = %v, want trusted home requirement", err)
 	}
 }
 

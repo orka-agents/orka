@@ -50,6 +50,7 @@ type TurnContext struct {
 	Prompt           string
 	WorkDir          string
 	RootDir          string
+	HomeDir          string
 	SkillsRoot       string
 	Env              []string
 	Deadline         time.Time
