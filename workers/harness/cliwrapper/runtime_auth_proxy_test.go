@@ -115,6 +115,36 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 	}
 }
 
+func TestProtectRuntimeAuthTurnProtectsReadOnlyCodexCredentials(t *testing.T) {
+	previousBoundary := runtimeAuthChildBoundaryAvailable
+	runtimeAuthChildBoundaryAvailable = func() bool { return true }
+	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	turn := TurnContext{
+		RuntimeName: RuntimeCodex,
+		Metadata:    map[string]string{"readOnly": "true"},
+		Env: []string{
+			workerenv.OpenAIBaseURL + "=" + upstream.URL + "/v1",
+			workerenv.OpenAIAPIKey + "=upstream-value",
+		},
+	}
+	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	if err != nil {
+		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
+	}
+	defer closeProxy()
+	if strings.Contains(strings.Join(protected.Env, "\n"), "upstream-value") {
+		t.Fatalf("read-only child environment retained upstream credential: %#v", protected.Env)
+	}
+	parsed, err := url.Parse(envEntryValue(protected.Env, workerenv.OpenAIBaseURL))
+	if err != nil || parsed.Hostname() != "127.0.0.1" {
+		t.Fatalf("protected base URL = %q err=%v, want loopback proxy", parsed, err)
+	}
+}
+
 func TestProtectRuntimeAuthTurnRejectsClaudeFoundry(t *testing.T) {
 	turn := TurnContext{RuntimeName: RuntimeClaude, Metadata: map[string]string{"runtimeAuthOnly": "true"}, Env: []string{
 		"CLAUDE_CODE_USE_FOUNDRY=1",

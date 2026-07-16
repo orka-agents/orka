@@ -1435,9 +1435,6 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		return fmt.Errorf("read-only agent tasks do not support external runtimeRef %q", agent.Spec.Runtime.RuntimeRef.Name)
 	}
-	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex {
-		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
-	}
 	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCopilot {
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
 	}
@@ -1644,6 +1641,13 @@ func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev
 		return false
 	}
 	switch readOnlyAgentRuntimeType(agent) {
+	case corev1alpha1.AgentRuntimeCodex:
+		for _, key := range []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey} {
+			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
+				return true
+			}
+		}
+		return false
 	case corev1alpha1.AgentRuntimeClaude:
 		for _, key := range []string{workerenv.AnthropicAPIKey, "ANTHROPIC_FOUNDRY_API_KEY"} {
 			if value := strings.TrimSpace(string(secret.Data[key])); value != "" {
@@ -1659,7 +1663,7 @@ func readOnlyAgentRuntimeSecretHasCredential(secret *corev1.Secret, agent *corev
 func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error) {
 	switch readOnlyAgentRuntimeType(agent) {
 	case corev1alpha1.AgentRuntimeCodex:
-		return nil, fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed as environment variables")
+		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, nil
 	case corev1alpha1.AgentRuntimeClaude:
 		return []string{
 			workerenv.AnthropicAPIKey,

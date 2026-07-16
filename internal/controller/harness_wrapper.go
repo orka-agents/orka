@@ -1690,6 +1690,11 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultMaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*agent.Spec.Runtime.DefaultMaxTurns), 10)
 	}
+	if agent != nil && agent.Spec.Runtime != nil {
+		if effort := strings.ToLower(strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort)); effort != "" {
+			metadata["reasoningEffort"] = effort
+		}
+	}
 	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
 		metadata["maxTurns"] = strconv.FormatInt(int64(*task.Spec.AgentRuntime.MaxTurns), 10)
 	}
@@ -2191,7 +2196,11 @@ func setHarnessTurnEnv(env []harness.TurnEnvVar, name, value string) []harness.T
 }
 
 func harnessWrapperReadOnlyEnvBlocked(name string) bool {
-	switch strings.TrimSpace(name) {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "GIT_CONFIG_") || strings.HasPrefix(name, "DYLD_") {
+		return true
+	}
+	switch name {
 	case workerenv.AgentReadOnly,
 		workerenv.ResultStdout,
 		workerenv.AllowBash,
@@ -2201,7 +2210,23 @@ func harnessWrapperReadOnlyEnvBlocked(name string) bool {
 		workerenv.ClaudeDisableSettingSources,
 		workerenv.ClaudePermissionMode,
 		workerenv.CodexDisableSandbox,
-		workerenv.CodexSandboxMode:
+		workerenv.CodexSandboxMode,
+		"NODE_OPTIONS",
+		"NODE_PATH",
+		"HOME",
+		"ZDOTDIR",
+		"CODEX_HOME",
+		"BASH_ENV",
+		"ENV",
+		"LD_PRELOAD",
+		"LD_AUDIT",
+		"LD_LIBRARY_PATH",
+		"PYTHONPATH",
+		"PERL5OPT",
+		"RUBYOPT",
+		"NPM_CONFIG_USERCONFIG",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME":
 		return true
 	default:
 		return false

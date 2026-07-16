@@ -62,6 +62,7 @@ type CommandSpec struct {
 	Args       []string
 	Env        []string
 	UnsetEnv   []string // Removed after inherited and explicit Env entries are merged.
+	ClearEnv   bool     // Start from an empty environment before applying Env.
 	Dir        string
 	Stdin      []byte
 	ResultFile string

@@ -2816,6 +2816,9 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 		if agent.Spec.Runtime.DefaultAllowBash != nil {
 			return fmt.Errorf("runtimeRef custom runtimes do not support defaultAllowBash policy metadata")
 		}
+		if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultReasoningEffort policy metadata")
+		}
 	}
 	if task != nil && task.Spec.AgentRuntime != nil {
 		if len(task.Spec.AgentRuntime.DisallowedTools) > 0 {
@@ -2925,8 +2928,6 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 		return nil
 	}
 	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex:
-		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
 	case corev1alpha1.AgentRuntimeCopilot:
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
 	default:

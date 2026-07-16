@@ -2707,6 +2707,7 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 
 func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime.DefaultReasoningEffort = agentReasoningEffortHigh
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err != nil {
@@ -2714,6 +2715,9 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	}
 	if request.Metadata["maxTurns"] != "50" {
 		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+	if request.Metadata["reasoningEffort"] != "high" {
+		t.Fatalf("metadata reasoningEffort = %q, want high", request.Metadata["reasoningEffort"])
 	}
 }
 
@@ -2795,5 +2799,20 @@ func TestHarnessWrapperTurnRequestRejectsReadOnlyRuntimeRefWithoutSecret(t *test
 	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
 		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want read-only runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperReadOnlyEnvBlocksStartupInjection(t *testing.T) {
+	for _, name := range []string{
+		"NODE_OPTIONS", "NODE_PATH", "HOME", "ZDOTDIR", "CODEX_HOME", "BASH_ENV", "ENV",
+		"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PYTHONPATH",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "XDG_CONFIG_HOME",
+	} {
+		if !harnessWrapperReadOnlyEnvBlocked(name) {
+			t.Errorf("harnessWrapperReadOnlyEnvBlocked(%q) = false", name)
+		}
+	}
+	if harnessWrapperReadOnlyEnvBlocked("SAFE_REVIEW_SETTING") {
+		t.Fatal("ordinary review setting was unexpectedly blocked")
 	}
 }

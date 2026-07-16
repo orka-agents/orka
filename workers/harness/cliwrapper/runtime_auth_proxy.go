@@ -38,12 +38,14 @@ const (
 )
 
 func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
-	if !strings.EqualFold(strings.TrimSpace(turn.Metadata["runtimeAuthOnly"]), "true") {
-		return turn, func() {}, nil
-	}
 	runtimeName := strings.ToLower(strings.TrimSpace(turn.RuntimeName))
 	if runtimeName == RuntimeMulti {
 		runtimeName = strings.ToLower(strings.TrimSpace(turn.Metadata["runtime"]))
+	}
+	runtimeAuthOnly := strings.EqualFold(strings.TrimSpace(turn.Metadata["runtimeAuthOnly"]), "true")
+	readOnlyCodex := runtimeName == RuntimeCodex && strings.EqualFold(strings.TrimSpace(turn.Metadata["readOnly"]), "true")
+	if !runtimeAuthOnly && !readOnlyCodex {
+		return turn, func() {}, nil
 	}
 	var mode runtimeAuthProxyMode
 	var upstreamValue, endpoint string

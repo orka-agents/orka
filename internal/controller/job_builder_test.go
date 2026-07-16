@@ -3110,6 +3110,35 @@ func TestAddSecretVolumes_RuntimeAuthOnlyRejectsFoundryCredentials(t *testing.T)
 	}
 }
 
+func TestValidateReadOnlyAgentRuntimeAllowsCodexWithScopedCredentials(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		labels.AnnotationAgentReadOnly: scheduledRunLabelValue,
+	}}}
+	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+		Type: corev1alpha1.AgentRuntimeCodex,
+	}}}
+	if err := validateReadOnlyAgentRuntime(task, agent); err != nil {
+		t.Fatalf("validateReadOnlyAgentRuntime() error = %v", err)
+	}
+	if err := validateReadOnlyBuiltInAgentRuntime(task, corev1alpha1.AgentRuntimeCodex); err != nil {
+		t.Fatalf("validateReadOnlyBuiltInAgentRuntime() error = %v", err)
+	}
+	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
+	if err != nil {
+		t.Fatalf("readOnlyAgentRuntimeSecretKeys() error = %v", err)
+	}
+	joined := strings.Join(keys, ",")
+	for _, want := range []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("read-only Codex keys = %#v, missing %s", keys, want)
+		}
+	}
+	secret := &corev1.Secret{Data: map[string][]byte{workerenv.OpenAIAPIKey: []byte("x")}}
+	if !readOnlyAgentRuntimeSecretHasCredential(secret, agent) {
+		t.Fatal("read-only Codex credential was not recognized")
+	}
+}
+
 func TestValidateReadOnlyAgentRuntimeRejectsExternalRuntimeRef(t *testing.T) {
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		labels.AnnotationAgentReadOnly: scheduledRunLabelValue,

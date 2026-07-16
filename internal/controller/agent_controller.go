@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,14 @@ type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+const (
+	agentReasoningEffortLow    = "low"
+	agentReasoningEffortMedium = "medium"
+	agentReasoningEffortHigh   = "high"
+	agentReasoningEffortXHigh  = "xhigh"
+	agentReasoningEffortMax    = "max"
+)
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents/status,verbs=get;update;patch
@@ -88,6 +97,8 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		if agent.Spec.ProviderRef == nil && (agent.Spec.Model == nil || agent.Spec.Model.Provider == "") {
 			return fmt.Errorf("either providerRef or model.provider must be specified")
 		}
+	} else if err := validateAgentRuntimeReasoningEffort(agent.Spec.Runtime); err != nil {
+		return err
 	}
 
 	if err := r.validateProviderRef(ctx, agent); err != nil {
@@ -106,6 +117,40 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		return err
 	}
 	return r.validateCoordination(ctx, agent)
+}
+
+func validateAgentRuntimeReasoningEffort(runtimeCfg *corev1alpha1.AgentCLIRuntime) error {
+	if runtimeCfg == nil {
+		return nil
+	}
+	effort := strings.ToLower(strings.TrimSpace(runtimeCfg.DefaultReasoningEffort))
+	if effort == "" {
+		return nil
+	}
+	switch runtimeCfg.Type {
+	case corev1alpha1.AgentRuntimeCodex:
+		switch effort {
+		case agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
+			return nil
+		default:
+			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be low, medium, high, or xhigh", effort)
+		}
+	case corev1alpha1.AgentRuntimeClaude:
+		switch effort {
+		case agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh,
+			agentReasoningEffortXHigh, agentReasoningEffortMax:
+			return nil
+		default:
+			return fmt.Errorf("claude runtime defaultReasoningEffort %q must be low, medium, high, xhigh, or max", effort)
+		}
+	case corev1alpha1.AgentRuntimeCopilot:
+		return fmt.Errorf("copilot runtime does not support defaultReasoningEffort")
+	default:
+		if runtimeCfg.RuntimeRef != nil {
+			return fmt.Errorf("runtimeRef custom runtimes do not support defaultReasoningEffort")
+		}
+		return fmt.Errorf("runtime %q does not support defaultReasoningEffort", runtimeCfg.Type)
+	}
 }
 
 // validateProviderRef validates the providerRef if set.
