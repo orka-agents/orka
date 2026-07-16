@@ -79,6 +79,7 @@ func TestCodexAdapterForcesHardenedReadOnlyCommand(t *testing.T) {
 	joined := strings.Join(spec.Args, " ")
 	for _, want := range []string{
 		"--sandbox read-only",
+		"--config use_legacy_landlock=true",
 		"--ignore-user-config",
 		"--ignore-rules",
 		"--disable hooks",

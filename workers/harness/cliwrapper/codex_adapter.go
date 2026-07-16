@@ -155,6 +155,10 @@ func buildCodexArgs(
 	if forceReadOnly {
 		args = append(args,
 			"--sandbox", "read-only",
+			// Restricted Kubernetes pods commonly block bubblewrap user namespaces.
+			// Codex's explicit legacy backend preserves the read-only filesystem and
+			// network policy with Landlock/seccomp without requiring those namespaces.
+			"--config", "use_legacy_landlock=true",
 			"--ignore-user-config",
 			"--ignore-rules",
 			"--disable", "hooks",
