@@ -2202,19 +2202,16 @@ func readOnlyAgentAllowedTools() []string {
 
 func readOnlyAgentDisallowedTools() []string {
 	deniedReadPaths := []string{
-		"/proc/**",
-		"/var/run/secrets/**",
-		"/secrets/**",
-		"/home/worker/**",
+		"//proc/**",
+		"//var/run/secrets/**",
+		"//secrets/**",
+		"//home/worker/**",
 	}
-	disallowed := []string{"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"}
+	disallowed := []string{"Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"}
 	for _, deniedPath := range deniedReadPaths {
-		disallowed = append(disallowed,
-			"Read("+deniedPath+")",
-			"Glob("+deniedPath+")",
-			"Grep("+deniedPath+")",
-			"LS("+deniedPath+")",
-		)
+		// Claude Code applies Read(path) deny rules to all file-reading tools.
+		// A double slash denotes an absolute filesystem path.
+		disallowed = append(disallowed, "Read("+deniedPath+")")
 	}
 	return disallowed
 }

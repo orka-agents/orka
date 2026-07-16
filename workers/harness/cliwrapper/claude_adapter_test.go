@@ -76,35 +76,65 @@ func TestClaudeAdapterScopesReadOnlyPermissions(t *testing.T) {
 			workerenv.ClaudePermissionMode + "=dontAsk",
 		},
 		Metadata: map[string]string{
+			"readOnly": "true",
 			"allowedTools": strings.Join([]string{
 				"Read(/workspace/**)",
 				"Glob(/workspace/**)",
 				"Grep(/workspace/**)",
 				"LS(/workspace/**)",
+				"Agent(review)",
+				"mcp__repo__lookup",
 				"Read(/workspace/**)",
 			}, ","),
-			"disallowedTools": "Bash,Read(/proc/**),Read(/workspace/secrets/**)",
+			"disallowedTools": "Bash,Read(//proc/**),Read(/workspace/secrets/**),Read(/.env)",
 		},
 		WorkDir: "/repo-root",
 	}
 	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
 	assertContains(t, args, "--bare")
+	assertContains(t, args, "--strict-mcp-config")
 	assertFlagValue(t, args, "--setting-sources", "")
 	assertFlagValue(t, args, "--permission-mode", "dontAsk")
-	assertFlagValue(t, args, "--tools", "Read,Glob,Grep,LS")
+	assertFlagValue(t, args, "--tools", "Read,Glob,Grep,Agent,mcp__repo__lookup")
 	assertContains(t, args, "--allowedTools")
-	assertContains(t, args, "Read(/repo-root/**)")
-	assertContains(t, args, "Glob(/repo-root/**)")
-	assertContains(t, args, "Grep(/repo-root/**)")
-	assertContains(t, args, "LS(/repo-root/**)")
+	assertContains(t, args, "Read(//repo-root/**)")
+	assertContains(t, args, "Glob(//repo-root/**)")
+	assertContains(t, args, "Grep(//repo-root/**)")
+	assertContains(t, args, "Agent(review)")
+	assertContains(t, args, "mcp__repo__lookup")
+	assertNotContains(t, args, "LS(//repo-root/**)")
 	assertContains(t, args, "--disallowedTools")
 	assertContains(t, args, "Bash")
-	assertContains(t, args, "Read(/proc/**)")
-	assertContains(t, args, "Read(/repo-root/secrets/**)")
-	assertNotContains(t, args, "Read(/repo-root/subdir/secrets/**)")
+	assertContains(t, args, "Read(//proc/**)")
+	assertContains(t, args, "Read(//repo-root/secrets/**)")
+	assertContains(t, args, "Read(/.env)")
+	assertNotContains(t, args, "Read(//.env)")
+	assertNotContains(t, args, "Read(//repo-root/subdir/secrets/**)")
 	if slices.Contains(args, "Read(/workspace/**),Glob(/workspace/**),Grep(/workspace/**),LS(/workspace/**)") {
 		t.Fatal("--tools should receive bare tool names, not scoped permission specs")
 	}
+}
+
+func TestClaudeAdapterObsoleteOnlyAllowlistFailsClosed(t *testing.T) {
+	turn := TurnContext{Metadata: map[string]string{"readOnly": "true", "allowedTools": "LS,MultiEdit"}}
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
+	assertFlagValue(t, args, "--tools", "")
+	assertNotContains(t, args, "LS")
+	assertNotContains(t, args, "MultiEdit")
+}
+
+func TestClaudeAdapterDoesNotRewriteGenericPermissionPayloads(t *testing.T) {
+	turn := TurnContext{
+		Metadata: map[string]string{
+			"allowedTools":    "Read(/secrets/**)",
+			"disallowedTools": "Bash(/usr/bin/curl *)",
+		},
+		WorkDir: "/repo-root",
+	}
+	args := buildClaudeArgs(agentConfigFromTurn(turn), turn, "")
+	assertContains(t, args, "Read(/secrets/**)")
+	assertContains(t, args, "Bash(/usr/bin/curl *)")
+	assertNotContains(t, args, "Bash(//usr/bin/curl *)")
 }
 
 func TestClaudeAdapterRunsFakeCLIThroughWrapper(t *testing.T) {
