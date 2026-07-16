@@ -4171,6 +4171,39 @@ func TestRepositoryMonitorReconcileRejectsInvalidReviewerAgentWithoutPersistingM
 	}
 }
 
+func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1 AddToScheme() error = %v", err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "codex-review-monitor", Namespace: "default"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			Agents: corev1alpha1.RepositoryMonitorAgents{
+				Reviewer: &corev1alpha1.AgentReference{Name: "codex-reviewer"},
+			},
+		},
+	}
+	reviewer := repositoryMonitorControllerTestAgent(
+		"codex-reviewer",
+		corev1alpha1.AgentRuntimeCodex,
+		"codex-reviewer-secret",
+	)
+	secret := repositoryMonitorControllerTestSecret("codex-reviewer-secret", map[string][]byte{
+		workerenv.OpenAIAPIKey: []byte("test-key"),
+	})
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer, secret).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl}
+	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
+	if err != nil || reason != "" || message != "" {
+		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
+	}
+}
+
 func TestRepositoryMonitorReconcileRejectsInvalidGitSecretWithoutPersistingMetadata(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
