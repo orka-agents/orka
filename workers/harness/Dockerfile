@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
 
 FROM --platform=$TARGETPLATFORM golang:1.26 AS target-go
 
-# Runtime stage with common CLI dependencies for generic, Codex, and Claude adapters.
+# Runtime stage with common CLI dependencies for generic, Codex, Claude, and OpenCode adapters.
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code \
+RUN npm install -g @openai/codex @anthropic-ai/claude-code opencode-ai \
+    && command -v opencode \
     && npm cache clean --force
 
 COPY --from=target-go /usr/local/go /usr/local/go
