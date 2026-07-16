@@ -8,6 +8,19 @@ import {
 } from './monitor'
 
 describe('repositoryMonitorSpecSchema', () => {
+  it('preserves issue inventory label policy', () => {
+    const targets = {
+      issues: {
+        enabled: true,
+        maxPerRun: 25,
+        includeLabels: ['agent-ready'],
+        excludeLabels: ['blocked'],
+      },
+    }
+    const parsed = repositoryMonitorSpecSchema.parse({ repoURL: 'https://github.com/orka-agents/orka', targets })
+    expect(parsed.targets).toEqual(targets)
+  })
+
   it('preserves GitHub label trigger configuration', () => {
     const triggers = {
       github: {

@@ -5164,7 +5164,7 @@ func TestRepositoryMonitorImplementationBudgetIgnoresFailedActionsButCountsMutat
 	if err := monitorStore.CreateImplementationJob(ctx, &store.ImplementationJob{ID: "impl-mutating", MonitorNamespace: "default", MonitorName: monitor.Name, IssueNumber: 45, SnapshotDigest: "sha256:other", Phase: repositoryMonitorIssuePhaseMutationQueued, WorkActionID: "wa-succeeded", CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("CreateImplementationJob(mutating) error = %v", err)
 	}
-	if reason, err := reconciler.issueImplementationBudgetBlockReason(ctx, monitor, item, ""); err != nil || reason != "implementation_active_budget_exhausted" {
+	if reason, err := reconciler.issueImplementationBudgetBlockReason(ctx, monitor, item, ""); err != nil || reason != repositoryMonitorImplementationActiveBudget {
 		t.Fatalf("mutating job reason=%q err=%v, want implementation_active_budget_exhausted", reason, err)
 	}
 	currentTaskName := "current-implementation-task"
@@ -5173,6 +5173,44 @@ func TestRepositoryMonitorImplementationBudgetIgnoresFailedActionsButCountsMutat
 	}
 	if reason, err := reconciler.issueImplementationBudgetBlockReason(ctx, monitor, item, currentTaskName); err != nil || reason != "" {
 		t.Fatalf("existing current job reason=%q err=%v, want retry reuse", reason, err)
+	}
+}
+
+func TestRepositoryMonitorImplementationBudgetPaginatesAllJobs(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	maxActive := int32(1)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "large-history", Namespace: defaultNS}}
+	monitor.Spec.IssueWorkflow.Implementation.MaxActive = &maxActive
+	item := &store.MonitorItem{Number: 9999, SnapshotDigest: "sha256:current"}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+
+	if err := monitorStore.CreateImplementationJob(ctx, &store.ImplementationJob{
+		ID:               "impl-active-oldest",
+		MonitorNamespace: defaultNS,
+		MonitorName:      monitor.Name,
+		IssueNumber:      1,
+		Phase:            repositoryMonitorIssuePhaseImplementationQueued,
+		CreatedAt:        time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateImplementationJob(active) error = %v", err)
+	}
+	for i := range 200 {
+		if err := monitorStore.CreateImplementationJob(ctx, &store.ImplementationJob{
+			ID:               fmt.Sprintf("impl-complete-%03d", i),
+			MonitorNamespace: defaultNS,
+			MonitorName:      monitor.Name,
+			IssueNumber:      int64(1000 + i),
+			Phase:            repositoryMonitorIssuePhasePROpened,
+			CreatedAt:        time.Now(),
+		}); err != nil {
+			t.Fatalf("CreateImplementationJob(completed %d) error = %v", i, err)
+		}
+	}
+
+	reason, err := reconciler.issueImplementationBudgetBlockReason(ctx, monitor, item, "")
+	if err != nil || reason != repositoryMonitorImplementationActiveBudget {
+		t.Fatalf("budget reason=%q err=%v, want implementation_active_budget_exhausted from second page", reason, err)
 	}
 }
 
@@ -6973,6 +7011,23 @@ func TestRepositoryMonitorRunSignalFailureRemainsRetryable(t *testing.T) {
 	completedAt := time.Now()
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: runID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseFailed, StartedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt, Error: "failed to signal repository monitor run: conflict"}); err != nil {
 		t.Fatalf("CreateMonitorRun() error = %v", err)
+	}
+	for i := range 101 {
+		decoyCompletedAt := completedAt.Add(time.Duration(i+1) * time.Minute)
+		if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{
+			ID:               fmt.Sprintf("run-decoy-%03d", i),
+			MonitorNamespace: defaultNS,
+			MonitorName:      monitor.Name,
+			TargetKind:       command.Kind,
+			TargetNumber:     command.Number,
+			TargetSHA:        command.HeadSHA,
+			CommandEventID:   fmt.Sprintf("cmd-decoy-%03d", i),
+			Phase:            repositoryMonitorRunPhaseSucceeded,
+			StartedAt:        decoyCompletedAt.Add(-time.Second),
+			CompletedAt:      &decoyCompletedAt,
+		}); err != nil {
+			t.Fatalf("CreateMonitorRun(decoy %d) error = %v", i, err)
+		}
 	}
 	actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent))
 	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, RunID: runID, CommandEventID: command.ID, DesiredAction: command.Intent, Status: store.RepositoryMonitorWorkActionStatusRetryPending, Phase: store.RepositoryMonitorWorkActionStatusRetryPending, BlockedReason: store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, Error: "failed to signal repository monitor run: conflict", CreatedAt: completedAt}); err != nil {

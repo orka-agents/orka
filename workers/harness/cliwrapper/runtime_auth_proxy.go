@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -122,7 +123,56 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicAPIKey, token)
 	}
+	turn.Env = runtimeAuthProxyAddNoProxyHosts(turn.Env, "127.0.0.1", "localhost")
 	return turn, closeProxy, nil
+}
+
+func runtimeAuthProxyAddNoProxyHosts(env []string, hosts ...string) []string {
+	values := make([]string, 0, len(hosts)+2)
+	seen := make(map[string]struct{}, len(hosts)+2)
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		raw := runtimeAuthProxyEffectiveEnvValue(env, name)
+		for value := range strings.SplitSeq(raw, ",") {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			key := strings.ToLower(value)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			values = append(values, value)
+		}
+	}
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		key := strings.ToLower(host)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		values = append(values, host)
+	}
+	combined := strings.Join(values, ",")
+	env = removeTurnEnv(env, "NO_PROXY", "no_proxy")
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		env = setEnv(env, name, combined)
+	}
+	return env
+}
+
+func runtimeAuthProxyEffectiveEnvValue(env []string, name string) string {
+	prefix := name + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if after, ok := strings.CutPrefix(env[i], prefix); ok {
+			return after
+		}
+	}
+	return os.Getenv(name)
 }
 
 func runtimeAuthProxyEnvFlagEnabled(env []string, name string) bool {

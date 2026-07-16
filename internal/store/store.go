@@ -179,6 +179,7 @@ type RepositoryMonitorStore interface {
 	UpdateImplementationJob(ctx context.Context, job *ImplementationJob) error
 	GetImplementationJob(ctx context.Context, namespace, id string) (*ImplementationJob, error)
 	ListImplementationJobs(ctx context.Context, filter ImplementationJobFilter) ([]ImplementationJob, string, error)
+	CountImplementationJobs(ctx context.Context, filter ImplementationJobFilter) (int, error)
 
 	CreateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error
 	UpdateGitHubMutationRecord(ctx context.Context, record *GitHubMutationRecord) error

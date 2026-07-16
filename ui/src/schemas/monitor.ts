@@ -7,6 +7,13 @@ export const repositoryMonitorTargetSchema = z.object({
   maxPerRun: z.number().optional(),
 })
 
+export const repositoryMonitorIssueTargetSchema = z.object({
+  enabled: z.boolean().optional(),
+  maxPerRun: z.number().optional(),
+  includeLabels: z.array(z.string()).optional(),
+  excludeLabels: z.array(z.string()).optional(),
+})
+
 const repositoryMonitorIssueCommandLabelsSchema = z.object({
   triage: z.string().optional(),
   research: z.string().optional(),
@@ -52,7 +59,7 @@ export const repositoryMonitorSpecSchema = z.object({
   suspend: z.boolean().optional(),
   targets: z.object({
     pullRequests: repositoryMonitorTargetSchema.optional(),
-    issues: repositoryMonitorTargetSchema.optional(),
+    issues: repositoryMonitorIssueTargetSchema.optional(),
     commits: repositoryMonitorTargetSchema.optional(),
   }).optional(),
   agents: z.object({

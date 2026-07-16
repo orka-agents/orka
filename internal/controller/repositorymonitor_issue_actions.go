@@ -57,6 +57,7 @@ const (
 	repositoryMonitorCommandIntentStop           = "stop"
 	repositoryMonitorCommandIntentResume         = "resume"
 	repositoryMonitorIssueSkipStoppedByCommand   = "stopped_by_command"
+	repositoryMonitorImplementationActiveBudget  = "implementation_active_budget_exhausted"
 
 	repositoryMonitorIssuePhaseTriageQueued         = "triage_queued"
 	repositoryMonitorIssuePhaseTriaging             = "triaging"
@@ -1626,46 +1627,42 @@ func (r *RepositoryMonitorReconciler) issueImplementationBudgetBlockReason(ctx c
 			return "", err
 		}
 	}
-	jobs, _, err := r.Store.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, IssueNumber: item.Number, Limit: 200})
-	if err != nil {
-		return "", err
-	}
-	if maxAttempts := repositoryMonitorImplementationMaxAttemptsPerIssue(monitor); maxAttempts >= 0 && len(jobs) >= maxAttempts {
-		return "implementation_attempt_budget_exhausted", nil
-	}
-	allJobs, _, err := r.Store.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 200})
-	if err != nil {
-		return "", err
-	}
-	active := 0
-	for _, job := range allJobs {
-		if !repositoryMonitorImplementationJobActive(job.Phase) {
-			continue
+	if maxAttempts := repositoryMonitorImplementationMaxAttemptsPerIssue(monitor); maxAttempts >= 0 {
+		count, err := r.Store.CountImplementationJobs(ctx, store.ImplementationJobFilter{
+			Namespace: monitor.Namespace, MonitorName: monitor.Name, IssueNumber: item.Number,
+		})
+		if err != nil {
+			return "", err
 		}
-		if strings.TrimSpace(job.WorkActionID) != "" {
-			action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, job.WorkActionID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return "", err
-			}
-			if err == nil && repositoryMonitorWorkActionReleasesImplementationCapacity(action.Status) {
-				continue
-			}
+		if count >= maxAttempts {
+			return "implementation_attempt_budget_exhausted", nil
 		}
-		active++
 	}
-	if maxActive := repositoryMonitorImplementationMaxActive(monitor); maxActive >= 0 && active >= maxActive {
-		return "implementation_active_budget_exhausted", nil
+	if maxActive := repositoryMonitorImplementationMaxActive(monitor); maxActive >= 0 {
+		count, err := r.Store.CountImplementationJobs(ctx, store.ImplementationJobFilter{
+			Namespace:   monitor.Namespace,
+			MonitorName: monitor.Name,
+			Phases: []string{
+				repositoryMonitorIssuePhaseImplementationQueued,
+				repositoryMonitorIssuePhaseImplementing,
+				repositoryMonitorIssuePhasePatchReady,
+				repositoryMonitorIssuePhaseMutationQueued,
+				repositoryMonitorIssuePhaseMutatingToPR,
+			},
+			ExcludeWorkActionStatuses: []string{
+				repositoryMonitorWorkActionStatusFailed,
+				repositoryMonitorWorkActionStatusBlocked,
+				repositoryMonitorWorkActionStatusCancelled,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		if count >= maxActive {
+			return repositoryMonitorImplementationActiveBudget, nil
+		}
 	}
 	return "", nil
-}
-
-func repositoryMonitorWorkActionReleasesImplementationCapacity(status string) bool {
-	switch strings.TrimSpace(status) {
-	case repositoryMonitorWorkActionStatusFailed, repositoryMonitorWorkActionStatusBlocked, repositoryMonitorWorkActionStatusCancelled:
-		return true
-	default:
-		return false
-	}
 }
 
 func repositoryMonitorImplementationJobActive(phase string) bool {

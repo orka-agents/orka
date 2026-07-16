@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,6 +60,8 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 				Env: []string{
 					tt.baseField + "=" + upstream.URL + basePath,
 					tt.authField + "=" + upstreamValue,
+					"NO_PROXY=existing.internal",
+					"no_proxy=lower.internal",
 				},
 			}
 			protected, closeProxy, err := protectRuntimeAuthTurn(turn)
@@ -68,6 +71,14 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 			defer closeProxy()
 			if strings.Contains(strings.Join(protected.Env, "\n"), upstreamValue) {
 				t.Fatalf("protected child environment retained upstream value: %#v", protected.Env)
+			}
+			for _, name := range []string{"NO_PROXY", "no_proxy"} {
+				value := envEntryValue(protected.Env, name)
+				for _, want := range []string{"existing.internal", "lower.internal", "127.0.0.1", "localhost"} {
+					if !slices.Contains(strings.Split(value, ","), want) {
+						t.Fatalf("%s = %q, missing %q", name, value, want)
+					}
+				}
 			}
 			localBase := envEntryValue(protected.Env, tt.baseField)
 			parsed, err := url.Parse(localBase)
@@ -112,6 +123,73 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 				t.Fatalf("upstream x-api-key was not injected")
 			}
 		})
+	}
+}
+
+func TestRuntimeAuthProxyAddNoProxyHostsMergesCaseVariants(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		env  string
+		want string
+	}{
+		{name: "uppercase only", env: "NO_PROXY=upper.internal", want: "upper.internal"},
+		{name: "lowercase only", env: "no_proxy=lower.internal", want: "lower.internal"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := runtimeAuthProxyAddNoProxyHosts([]string{tt.env}, "127.0.0.1", "localhost")
+			for _, name := range []string{"NO_PROXY", "no_proxy"} {
+				value := envEntryValue(env, name)
+				for _, want := range []string{tt.want, "127.0.0.1", "localhost"} {
+					if !slices.Contains(strings.Split(value, ","), want) {
+						t.Fatalf("%s = %q, missing %q", name, value, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeAuthProxyAddNoProxyHostsCollapsesDuplicateKeys(t *testing.T) {
+	env := runtimeAuthProxyAddNoProxyHosts([]string{
+		"NO_PROXY=base.internal",
+		"NO_PROXY=override.internal",
+		"no_proxy=lower.internal",
+		"OTHER=value",
+	}, "127.0.0.1", "localhost")
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		prefix := name + "="
+		count := 0
+		for _, entry := range env {
+			if strings.HasPrefix(entry, prefix) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("env = %#v, want exactly one %s entry", env, name)
+		}
+		value := envEntryValue(env, name)
+		for _, want := range []string{"override.internal", "lower.internal", "127.0.0.1", "localhost"} {
+			if !slices.Contains(strings.Split(value, ","), want) {
+				t.Fatalf("%s = %q, missing %q", name, value, want)
+			}
+		}
+		if slices.Contains(strings.Split(value, ","), "base.internal") {
+			t.Fatalf("%s = %q, resurrected overridden base.internal entry", name, value)
+		}
+	}
+}
+
+func TestRuntimeAuthProxyAddNoProxyHostsPreservesProcessEnvironment(t *testing.T) {
+	t.Setenv("NO_PROXY", ".svc")
+	t.Setenv("no_proxy", ".cluster.local")
+	env := runtimeAuthProxyAddNoProxyHosts(nil, "127.0.0.1", "localhost")
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		value := envEntryValue(env, name)
+		for _, want := range []string{".svc", ".cluster.local", "127.0.0.1", "localhost"} {
+			if !slices.Contains(strings.Split(value, ","), want) {
+				t.Fatalf("%s = %q, missing inherited %q", name, value, want)
+			}
+		}
 	}
 }
 

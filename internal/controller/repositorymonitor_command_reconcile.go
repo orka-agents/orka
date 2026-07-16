@@ -74,66 +74,101 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 	if err != nil || terminal {
 		return terminal, false, err
 	}
-	runs, _, err := r.Store.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, Limit: 100})
+	run, err := r.repositoryMonitorCommandRun(ctx, monitor, command, runID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, false, nil
+	}
 	if err != nil {
 		return false, false, err
 	}
-	for _, run := range runs {
-		if run.CommandEventID != command.ID {
-			continue
-		}
-		if run.Phase == repositoryMonitorRunPhaseSucceeded && command.Intent == repositoryMonitorCommandIntentAutomerge {
-			if item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, command.Kind, fmt.Sprintf("%d", command.Number)); err == nil && item.AutomergeState == repositoryMonitorAutomergeStatePending {
-				now := time.Now()
-				run.Phase = repositoryMonitorRunPhaseQueued
-				run.StartedAt = now
-				run.CompletedAt = nil
-				run.Error = ""
-				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
-					return false, false, err
-				}
-				return true, true, nil
-			}
-		}
-		if run.Phase != repositoryMonitorRunPhaseFailed {
-			return true, false, nil
-		}
-		if run.ID == runID && strings.Contains(run.Error, "failed to signal repository monitor run") {
+	if run.Phase == repositoryMonitorRunPhaseSucceeded && command.Intent == repositoryMonitorCommandIntentAutomerge {
+		if item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, command.Kind, fmt.Sprintf("%d", command.Number)); err == nil && item.AutomergeState == repositoryMonitorAutomergeStatePending {
 			now := time.Now()
 			run.Phase = repositoryMonitorRunPhaseQueued
 			run.StartedAt = now
 			run.CompletedAt = nil
 			run.Error = ""
-			if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
+			if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
 				return false, false, err
 			}
 			return true, true, nil
 		}
-		if run.ID == runID && repositoryMonitorFailedCommandRunRetryable(run.Error) {
-			events, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
-			if err != nil {
-				return false, false, err
-			}
-			if len(events) < repositoryMonitorCommandMaxRetries {
-				now := time.Now()
-				run.Phase = repositoryMonitorRunPhaseQueued
-				run.StartedAt = now.Add(repositoryMonitorCommandRetryDelay)
-				run.CompletedAt = nil
-				run.Error = ""
-				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
-					return false, false, err
-				}
-				return true, true, nil
-			}
-			run.Error = "[run_failed] retry_attempts_exhausted"
-			if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
-				return false, false, err
-			}
-			return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, &run, "retry_attempts_exhausted")
-		}
-		return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, &run, run.Error)
 	}
-	return false, false, nil
+	if run.Phase != repositoryMonitorRunPhaseFailed {
+		return true, false, nil
+	}
+	if strings.Contains(run.Error, "failed to signal repository monitor run") {
+		now := time.Now()
+		run.Phase = repositoryMonitorRunPhaseQueued
+		run.StartedAt = now
+		run.CompletedAt = nil
+		run.Error = ""
+		if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
+			return false, false, err
+		}
+		return true, true, nil
+	}
+	if repositoryMonitorFailedCommandRunRetryable(run.Error) {
+		events, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID, EventType: "run_failed", Limit: repositoryMonitorCommandMaxRetries})
+		if err != nil {
+			return false, false, err
+		}
+		if len(events) < repositoryMonitorCommandMaxRetries {
+			now := time.Now()
+			run.Phase = repositoryMonitorRunPhaseQueued
+			run.StartedAt = now.Add(repositoryMonitorCommandRetryDelay)
+			run.CompletedAt = nil
+			run.Error = ""
+			if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
+				return false, false, err
+			}
+			return true, true, nil
+		}
+		run.Error = "[run_failed] retry_attempts_exhausted"
+		if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
+			return false, false, err
+		}
+		return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, run, "retry_attempts_exhausted")
+	}
+	return true, false, r.terminalizeRepositoryMonitorFailedCommand(ctx, monitor, command, run, run.Error)
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorCommandRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, runID string) (*store.MonitorRun, error) {
+	run, err := r.Store.GetMonitorRun(ctx, monitor.Namespace, runID)
+	if err == nil {
+		if run.CommandEventID != command.ID {
+			return nil, fmt.Errorf("monitor run %q belongs to command %q, not %q", run.ID, run.CommandEventID, command.ID)
+		}
+		return run, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+
+	cursor := ""
+	for {
+		runs, next, err := r.Store.ListMonitorRuns(ctx, store.MonitorRunFilter{
+			Namespace:    monitor.Namespace,
+			MonitorName:  monitor.Name,
+			TargetKind:   command.Kind,
+			TargetNumber: command.Number,
+			TargetSHA:    command.HeadSHA,
+			Limit:        100,
+			Cursor:       cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range runs {
+			if runs[i].CommandEventID == command.ID {
+				return &runs[i], nil
+			}
+		}
+		if next == "" {
+			return nil, store.ErrNotFound
+		}
+		cursor = next
+	}
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent) (bool, error) {

@@ -188,14 +188,16 @@ type ImplementationJob struct {
 
 // ImplementationJobFilter constrains implementation job list queries.
 type ImplementationJobFilter struct {
-	Namespace   string
-	MonitorName string
-	Repo        string
-	IssueNumber int64
-	Phase       string
-	TaskName    string
-	Limit       int
-	Cursor      string
+	Namespace                 string
+	MonitorName               string
+	Repo                      string
+	IssueNumber               int64
+	Phase                     string
+	Phases                    []string
+	TaskName                  string
+	ExcludeWorkActionStatuses []string
+	Limit                     int
+	Cursor                    string
 }
 
 // GitHubMutationRecord stores one controller-owned GitHub write audit record.

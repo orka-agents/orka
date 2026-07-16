@@ -1672,6 +1672,61 @@ func (s *Store) ListImplementationJobs(ctx context.Context, filter store.Impleme
 	return jobs, nextOffsetCursor(offset, len(jobs), limit), nil
 }
 
+// CountImplementationJobs counts jobs matching durable workflow filters without
+// materializing historical rows. When ExcludeWorkActionStatuses is set, jobs
+// with a linked work action in one of those statuses are excluded; jobs without
+// a linked/found action remain counted, matching controller capacity semantics.
+func (s *Store) CountImplementationJobs(ctx context.Context, filter store.ImplementationJobFilter) (int, error) {
+	query := strings.Builder{}
+	query.WriteString("SELECT COUNT(*) FROM implementation_jobs j")
+	if len(filter.ExcludeWorkActionStatuses) > 0 {
+		query.WriteString(" LEFT JOIN work_actions a ON a.monitor_namespace = j.monitor_namespace AND a.id = j.work_action_id")
+	}
+	query.WriteString(" WHERE j.monitor_namespace = ?")
+	args := []any{filter.Namespace}
+	if filter.MonitorName != "" {
+		query.WriteString(" AND j.monitor_name = ?")
+		args = append(args, filter.MonitorName)
+	}
+	if filter.Repo != "" {
+		query.WriteString(" AND j.repo = ?")
+		args = append(args, filter.Repo)
+	}
+	if filter.IssueNumber != 0 {
+		query.WriteString(" AND j.issue_number = ?")
+		args = append(args, filter.IssueNumber)
+	}
+	if filter.Phase != "" {
+		query.WriteString(" AND j.phase = ?")
+		args = append(args, filter.Phase)
+	}
+	if len(filter.Phases) > 0 {
+		query.WriteString(" AND j.phase IN (")
+		query.WriteString(strings.TrimSuffix(strings.Repeat("?,", len(filter.Phases)), ","))
+		query.WriteString(")")
+		for _, phase := range filter.Phases {
+			args = append(args, phase)
+		}
+	}
+	if filter.TaskName != "" {
+		query.WriteString(" AND j.task_name = ?")
+		args = append(args, filter.TaskName)
+	}
+	if len(filter.ExcludeWorkActionStatuses) > 0 {
+		query.WriteString(" AND (j.work_action_id = '' OR a.id IS NULL OR a.status NOT IN (")
+		query.WriteString(strings.TrimSuffix(strings.Repeat("?,", len(filter.ExcludeWorkActionStatuses)), ","))
+		query.WriteString("))")
+		for _, status := range filter.ExcludeWorkActionStatuses {
+			args = append(args, status)
+		}
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, query.String(), args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // CreateGitHubMutationRecord inserts an immutable GitHub mutation audit record.
 func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
 	if record == nil {
