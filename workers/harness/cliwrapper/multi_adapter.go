@@ -14,9 +14,10 @@ type MultiAdapter struct {
 
 func NewMultiAdapter(cfg Config) *MultiAdapter {
 	adapters := map[string]RuntimeAdapter{
-		RuntimeCodex:   NewCodexAdapter(cfg.Codex),
-		RuntimeClaude:  NewClaudeAdapter(cfg.Claude),
-		RuntimeCopilot: NewCopilotAdapter(cfg.Copilot),
+		RuntimeCodex:    NewCodexAdapter(cfg.Codex),
+		RuntimeClaude:   NewClaudeAdapter(cfg.Claude),
+		RuntimeCopilot:  NewCopilotAdapter(cfg.Copilot),
+		RuntimeOpencode: NewOpencodeAdapter(cfg.Opencode),
 	}
 	if strings.TrimSpace(cfg.Generic.Command) != "" {
 		adapters[RuntimeGeneric] = NewGenericAdapter(cfg.Generic)
@@ -30,7 +31,7 @@ func (a *MultiAdapter) SupportedRuntimes() []string {
 	if a == nil {
 		return nil
 	}
-	ordered := []string{RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot}
+	ordered := []string{RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode}
 	out := make([]string, 0, len(a.adapters))
 	for _, runtime := range ordered {
 		if _, ok := a.adapters[runtime]; ok {

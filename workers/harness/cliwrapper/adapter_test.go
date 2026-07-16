@@ -39,6 +39,15 @@ func TestNewRuntimeAdapterSelection(t *testing.T) {
 		t.Fatalf("adapter.Name() = %s, want codex", adapter.Name())
 	}
 
+	cfg.Runtime = RuntimeOpencode
+	adapter, err = NewRuntimeAdapter(cfg)
+	if err != nil {
+		t.Fatalf("NewRuntimeAdapter(opencode): %v", err)
+	}
+	if adapter.Name() != RuntimeOpencode {
+		t.Fatalf("adapter.Name() = %s, want opencode", adapter.Name())
+	}
+
 	cfg.Runtime = "bogus"
 	if _, err := NewRuntimeAdapter(cfg); err == nil || !strings.Contains(err.Error(), "unsupported runtime adapter") {
 		t.Fatalf("NewRuntimeAdapter(bogus) error = %v, want unsupported", err)
