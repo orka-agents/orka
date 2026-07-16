@@ -4,7 +4,7 @@ slug: /agent-runtimes
 
 # Agent Runtimes
 
-Agent runtimes cover two paths: built-in CLI runtimes such as Codex CLI, Claude Code CLI, and GitHub Copilot CLI, and bring-your-own remote execution backends selected through `AgentRuntime` and `spec.runtime.runtimeRef`. Built-in CLI runtimes give tasks autonomous coding capabilities (file read/write/edit, bash execution, git operations), while `AgentRuntime` lets teams run workloads on a generic HTTP runtime, AgentKit Serve, Foundry, or another adapter. Orka keeps scheduling, lifecycle, sessions, approvals, tool governance, idempotency, events, lineage, and result storage.
+Agent runtimes cover two paths: built-in CLI runtimes such as Codex CLI, Claude Code CLI, GitHub Copilot CLI, and OpenCode CLI, and bring-your-own remote execution backends selected through `AgentRuntime` and `spec.runtime.runtimeRef`. Built-in CLI runtimes give tasks autonomous coding capabilities (file read/write/edit, bash execution, git operations), while `AgentRuntime` lets teams run workloads on a generic HTTP runtime, AgentKit Serve, Foundry, or another adapter. Orka keeps scheduling, lifecycle, sessions, approvals, tool governance, idempotency, events, lineage, and result storage.
 
 ## Supported built-in CLI runtimes
 
@@ -13,6 +13,7 @@ Agent runtimes cover two paths: built-in CLI runtimes such as Codex CLI, Claude 
 | Codex CLI | `codex` | `OPENAI_API_KEY` or `CODEX_API_KEY` | GA |
 | Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` (direct) or `ANTHROPIC_FOUNDRY_API_KEY` (Azure AI Foundry) | GA |
 | GitHub Copilot CLI | `copilot` | `GITHUB_TOKEN` | Technical Preview |
+| OpenCode CLI | `opencode` | `OPENAI_BASE_URL` and `OPENAI_API_KEY` | Technical Preview |
 
 ## Live Coverage
 
@@ -23,6 +24,10 @@ PR-blocking live CI currently exercises these runtime scenarios against real mod
 - `copilot` + Gemini with a pinned public repo checkout
 
 This coverage is about Orka's runtime wiring and task/session/workspace behavior. The live backend used in CI is harness infrastructure, not the main product under test.
+
+OpenCode uses a custom OpenAI-compatible provider, so it can target chat-completions endpoints such as vLLM, Ray Serve, or Ollama. Set `OPENAI_BASE_URL` to the endpoint base, optionally including a trailing `/chat/completions`, and set `OPENAI_API_KEY` to the credential expected by that endpoint. The adapter strips the trailing chat-completions path before configuring OpenCode.
+
+OpenCode CLI session continuation is not wired initially. Each Orka turn starts a new OpenCode CLI session, while Orka still retains its own task, result, and lineage records. Read-only scheduled agent tasks do not support OpenCode initially because non-interactive OpenCode runs pre-approve file edits.
 
 ## Bring-your-own AgentRuntime
 
@@ -76,6 +81,10 @@ kubectl create secret generic claude-api-key \
 # For GitHub Copilot CLI
 kubectl create secret generic copilot-token \
   --from-literal=GITHUB_TOKEN=<github-token>
+
+kubectl create secret generic opencode-credentials \
+  --from-literal=OPENAI_BASE_URL=http://models.example/v1 \
+  --from-literal=OPENAI_API_KEY=<endpoint-api-key>
 ```
 
 ### Azure AI Foundry for Claude Code CLI
@@ -171,7 +180,7 @@ spec:
   # runtime marks this Agent for type: agent tasks
   runtime:
     # type: which built-in CLI runtime to use (set exactly one of type or runtimeRef)
-    # Valid values: "copilot", "claude", "codex"
+    # Valid values: "copilot", "claude", "codex", "opencode"
     type: claude
     # runtimeRef selects a namespace-local AgentRuntime facade instead of a built-in CLI runtime.
     # runtimeRef:
@@ -196,6 +205,7 @@ spec:
   # Codex runtime expects: OPENAI_API_KEY or CODEX_API_KEY
   # Claude runtime expects: ANTHROPIC_API_KEY
   # Copilot runtime expects: GITHUB_TOKEN
+  # OpenCode runtime expects: OPENAI_BASE_URL and OPENAI_API_KEY
   secretRef:
     name: claude-api-key
 
@@ -395,7 +405,7 @@ agentRuntime:
       name: git-credentials
 ```
 
-> **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
+> **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude, Codex, and OpenCode runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
 
 > **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the wrapper fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
 
@@ -528,6 +538,10 @@ kubectl create secret generic codex-api-key \
 # Copilot runtime
 kubectl create secret generic copilot-token \
   --from-literal=GITHUB_TOKEN=<github-token>
+
+kubectl create secret generic opencode-credentials \
+  --from-literal=OPENAI_BASE_URL=http://models.example/v1 \
+  --from-literal=OPENAI_API_KEY=<endpoint-api-key>
 ```
 
 ## Controller Configuration
@@ -555,6 +569,7 @@ Complete sample manifests are available in [`config/samples/`](https://github.co
 |------|-------------|
 | `core_v1alpha1_agent_codex.yaml` | Agent configured for Codex CLI |
 | `core_v1alpha1_agent_claude.yaml` | Agent configured for Claude Code CLI |
+| `core_v1alpha1_agent_opencode.yaml` | Agent configured for OpenCode CLI and an OpenAI-compatible endpoint |
 | `core_v1alpha1_task_agent.yaml` | Basic agent task with workspace |
 | `core_v1alpha1_task_agent_copilot.yaml` | Agent task using Copilot runtime |
 | `core_v1alpha1_task_agent_workspace.yaml` | Agent task with full workspace configuration |
@@ -644,7 +659,7 @@ kubectl logs -l job-name=$(kubectl get task fix-tests -o jsonpath='{.status.jobN
 ### Task fails immediately
 
 - **Type mismatch**: `type: agent` tasks require an Agent with `runtime` configured. `type: ai` tasks cannot use Agents with `runtime`.
-- **Invalid runtime type**: `runtime.type` must be `copilot`, `claude`, or `codex`; for remote execution backends, use `runtime.runtimeRef` pointing at a Ready namespace-local `AgentRuntime`.
+- **Invalid runtime type**: `runtime.type` must be `copilot`, `claude`, `codex`, or `opencode`; for remote execution backends, use `runtime.runtimeRef` pointing at a Ready namespace-local `AgentRuntime`.
 - **Worker image not available**: Check that the harness wrapper image is accessible from your cluster:
   ```bash
   kubectl describe pod -l orka.ai/worker-type=agent
