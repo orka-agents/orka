@@ -28,7 +28,7 @@ func (a *ClaudeAdapter) Name() string { return RuntimeClaude }
 
 func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
-	effort, err := claudeEffort(turn.Env)
+	effort, err := claudeEffort(turn.Metadata, turn.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -117,8 +117,9 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []str
 	return args
 }
 
-func claudeEffort(turnEnv []string) (string, error) {
+func claudeEffort(metadata map[string]string, turnEnv []string) (string, error) {
 	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		metadata["reasoningEffort"],
 		envEntryValue(turnEnv, claudeEffortEnv),
 		os.Getenv(claudeEffortEnv),
 	)))

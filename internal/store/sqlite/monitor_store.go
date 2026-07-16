@@ -1525,7 +1525,7 @@ func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, t
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE work_actions SET status = 'cancelled', blocked_reason = ?, error = '', completed_at = ?, updated_at = ?
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND target_kind = ? AND target_number = ?
-		 AND status IN ('queued', 'leased', 'running')`, reason, now, now, namespace, monitorName, targetKind, targetNumber)
+		 AND status IN ('queued', 'leased', 'running', 'retry_pending')`, reason, now, now, namespace, monitorName, targetKind, targetNumber)
 	if err != nil {
 		return 0, err
 	}

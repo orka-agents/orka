@@ -60,6 +60,20 @@ func TestClaudeAdapterRejectsInvalidEffort(t *testing.T) {
 	}
 }
 
+func TestClaudeAdapterUsesTrustedEffortMetadata(t *testing.T) {
+	t.Setenv(claudeEffortEnv, "low")
+	adapter := NewClaudeAdapter(ClaudeAdapterConfig{Path: "/fake/claude", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt:   "review",
+		Metadata: map[string]string{"reasoningEffort": "high"},
+		Env:      []string{claudeEffortEnv + "=xhigh"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand error = %v", err)
+	}
+	assertFlagValue(t, spec.Args, "--effort", "high")
+}
+
 func TestClaudeAdapterBuildsAllowBashArgs(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	turn := TurnContext{Prompt: "hello", Metadata: map[string]string{"allowBash": "true"}}

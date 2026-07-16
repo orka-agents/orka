@@ -610,12 +610,26 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	if len(actions) != 1 || actions[0].Status != "running" {
 		t.Fatalf("actions = %#v, want running task action", actions)
 	}
+	retryPending := &store.WorkAction{
+		ID:                "wa-retry",
+		MonitorNamespace:  "demo",
+		MonitorName:       "orka",
+		TargetKind:        "issue",
+		TargetNumber:      123,
+		Intent:            "implement",
+		DesiredAction:     "implement",
+		Status:            store.RepositoryMonitorWorkActionStatusRetryPending,
+		MonitorGeneration: 2,
+	}
+	if err := s.CreateWorkAction(ctx, retryPending); err != nil {
+		t.Fatalf("CreateWorkAction(retry pending) error = %v", err)
+	}
 	cancelled, err := s.CancelWorkActions(ctx, "demo", "orka", "issue", 123, "stopped_by_command")
 	if err != nil {
 		t.Fatalf("CancelWorkActions() error = %v", err)
 	}
-	if cancelled != 1 {
-		t.Fatalf("CancelWorkActions() = %d, want 1", cancelled)
+	if cancelled != 2 {
+		t.Fatalf("CancelWorkActions() = %d, want 2", cancelled)
 	}
 	gotAction, err := s.GetWorkAction(ctx, "demo", "wa-1")
 	if err != nil {
@@ -623,6 +637,13 @@ func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
 	}
 	if gotAction.Status != "cancelled" || gotAction.BlockedReason != "stopped_by_command" || gotAction.CompletedAt == nil {
 		t.Fatalf("got action = %#v, want cancelled with reason and completion", gotAction)
+	}
+	gotRetry, err := s.GetWorkAction(ctx, "demo", retryPending.ID)
+	if err != nil {
+		t.Fatalf("GetWorkAction(retry pending) error = %v", err)
+	}
+	if gotRetry.Status != "cancelled" || gotRetry.BlockedReason != "stopped_by_command" || gotRetry.CompletedAt == nil {
+		t.Fatalf("retry action = %#v, want cancelled with reason and completion", gotRetry)
 	}
 
 	job := &store.ImplementationJob{ID: "impl-1", MonitorNamespace: "demo", MonitorName: "orka", Repo: "orka-agents/orka", IssueNumber: 123, PlanID: "act-plan", SnapshotDigest: "sha256:issue", Phase: "implementation_queued", Attempt: 1, Branch: "orka/issue-123", TaskName: "task-1"}

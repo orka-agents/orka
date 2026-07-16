@@ -7,6 +7,39 @@ export const repositoryMonitorTargetSchema = z.object({
   maxPerRun: z.number().optional(),
 })
 
+const repositoryMonitorIssueCommandLabelsSchema = z.object({
+  triage: z.string().optional(),
+  research: z.string().optional(),
+  plan: z.string().optional(),
+  approvePlan: z.string().optional(),
+  implement: z.string().optional(),
+  decompose: z.string().optional(),
+  stop: z.string().optional(),
+  resume: z.string().optional(),
+})
+
+const repositoryMonitorPullRequestCommandLabelsSchema = z.object({
+  review: z.string().optional(),
+  fix: z.string().optional(),
+  fixCI: z.string().optional(),
+  updateBranch: z.string().optional(),
+  automerge: z.string().optional(),
+  stop: z.string().optional(),
+  resume: z.string().optional(),
+})
+
+const repositoryMonitorTriggersSchema = z.object({
+  github: z.object({
+    labels: z.object({
+      enabled: z.boolean().optional(),
+      consumeCommandLabels: z.boolean().optional(),
+      requireActorPermission: z.enum(['write', 'maintain', 'admin']).optional(),
+      issues: repositoryMonitorIssueCommandLabelsSchema.optional(),
+      pullRequests: repositoryMonitorPullRequestCommandLabelsSchema.optional(),
+    }).optional(),
+  }).optional(),
+})
+
 export const repositoryMonitorSpecSchema = z.object({
   provider: z.string().optional(),
   repoURL: z.string(),
@@ -30,6 +63,7 @@ export const repositoryMonitorSpecSchema = z.object({
     repairer: agentRefSchema.optional(),
     implementer: agentRefSchema.optional(),
   }).optional(),
+  triggers: repositoryMonitorTriggersSchema.optional(),
 
   issueWorkflow: z.object({
     triage: z.object({ enabled: z.boolean().optional() }).optional(),
@@ -189,10 +223,13 @@ export const monitorActionSchema = z.object({
   headSHA: z.string().optional(),
   taskName: z.string().optional(),
   commandEventID: z.string().optional(),
+  workActionID: z.string().optional(),
+  monitorGeneration: z.number().optional(),
   verdict: z.string().optional(),
   confidence: z.string().optional(),
   summary: z.string().optional(),
   payloadJSON: z.string().optional(),
+  payloadDigest: z.string().optional(),
   createdAt: z.string(),
 })
 
@@ -209,9 +246,12 @@ export const monitorWorkActionSchema = z.object({
   targetSnapshotDigest: z.string().optional(),
   intent: z.string().optional(),
   desiredAction: z.string().optional(),
+  dependsOnActionID: z.string().optional(),
+  dedupeKey: z.string().optional(),
+  idempotencyKey: z.string().optional(),
   status: z.string(),
   phase: z.string().optional(),
-  attempt: z.number().optional(),
+  attempt: z.number(),
   leaseOwner: z.string().optional(),
   leaseExpiresAt: z.string().optional(),
   taskName: z.string().optional(),
@@ -219,6 +259,7 @@ export const monitorWorkActionSchema = z.object({
   error: z.string().optional(),
   artifactIDs: z.string().optional(),
   payloadDigest: z.string().optional(),
+  metadataJSON: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   completedAt: z.string().optional(),
@@ -233,7 +274,7 @@ export const monitorImplementationJobSchema = z.object({
   planID: z.string().optional(),
   snapshotDigest: z.string().optional(),
   phase: z.string().optional(),
-  attempt: z.number().optional(),
+  attempt: z.number(),
   branch: z.string().optional(),
   patchArtifactID: z.string().optional(),
   prNumber: z.number().optional(),
@@ -282,12 +323,21 @@ export const monitorCommandSchema = z.object({
   source: z.string().optional(),
   deliveryID: z.string().optional(),
   label: z.string().optional(),
+  monitorGeneration: z.number().optional(),
+  dedupeKey: z.string().optional(),
+  idempotencyKey: z.string().optional(),
+  commentID: z.string().optional(),
+  commentURL: z.string().optional(),
   author: z.string().optional(),
+  authorAssociation: z.string().optional(),
   permission: z.string().optional(),
+  command: z.string().optional(),
   intent: z.string().optional(),
   headSHA: z.string().optional(),
   issueSnapshotDigest: z.string().optional(),
   status: z.string().optional(),
+  statusCommentID: z.string().optional(),
+  createdRepairJobID: z.string().optional(),
   createdAt: z.string(),
   processedAt: z.string().optional(),
   error: z.string().optional(),

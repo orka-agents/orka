@@ -397,7 +397,7 @@ agentRuntime:
 
 > **Note**: For the Copilot runtime, `GITHUB_TOKEN` from the Agent's `secretRef` can authenticate both the CLI and git clone operations. For the Claude and Codex runtimes, a separate `gitSecretRef` is usually needed because their API keys do not authenticate git operations.
 
-> **Codex caveat**: The current Codex runtime implementation requires `defaultAllowBash: true` (or task-level `allowBash: true`). If bash is disabled, the wrapper fails fast instead of launching Codex, because the current Codex CLI does not expose a reliable shell-disable mode.
+> **Codex caveat**: Ordinary Codex tasks require `defaultAllowBash: true` (or task-level `allowBash: true`). Controller-managed read-only tasks are the exception: Orka forces Codex's read-only Landlock sandbox, strips inherited environment state, and brokers model credentials through a short-lived loopback proxy.
 
 ### SubPath
 
@@ -510,7 +510,7 @@ Writable directories are provided via `emptyDir` volumes:
 
 All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
 
-For Codex specifically, bash-disabled tasks are not currently supported. Use `defaultAllowBash: true` for Codex Agents until the upstream CLI exposes a reliable shell-disable mode.
+For ordinary Codex tasks, bash-disabled execution is not supported. Use `defaultAllowBash: true` unless the task is controller-managed read-only work, where Orka forces the hardened read-only sandbox and ignores broader shell policy.
 
 ### Secrets
 

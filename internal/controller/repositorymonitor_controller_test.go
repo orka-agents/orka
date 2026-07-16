@@ -6611,6 +6611,12 @@ func TestRepositoryMonitorStateTransitionValidation(t *testing.T) {
 	if repositoryMonitorIssuePhaseTransitionAllowed(repositoryMonitorIssuePhaseApproved, repositoryMonitorIssuePhaseResearchQueued) {
 		t.Fatal("approved should not transition back to research_queued without a target change")
 	}
+	if !repositoryMonitorIssuePhaseTransitionAllowed(repositoryMonitorIssuePhaseTriaged, repositoryMonitorIssuePhaseImplementationQueued) {
+		t.Fatal("triaged should transition directly to implementation_queued when planning is optional")
+	}
+	if !repositoryMonitorIssuePhaseTransitionAllowed(repositoryMonitorIssuePhaseResearched, repositoryMonitorIssuePhaseImplementationQueued) {
+		t.Fatal("researched should transition directly to implementation_queued when planning is optional")
+	}
 	if !repositoryMonitorPRPhaseTransitionAllowed("reviewed_needs_changes", "repair_queued") {
 		t.Fatal("reviewed_needs_changes should transition to repair_queued")
 	}

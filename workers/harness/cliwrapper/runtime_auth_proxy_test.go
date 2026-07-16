@@ -145,6 +145,13 @@ func TestProtectRuntimeAuthTurnProtectsReadOnlyCodexCredentials(t *testing.T) {
 	}
 }
 
+func TestRuntimeAuthProxyTransportDisablesEnvironmentProxy(t *testing.T) {
+	transport := runtimeAuthProxyTransport()
+	if transport.Proxy != nil {
+		t.Fatal("runtime-auth proxy transport inherited environment proxy routing")
+	}
+}
+
 func TestProtectRuntimeAuthTurnRejectsClaudeFoundry(t *testing.T) {
 	turn := TurnContext{RuntimeName: RuntimeClaude, Metadata: map[string]string{"runtimeAuthOnly": "true"}, Env: []string{
 		"CLAUDE_CODE_USE_FOUNDRY=1",

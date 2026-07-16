@@ -149,6 +149,7 @@ func newRuntimeAuthReverseProxy(
 	token string,
 ) http.Handler {
 	proxy := &httputil.ReverseProxy{
+		Transport: runtimeAuthProxyTransport(),
 		Director: func(request *http.Request) {
 			request.URL.Scheme = upstream.Scheme
 			request.URL.Host = upstream.Host
@@ -198,6 +199,14 @@ func newRuntimeAuthReverseProxy(
 		}
 		proxy.ServeHTTP(w, request)
 	})
+}
+
+func runtimeAuthProxyTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Upstream credentials must never traverse operator-configured HTTP(S)
+	// proxies, where they could be observed or logged outside the pod.
+	transport.Proxy = nil
+	return transport
 }
 
 func runtimeAuthProxyPathAllowed(basePath string, mode runtimeAuthProxyMode, requestPath string) bool {
