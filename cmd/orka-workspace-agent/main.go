@@ -36,8 +36,8 @@ const (
 	completedExecutionRetention  = 15 * time.Minute
 	defaultMaxOutputBytes        = 1 << 20
 	defaultMaxRequestBytes       = 256 << 20
-	defaultHandoffTokenFile      = "/app/orka-workspace-handoff-token"
-	defaultHandoffTokenUpload    = "orka-workspace-handoff-token"
+	defaultHandoffFile           = "/app/orka-workspace-handoff-token"
+	defaultHandoffUploadAlias    = "orka-workspace-handoff-token"
 	envListenAddr                = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
 	envHandoffToken              = "ORKA_WORKSPACE_HANDOFF_TOKEN"
 	envHandoffTokenFile          = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
@@ -50,8 +50,8 @@ const (
 var allowedRoots = []string{"/app", "/workspace", "/home/worker", "/tmp"}
 
 var (
-	errHandoffTokenMissing = errors.New("handoff token file is missing")
-	errHandoffTokenEmpty   = errors.New("handoff token file is empty")
+	errHandoffCredentialMissing = errors.New("handoff token file is missing")
+	errHandoffCredentialEmpty   = errors.New("handoff token file is empty")
 )
 
 func main() {
@@ -134,7 +134,7 @@ func (s *workspaceAgentServer) requireAuth(next http.HandlerFunc) http.HandlerFu
 }
 
 func handoffBootstrapAllowedForTokenError(err error) bool {
-	return errors.Is(err, errHandoffTokenMissing) || errors.Is(err, errHandoffTokenEmpty)
+	return errors.Is(err, errHandoffCredentialMissing) || errors.Is(err, errHandoffCredentialEmpty)
 }
 
 func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *http.Request) (bool, bool) {
@@ -163,7 +163,7 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 		return false, true
 	}
 	tokenPath := handoffTokenFilePath()
-	isDefaultUploadAlias := path == defaultHandoffTokenUpload || requestedPath == defaultHandoffTokenFile
+	isDefaultUploadAlias := path == defaultHandoffUploadAlias || requestedPath == defaultHandoffFile
 	if !isDefaultUploadAlias && requestedPath != tokenPath {
 		http.Error(w, "invalid handoff bootstrap path", http.StatusUnauthorized)
 		return false, true
@@ -196,13 +196,13 @@ func handoffToken() (string, error) {
 	data, err := os.ReadFile(handoffTokenFilePath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("%w: %w", errHandoffTokenMissing, err)
+			return "", fmt.Errorf("%w: %w", errHandoffCredentialMissing, err)
 		}
 		return "", err
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return "", errHandoffTokenEmpty
+		return "", errHandoffCredentialEmpty
 	}
 	return token, nil
 }
@@ -210,11 +210,11 @@ func handoffToken() (string, error) {
 func handoffTokenFilePath() string {
 	path := strings.TrimSpace(os.Getenv(envHandoffTokenFile))
 	if path == "" {
-		path = defaultHandoffTokenFile
+		path = defaultHandoffFile
 	}
 	normalized, err := normalizeAgentPath(path)
 	if err != nil {
-		return defaultHandoffTokenFile
+		return defaultHandoffFile
 	}
 	return normalized
 }

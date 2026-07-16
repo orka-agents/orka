@@ -344,7 +344,7 @@ func TestWorkspaceAgentBootstrapDefaultUploadHonorsConfiguredTokenFile(t *testin
 		allowedRoots = previousAllowedRoots
 	})
 	tokenFile := filepath.Join(dir, "custom-handoff-token")
-	resp := exerciseHandoffBootstrap(t, tokenFile, defaultHandoffTokenUpload)
+	resp := exerciseHandoffBootstrap(t, tokenFile, defaultHandoffUploadAlias)
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
