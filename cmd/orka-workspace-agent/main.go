@@ -39,9 +39,9 @@ const (
 	defaultHandoffFile           = "/app/orka-workspace-handoff-token"
 	defaultHandoffUploadAlias    = "orka-workspace-handoff-token"
 	envListenAddr                = "ORKA_WORKSPACE_AGENT_LISTEN_ADDR"
-	envHandoffToken              = "ORKA_WORKSPACE_HANDOFF_TOKEN"
-	envHandoffTokenFile          = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
-	envBootstrapToken            = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
+	envHandoffAuth               = "ORKA_WORKSPACE_HANDOFF_TOKEN"
+	envHandoffAuthFile           = "ORKA_WORKSPACE_HANDOFF_TOKEN_FILE"
+	envBootstrapAuth             = "ORKA_WORKSPACE_BOOTSTRAP_TOKEN"
 	envDefaultCommandTimeoutSecs = "ORKA_WORKSPACE_AGENT_DEFAULT_COMMAND_TIMEOUT_SECONDS"
 	envDefaultMaxOutputBytes     = "ORKA_WORKSPACE_AGENT_MAX_OUTPUT_BYTES"
 	envMaxRequestBytes           = "ORKA_WORKSPACE_AGENT_MAX_REQUEST_BYTES"
@@ -75,22 +75,22 @@ type workspaceAgentServer struct {
 	defaultCommandTimeout time.Duration
 	defaultMaxOutputBytes int64
 	maxRequestBytes       int64
-	bootstrapToken        string
+	bootstrapAuth         string
 
 	mu         sync.Mutex
 	executions map[string]execResponse
 }
 
 func newWorkspaceAgentServer() *workspaceAgentServer {
-	bootstrapToken := strings.TrimSpace(os.Getenv(envBootstrapToken))
-	if bootstrapToken != "" {
-		_ = os.Unsetenv(envBootstrapToken)
+	bootstrapAuth := strings.TrimSpace(os.Getenv(envBootstrapAuth))
+	if bootstrapAuth != "" {
+		_ = os.Unsetenv(envBootstrapAuth)
 	}
 	return &workspaceAgentServer{
 		defaultCommandTimeout: durationEnvSeconds(envDefaultCommandTimeoutSecs, defaultCommandTimeout),
 		defaultMaxOutputBytes: int64Env(envDefaultMaxOutputBytes, defaultMaxOutputBytes),
 		maxRequestBytes:       int64Env(envMaxRequestBytes, defaultMaxRequestBytes),
-		bootstrapToken:        bootstrapToken,
+		bootstrapAuth:         bootstrapAuth,
 		executions:            make(map[string]execResponse),
 	}
 }
@@ -141,7 +141,7 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 	if r.Method != http.MethodPut || r.URL.Path != daemonprotocol.FilesPath {
 		return false, false
 	}
-	if s.bootstrapToken == "" {
+	if s.bootstrapAuth == "" {
 		http.Error(w, "handoff bootstrap credential unavailable", http.StatusServiceUnavailable)
 		return false, true
 	}
@@ -173,7 +173,7 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 		http.Error(w, "empty handoff bootstrap token", http.StatusBadRequest)
 		return false, true
 	}
-	if !validHandoffBearer(r.Header.Get("Authorization"), s.bootstrapToken) {
+	if !validHandoffBearer(r.Header.Get("Authorization"), s.bootstrapAuth) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false, true
 	}
@@ -190,7 +190,7 @@ func (s *workspaceAgentServer) allowHandoffBootstrap(w http.ResponseWriter, r *h
 }
 
 func handoffToken() (string, error) {
-	if token := strings.TrimSpace(os.Getenv(envHandoffToken)); token != "" {
+	if token := strings.TrimSpace(os.Getenv(envHandoffAuth)); token != "" {
 		return token, nil
 	}
 	data, err := os.ReadFile(handoffTokenFilePath())
@@ -208,7 +208,7 @@ func handoffToken() (string, error) {
 }
 
 func handoffTokenFilePath() string {
-	path := strings.TrimSpace(os.Getenv(envHandoffTokenFile))
+	path := strings.TrimSpace(os.Getenv(envHandoffAuthFile))
 	if path == "" {
 		path = defaultHandoffFile
 	}
@@ -705,7 +705,7 @@ func commandBaseEnv(environ []string) []string {
 			continue
 		}
 		switch name {
-		case envHandoffToken, envBootstrapToken:
+		case envHandoffAuth, envBootstrapAuth:
 			continue
 		default:
 			filtered = append(filtered, item)

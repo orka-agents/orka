@@ -22,7 +22,7 @@ import (
 const testBootstrapHandoffToken = "secret"
 
 func TestWorkspaceAgentRejectsUnauthenticatedExec(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envHandoffAuth, "secret")
 	server := newWorkspaceAgentServer()
 	req := httptest.NewRequest(http.MethodPost, "/v1/exec", strings.NewReader(`{"command":["echo","ok"]}`))
 	resp := httptest.NewRecorder()
@@ -41,7 +41,7 @@ func TestSafePathRejectsTraversal(t *testing.T) {
 }
 
 func TestWorkspaceAgentExecTruncatesOutput(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envHandoffAuth, "secret")
 	server := newWorkspaceAgentServer()
 	server.defaultCommandTimeout = time.Second
 	server.defaultMaxOutputBytes = 4
@@ -72,7 +72,7 @@ func TestWorkspaceAgentExecTruncatesOutput(t *testing.T) {
 }
 
 func TestWorkspaceAgentExecTimeoutReturns124(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envHandoffAuth, "secret")
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(execRequest{
 		Command:        []string{"sh", "-c", "sleep 2"},
@@ -101,7 +101,7 @@ func TestWorkspaceAgentExecTimeoutReturns124(t *testing.T) {
 }
 
 func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envHandoffAuth, "secret")
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(execRequest{
 		Command: []string{"sh", "-c", "printf detached-ok"},
@@ -166,7 +166,7 @@ func TestWorkspaceAgentDetachedExecCanBePolled(t *testing.T) {
 }
 
 func TestWorkspaceAgentRejectsResidentExec(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envHandoffAuth, "secret")
 	server := newWorkspaceAgentServer()
 
 	for _, detach := range []bool{false, true} {
@@ -198,8 +198,8 @@ func TestWorkspaceAgentRejectsResidentExec(t *testing.T) {
 }
 
 func TestWorkspaceAgentExecDoesNotInheritDaemonAuthTokens(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
-	t.Setenv(envBootstrapToken, "bootstrap-secret")
+	t.Setenv(envHandoffAuth, "secret")
+	t.Setenv(envBootstrapAuth, "bootstrap-secret")
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(execRequest{
 		Command: []string{
@@ -231,7 +231,7 @@ func TestWorkspaceAgentExecDoesNotInheritDaemonAuthTokens(t *testing.T) {
 }
 
 func TestWorkspaceAgentUploadUpdatesExistingFileMode(t *testing.T) {
-	t.Setenv(envHandoffToken, "secret")
+	t.Setenv(envHandoffAuth, "secret")
 	dir := t.TempDir()
 	previousAllowedRoots := allowedRoots
 	allowedRoots = []string{dir}
@@ -456,7 +456,7 @@ func TestWorkspaceAgentRejectsHandoffBootstrapWhenTokenPathUnreadable(t *testing
 }
 
 func TestHandoffTokenFilePathNormalizesRelativeEnv(t *testing.T) {
-	t.Setenv(envHandoffTokenFile, "custom-handoff-token")
+	t.Setenv(envHandoffAuthFile, "custom-handoff-token")
 
 	if got, want := handoffTokenFilePath(), "/app/custom-handoff-token"; got != want {
 		t.Fatalf("handoffTokenFilePath() = %q, want %q", got, want)
@@ -475,8 +475,8 @@ func exerciseHandoffBootstrapWithBearer(
 	bearer string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
-	t.Setenv(envHandoffTokenFile, tokenFile)
-	t.Setenv(envBootstrapToken, "bootstrap-secret")
+	t.Setenv(envHandoffAuthFile, tokenFile)
+	t.Setenv(envBootstrapAuth, "bootstrap-secret")
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
 		Path: uploadPath,
@@ -503,8 +503,8 @@ func TestWorkspaceAgentRejectsInvalidHandoffBootstrapWithoutWritingFile(t *testi
 	t.Cleanup(func() {
 		allowedRoots = previousAllowedRoots
 	})
-	t.Setenv(envHandoffTokenFile, filepath.Join(dir, "handoff-token"))
-	t.Setenv(envBootstrapToken, "bootstrap-secret")
+	t.Setenv(envHandoffAuthFile, filepath.Join(dir, "handoff-token"))
+	t.Setenv(envBootstrapAuth, "bootstrap-secret")
 	server := newWorkspaceAgentServer()
 	disallowedPath := filepath.Join(dir, "not-the-token")
 	body, err := json.Marshal(uploadRequest{Files: []uploadFile{{
@@ -544,7 +544,7 @@ func TestWorkspaceAgentScrubRemovesConfiguredHandoffTokenFile(t *testing.T) {
 	if err := os.WriteFile(otherFile, []byte("scratch"), 0o600); err != nil {
 		t.Fatalf("write scratch file: %v", err)
 	}
-	t.Setenv(envHandoffTokenFile, tokenFile)
+	t.Setenv(envHandoffAuthFile, tokenFile)
 	server := newWorkspaceAgentServer()
 	body, err := json.Marshal(scrubRequest{Paths: []string{otherFile}})
 	if err != nil {
