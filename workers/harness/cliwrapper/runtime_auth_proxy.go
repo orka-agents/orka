@@ -24,6 +24,7 @@ const (
 	defaultAnthropicEndpoint = "https://api.anthropic.com"
 	runtimeAuthProxyHTTP     = "http"
 	runtimeAuthProxyHTTPS    = "https"
+	runtimeAuthProxyLoopback = "127.0.0.1"
 )
 
 var runtimeAuthChildBoundaryAvailable = func() bool {
@@ -90,7 +91,7 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	if err != nil {
 		return turn, nil, err
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", runtimeAuthProxyLoopback+":0")
 	if err != nil {
 		return turn, nil, fmt.Errorf("listen for runtime-auth-only credential proxy: %w", err)
 	}
@@ -116,14 +117,16 @@ func protectRuntimeAuthTurn(turn TurnContext) (TurnContext, func(), error) {
 	localEndpoint := (&url.URL{Scheme: runtimeAuthProxyHTTP, Host: listener.Addr().String(), Path: upstream.Path}).String()
 	switch mode {
 	case runtimeAuthProxyOpenAI:
+		turn.Env = removeTurnEnv(turn.Env, workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey)
 		turn.Env = setEnv(turn.Env, workerenv.OpenAIBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.OpenAIAPIKey, token)
 		turn.Env = setEnv(turn.Env, workerenv.CodexAPIKey, token)
 	case runtimeAuthProxyAnthropic:
+		turn.Env = removeTurnEnv(turn.Env, workerenv.AnthropicBaseURL, workerenv.AnthropicAPIKey)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicBaseURL, localEndpoint)
 		turn.Env = setEnv(turn.Env, workerenv.AnthropicAPIKey, token)
 	}
-	turn.Env = runtimeAuthProxyAddNoProxyHosts(turn.Env, "127.0.0.1", "localhost")
+	turn.Env = runtimeAuthProxyAddNoProxyHosts(turn.Env, runtimeAuthProxyLoopback, "localhost")
 	return turn, closeProxy, nil
 }
 

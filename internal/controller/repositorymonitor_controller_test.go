@@ -3326,23 +3326,59 @@ func TestParseRepositoryMonitorPatchRightLinesHandlesPlusPlusContent(t *testing.
 func TestRepositoryMonitorItemFromPullRequestClearsPublishStateOnHeadChange(t *testing.T) {
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-head-change")
 	existing := &store.MonitorItem{
-		MonitorNamespace: "default",
-		MonitorName:      "publish-head-change",
-		Kind:             repositoryMonitorPullRequestKind,
-		Number:           1,
-		HeadSHA:          "old-head",
-		LastPublishID:    "publish-old",
-		LastPublishPhase: repositoryMonitorPublishPhaseSucceeded,
-		LastPublishURL:   "https://github.example/review/old",
+		MonitorNamespace:    "default",
+		MonitorName:         "publish-head-change",
+		Kind:                repositoryMonitorPullRequestKind,
+		Number:              1,
+		HeadSHA:             "old-head",
+		LastReviewedHeadSHA: "old-head",
+		LastVerdict:         repositoryMonitorReviewVerdictPassed,
+		AutomergeState:      repositoryMonitorAutomergeStateMergeReady,
+		LastPublishID:       "publish-old",
+		LastPublishPhase:    repositoryMonitorPublishPhaseSucceeded,
+		LastPublishURL:      "https://github.example/review/old",
 	}
 	item := repositoryMonitorItemFromPullRequest(monitor, repositoryMonitorPullRequest{Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "new-head"}, existing)
 	if item.LastPublishID != "" || item.LastPublishPhase != "" || item.LastPublishURL != "" {
 		t.Fatalf("item = %#v, want publish status cleared for new head", item)
 	}
+	if item.AutomergeState != "" {
+		t.Fatalf("item = %#v, want merge readiness cleared for new head", item)
+	}
 
 	item = repositoryMonitorItemFromPullRequest(monitor, repositoryMonitorPullRequest{Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "old-head"}, existing)
 	if item.LastPublishID != "publish-old" || item.LastPublishPhase != repositoryMonitorPublishPhaseSucceeded || item.LastPublishURL == "" {
 		t.Fatalf("item = %#v, want publish status preserved for same head", item)
+	}
+	if item.AutomergeState != repositoryMonitorAutomergeStateMergeReady {
+		t.Fatalf("item = %#v, want merge readiness preserved for same head", item)
+	}
+}
+
+func TestRepositoryMonitorPassedReviewDoesNotMarkRepairingItemMergeReady(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	item := &store.MonitorItem{
+		MonitorNamespace: "default",
+		MonitorName:      "repairing-review",
+		Kind:             repositoryMonitorPullRequestKind,
+		ItemKey:          "7",
+		Number:           7,
+		HeadSHA:          "head-7",
+		RepairState:      repositoryMonitorRepairPhaseQueued,
+		AutomergeState:   repositoryMonitorAutomergeStateMergeReady,
+	}
+	record := &store.ReviewRecord{ID: "review-7", HeadSHA: item.HeadSHA, Verdict: repositoryMonitorReviewVerdictPassed}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	if err := reconciler.applyRepositoryMonitorReviewRecordToItem(ctx, item, record, ""); err != nil {
+		t.Fatalf("applyRepositoryMonitorReviewRecordToItem() error = %v", err)
+	}
+	stored, err := monitorStore.GetMonitorItem(ctx, item.MonitorNamespace, item.MonitorName, item.Kind, item.ItemKey)
+	if err != nil {
+		t.Fatalf("GetMonitorItem() error = %v", err)
+	}
+	if stored.LastReviewedHeadSHA != item.HeadSHA || stored.AutomergeState != "" {
+		t.Fatalf("stored item = %#v, want exact-head review retained but merge readiness blocked during repair", stored)
 	}
 }
 
@@ -5508,7 +5544,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	run := &store.MonitorRun{ID: "run-repair-retry"}
 	command := &store.CommandEvent{ID: "cmd-repair-retry", Intent: "fix", Source: "api"}
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", BaseBranch: "main"}
-	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA, AutomergeState: repositoryMonitorAutomergeStateMergeReady}
 
 	if created, err := reconciler.createRepositoryMonitorRepairTask(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err == nil || created != 0 {
 		t.Fatalf("first create result = (%d, %v), want transient failure", created, err)
@@ -5531,6 +5567,13 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	}
 	if job.Phase != repositoryMonitorRepairPhaseQueued || job.LastError != "" || job.CompletedAt != nil {
 		t.Fatalf("job after successful retry = %#v, want clean queued state", job)
+	}
+	storedItem, err := monitorStore.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, item.ItemKey)
+	if err != nil {
+		t.Fatalf("GetMonitorItem(after retry) error = %v", err)
+	}
+	if storedItem.RepairState != repositoryMonitorRepairPhaseQueued || storedItem.AutomergeState != "" {
+		t.Fatalf("item after repair queue = %#v, want queued repair with merge readiness cleared", storedItem)
 	}
 	var task corev1alpha1.Task
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: job.TaskName}, &task); err != nil {

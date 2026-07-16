@@ -74,7 +74,7 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 			}
 			for _, name := range []string{"NO_PROXY", "no_proxy"} {
 				value := envEntryValue(protected.Env, name)
-				for _, want := range []string{"existing.internal", "lower.internal", "127.0.0.1", "localhost"} {
+				for _, want := range []string{"existing.internal", "lower.internal", runtimeAuthProxyLoopback, "localhost"} {
 					if !slices.Contains(strings.Split(value, ","), want) {
 						t.Fatalf("%s = %q, missing %q", name, value, want)
 					}
@@ -82,7 +82,7 @@ func TestProtectRuntimeAuthTurnUsesLoopbackProxy(t *testing.T) {
 			}
 			localBase := envEntryValue(protected.Env, tt.baseField)
 			parsed, err := url.Parse(localBase)
-			if err != nil || parsed.Hostname() != "127.0.0.1" {
+			if err != nil || parsed.Hostname() != runtimeAuthProxyLoopback {
 				t.Fatalf("local base = %q err=%v, want loopback proxy", localBase, err)
 			}
 			requestURL := strings.TrimRight(localBase, "/") + strings.TrimPrefix(tt.upstreamPath, basePath)
@@ -136,10 +136,10 @@ func TestRuntimeAuthProxyAddNoProxyHostsMergesCaseVariants(t *testing.T) {
 		{name: "lowercase only", env: "no_proxy=lower.internal", want: "lower.internal"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			env := runtimeAuthProxyAddNoProxyHosts([]string{tt.env}, "127.0.0.1", "localhost")
+			env := runtimeAuthProxyAddNoProxyHosts([]string{tt.env}, runtimeAuthProxyLoopback, "localhost")
 			for _, name := range []string{"NO_PROXY", "no_proxy"} {
 				value := envEntryValue(env, name)
-				for _, want := range []string{tt.want, "127.0.0.1", "localhost"} {
+				for _, want := range []string{tt.want, runtimeAuthProxyLoopback, "localhost"} {
 					if !slices.Contains(strings.Split(value, ","), want) {
 						t.Fatalf("%s = %q, missing %q", name, value, want)
 					}
@@ -155,7 +155,7 @@ func TestRuntimeAuthProxyAddNoProxyHostsCollapsesDuplicateKeys(t *testing.T) {
 		"NO_PROXY=override.internal",
 		"no_proxy=lower.internal",
 		"OTHER=value",
-	}, "127.0.0.1", "localhost")
+	}, runtimeAuthProxyLoopback, "localhost")
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
 		prefix := name + "="
 		count := 0
@@ -168,7 +168,7 @@ func TestRuntimeAuthProxyAddNoProxyHostsCollapsesDuplicateKeys(t *testing.T) {
 			t.Fatalf("env = %#v, want exactly one %s entry", env, name)
 		}
 		value := envEntryValue(env, name)
-		for _, want := range []string{"override.internal", "lower.internal", "127.0.0.1", "localhost"} {
+		for _, want := range []string{"override.internal", "lower.internal", runtimeAuthProxyLoopback, "localhost"} {
 			if !slices.Contains(strings.Split(value, ","), want) {
 				t.Fatalf("%s = %q, missing %q", name, value, want)
 			}
@@ -182,10 +182,10 @@ func TestRuntimeAuthProxyAddNoProxyHostsCollapsesDuplicateKeys(t *testing.T) {
 func TestRuntimeAuthProxyAddNoProxyHostsPreservesProcessEnvironment(t *testing.T) {
 	t.Setenv("NO_PROXY", ".svc")
 	t.Setenv("no_proxy", ".cluster.local")
-	env := runtimeAuthProxyAddNoProxyHosts(nil, "127.0.0.1", "localhost")
+	env := runtimeAuthProxyAddNoProxyHosts(nil, runtimeAuthProxyLoopback, "localhost")
 	for _, name := range []string{"NO_PROXY", "no_proxy"} {
 		value := envEntryValue(env, name)
-		for _, want := range []string{".svc", ".cluster.local", "127.0.0.1", "localhost"} {
+		for _, want := range []string{".svc", ".cluster.local", runtimeAuthProxyLoopback, "localhost"} {
 			if !slices.Contains(strings.Split(value, ","), want) {
 				t.Fatalf("%s = %q, missing inherited %q", name, value, want)
 			}
@@ -218,8 +218,58 @@ func TestProtectRuntimeAuthTurnProtectsReadOnlyCodexCredentials(t *testing.T) {
 		t.Fatalf("read-only child environment retained upstream credential: %#v", protected.Env)
 	}
 	parsed, err := url.Parse(envEntryValue(protected.Env, workerenv.OpenAIBaseURL))
-	if err != nil || parsed.Hostname() != "127.0.0.1" {
+	if err != nil || parsed.Hostname() != runtimeAuthProxyLoopback {
 		t.Fatalf("protected base URL = %q err=%v, want loopback proxy", parsed, err)
+	}
+}
+
+func TestProtectRuntimeAuthTurnCollapsesDuplicateCredentialEntries(t *testing.T) {
+	previousBoundary := runtimeAuthChildBoundaryAvailable
+	runtimeAuthChildBoundaryAvailable = func() bool { return true }
+	t.Cleanup(func() { runtimeAuthChildBoundaryAvailable = previousBoundary })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(upstream.Close)
+	turn := TurnContext{
+		RuntimeName: RuntimeCodex,
+		Metadata:    map[string]string{"runtimeAuthOnly": "true"},
+		Env: []string{
+			workerenv.OpenAIBaseURL + "=https://bypass.invalid/v1",
+			workerenv.OpenAIBaseURL + "=" + upstream.URL + "/v1",
+			workerenv.OpenAIAPIKey + "=leaked-openai-first",
+			workerenv.OpenAIAPIKey + "=upstream-openai",
+			workerenv.CodexAPIKey + "=leaked-codex-first",
+			workerenv.CodexAPIKey + "=upstream-codex",
+		},
+	}
+	protected, closeProxy, err := protectRuntimeAuthTurn(turn)
+	if err != nil {
+		t.Fatalf("protectRuntimeAuthTurn() error = %v", err)
+	}
+	defer closeProxy()
+	joined := strings.Join(protected.Env, "\n")
+	for _, secret := range []string{
+		"leaked-openai-first", "upstream-openai", "leaked-codex-first", "upstream-codex", "bypass.invalid",
+	} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("protected environment retained %q: %#v", secret, protected.Env)
+		}
+	}
+	for _, name := range []string{workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey, workerenv.CodexAPIKey} {
+		count := 0
+		for _, entry := range protected.Env {
+			if strings.HasPrefix(entry, name+"=") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("protected environment has %d %s entries: %#v", count, name, protected.Env)
+		}
+	}
+	base, err := url.Parse(envEntryValue(protected.Env, workerenv.OpenAIBaseURL))
+	if err != nil || base.Hostname() != runtimeAuthProxyLoopback {
+		t.Fatalf("protected base URL = %q err=%v, want loopback", base, err)
 	}
 }
 

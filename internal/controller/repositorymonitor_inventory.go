@@ -905,14 +905,18 @@ func repositoryMonitorItemFromPullRequest(monitor *corev1alpha1.RepositoryMonito
 		CIState:          "unknown",
 	}
 	if existing != nil {
+		sameHead := strings.TrimSpace(existing.HeadSHA) != "" && existing.HeadSHA == pr.HeadSHA
 		item.LastReviewID = existing.LastReviewID
 		item.LastReviewedHeadSHA = existing.LastReviewedHeadSHA
 		item.LastVerdict = existing.LastVerdict
 		item.RepairState = existing.RepairState
 		item.AutomergeState = existing.AutomergeState
+		if !sameHead && item.AutomergeState != repositoryMonitorAutomergeStateMerged {
+			item.AutomergeState = ""
+		}
 		item.StatusCommentID = existing.StatusCommentID
 		item.StatusCommentURL = existing.StatusCommentURL
-		if strings.TrimSpace(existing.HeadSHA) != "" && existing.HeadSHA == pr.HeadSHA {
+		if sameHead {
 			item.LastPublishID = existing.LastPublishID
 			item.LastPublishPhase = existing.LastPublishPhase
 			item.LastPublishReason = existing.LastPublishReason

@@ -349,6 +349,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		}
 	}
 	item.RepairState = repositoryMonitorRepairPhaseQueued
+	item.AutomergeState = ""
 	item.SkipReason = ""
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 		return created, err

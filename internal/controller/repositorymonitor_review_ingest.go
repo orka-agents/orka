@@ -460,9 +460,9 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 			item.LastReviewedHeadSHA = ""
 		}
 	}
-	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed {
+	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
-	} else if record.Verdict != repositoryMonitorReviewVerdictPassed {
+	} else {
 		item.AutomergeState = ""
 	}
 	return r.Store.UpsertMonitorItem(ctx, item)
