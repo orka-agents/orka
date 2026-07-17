@@ -384,8 +384,10 @@ func runBrokeredProbe(
 		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
 	}
 
-	streamCtx, streamCancel := context.WithTimeout(ctx, controlTimeout)
+	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()
+	toolRequestTimer := time.NewTimer(controlTimeout)
+	defer toolRequestTimer.Stop()
 	framesCh := make(chan harness.HarnessEventFrame, maxProbeFrames)
 	errCh := make(chan error, 1)
 	emitFrame := newBrokeredProbeFrameEmitter(framesCh)
@@ -395,50 +397,50 @@ func runBrokeredProbe(
 
 	var requested *harness.HarnessEventFrame
 	initialStreamEnded := false
-	for requested == nil {
-		select {
-		case frame := <-framesCh:
-			frames = append(frames, frame)
-			if err := validateBrokeredProbeFrame(request, frame); err != nil {
-				result.addFailure(err.Error())
-				return
-			}
+	initialStreamDrained := false
+	recordInitialFrame := func(frame harness.HarnessEventFrame) bool {
+		frames = append(frames, frame)
+		if err := validateBrokeredProbeFrame(request, frame); err != nil {
+			result.addFailure(err.Error())
+			return false
+		}
+		if requested == nil {
 			if frame.Type == harness.FrameToolCallRequested {
 				if expected := expectedBrokeredProbeToolName(profile); frame.ToolName != expected {
 					result.addFailure(fmt.Sprintf("brokered %s probe requested tool %q, want %q", profile, frame.ToolName, expected))
-					return
+					return false
 				}
 				copyFrame := frame
 				requested = &copyFrame
+				return true
 			}
-			if isProbeTerminalFrame(frame.Type) && requested == nil {
+			if isProbeTerminalFrame(frame.Type) {
 				result.addFailure("brokered turn completed before requesting a tool")
+				return false
+			}
+			return true
+		}
+		if frame.Type == harness.FrameToolResultReceived || isProbeTerminalFrame(frame.Type) {
+			result.addFailure("brokered runtime emitted tool result or terminal frame before continue")
+			return false
+		}
+		return true
+	}
+	for requested == nil {
+		select {
+		case frame := <-framesCh:
+			if !recordInitialFrame(frame) {
 				return
 			}
 		case err := <-errCh:
-			for len(framesCh) > 0 && requested == nil {
-				frame := <-framesCh
-				frames = append(frames, frame)
-				if err := validateBrokeredProbeFrame(request, frame); err != nil {
-					result.addFailure(err.Error())
-					return
-				}
-				if frame.Type == harness.FrameToolCallRequested {
-					if expected := expectedBrokeredProbeToolName(profile); frame.ToolName != expected {
-						result.addFailure(fmt.Sprintf("brokered %s probe requested tool %q, want %q", profile, frame.ToolName, expected))
-						return
-					}
-					copyFrame := frame
-					requested = &copyFrame
-					break
-				}
-				if isProbeTerminalFrame(frame.Type) {
-					result.addFailure("brokered turn completed before requesting a tool")
+			initialStreamEnded = true
+			initialStreamDrained = true
+			for len(framesCh) > 0 {
+				if !recordInitialFrame(<-framesCh) {
 					return
 				}
 			}
 			if requested != nil {
-				initialStreamEnded = true
 				if err != nil && !probeStreamStoppedByContext(err) {
 					result.addFailure(fmt.Sprintf("stream brokered frames failed before continue: %v", err))
 					return
@@ -451,12 +453,74 @@ func runBrokeredProbe(
 				result.addFailure("brokered stream ended before tool request")
 			}
 			return
-		case <-streamCtx.Done():
+		case <-toolRequestTimer.C:
+			failureCount := len(result.Failures)
+			streamErr, drained := stopProbeStreamAndDrainFrames(streamCancel, framesCh, errCh, recordInitialFrame)
+			if !drained {
+				if len(result.Failures) == failureCount {
+					result.addFailure("failed to drain initial brokered stream frames")
+				}
+				return
+			}
+			initialStreamEnded = true
+			initialStreamDrained = true
+			if requested != nil {
+				if streamErr != nil && !probeStreamStoppedByContext(streamErr) {
+					result.addFailure(fmt.Sprintf("stream brokered frames failed before continue: %v", streamErr))
+					return
+				}
+				break
+			}
+			if streamErr != nil && !probeStreamStoppedByContext(streamErr) {
+				result.addFailure(fmt.Sprintf("stream brokered frames failed before tool request: %v", streamErr))
+				return
+			}
 			result.addFailure("brokered conformance timed out waiting for tool request")
+			return
+		case <-streamCtx.Done():
+			failureCount := len(result.Failures)
+			streamErr, drained := stopProbeStreamAndDrainFrames(streamCancel, framesCh, errCh, recordInitialFrame)
+			if !drained {
+				if len(result.Failures) == failureCount {
+					result.addFailure("failed to drain initial brokered stream frames")
+				}
+				return
+			}
+			if streamErr != nil && !probeStreamStoppedByContext(streamErr) {
+				result.addFailure(fmt.Sprintf("stream brokered frames failed before continue: %v", streamErr))
+				return
+			}
+			if requested == nil {
+				result.addFailure("brokered conformance context ended before tool request")
+			} else {
+				result.addFailure("brokered conformance context ended before continue")
+			}
 			return
 		}
 	}
-	if !assertNoBrokeredPreContinueFrames(streamCtx, result, request, framesCh, &frames) {
+	if !initialStreamDrained {
+		failureCount := len(result.Failures)
+		streamEnded, ok, streamErr := observeBrokeredPreContinueFrames(
+			streamCtx,
+			streamCancel,
+			framesCh,
+			errCh,
+			recordInitialFrame,
+		)
+		if !ok {
+			if len(result.Failures) == failureCount {
+				result.addFailure("failed to drain brokered stream frames before continue")
+			}
+			return
+		}
+		initialStreamEnded = streamEnded
+		if streamErr != nil && !probeStreamStoppedByContext(streamErr) {
+			result.addFailure(fmt.Sprintf("stream brokered frames failed before continue: %v", streamErr))
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		result.addFailure("brokered conformance context ended before continue")
 		return
 	}
 
@@ -640,6 +704,9 @@ func newBrokeredProbeFrameEmitter(
 	}
 }
 
+// stopProbeStreamAndDrainFrames returns false only when recordFrame rejects a
+// frame. A producer that does not exit is reported through
+// errProbeStreamShutdownTimeout so callers can record the shutdown failure.
 func stopProbeStreamAndDrainFrames(
 	streamCancel context.CancelFunc,
 	framesCh <-chan harness.HarnessEventFrame,
@@ -751,32 +818,54 @@ func maxFrameSeq(frames []harness.HarnessEventFrame) int64 {
 	return maxSeq
 }
 
-func assertNoBrokeredPreContinueFrames(
-	ctx context.Context,
-	result *Result,
-	request harness.StartTurnRequest,
+func observeBrokeredPreContinueFrames(
+	streamCtx context.Context,
+	streamCancel context.CancelFunc,
 	framesCh <-chan harness.HarnessEventFrame,
-	frames *[]harness.HarnessEventFrame,
-) bool {
+	errCh <-chan error,
+	recordFrame func(harness.HarnessEventFrame) bool,
+) (bool, bool, error) {
 	timer := time.NewTimer(postTerminalDrainTimeout)
 	defer timer.Stop()
+	drainQueuedFrames := func() bool {
+		for len(framesCh) > 0 {
+			if !recordFrame(<-framesCh) {
+				return false
+			}
+		}
+		return true
+	}
 	for {
 		select {
 		case frame := <-framesCh:
-			*frames = append(*frames, frame)
-			if err := validateBrokeredProbeFrame(request, frame); err != nil {
-				result.addFailure(err.Error())
-				return false
+			if !recordFrame(frame) {
+				return false, false, nil
 			}
-			if frame.Type == harness.FrameToolResultReceived || isProbeTerminalFrame(frame.Type) {
-				result.addFailure("brokered runtime emitted tool result or terminal frame before continue")
-				return false
+		case streamErr := <-errCh:
+			if !drainQueuedFrames() {
+				return true, false, streamErr
 			}
+			return true, true, streamErr
+		case <-streamCtx.Done():
+			streamErr, drained := stopProbeStreamAndDrainFrames(streamCancel, framesCh, errCh, recordFrame)
+			return true, drained, streamErr
 		case <-timer.C:
-			return true
-		case <-ctx.Done():
-			result.addFailure("brokered conformance context ended before continue")
-			return false
+			if !drainQueuedFrames() {
+				return false, false, nil
+			}
+			if streamCtx.Err() != nil {
+				streamErr, drained := stopProbeStreamAndDrainFrames(streamCancel, framesCh, errCh, recordFrame)
+				return true, drained, streamErr
+			}
+			select {
+			case streamErr := <-errCh:
+				if !drainQueuedFrames() {
+					return true, false, streamErr
+				}
+				return true, true, streamErr
+			default:
+				return false, true, nil
+			}
 		}
 	}
 }

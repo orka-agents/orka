@@ -942,6 +942,57 @@ func TestBrokeredProbeStreamPreservesDecodedTerminalDuringCancellation(t *testin
 	}
 }
 
+func TestBrokeredProbeStreamPreservesDecodedToolRequestDuringTimeoutDrain(t *testing.T) {
+	framesCh := make(chan harness.HarnessEventFrame)
+	errCh := make(chan error, 1)
+	decoded := make(chan struct{})
+	cancelInvoked := make(chan struct{})
+	producerDone := make(chan struct{})
+	emitFrame := newBrokeredProbeFrameEmitter(framesCh)
+	go func() {
+		defer close(producerDone)
+		close(decoded)
+		if err := emitFrame(harness.HarnessEventFrame{Type: harness.FrameToolCallRequested}); err != nil {
+			errCh <- err
+			return
+		}
+		<-cancelInvoked
+		errCh <- context.Canceled
+	}()
+	<-decoded
+	cancelled := false
+	toolRequestSeen := false
+	streamErr, drained := stopProbeStreamAndDrainFrames(
+		func() {
+			cancelled = true
+			close(cancelInvoked)
+		},
+		framesCh,
+		errCh,
+		func(frame harness.HarnessEventFrame) bool {
+			toolRequestSeen = frame.Type == harness.FrameToolCallRequested
+			return true
+		},
+	)
+	if !cancelled {
+		t.Fatal("stream cancel was not called")
+	}
+	if !drained {
+		t.Fatal("in-flight frames were not drained")
+	}
+	if !errors.Is(streamErr, context.Canceled) {
+		t.Fatalf("stream error = %v, want context canceled", streamErr)
+	}
+	if !toolRequestSeen {
+		t.Fatal("decoded tool request frame was not recorded")
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(time.Second):
+		t.Fatal("stream producer did not exit")
+	}
+}
+
 func TestStopProbeStreamAndDrainFramesTimesOutWhenProducerDoesNotExit(t *testing.T) {
 	started := time.Now()
 	streamErr, drained := stopProbeStreamAndDrainFrames(
