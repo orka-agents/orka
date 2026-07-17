@@ -53,7 +53,7 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return classifyChatK8sErr(err)
 	}
 
-	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+	if isWaitTaskTerminal(task.Status.Phase) {
 		return chatTaskStatusResult(task)
 	}
 
@@ -75,15 +75,30 @@ func (t *WaitForTaskTool) Execute(ctx context.Context, args json.RawMessage) (st
 				return classifyChatK8sErr(err)
 			}
 
-			if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded || task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+			if isWaitTaskTerminal(task.Status.Phase) {
 				return chatTaskStatusResult(task)
 			}
 		}
 	}
 }
 
+func isWaitTaskTerminal(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 func chatTaskStatusResult(task *corev1alpha1.Task) (string, error) {
 	data := map[string]any{nameField: task.Name, phaseField: string(task.Status.Phase), messageField: task.Status.Message}
+	if task.Status.ExecutionOutcome != nil {
+		data["executionOutcome"] = task.Status.ExecutionOutcome
+	}
+	if task.Status.ExecutionWorkspace != nil {
+		data["executionWorkspace"] = task.Status.ExecutionWorkspace
+	}
 	if task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		if task.Status.CompletionTime != nil {

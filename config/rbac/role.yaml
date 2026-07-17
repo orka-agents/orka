@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - secrets
   verbs:
   - create
   - delete
@@ -57,17 +58,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - serviceaccounts
   verbs:
   - create
@@ -102,6 +92,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - autoscaling
   resources:
@@ -300,4 +296,65 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceclasses/status
+  - executionworkspacepools/status
+  - executionworkspaceproviders/status
+  - executionworkspaces/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspacepools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaceproviders/finalizers
+  - executionworkspaces/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch

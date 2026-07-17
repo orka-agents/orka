@@ -960,8 +960,10 @@ func (ch *ChatHandler) hasRunningTasks(ctx context.Context, namespace, sessionID
 		return false
 	}
 	for i := range taskList.Items {
-		phase := taskList.Items[i].Status.Phase
-		if phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning {
+		switch taskList.Items[i].Status.Phase {
+		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+			continue
+		default:
 			return true
 		}
 	}

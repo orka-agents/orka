@@ -11,6 +11,12 @@ resources:
 - bases/core.orka.ai_repositoryscans.yaml
 - bases/core.orka.ai_repositorymonitors.yaml
 - bases/core.orka.ai_substrateactorpools.yaml
+- bases/workspace.orka.ai_executionworkspaceproviders.yaml
+- bases/workspace.orka.ai_executionworkspacepools.yaml
+- bases/workspace.orka.ai_executionworkspaceclasses.yaml
+- bases/workspace.orka.ai_executionworkspaces.yaml
+- bases/fake.workspace.orka.ai_fakeproviderconfigs.yaml
+- bases/fake.workspace.orka.ai_fakepoolparameters.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

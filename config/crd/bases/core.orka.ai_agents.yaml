@@ -1105,6 +1105,18 @@ spec:
                           instead of resuming from the provider's default snapshot. Currently supported
                           by the Substrate provider.
                         type: boolean
+                      classRef:
+                        description: |-
+                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
+                          classRef implicitly enables the controller-first workspace path.
+                        properties:
+                          name:
+                            description: Name is the class name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
                       cleanupPolicy:
                         description: |-
                           CleanupPolicy controls whether the workspace is deleted or retained after use.
@@ -1138,6 +1150,13 @@ spec:
                               worker derives a stable key from namespace, template, and reuse key.
                             type: string
                         type: object
+                      onDetach:
+                        description: OnDetach requests an action allowed by the selected
+                          class.
+                        enum:
+                        - Suspend
+                        - Delete
+                        type: string
                       poolRef:
                         description: |-
                           PoolRef references an operator-managed Substrate actor pool for placement,
@@ -1206,7 +1225,22 @@ spec:
                               It defaults to the Task namespace, or the controller namespace when configured.
                             type: string
                         type: object
+                      workspaceSlot:
+                        default: default
+                        description: WorkspaceSlot names one independently reusable
+                          workspace within a Session.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: classRef cannot be combined with legacy enabled, provider,
+                        template, pool, cleanup, boot, snapshot, or hibernation settings
+                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
+                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
+                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
+                        && !has(self.snapshot) && !has(self.hibernation))'
                 type: object
               model:
                 description: |-
@@ -1498,6 +1532,9 @@ spec:
                   Zero means the agent is never auto-deleted (permanent). Default is no TTL (permanent).
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: execution.workspace.classRef is only supported on Task specs
+              rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:

@@ -13,6 +13,9 @@
 !internal/
 !internal/**/
 !internal/**/*.go
+!pkg/
+!pkg/**/
+!pkg/**/*.go
 !workers/
 !workers/**/
 !workers/**/*.go

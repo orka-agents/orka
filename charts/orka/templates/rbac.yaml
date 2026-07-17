@@ -18,6 +18,32 @@ rules:
     resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers"]
     verbs: ["update"]
 
+  # Provider-neutral Execution Workspace control plane
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "use"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspacepools"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceproviders"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceproviders/status", "executionworkspaceclasses/status", "executionworkspacepools/status", "executionworkspaces/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["workspace.orka.ai"]
+    resources: ["executionworkspaceproviders/finalizers", "executionworkspaces/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   # Job permissions
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -32,7 +58,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
@@ -459,5 +485,49 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: orka-container-worker
+    namespace: {{ .Release.Namespace }}
+
+---
+# Adapter charts aggregate read-only access to their provider-specific parameter CRDs here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.fullname" . }}-workspace-parameter-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        workspace.orka.ai/aggregate-to-parameter-reader: "true"
+rules: []
+{{- if .Values.controller.workspaceProvider.fakeProviderEnabled }}
+---
+# Development-only fake provider parameters contribute to the aggregate reader.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.fullname" . }}-fake-workspace-parameter-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    workspace.orka.ai/aggregate-to-parameter-reader: "true"
+rules:
+  - apiGroups: ["fake.workspace.orka.ai"]
+    resources: ["fakeproviderconfigs", "fakepoolparameters"]
+    verbs: ["get", "list", "watch"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-workspace-parameter-reader
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.fullname" . }}-workspace-parameter-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

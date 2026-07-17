@@ -109,6 +109,7 @@ type TaskReconciler struct {
 	EnforceNamespaceIsolation          bool
 	MaxTasksPerNamespace               int32
 	ExecutionWorkspaceDefaultProvider  corev1alpha1.WorkspaceProvider
+	WorkspaceProviderAPIEnabled        bool
 	AgentSandboxEnabled                bool
 	AgentSandboxConfig                 AgentSandboxConfig
 	SubstrateEnabled                   bool
@@ -302,6 +303,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleScheduled(ctx, task)
 	case corev1alpha1.TaskPhaseRunning:
 		return r.handleRunning(ctx, task)
+	case corev1alpha1.TaskPhaseFinalizing:
+		return r.handleFinalizing(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return r.handleCompleted(ctx, task)
 	}
@@ -539,6 +542,11 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 // handlePending handles Tasks in Pending phase
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if outcome := task.Status.ExecutionOutcome; outcome != nil {
+		log.Info("refusing to replay task with immutable execution outcome", "outcome", outcome.Phase)
+		return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
+	}
 
 	if err := r.clearApprovalDecisionNudge(ctx, task); err != nil {
 		log.Error(err, "failed to clear durable approval decision nudge")
@@ -1154,7 +1162,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !canStartTaskJob(latest.Status.Phase) {
+	if !canStartTaskJob(latest.Status.Phase) || executionOutcomePreventsReplay(latest.Status.ExecutionOutcome) {
 		task.Status = latest.Status
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
@@ -1718,7 +1726,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			return r.handleAutonomousIteration(ctx, task)
 		}
 		// Job succeeded
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "task completed successfully")
+		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "task completed successfully")
 	}
 
 	if job.Status.Failed > 0 {
@@ -1726,7 +1734,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			return result, err
 		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
-			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
@@ -1738,7 +1746,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		// fetch_task_output and adapt — e.g. recreate the Agent with more memory.
 		// Falls back to the generic "job failed" if no signal is available.
 		msg := r.diagnoseFailedJob(ctx, task)
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
 	}
 
 	// Check for pods stuck in Pending/ContainerCreating with unrecoverable errors
@@ -2037,6 +2045,26 @@ func (r *TaskReconciler) isWithinJobCreationVisibilityGracePeriod(task *corev1al
 }
 
 // handleCompleted handles Tasks that have completed (Succeeded or Failed)
+func (r *TaskReconciler) handleFinalizing(
+	ctx context.Context, task *corev1alpha1.Task,
+) (ctrl.Result, error) {
+	outcome := task.Status.ExecutionOutcome
+	if outcome == nil {
+		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "finalizing task is missing execution outcome")
+	}
+	workspaceStatus := task.Status.ExecutionWorkspace
+	if workspaceStatus != nil && workspaceStatus.AttachedEpoch > 0 {
+		attached := true
+		if condition := meta.FindStatusCondition(workspaceStatus.Conditions, "Attached"); condition != nil {
+			attached = condition.Status != metav1.ConditionFalse
+		}
+		if attached {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
+	return r.completeTask(ctx, task, outcome.Phase, outcome.Message)
+}
+
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
@@ -2181,8 +2209,44 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	return nil
 }
 
-// completeTask marks a task as completed
-func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Task, phase corev1alpha1.TaskPhase, message string) (ctrl.Result, error) {
+// completeTask marks a task as completed without asserting that workload execution started.
+func (r *TaskReconciler) completeTask(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	phase corev1alpha1.TaskPhase,
+	message string,
+) (ctrl.Result, error) {
+	return r.completeTaskWithOutcome(ctx, task, phase, phase, message, false)
+}
+
+// completeExecutedTask marks a task terminal and records the immutable workload outcome.
+func (r *TaskReconciler) completeExecutedTask(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	phase corev1alpha1.TaskPhase,
+	message string,
+) (ctrl.Result, error) {
+	return r.completeTaskWithOutcome(ctx, task, phase, phase, message, true)
+}
+
+func (r *TaskReconciler) completeAfterSuccessfulExecutionError(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	message string,
+) (ctrl.Result, error) {
+	return r.completeTaskWithOutcome(
+		ctx, task, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseSucceeded, message, true,
+	)
+}
+
+func (r *TaskReconciler) completeTaskWithOutcome(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	phase corev1alpha1.TaskPhase,
+	outcomePhase corev1alpha1.TaskPhase,
+	message string,
+	recordOutcome bool,
+) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	now := metav1.Now()
@@ -2240,6 +2304,16 @@ func (r *TaskReconciler) completeTask(ctx context.Context, task *corev1alpha1.Ta
 		t.Status.CompletionTime = &now
 		t.Status.Message = message
 		t.Status.ResultRef = resultRef
+		if recordOutcome && t.Status.ExecutionOutcome == nil {
+			attempt := max(t.Status.Attempts, 1)
+			t.Status.ExecutionOutcome = &corev1alpha1.TaskExecutionOutcome{
+				Phase:      outcomePhase,
+				Attempt:    attempt,
+				ResultRef:  resultRef,
+				RecordedAt: now,
+				Message:    message,
+			}
+		}
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeWaitingForApproval,
 			Status:             metav1.ConditionFalse,
@@ -2295,8 +2369,18 @@ func (r *TaskReconciler) failTask(ctx context.Context, task *corev1alpha1.Task, 
 	return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, message)
 }
 
+// executionOutcomePreventsReplay treats every recorded outcome as final.
+// Retryable failed attempts are routed through retryTask before
+// completeExecutedTask records an outcome; once recorded, no attempt is replayed.
+func executionOutcomePreventsReplay(outcome *corev1alpha1.TaskExecutionOutcome) bool {
+	return outcome != nil
+}
+
 // shouldRetry checks if the task should be retried
 func (r *TaskReconciler) shouldRetry(task *corev1alpha1.Task) bool {
+	if task == nil || executionOutcomePreventsReplay(task.Status.ExecutionOutcome) {
+		return false
+	}
 	if task.Spec.RetryPolicy == nil {
 		return false
 	}
@@ -2593,11 +2677,23 @@ func (r *TaskReconciler) resolveProviderRef(task *corev1alpha1.Task, agent *core
 
 // validateExecutionWorkspace validates optional durable workspace settings.
 func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) error {
-	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil || !task.Spec.Execution.Workspace.Enabled {
+	if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil
 	}
 
 	ws := task.Spec.Execution.Workspace
+	if ws.ClassRef != nil {
+		if strings.TrimSpace(ws.ClassRef.Name) == "" {
+			return fmt.Errorf("execution workspace classRef.name is required")
+		}
+		if !r.WorkspaceProviderAPIEnabled {
+			return fmt.Errorf("execution workspace classRef requires the workspace provider API")
+		}
+		return fmt.Errorf("execution workspace classRef requires controller-first Task workspace integration")
+	}
+	if !ws.Enabled {
+		return nil
+	}
 	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
 
 	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
@@ -2890,7 +2986,8 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	default:
 		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 	}
-	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil && agent.Spec.Execution.Workspace.Enabled {
+	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil &&
+		(agent.Spec.Execution.Workspace.Enabled || agent.Spec.Execution.Workspace.ClassRef != nil) {
 		return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 	}
 	if agent.Spec.ProviderRef != nil {
@@ -3847,7 +3944,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 		plan, err := r.PlanStore.GetPlan(ctx, task.Namespace, task.Name)
 		if err == nil && plan.GoalComplete && !resumingAfterApproval {
 			log.Info("autonomous task goal complete", "iteration", task.Status.Iteration, "summary", plan.Summary)
-			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
+			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
 				fmt.Sprintf("goal complete after %d iterations: %s", task.Status.Iteration+1, plan.Summary))
 		}
 	}
@@ -3869,7 +3966,7 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	maxIter := agent.Spec.Coordination.MaxIterations
 	if maxIter > 0 && task.Status.Iteration+1 >= maxIter && !resumingAfterApproval {
 		log.Info("autonomous task reached max iterations", "maxIterations", maxIter)
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
+		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseSucceeded,
 			fmt.Sprintf("reached max iterations (%d)", maxIter))
 	}
 

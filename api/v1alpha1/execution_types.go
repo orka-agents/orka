@@ -102,8 +102,32 @@ const (
 	ExecutionWorkspaceReasonStatusUpdateFailed ExecutionWorkspaceReason = "WorkspaceStatusUpdateFailed"
 )
 
+// WorkspaceClassReference references an ExecutionWorkspaceClass in the Task namespace.
+type WorkspaceClassReference struct {
+	// Name is the class name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// WorkspaceOnDetachPolicy is a Task-requested class-permitted detach action.
+// +kubebuilder:validation:Enum=Suspend;Delete
+type WorkspaceOnDetachPolicy string
+
+const (
+	WorkspaceOnDetachSuspend WorkspaceOnDetachPolicy = "Suspend"
+	WorkspaceOnDetachDelete  WorkspaceOnDetachPolicy = "Delete"
+)
+
 // ExecutionWorkspaceSpec defines an optional durable execution workspace request.
+// ClassRef selects the provider-neutral controller-first path. Legacy provider/template/pool fields
+// remain served during migration.
+// +kubebuilder:validation:XValidation:rule="!has(self.classRef) || (!has(self.provider) && !has(self.templateRef) && !has(self.poolRef) && (!has(self.enabled) || !self.enabled) && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot) && !has(self.snapshot) && !has(self.hibernation))",message="classRef cannot be combined with legacy enabled, provider, template, pool, cleanup, boot, snapshot, or hibernation settings"
 type ExecutionWorkspaceSpec struct {
+	// ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
+	// classRef implicitly enables the controller-first workspace path.
+	// +optional
+	ClassRef *WorkspaceClassReference `json:"classRef,omitempty"`
+
 	// Enabled requests use of a durable workspace for the task execution.
 	// +kubebuilder:default=false
 	// +optional
@@ -131,6 +155,18 @@ type ExecutionWorkspaceSpec struct {
 	// Defaults to delete when omitted.
 	// +optional
 	CleanupPolicy WorkspaceCleanupPolicy `json:"cleanupPolicy,omitempty"`
+
+	// WorkspaceSlot names one independently reusable workspace within a Session.
+	// +kubebuilder:default=default
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	WorkspaceSlot string `json:"workspaceSlot,omitempty"`
+
+	// OnDetach requests an action allowed by the selected class.
+	// +optional
+	OnDetach WorkspaceOnDetachPolicy `json:"onDetach,omitempty"`
 
 	// Boot asks providers that support it to boot the workspace workload from scratch
 	// instead of resuming from the provider's default snapshot. Currently supported

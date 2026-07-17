@@ -44,6 +44,20 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Provider-neutral workspace.orka.ai control plane (disabled by default during rollout).
+  workspaceProvider:
+    # Enable generic provider/class/pool/workspace coordination controllers.
+    apiEnabled: false
+    # Enable the development-only fake provider adapter.
+    fakeProviderEnabled: false
+    # Fail-closed Kubernetes admission required whenever apiEnabled is true.
+    classUseAdmission:
+      enabled: false
+      # Existing TLS Secret with tls.crt and tls.key for the webhook Service DNS name.
+      existingSecret: ""
+      # Base64-encoded PEM CA bundle trusted by the API server.
+      caBundle: ""
+
   # Experimental agent sandbox workspace support (disabled by default)
   executionWorkspace:
     # Default provider used when Task execution.workspace.provider is omitted.

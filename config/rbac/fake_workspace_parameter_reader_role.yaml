@@ -1,0 +1,20 @@
+# Development-only fake provider parameters contribute to Orka's aggregate
+# provider-parameter reader when the fake adapter is enabled.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+    workspace.orka.ai/aggregate-to-parameter-reader: "true"
+  name: fake-workspace-parameter-reader
+rules:
+- apiGroups:
+  - fake.workspace.orka.ai
+  resources:
+  - fakeproviderconfigs
+  - fakepoolparameters
+  verbs:
+  - get
+  - list
+  - watch

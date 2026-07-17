@@ -1,0 +1,15 @@
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspacePool
+metadata:
+  name: coding-pool
+  namespace: default
+spec:
+  providerRef:
+    name: fake-local
+  parametersRef:
+    group: fake.workspace.orka.ai
+    kind: FakePoolParameters
+    name: coding-pool
+  capacity:
+    minReady: 2
+    maxSize: 20

@@ -36,3 +36,55 @@ webhooks:
     resources:
     - tasks
     scope: Namespaced
+- name: taskworkspaceclassuse.core.orka.ai
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+  # Workspace class authorization is a security boundary and must fail closed.
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  timeoutSeconds: 10
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-core-orka-ai-v1alpha1-task-workspace-class-use
+      port: 443
+    # Configure caBundle injection before installing this opt-in webhook bundle.
+  rules:
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - core.orka.ai
+    apiVersions:
+    - v1alpha1
+    resources:
+    - tasks
+    scope: Namespaced
+- name: toolworkspaceclassuse.core.orka.ai
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+  # Workspace class authorization is a security boundary and must fail closed.
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  timeoutSeconds: 10
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use
+      port: 443
+    # Configure caBundle injection before installing this opt-in webhook bundle.
+  rules:
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - core.orka.ai
+    apiVersions:
+    - v1alpha1
+    resources:
+    - tools
+    scope: Namespaced

@@ -41,12 +41,14 @@
   /* ---- Phase status tokens (foreground-strength: dots / text / rails) ---- */
   --color-status-pending: #b45309;
   --color-status-running: #0891b2;
+  --color-status-finalizing: #7c3aed;
   --color-status-succeeded: #047857;
   --color-status-failed: #be123c;
 
   /* ---- Phase status tints (translucent: rails / column fills / soft chips) ---- */
   --color-status-pending-bg: rgb(245 158 11 / 0.12);
   --color-status-running-bg: rgb(34 211 238 / 0.12);
+  --color-status-finalizing-bg: rgb(124 58 237 / 0.12);
   --color-status-succeeded-bg: rgb(16 185 129 / 0.12);
   --color-status-failed-bg: rgb(244 63 94 / 0.12);
 
@@ -108,11 +110,13 @@
   /* Status: brighter faces so they sit on the abyss without glowing falsely. */
   --color-status-pending: #f59e0b;
   --color-status-running: #22d3ee;
+  --color-status-finalizing: #a78bfa;
   --color-status-succeeded: #34d399;
   --color-status-failed: #fb7185;
 
   --color-status-pending-bg: rgb(245 158 11 / 0.16);
   --color-status-running-bg: rgb(34 211 238 / 0.16);
+  --color-status-finalizing-bg: rgb(167 139 250 / 0.16);
   --color-status-succeeded-bg: rgb(52 211 153 / 0.16);
   --color-status-failed-bg: rgb(251 113 133 / 0.16);
 

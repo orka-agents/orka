@@ -6,6 +6,7 @@ cliVersion: 4.11.1
 domain: orka.ai
 layout:
 - go.kubebuilder.io/v4
+multigroup: true
 projectName: orka
 repo: github.com/orka-agents/orka
 resources:
@@ -44,5 +45,51 @@ resources:
   group: core
   kind: Skill
   path: github.com/orka-agents/orka/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  domain: orka.ai
+  group: workspace
+  kind: ExecutionWorkspaceProvider
+  path: github.com/orka-agents/orka/api/workspace/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: orka.ai
+  group: workspace
+  kind: ExecutionWorkspacePool
+  path: github.com/orka-agents/orka/api/workspace/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: orka.ai
+  group: workspace
+  kind: ExecutionWorkspaceClass
+  path: github.com/orka-agents/orka/api/workspace/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: orka.ai
+  group: workspace
+  kind: ExecutionWorkspace
+  path: github.com/orka-agents/orka/api/workspace/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  domain: orka.ai
+  group: fake.workspace
+  kind: FakeProviderConfig
+  path: github.com/orka-agents/orka/api/fake.workspace/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: orka.ai
+  group: fake.workspace
+  kind: FakePoolParameters
+  path: github.com/orka-agents/orka/api/fake.workspace/v1alpha1
   version: v1alpha1
 version: "3"

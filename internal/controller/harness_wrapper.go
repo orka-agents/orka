@@ -733,7 +733,9 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 				log.Error(fetchErr, "failed to fetch harness wrapper result")
 				retries := harnessWrapperOutputFetchRetries(task)
 				if retries >= harnessWrapperMaxOutputFetchRetries {
-					return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to fetch harness wrapper result: %v", fetchErr))
+					return r.completeAfterSuccessfulExecutionError(
+						ctx, task, fmt.Sprintf("failed to fetch harness wrapper result: %v", fetchErr),
+					)
 				}
 				if patchErr := r.patchHarnessWrapperOutputFetchRetries(ctx, task, retries+1); patchErr != nil {
 					return ctrl.Result{}, patchErr
@@ -744,7 +746,9 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		}
 		if saveErr := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, resultBytes); saveErr != nil {
 			log.Error(saveErr, "failed to save harness wrapper result")
-			return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, fmt.Sprintf("failed to save harness wrapper result: %v", saveErr))
+			return r.completeAfterSuccessfulExecutionError(
+				ctx, task, fmt.Sprintf("failed to save harness wrapper result: %v", saveErr),
+			)
 		}
 		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
 	}
@@ -767,7 +771,7 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		}
 	}
 	if result.Cancelled {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, "harness wrapper turn cancelled")
+		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseCancelled, "harness wrapper turn cancelled")
 	}
 	if result.Failed != nil {
 		if result.Failed.Retryable && r.shouldRetry(task) {
@@ -786,12 +790,12 @@ func (r *TaskReconciler) finishHarnessWrapperTask(ctx context.Context, task *cor
 		if message == "" {
 			message = "harness wrapper turn failed"
 		}
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(message))
+		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, events.RedactExecutionEventText(message))
 	}
 	if result.Completed == nil {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn ended without result")
+		return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "harness wrapper turn ended without result")
 	}
-	return r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "harness wrapper task completed successfully")
+	return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "harness wrapper task completed successfully")
 }
 
 func (r *TaskReconciler) markHarnessBrokeredApprovalWaiting(ctx context.Context, task *corev1alpha1.Task, approvalID, toolName string) error {
@@ -2372,7 +2376,7 @@ func harnessWrapperSessionName(task *corev1alpha1.Task) string {
 	if task != nil {
 		return task.Name
 	}
-	return "default"
+	return "default" //nolint:goconst
 }
 
 func harnessWrapperTaskAgentName(task *corev1alpha1.Task) string {

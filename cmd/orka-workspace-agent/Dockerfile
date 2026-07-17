@@ -8,6 +8,7 @@ RUN go mod download
 COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY pkg/ pkg/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/orka-workspace-agent ./cmd/orka-workspace-agent
 
@@ -23,7 +24,11 @@ RUN apt-get update \
     && mkdir -p /app /workspace /home/worker \
     && chmod 1777 /app /workspace /home/worker
 
-USER 1000:1000
+# The workspace-agent is the PID-namespace supervisor. It runs as root so it can
+# terminate/reap descendants, while every task command is dropped to the
+# configured unprivileged UID/GID before exec.
+USER 0:0
+ENV HOME=/home/worker
 WORKDIR /workspace
 # Standalone image default matches the binary default and avoids privileged ports.
 # ActorTemplates should still set this env explicitly so controller validation can

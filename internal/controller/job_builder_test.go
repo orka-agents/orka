@@ -2821,7 +2821,7 @@ func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAgentTelemetryEnv(t *testing
 			Type:   corev1alpha1.TaskTypeAgent,
 			Prompt: "p",
 			Env: []corev1.EnvVar{
-				{Name: workerenv.EnableTelemetry, Value: "true"},
+				{Name: workerenv.EnableTelemetry, Value: scheduledRunLabelValue},
 				{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "otel-collector:4317"},
 				{Name: workerenv.TraceParent, Value: "00-" + strings.Repeat("1", 32) + "-" + strings.Repeat("2", 16) + "-01"},
 				{Name: workerenv.TraceState, Value: "vendor=value"},
@@ -2836,7 +2836,7 @@ func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAgentTelemetryEnv(t *testing
 			t.Fatalf("task-supplied %s should be ignored for agent workers", name)
 		}
 	}
-	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != "true" {
+	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
 		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
 	}
 	if got, ok := findEnvVar(envVars, "OTEL_EXPORTER_OTLP_ENDPOINT"); !ok || got.Value != "otel-collector:4317" {
@@ -2856,14 +2856,14 @@ func TestJobBuilder_buildEnvVars_PreservesContainerTelemetryEnv(t *testing.T) {
 			Image:   "busybox",
 			Command: []string{"true"},
 			Env: []corev1.EnvVar{
-				{Name: workerenv.EnableTelemetry, Value: "true"},
+				{Name: workerenv.EnableTelemetry, Value: scheduledRunLabelValue},
 				{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "service.name=user-container"},
 			},
 		},
 	}
 
 	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
-	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != "true" {
+	if got, ok := findEnvVar(envVars, workerenv.EnableTelemetry); !ok || got.Value != scheduledRunLabelValue {
 		t.Fatalf("%s = %#v, found=%v", workerenv.EnableTelemetry, got, ok)
 	}
 	if got, ok := findEnvVar(envVars, "OTEL_RESOURCE_ATTRIBUTES"); !ok || got.Value != "service.name=user-container" {

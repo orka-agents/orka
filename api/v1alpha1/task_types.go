@@ -25,16 +25,17 @@ const (
 )
 
 // TaskPhase defines the phase of task execution
-// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed;Scheduled;Cancelled
+// +kubebuilder:validation:Enum=Pending;Running;Finalizing;Succeeded;Failed;Scheduled;Cancelled
 type TaskPhase string
 
 const (
-	TaskPhasePending   TaskPhase = "Pending"
-	TaskPhaseRunning   TaskPhase = "Running"
-	TaskPhaseSucceeded TaskPhase = "Succeeded"
-	TaskPhaseFailed    TaskPhase = "Failed"
-	TaskPhaseScheduled TaskPhase = "Scheduled"
-	TaskPhaseCancelled TaskPhase = "Cancelled"
+	TaskPhasePending    TaskPhase = "Pending"
+	TaskPhaseRunning    TaskPhase = "Running"
+	TaskPhaseFinalizing TaskPhase = "Finalizing"
+	TaskPhaseSucceeded  TaskPhase = "Succeeded"
+	TaskPhaseFailed     TaskPhase = "Failed"
+	TaskPhaseScheduled  TaskPhase = "Scheduled"
+	TaskPhaseCancelled  TaskPhase = "Cancelled"
 )
 
 // ConcurrencyPolicy describes how the controller will handle concurrent scheduled runs.
@@ -125,6 +126,7 @@ type TaskTransaction struct {
 // TaskSpec defines the desired state of Task
 // +kubebuilder:validation:XValidation:rule="has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy) || self.requestedBy == oldSelf.requestedBy)",message="requestedBy is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction) || self.transaction == oldSelf.transaction)",message="transaction is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy != 'session' || has(self.sessionRef)",message="session workspace reuse requires spec.sessionRef"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -398,6 +400,7 @@ type SkillReference struct {
 }
 
 // TaskStatus defines the observed state of Task
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
 type TaskStatus struct {
 	// Phase is the current phase of the task
 	// +optional
@@ -427,6 +430,11 @@ type TaskStatus struct {
 	// ResultRef indicates whether a result is available
 	// +optional
 	ResultRef *ResultReference `json:"resultRef,omitempty"`
+
+	// ExecutionOutcome is the immutable outcome recorded when workload execution ends. Workspace
+	// attachment revocation and cleanup continue independently while the Task is Finalizing.
+	// +optional
+	ExecutionOutcome *TaskExecutionOutcome `json:"executionOutcome,omitempty"`
 
 	// ExecutionWorkspace reports the provider-neutral lifecycle state for a
 	// requested execution workspace. Provider-native identifiers and credentials
@@ -502,15 +510,69 @@ type HarnessRuntimeStatus struct {
 	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
 }
 
+// TaskExecutionOutcome records the immutable result of workload execution before workspace finalization.
+type TaskExecutionOutcome struct {
+	// Phase is the terminal workload execution phase.
+	// +kubebuilder:validation:Enum=Succeeded;Failed;Cancelled
+	Phase TaskPhase `json:"phase"`
+
+	// Attempt is the Task attempt that produced this outcome.
+	// +kubebuilder:validation:Minimum=1
+	Attempt int32 `json:"attempt"`
+
+	// ResultRef indicates whether the corresponding result was persisted.
+	// +optional
+	ResultRef *ResultReference `json:"resultRef,omitempty"`
+
+	// RecordedAt is when Orka durably recorded the execution outcome.
+	RecordedAt metav1.Time `json:"recordedAt"`
+
+	// Message contains sanitized execution context.
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
 // ResultReference indicates whether a result is available for the task
 type ResultReference struct {
 	// Available indicates whether a result has been stored for this task
 	Available bool `json:"available"`
 }
 
+// WorkspaceObjectReference identifies a concrete workspace without exposing provider-native IDs.
+type WorkspaceObjectReference struct {
+	// Name is the ExecutionWorkspace name.
+	Name string `json:"name"`
+
+	// UID is the immutable ExecutionWorkspace UID.
+	// +optional
+	UID string `json:"uid,omitempty"`
+}
+
 // ExecutionWorkspaceStatus is the safe status surface for execution workspace lifecycle.
 type ExecutionWorkspaceStatus struct {
-	// Provider is the resolved workspace backend.
+	// ClassRef is the provider-neutral class selected for controller-first execution.
+	// +optional
+	ClassRef *WorkspaceClassReference `json:"classRef,omitempty"`
+
+	// WorkspaceRef identifies the concrete ExecutionWorkspace in the Task namespace.
+	// +optional
+	WorkspaceRef *WorkspaceObjectReference `json:"workspaceRef,omitempty"`
+
+	// State is the provider-neutral concrete workspace state.
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// AttachedEpoch is the attachment epoch enforced for this Task.
+	// +optional
+	AttachedEpoch int64 `json:"attachedEpoch,omitempty"`
+
+	// Conditions project generic workspace admission, readiness, attachment, and finalization state.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Provider is the resolved legacy workspace backend.
 	// +optional
 	Provider WorkspaceProvider `json:"provider,omitempty"`
 
