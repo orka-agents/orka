@@ -189,7 +189,7 @@ func buildTaskTypesSection(mode PromptMode) string {
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
-- agent: Run an external CLI runtime (Copilot, Claude Code, Codex).
+- agent: Run an external CLI runtime (Copilot, Claude Code, Codex, OpenCode).
   Use create_agent_task only for Agents that have runtime listed in available_agents.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
@@ -462,6 +462,9 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		}
 		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeClaude)) != "" {
 			availableRuntimes = append(availableRuntimes, "claude")
+		}
+		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeOpencode)) != "" {
+			availableRuntimes = append(availableRuntimes, "opencode")
 		}
 	}
 
