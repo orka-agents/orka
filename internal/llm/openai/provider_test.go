@@ -24,6 +24,7 @@ import (
 const (
 	testProviderOpenAI = "openai"
 	testToolNameSearch = "search"
+	testToolArguments  = `{"q":"test"}`
 	testResponsesPath  = "/responses"
 	testFallbackWorks  = "Fallback works!"
 	testFallbackStream = "Fallback"
@@ -246,7 +247,7 @@ func TestConvertInputItems(t *testing.T) {
 				Role:    "assistant",
 				Content: "thinking",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(testToolArguments)},
 				},
 			}},
 			2, // function_call + assistant content message
@@ -256,7 +257,7 @@ func TestConvertInputItems(t *testing.T) {
 			[]llm.Message{{
 				Role: "assistant",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(testToolArguments)},
 				},
 			}},
 			1, // just function_call
@@ -353,7 +354,7 @@ func TestConvertMessages(t *testing.T) {
 			[]llm.Message{{
 				Role: "assistant",
 				ToolCalls: []llm.ToolCall{
-					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"test"}`)},
+					{ID: "tc1", Name: testToolNameSearch, Arguments: json.RawMessage(testToolArguments)},
 				},
 			}},
 			"",
@@ -631,6 +632,57 @@ func TestComplete_ChatCompletions_WithToolCalls(t *testing.T) {
 	}
 	if resp.ToolCalls[0].Name != testToolNameSearch {
 		t.Errorf("expected tool call name 'search', got %q", resp.ToolCalls[0].Name)
+	}
+}
+
+func TestComplete_ChatCompletions_WithLegacyFunctionCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{
+			"id": "chatcmpl-legacy",
+			"object": "chat.completion",
+			"model": "gpt-4",
+			"choices": [{
+				"index": 0,
+				"message": {
+					"role": "assistant",
+					"content": "",
+					"function_call": {"name": "search", "arguments": "{\"q\":\"test\"}"}
+				},
+				"finish_reason": "function_call"
+			}],
+			"usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	provider.mode.Store(int32(apiModeChatCompletions))
+
+	resp, err := provider.Complete(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "search for test"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %d, want 1", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].ID != "chatcmpl-legacy_function_call" {
+		t.Fatalf("tool call ID = %q", resp.ToolCalls[0].ID)
+	}
+	if resp.ToolCalls[0].Name != testToolNameSearch {
+		t.Fatalf("tool call name = %q", resp.ToolCalls[0].Name)
+	}
+	if string(resp.ToolCalls[0].Arguments) != testToolArguments {
+		t.Fatalf("tool call arguments = %q", resp.ToolCalls[0].Arguments)
+	}
+	if got := llm.NormalizeCompletionOutcome(resp); got != llm.CompletionOutcomeToolCalls {
+		t.Fatalf("outcome = %q, want %q", got, llm.CompletionOutcomeToolCalls)
 	}
 }
 
@@ -1016,6 +1068,57 @@ func TestStream_ChatCompletions_NormalizesTerminalOutcome(t *testing.T) {
 				t.Fatalf("stop reason = %q, want %q", stopReason, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestStream_ChatCompletions_LegacyFunctionCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-legacy\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"name\":\"se\",\"arguments\":\"{\\\"q\\\":\"}},\"finish_reason\":null}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-legacy\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"name\":\"arch\",\"arguments\":\"\\\"test\\\"}\"}},\"finish_reason\":null}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-legacy\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"function_call\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	provider.mode.Store(int32(apiModeChatCompletions))
+
+	ch, err := provider.Stream(context.Background(), &llm.CompletionRequest{
+		Model:    "gpt-4",
+		Messages: []llm.Message{{Role: "user", Content: "search for test"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+
+	var toolCalls []llm.ToolCall
+	var stopReason string
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("stream error = %v", chunk.Error)
+		}
+		if chunk.ToolCall != nil {
+			toolCalls = append(toolCalls, *chunk.ToolCall)
+		}
+		if chunk.Done {
+			stopReason = chunk.StopReason
+		}
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(toolCalls))
+	}
+	if toolCalls[0].ID != "chatcmpl-legacy_function_call" || toolCalls[0].Name != testToolNameSearch {
+		t.Fatalf("tool call = %#v", toolCalls[0])
+	}
+	if string(toolCalls[0].Arguments) != testToolArguments {
+		t.Fatalf("tool call arguments = %q", toolCalls[0].Arguments)
+	}
+	if stopReason != stopReasonToolCalls {
+		t.Fatalf("stop reason = %q, want %q", stopReason, stopReasonToolCalls)
 	}
 }
 
@@ -1816,8 +1919,8 @@ func TestStream_ResponsesAPI_ToolCallNameFromCompletedOutput(t *testing.T) {
 	if toolCalls[0].ID != "call_123" {
 		t.Errorf("expected tool ID 'call_123', got %q", toolCalls[0].ID)
 	}
-	if string(toolCalls[0].Arguments) != `{"q":"test"}` {
-		t.Errorf("expected arguments %q, got %q", `{"q":"test"}`, string(toolCalls[0].Arguments))
+	if string(toolCalls[0].Arguments) != testToolArguments {
+		t.Errorf("expected arguments %q, got %q", testToolArguments, string(toolCalls[0].Arguments))
 	}
 	if stopReason != stopReasonToolCalls {
 		t.Errorf("expected stop reason 'tool_calls', got %q", stopReason)

@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/llm"
@@ -19,6 +20,41 @@ type streamUsageProvider struct{}
 func (streamUsageProvider) Name() string { return "stream-usage" }
 func (streamUsageProvider) Complete(context.Context, *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	return nil, nil
+}
+
+type streamChunksProvider struct {
+	chunks []llm.StreamChunk
+	err    error
+}
+
+func (streamChunksProvider) Name() string { return "stream-chunks" }
+func (streamChunksProvider) Complete(context.Context, *llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	return nil, nil
+}
+func (p streamChunksProvider) Stream(context.Context, *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	ch := make(chan llm.StreamChunk, len(p.chunks))
+	for _, chunk := range p.chunks {
+		ch <- chunk
+	}
+	close(ch)
+	return ch, nil
+}
+
+func TestCompleteViaStreamPreservesOpenErrorChain(t *testing.T) {
+	providerErr := &llm.ProviderError{StatusCode: 400, Message: "context length exceeded"}
+	_, err := completeViaStream(context.Background(), streamChunksProvider{err: providerErr}, &llm.CompletionRequest{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, errStreamOpen) {
+		t.Fatalf("error = %v, want stream-open sentinel", err)
+	}
+	if !llm.IsContextTooLongErr(err) {
+		t.Fatalf("error = %v, want context-too-long provider cause", err)
+	}
 }
 func (streamUsageProvider) Stream(context.Context, *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
 	ch := make(chan llm.StreamChunk, 3)
@@ -42,5 +78,25 @@ func TestCompleteViaStreamPreservesTerminalUsageMetadata(t *testing.T) {
 	}
 	if resp.Model != "stream-model" || resp.Provider != "anthropic" {
 		t.Fatalf("metadata = model:%q provider:%q", resp.Model, resp.Provider)
+	}
+}
+
+func TestCompleteViaStreamRejectsMissingTerminalOutcome(t *testing.T) {
+	tests := []struct {
+		name   string
+		chunks []llm.StreamChunk
+	}{
+		{name: "channel closes without terminal", chunks: []llm.StreamChunk{{Content: "partial"}}},
+		{name: "terminal missing reason", chunks: []llm.StreamChunk{{Done: true}}},
+		{name: "failed terminal", chunks: []llm.StreamChunk{{Done: true, StopReason: "failed"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := completeViaStream(context.Background(), streamChunksProvider{chunks: tt.chunks}, &llm.CompletionRequest{})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+		})
 	}
 }

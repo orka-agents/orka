@@ -914,6 +914,14 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 				})
 			}
 		}
+		legacyName, legacyArguments := legacyFunctionCallFromJSON(choice.Message.RawJSON())
+		if len(result.ToolCalls) == 0 && strings.TrimSpace(legacyName) != "" {
+			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
+				ID:        legacyFunctionCallID(resp.ID),
+				Name:      legacyName,
+				Arguments: legacyFunctionCallArguments(legacyArguments),
+			})
+		}
 	}
 	return result, nil
 }
@@ -922,7 +930,7 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 	return p.streamChatCompletionsWithUsage(ctx, req, true)
 }
 
-func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.CompletionRequest, includeUsage bool) <-chan llm.StreamChunk {
+func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.CompletionRequest, includeUsage bool) <-chan llm.StreamChunk { //nolint:gocyclo // Handles modern and legacy streaming fields inline.
 	ch := make(chan llm.StreamChunk)
 	go func() {
 		defer close(ch)
@@ -964,6 +972,10 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		hasContent := false
 		hasRefusal := false
 		hasToolCalls := false
+		legacyFunctionCallSeen := false
+		legacyFunctionCallIDValue := ""
+		var legacyFunctionCallName strings.Builder
+		var legacyFunctionCallArgs strings.Builder
 		var inputTokens, outputTokens int
 		streamModel := req.Model
 
@@ -980,6 +992,15 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				}
 				if strings.TrimSpace(delta.Refusal) != "" {
 					hasRefusal = true
+				}
+				legacyName, legacyArguments := legacyFunctionCallFromJSON(delta.RawJSON())
+				if legacyName != "" {
+					legacyFunctionCallSeen = true
+					legacyFunctionCallName.WriteString(legacyName)
+				}
+				if legacyArguments != "" {
+					legacyFunctionCallSeen = true
+					legacyFunctionCallArgs.WriteString(legacyArguments)
 				}
 			}
 
@@ -1000,6 +1021,9 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 
 			if strings.TrimSpace(chunk.Model) != "" {
 				streamModel = chunk.Model
+			}
+			if strings.TrimSpace(chunk.ID) != "" {
+				legacyFunctionCallIDValue = chunk.ID
 			}
 			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
 				inputTokens = int(chunk.Usage.PromptTokens)
@@ -1024,6 +1048,17 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			send(llm.StreamChunk{Error: providerErr, Done: true})
 			return
 		}
+		legacyName := legacyFunctionCallName.String()
+		if legacyFunctionCallSeen && !hasToolCalls && strings.TrimSpace(legacyName) != "" {
+			hasToolCalls = true
+			if !send(llm.StreamChunk{ToolCall: &llm.ToolCall{
+				ID:        legacyFunctionCallID(legacyFunctionCallIDValue),
+				Name:      legacyName,
+				Arguments: legacyFunctionCallArguments(legacyFunctionCallArgs.String()),
+			}}) {
+				return
+			}
+		}
 		finishReason = normalizeChatStreamStopReason(finishReason, hasContent, hasRefusal, hasToolCalls)
 		send(llm.StreamChunk{
 			Done:         true,
@@ -1035,6 +1070,34 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		})
 	}()
 	return ch
+}
+
+func legacyFunctionCallID(responseID string) string {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return "legacy_function_call"
+	}
+	return responseID + "_function_call"
+}
+
+func legacyFunctionCallFromJSON(raw string) (string, string) {
+	var payload struct {
+		FunctionCall struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function_call"`
+	}
+	if raw == "" || json.Unmarshal([]byte(raw), &payload) != nil {
+		return "", ""
+	}
+	return payload.FunctionCall.Name, payload.FunctionCall.Arguments
+}
+
+func legacyFunctionCallArguments(arguments string) json.RawMessage {
+	if strings.TrimSpace(arguments) == "" {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(arguments)
 }
 
 func normalizeChatStreamStopReason(finishReason string, hasContent, hasRefusal, hasToolCalls bool) string {

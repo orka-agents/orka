@@ -705,6 +705,21 @@ func TestExecuteAgentLoop_RejectsMissingStopReason(t *testing.T) {
 	}
 }
 
+func TestExecuteAgentLoop_RejectsNilResponse(t *testing.T) {
+	provider := &mockProvider{}
+
+	_, err := executeAgentLoop(
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "investigate"}}, "", "test-model",
+		nil, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unsupported completion outcome") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
 func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	provider := &mockProvider{
 		response: &llm.CompletionResponse{

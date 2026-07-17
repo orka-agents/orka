@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ import (
 // emits "## Progress Summary" mid-workflow, which terminates the SSE stream
 // and skips validation/review/PR.
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
+
+var errStreamOpen = errors.New("stream open")
 
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
@@ -62,15 +65,16 @@ func isStreamingRequiredErr(err error) bool {
 // fallback path when provider.Complete is refused with
 // "streaming is required for operations that may take longer than N minutes".
 // The aggregation is intentionally simple: concatenate text content and append
-// each tool call exactly once. Final stop_reason follows
-// the last chunk's reason or defaults to "end_turn".
+// each tool call exactly once. A terminal chunk with an explicit stop reason
+// is required so truncated streams cannot be mistaken for completion.
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("stream open: %w", err)
+		return nil, fmt.Errorf("%w: %w", errStreamOpen, err)
 	}
 
 	resp := &llm.CompletionResponse{}
+	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
@@ -94,20 +98,35 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 			resp.Provider = chunk.Provider
 		}
 		if chunk.Done {
-			if chunk.StopReason != "" {
-				resp.StopReason = chunk.StopReason
-			}
+			terminalSeen = true
+			resp.StopReason = chunk.StopReason
 			break
 		}
 	}
-	if resp.StopReason == "" {
-		if len(resp.ToolCalls) > 0 {
-			resp.StopReason = "tool_use"
-		} else {
-			resp.StopReason = "end_turn"
-		}
+	if !terminalSeen {
+		return nil, fmt.Errorf("stream closed without a terminal chunk")
+	}
+	if err := validateToolLoopCompletion(resp); err != nil {
+		return nil, err
 	}
 	return resp, nil
+}
+
+func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
+	outcome := llm.NormalizeCompletionOutcome(resp)
+	switch outcome {
+	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
+		return nil
+	default:
+		reason := ""
+		if resp != nil {
+			reason = strings.TrimSpace(resp.StopReason)
+		}
+		if reason == "" {
+			return fmt.Errorf("LLM returned %s completion outcome without a stop reason", outcome)
+		}
+		return fmt.Errorf("LLM returned %s completion outcome with stop reason %q", outcome, reason)
+	}
 }
 
 // toolLoopObserver receives best-effort progress events from the server-side
@@ -152,7 +171,7 @@ func (o *toolLoopObserver) autoPoll() {
 }
 
 func formatToolProgress(tc llm.ToolCall, result string) string {
-	status := "completed"
+	status := completionStatusCompleted
 	var parsed struct {
 		Success *bool `json:"success"`
 		Data    struct {
@@ -660,6 +679,9 @@ func runToolLoopWithObserver(
 				observer.finalContent(resp.Content)
 				return resp, nil
 			}
+			if err := validateToolLoopCompletion(resp); err != nil {
+				return nil, err
+			}
 			observer.finalContent(resp.Content)
 			return resp, nil
 		}
@@ -703,6 +725,9 @@ func runToolLoopWithObserver(
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
+		}
+		if err := validateToolLoopCompletion(resp); err != nil {
+			return nil, err
 		}
 
 		// No tool calls → potentially final response. Guard against premature

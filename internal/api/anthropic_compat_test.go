@@ -556,7 +556,7 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertToAnthropicResponse(tt.resp, tt.model)
+			result := convertToAnthropicResponse(tt.resp, tt.model, tt.wantStopReason)
 
 			if result.Type != "message" {
 				t.Errorf("type = %q, want message", result.Type)
@@ -592,11 +592,38 @@ func TestConvertToAnthropicResponse(t *testing.T) {
 	}
 }
 
+func TestMapAnthropicCompletionStopReason(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *llm.CompletionResponse
+		want string
+		ok   bool
+	}{
+		{name: "nil response"},
+		{name: "blank completion", resp: &llm.CompletionResponse{StopReason: "end_turn"}, want: "end_turn", ok: true},
+		{name: "completed", resp: &llm.CompletionResponse{Content: "done", StopReason: "end_turn"}, want: "end_turn", ok: true},
+		{name: "completed tool call", resp: &llm.CompletionResponse{StopReason: "end_turn", ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "search"}}}, want: "tool_use", ok: true},
+		{name: "refusal", resp: &llm.CompletionResponse{StopReason: "refusal"}, want: "refusal", ok: true},
+		{name: "pause turn", resp: &llm.CompletionResponse{StopReason: "pause_turn"}, want: "pause_turn", ok: true},
+		{name: "failed", resp: &llm.CompletionResponse{StopReason: "failed"}},
+		{name: "missing reason", resp: &llm.CompletionResponse{Content: "partial"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := mapAnthropicCompletionStopReason(tt.resp)
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("mapAnthropicCompletionStopReason() = (%q, %t), want (%q, %t)", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestConvertToAnthropicResponse_PreservesGoalStateSentinelForTransparentProxy(t *testing.T) {
 	result := convertToAnthropicResponse(&llm.CompletionResponse{
 		Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/3",
 		StopReason: oaiStopReasonEndTurn,
-	}, "claude-sonnet-4-20250514")
+	}, "claude-sonnet-4-20250514", oaiStopReasonEndTurn)
 
 	if len(result.Content) != 1 {
 		t.Fatalf("expected one text block, got %d", len(result.Content))
@@ -614,7 +641,7 @@ func TestAnthropicToolLoopFormatting_StripsGoalStateSentinel(t *testing.T) {
 		Content:    goalStateSentinel + "\nPR ready: https://example.test/pr/3",
 		StopReason: oaiStopReasonEndTurn,
 	})
-	result := convertToAnthropicResponse(resp, "claude-sonnet-4-20250514")
+	result := convertToAnthropicResponse(resp, "claude-sonnet-4-20250514", oaiStopReasonEndTurn)
 
 	if len(result.Content) != 1 {
 		t.Fatalf("expected one text block, got %d", len(result.Content))
@@ -624,36 +651,6 @@ func TestAnthropicToolLoopFormatting_StripsGoalStateSentinel(t *testing.T) {
 	}
 	if strings.Contains(result.Content[0].Text, goalStateSentinel) {
 		t.Fatalf("tool-loop formatted response leaked sentinel: %q", result.Content[0].Text)
-	}
-}
-
-// --- Tests: mapAnthropicStopReason ---
-
-func TestMapAnthropicStopReason(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"stop", "end_turn"},
-		{"end_turn", "end_turn"},
-		{"", "end_turn"},
-		{"tool_calls", oaiStopReasonToolUse},
-		{oaiStopReasonToolUse, oaiStopReasonToolUse},
-		{"max_tokens", "max_tokens"},
-		{"length", "max_tokens"},
-		{"unknown_reason", "end_turn"},
-		{"STOP", "end_turn"},                 // case insensitive
-		{"Tool_Calls", oaiStopReasonToolUse}, // case insensitive
-		{"MAX_TOKENS", "max_tokens"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := mapAnthropicStopReason(tt.input)
-			if got != tt.want {
-				t.Errorf("mapAnthropicStopReason(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -1090,6 +1087,44 @@ func TestHandleStreamingMessages_ForwardsTerminalUsage(t *testing.T) {
 	}
 }
 
+func TestHandleStreamingMessages_RejectsInvalidProviderOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		mock *mockAnthropicProvider
+	}{
+		{name: "failed stream", mock: &mockAnthropicProvider{streamChunks: []llm.StreamChunk{{Done: true, StopReason: "failed"}}}},
+		{name: "missing terminal", mock: &mockAnthropicProvider{streamChunks: []llm.StreamChunk{{Content: "partial"}}}},
+		{name: "fallback failed", mock: &mockAnthropicProvider{streamErr: fmt.Errorf("streaming not supported"), responses: []*llm.CompletionResponse{{StopReason: "failed"}}}},
+		{name: "fallback nil", mock: &mockAnthropicProvider{streamErr: fmt.Errorf("streaming not supported"), responses: []*llm.CompletionResponse{nil}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, app := setupTestAnthropicHandler()
+			app.Post("/test", func(c fiber.Ctx) error {
+				return handler.handleStreamingMessages(
+					c, context.Background(), tt.mock,
+					&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+					"claude-sonnet-4-20250514", nil,
+				)
+			})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			bodyStr := string(body)
+			if !strings.Contains(bodyStr, "event: error") {
+				t.Fatalf("expected stream error, got: %s", bodyStr)
+			}
+			if strings.Contains(bodyStr, "message_stop") {
+				t.Fatalf("invalid tool loop completed successfully: %s", bodyStr)
+			}
+		})
+	}
+}
+
 func TestHandleStreamingRawMessages_ForwardsTerminalUsage(t *testing.T) {
 	mock := &mockAnthropicProvider{
 		streamChunks: []llm.StreamChunk{
@@ -1116,6 +1151,240 @@ func TestHandleStreamingRawMessages_ForwardsTerminalUsage(t *testing.T) {
 	bodyStr := string(body)
 	if !strings.Contains(bodyStr, `"usage":{"input_tokens":0,"output_tokens":9`) {
 		t.Fatalf("expected streamed usage in body, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_PreservesRefusal(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{{Done: true, StopReason: "refusal"}},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"stop_reason":"refusal"`) {
+		t.Fatalf("expected refusal stop reason, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "event: error") {
+		t.Fatalf("refusal was emitted as an error: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_RejectsFailedOutcome(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{{Done: true, StopReason: "failed"}},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "event: error") || !strings.Contains(bodyStr, `non-success outcome \"failed\"`) {
+		t.Fatalf("expected stream error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"stop_reason":"end_turn"`) || strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("failed stream was completed successfully: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_PreservesBlankEndTurn(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{{Done: true, StopReason: "end_turn"}},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"stop_reason":"end_turn"`) || !strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("expected blank end_turn completion, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "event: error") {
+		t.Fatalf("blank end_turn emitted an error: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_FallbackPreservesBlankEndTurn(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		responses: []*llm.CompletionResponse{{Content: " \n", StopReason: "end_turn"}},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"stop_reason":"end_turn"`) || !strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("expected blank fallback end_turn, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "event: error") {
+		t.Fatalf("blank fallback emitted an error: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_FallbackRejectsFailedOutcome(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		responses: []*llm.CompletionResponse{{Content: "partial", StopReason: "failed"}},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "event: error") || !strings.Contains(bodyStr, `non-success outcome \"failed\"`) {
+		t.Fatalf("expected fallback stream error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "partial") || strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("failed fallback emitted completion data: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_FallbackProviderError(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		responses: []*llm.CompletionResponse{nil},
+		errors:    []error{fmt.Errorf("completion failed")},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "event: error") || !strings.Contains(bodyStr, `non-success outcome \"provider_error\"`) {
+		t.Fatalf("expected provider error event, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "completion failed") || strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("provider error leaked or completed successfully: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingRawMessages_FallbackNilResponse(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		responses: []*llm.CompletionResponse{nil},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingProxy(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514",
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, "event: error") || !strings.Contains(bodyStr, "without a successful terminal outcome") {
+		t.Fatalf("expected nil response error event, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("nil response completed successfully: %s", bodyStr)
+	}
+}
+
+func TestMapAnthropicStreamStopReason(t *testing.T) {
+	tests := []struct {
+		name         string
+		reason       string
+		hasToolCalls bool
+		want         string
+		wantOK       bool
+	}{
+		{name: "completed", reason: "end_turn", want: "end_turn", wantOK: true},
+		{name: "blank completed", reason: "end_turn", want: "end_turn", wantOK: true},
+		{name: "completed with calls", reason: "stop", hasToolCalls: true, want: "tool_use", wantOK: true},
+		{name: "empty stop sequence", reason: finishReasonStopSequence, want: finishReasonStopSequence, wantOK: true},
+		{name: "stop sequence with calls", reason: finishReasonStopSequence, hasToolCalls: true, want: oaiStopReasonToolUse, wantOK: true},
+		{name: "tool use", reason: "tool_calls", hasToolCalls: true, want: "tool_use", wantOK: true},
+		{name: "tool reason without calls", reason: "tool_use"},
+		{name: "max tokens", reason: "length", want: "max_tokens", wantOK: true},
+		{name: "pause turn", reason: "pause_turn", want: "pause_turn", wantOK: true},
+		{name: "refusal", reason: "refusal", want: "refusal", wantOK: true},
+		{name: "context window exceeded", reason: anthropicStopReasonModelContextWindowExceeded, want: anthropicStopReasonModelContextWindowExceeded, wantOK: true},
+		{name: "failed", reason: "failed"},
+		{name: "missing reason"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := mapAnthropicStreamStopReason(tt.reason, tt.hasToolCalls)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("mapAnthropicStreamStopReason() = (%q, %t), want (%q, %t)", got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }
 

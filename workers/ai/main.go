@@ -994,6 +994,7 @@ func executeAgentLoopWithEvents(
 			)
 			resp, err = provider.Complete(stepCtx, req)
 		}
+		err = completionCallError(resp, err)
 		if err != nil {
 			errType := aiWorkerErrorType(err)
 			stepSpan.SetStatus(codes.Error, errType)
@@ -1322,6 +1323,16 @@ func evaluateCompletionResponse(
 	default:
 		return completionDecisionReturn, "", fmt.Errorf("model returned an unsupported completion outcome")
 	}
+}
+
+func completionCallError(resp *llm.CompletionResponse, err error) error {
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return completionOutcomeError(llm.CompletionOutcomeUnknown, "")
+	}
+	return nil
 }
 
 func completionOutcomeError(outcome llm.CompletionOutcome, stopReason string) error {
