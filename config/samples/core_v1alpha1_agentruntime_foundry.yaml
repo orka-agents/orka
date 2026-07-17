@@ -6,9 +6,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: sample-foundry-runtime
 spec:
-  # Namespace-local facade for the separately deployed orka-agents/agent-runtime-foundry-classic adapter.
-  # Foundry credentials belong to the adapter Secret. Orka Tool credentials stay in
-  # Orka-governed credential sources and are used only by brokered execution.
+  # Namespace-local facade for the separately deployed orka-agents/agent-runtime-foundry
+  # Hosted Agents Responses adapter. Azure authentication belongs to the adapter deployment
+  # (for example, Workload Identity). Orka Tool credentials remain Orka-governed.
   contractVersion: orka.harness.v1
   deployment:
     mode: external-endpoint
@@ -18,12 +18,9 @@ spec:
       name: sample-foundry-runtime-token
       key: token
   capabilities:
+    # The adapter is observed-only by default. Advertise brokered classes only after
+    # enabling ORKA_FOUNDRY_BROKERED_TOOL_CLASSES and passing matching conformance probes.
     toolExecutionModes:
     - observed
-    - brokered
-    brokeredToolClasses:
-    - read
-    - write
     supportsCancel: true
     supportsRuntimeSessions: true
-    supportsContinuation: true

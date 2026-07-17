@@ -26,7 +26,7 @@ This coverage is about Orka's runtime wiring and task/session/workspace behavior
 
 ## Bring-your-own AgentRuntime
 
-`AgentRuntime` is the Orka-facing interface for remote execution backends. The backend can be a generic self-hosted HTTP runtime, AgentKit Serve, the separately maintained classic Agent Service adapter [`orka-agents/agent-runtime-foundry-classic`](https://github.com/orka-agents/agent-runtime-foundry-classic), or a future adapter. Provider-specific adapter implementations live outside the Orka source tree; Orka keeps task lifecycle, approvals, tool governance, idempotency, events, lineage, and results.
+`AgentRuntime` is the Orka-facing interface for remote execution backends. The backend can be a generic self-hosted HTTP runtime, AgentKit Serve, the separately maintained Microsoft Foundry Hosted Agents Responses adapter [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry), or a future adapter. Provider-specific adapter implementations live outside the Orka source tree; Orka keeps task lifecycle, approvals, tool governance, idempotency, events, lineage, and results.
 
 Remote backends must not receive production Orka Tool credentials. In brokered mode, they request tool calls and Orka authorizes, approves, executes or brokers, injects idempotency, and audits them.
 
@@ -80,7 +80,7 @@ kubectl create secret generic copilot-token \
 
 ### Azure AI Foundry for Claude Code CLI
 
-Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. This is the Claude Code CLI credential path. A Foundry Hosted Agents adapter would be a separate Responses API backend behind `AgentRuntime`; the current external Foundry adapter targets the classic Threads/Runs API. To use Azure AI Foundry with Claude Code CLI, include the Foundry-specific environment variables in the secret:
+Claude Code CLI supports Azure AI Foundry as an alternative to direct Anthropic API access. This is the Claude Code CLI credential path and is separate from the external [`agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry) adapter, which invokes a deployed Microsoft Foundry Hosted Agent through the Responses API behind `AgentRuntime`. To use Azure AI Foundry with Claude Code CLI, include the Foundry-specific environment variables in the secret:
 
 ```bash
 kubectl create secret generic claude-credentials \

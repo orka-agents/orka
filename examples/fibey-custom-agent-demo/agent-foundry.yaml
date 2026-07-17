@@ -1,4 +1,4 @@
-# Optional Agent that selects the classic Foundry Agent Service backend facade.
+# Optional Agent that selects the Microsoft Foundry Hosted Agents Responses facade.
 apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
@@ -9,4 +9,4 @@ spec:
       name: fibey-foundry-runtime
   systemPrompt:
     inline: |
-      You are Fibey's classic Foundry-backed incident scout. Produce a concise dossier and request Orka-brokered tools for evidence or consequential actions.
+      You are Fibey's Foundry Hosted Agent incident scout. Produce a concise dossier. Request Orka-brokered tools only when the selected runtime advertises them.

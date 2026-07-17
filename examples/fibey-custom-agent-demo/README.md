@@ -10,9 +10,11 @@ The checked-in backend is a deterministic generic HTTP harness fixture. It adver
 | --- | --- | --- |
 | `fibey-http-runtime` | Generic mock/self-hosted HTTP runtime | Harness bearer token only |
 | `fibey-agentkit-runtime` | AgentKit Serve adapter | Adapter/runtime config only |
-| `fibey-foundry-runtime` | [`orka-agents/agent-runtime-foundry-classic`](https://github.com/orka-agents/agent-runtime-foundry-classic) | Adapter Secret; no Orka Tool production credentials |
+| `fibey-foundry-runtime` | [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry) | Harness bearer Secret plus adapter Azure identity; no Orka Tool production credentials |
 
 `fibey-agentkit-runtime` is intentionally observed-only in the checked-in demo: it should show `toolExecutionModes: [observed]`, `supportsCancel: true`, and `supportsRuntimeSessions: true`, with no `brokeredToolClasses` or `supportsContinuation`. AgentKit brokered read/write/coordination exist only for deployments that explicitly enable those conformance-gated profiles.
+
+`fibey-foundry-runtime` is also observed-only by default. It targets a deployed Microsoft Foundry Hosted Agent through the dedicated Responses endpoint derived from `ORKA_FOUNDRY_PROJECT_ENDPOINT` and `ORKA_FOUNDRY_AGENT_NAME`. The adapter uses `DefaultAzureCredential`; Foundry access tokens and downstream Orka Tool credentials are never stored in the `AgentRuntime`. Brokered read/write are opt-in through `ORKA_FOUNDRY_BROKERED_TOOL_CLASSES` and must match the facade's advertised capabilities.
 
 All facades are namespace-local `AgentRuntime` objects. Remote execution backends do **not** receive production Orka Tool credentials. In brokered mode, remote backends request tools and Orka owns authorization, approvals, idempotency, credential resolution, execution/brokering, events, lineage, and audit.
 
@@ -106,9 +108,11 @@ kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-agentkit.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-agentkit.yaml
 kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-runtime --timeout=60s
 
-# Foundry adapter facade; requires a Service named fibey-foundry-runtime.
-# Build/deploy github.com/orka-agents/agent-runtime-foundry-classic with its ORKA_FOUNDRY_*
-# adapter settings plus an Azure SDK identity, such as Azure Workload Identity, for authentication.
+# Foundry Hosted Agents facade; requires a Service named fibey-foundry-runtime.
+# Build/deploy github.com/orka-agents/agent-runtime-foundry with a Foundry project endpoint,
+# Hosted Agent name, adapter bearer token, and an Azure SDK identity such as Workload Identity.
+# The checked-in facade is observed-only. Enable ORKA_FOUNDRY_BROKERED_TOOL_CLASSES
+# and update the facade only after the Hosted Agent passes matching conformance probes.
 kubectl apply -f examples/fibey-custom-agent-demo/secret-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-foundry.yaml

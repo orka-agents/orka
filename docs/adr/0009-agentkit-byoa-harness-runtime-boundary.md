@@ -38,6 +38,10 @@ Fibey remains one acceptance scenario, but the demo should show the same Orka AP
 - External runtimes can prove the cross-repo contract without placing provider-specific implementations in the Orka repository or making Orka own Deployment, ServiceAccount, NetworkPolicy, image policy, or secret-delivery hardening.
 - Brokered Orka Tool execution is opt-in by capability and policy; observed mode must not be marketed as full brokered governance.
 
+## External adapter references
+
+- Microsoft Foundry Hosted Agents Responses: [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry)
+
 ## References
 
 - `docs/development/harness-protocol-mvp.md`
