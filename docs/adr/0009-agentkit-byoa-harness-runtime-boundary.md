@@ -40,7 +40,8 @@ Fibey remains one acceptance scenario, but the demo should show the same Orka AP
 
 ## External adapter references
 
-- Microsoft Foundry Hosted Agents Responses: [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry)
+- Microsoft Foundry Hosted Agents (Responses API): [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry)
+- Microsoft Foundry Agent Service classic (Threads/Runs API): [`orka-agents/agent-runtime-foundry-classic`](https://github.com/orka-agents/agent-runtime-foundry-classic)
 
 ## References
 

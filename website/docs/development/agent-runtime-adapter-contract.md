@@ -60,4 +60,4 @@ Orka stores this as the standard structured result envelope so parent tasks can 
 
 ## Local validation
 
-Go adapters can import `github.com/orka-agents/orka/pkg/harness` and `github.com/orka-agents/orka/pkg/harness/conformance`. The generic HTTP fixture in `examples/harness/echo` is the reference implementation for observed and brokered read/write profiles. Provider-specific adapters live in separate repositories. The Microsoft Foundry Hosted Agents Responses implementation is [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry).
+Go adapters can import `github.com/orka-agents/orka/pkg/harness` and `github.com/orka-agents/orka/pkg/harness/conformance`. The generic HTTP fixture in `examples/harness/echo` is the reference implementation for observed and brokered read/write profiles. Provider-specific adapters live in separate repositories. Microsoft Foundry users can choose the [Hosted Agents Responses adapter](https://github.com/orka-agents/agent-runtime-foundry) or the [classic Agent Service Threads/Runs adapter](https://github.com/orka-agents/agent-runtime-foundry-classic).
