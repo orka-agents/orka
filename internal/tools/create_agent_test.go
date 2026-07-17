@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestCreateAgentTool_Name(t *testing.T) {
@@ -607,6 +608,72 @@ func TestCreateAgentTool_Execute_AcceptsCustomRuntimeSecretRef(t *testing.T) {
 	}
 	if agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
 		t.Errorf("secretRef.name = %q, want %q", agent.Spec.SecretRef.Name, testRuntimeCredsSecretName)
+	}
+}
+
+func TestCreateAgentTool_Execute_AcceptsOpencodeRuntimeSecretRef(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	k8sClient := newFakeClient(
+		parentTask(),
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}},
+	)
+	tool := NewCreateAgentTool(k8sClient)
+
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"model": {"name": "kimi-k2"},
+		"runtime": {
+			"type": "opencode",
+			"secretRef": "runtime-creds"
+		}
+	}`)
+
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var agentResult CreateAgentResult
+	if err := json.Unmarshal([]byte(result), &agentResult); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+
+	agent := &corev1alpha1.Agent{}
+	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
+		Name:      agentResult.AgentName,
+		Namespace: agentResult.Namespace,
+	}, agent); err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
+		t.Fatalf("runtime = %#v, want opencode", agent.Spec.Runtime)
+	}
+	if agent.Spec.Model == nil || agent.Spec.Model.Name != "kimi-k2" {
+		t.Fatalf("model = %#v, want kimi-k2", agent.Spec.Model)
+	}
+	if agent.Spec.SecretRef == nil || agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
+		t.Fatalf("secretRef = %#v, want %q", agent.Spec.SecretRef, testRuntimeCredsSecretName)
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsOpencodeWithoutModel(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(workerenv.AIModel, "coordinator-model")
+
+	tool := NewCreateAgentTool(newFakeClient(parentTask()))
+	args := json.RawMessage(`{
+		"role": "coder",
+		"systemPrompt": "You write code",
+		"runtime": {"type": "opencode"}
+	}`)
+
+	_, err := tool.Execute(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "model.name is required for opencode") {
+		t.Fatalf("Execute() error = %v, want missing OpenCode model rejection", err)
 	}
 }
 

@@ -29,13 +29,19 @@ export function AgentCreateForm() {
   const [systemPrompt, setSystemPrompt] = useState('')
 
   // Runtime mode fields
-  const [runtimeType, setRuntimeType] = useState<'claude' | 'copilot' | 'codex'>('claude')
+  const [runtimeType, setRuntimeType] = useState<'claude' | 'copilot' | 'codex' | 'opencode'>('claude')
   const [maxTurns, setMaxTurns] = useState('50')
   const [allowBash, setAllowBash] = useState(true)
   const [allowedTools, setAllowedTools] = useState('Read,Glob,Grep,Bash,LS')
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+
+    const trimmedModel = model.trim()
+    if (mode === 'runtime' && runtimeType === 'opencode' && !trimmedModel) {
+      toast.error('OpenCode requires an endpoint model ID')
+      return
+    }
 
     const spec: Record<string, unknown> = {}
 
@@ -55,6 +61,9 @@ export function AgentCreateForm() {
         defaultMaxTurns: parseInt(maxTurns),
         defaultAllowBash: allowBash,
         ...(allowedTools.trim() ? { defaultAllowedTools: allowedTools.split(',').map(t => t.trim()).filter(Boolean) } : {}),
+      }
+      if (trimmedModel) {
+        spec.model = { name: trimmedModel }
       }
     }
 
@@ -91,7 +100,7 @@ export function AgentCreateForm() {
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ai">AI (LLM Provider)</SelectItem>
-                    <SelectItem value="runtime">CLI Runtime (Copilot / Claude / Codex)</SelectItem>
+                    <SelectItem value="runtime">CLI Runtime (Copilot / Claude / Codex / OpenCode)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -142,12 +151,13 @@ export function AgentCreateForm() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Runtime Type</label>
-                    <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot' | 'codex')}>
+                    <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot' | 'codex' | 'opencode')}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="claude">Claude Code</SelectItem>
                         <SelectItem value="copilot">GitHub Copilot</SelectItem>
                         <SelectItem value="codex">OpenAI Codex</SelectItem>
+                        <SelectItem value="opencode">OpenCode</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -155,6 +165,18 @@ export function AgentCreateForm() {
                     <label className="text-sm font-medium">Max Turns</label>
                     <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
                   </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Model</label>
+                  <Input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="Endpoint model ID"
+                    required={runtimeType === 'opencode'}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Required for OpenCode; optional for runtimes with a configured default model
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Allowed Tools</label>

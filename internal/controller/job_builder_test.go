@@ -3013,6 +3013,29 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 
 }
 
+func TestReadOnlyAgentRuntimeGuardsRejectOpencode(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+
+	if err := validateReadOnlyAgentRuntime(task, agent); err == nil || !strings.Contains(err.Error(), "opencode") {
+		t.Fatalf("validateReadOnlyAgentRuntime() error = %v, want opencode rejection", err)
+	}
+	if got := readOnlyAgentRuntimeType(agent); got != corev1alpha1.AgentRuntimeOpencode {
+		t.Fatalf("readOnlyAgentRuntimeType() = %q, want opencode", got)
+	}
+	if _, err := readOnlyAgentRuntimeSecretKeys(agent); err == nil || !strings.Contains(err.Error(), "opencode") {
+		t.Fatalf("readOnlyAgentRuntimeSecretKeys() error = %v, want opencode rejection", err)
+	}
+}
+
 var benchmarkResourceRequirementsSink corev1.ResourceRequirements
 
 func BenchmarkJobBuilderBuildResourcesDefaults(b *testing.B) {

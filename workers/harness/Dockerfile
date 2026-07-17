@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex @anthropic-ai/claude-code opencode-ai \
+RUN npm install -g @openai/codex @anthropic-ai/claude-code opencode-ai@1.18.2 \
     && command -v opencode \
     && npm cache clean --force
 

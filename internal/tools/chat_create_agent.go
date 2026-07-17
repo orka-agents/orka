@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -37,10 +38,10 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 		"requests": map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 		"limits":   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, "additionalProperties": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 	},
-	}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
+	}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Model configuration; model.name is required for OpenCode runtimes", jsonSchemaPropertiesField: map[string]any{
+		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name; required endpoint model ID for OpenCode"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
 	},
-	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, or codex"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
+	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, codex, or opencode"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
 		"defaultAllowedTools": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Default CLI tools allowed for tasks using this runtime agent"},
 		"defaultAllowBash":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Whether bash is allowed by default for tasks using this runtime agent"}, secretRefField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional secret name containing runtime credentials. Omit to auto-discover the standard secret for this runtime."},
 	},
@@ -295,6 +296,19 @@ func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace 
 	}
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 		Type: corev1alpha1.AgentRuntimeType(runtimeType),
+	}
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+		if agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "" {
+			result, _ := ChatToolErrorResult(
+				"invalid_arguments",
+				"model.name is required for opencode runtime",
+				"Set model.name to the endpoint-specific OpenCode model ID.",
+			)
+			return result, false
+		}
+	}
+	if agent.Spec.Model != nil {
+		agent.Spec.Model.Provider = ""
 	}
 	if maxTurns, ok := rtMap["defaultMaxTurns"].(float64); ok && maxTurns > 0 {
 		maxTurnsInt := int32(maxTurns)

@@ -168,6 +168,59 @@ func TestParseRuntimeConfig_ResolvesExplicitSecretRef(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeConfig_ResolvesOpencodeSecretRef(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRuntimeCredsSecretName,
+			Namespace: defaultNamespace,
+		},
+	})
+	agent := &corev1alpha1.Agent{
+		Spec: corev1alpha1.AgentSpec{
+			ProviderRef: &corev1alpha1.ProviderReference{Name: testProviderOpenAI},
+			Model:       &corev1alpha1.ModelConfig{Name: "kimi-k2", Provider: testProviderOpenAI},
+		},
+	}
+
+	runtimeArgs := map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)}
+	runtimeArgs[secretRefField] = testRuntimeCredsSecretName
+	args := map[string]any{runtimeField: runtimeArgs}
+
+	if errResult, ok := parseRuntimeConfig(context.Background(), fc, defaultNamespace, args, agent); !ok {
+		t.Fatalf("parseRuntimeConfig returned error: %s", errResult)
+	}
+	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
+		t.Fatalf("runtime = %#v, want opencode", agent.Spec.Runtime)
+	}
+	if agent.Spec.SecretRef == nil || agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
+		t.Fatalf("secretRef = %#v, want %q", agent.Spec.SecretRef, testRuntimeCredsSecretName)
+	}
+	if agent.Spec.ProviderRef != nil {
+		t.Fatalf("providerRef = %#v, want nil", agent.Spec.ProviderRef)
+	}
+	if agent.Spec.Model == nil || agent.Spec.Model.Name != "kimi-k2" || agent.Spec.Model.Provider != "" {
+		t.Fatalf("model = %#v, want runtime model name without provider", agent.Spec.Model)
+	}
+}
+
+func TestParseRuntimeConfig_RejectsOpencodeWithoutModel(t *testing.T) {
+	agent := &corev1alpha1.Agent{}
+	runtimeArgs := map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)}
+	args := map[string]any{runtimeField: runtimeArgs}
+
+	errResult, ok := parseRuntimeConfig(context.Background(), newFakeClient(), defaultNamespace, args, agent)
+	if ok {
+		t.Fatal("parseRuntimeConfig() accepted OpenCode without model.name")
+	}
+	var result ChatToolResult
+	if err := json.Unmarshal([]byte(errResult), &result); err != nil {
+		t.Fatalf("unmarshal error result: %v", err)
+	}
+	if result.ErrorType != "invalid_arguments" || !strings.Contains(result.Error, "model.name is required for opencode") {
+		t.Fatalf("error result = %#v, want invalid_arguments for missing model", result)
+	}
+}
+
 func TestParseRuntimeConfig_AutoDiscoversSecretRef(t *testing.T) {
 	fc := newFakeClient(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

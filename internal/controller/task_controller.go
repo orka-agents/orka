@@ -2892,6 +2892,10 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 		if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
 			return err
 		}
+		if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
+			(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
+			return fmt.Errorf("agent %q opencode runtime requires spec.model.name", agent.Name)
+		}
 		if err := validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type); err != nil {
 			return err
 		}
