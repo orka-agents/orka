@@ -15,7 +15,6 @@ OpenClaw's work is used under the MIT License. The full notice is included below
 Compared with the upstream snapshot above:
 
 - Codex defaults to `gpt-5.6-sol` with `max` reasoning instead of upstream's `high` reasoning.
-- Non-runtime tests live in [`tests/autoreview`](../../tests/autoreview) so the installed skill payload contains only its documentation and runtime helpers; JVM-specific hardening tests skip when a Java launcher exists but no usable runtime is available.
 - Native Windows CI and a PowerShell review-harness launcher are included.
 - Bootstrap requires Python 3.9+ and refuses Python, Git, GitHub CLI, reviewer, or PowerShell executables resolved from the reviewed checkout.
 - Git reads neutralize repository-controlled filters, replacement refs, hooks, signing, color, submodule ignore settings, diff formatting, and excludes.
