@@ -1,6 +1,11 @@
 package harness
 
-import internal "github.com/orka-agents/orka/internal/harness"
+import (
+	"net/http"
+	"time"
+
+	internal "github.com/orka-agents/orka/internal/harness"
+)
 
 const (
 	ProtocolVersion = internal.ProtocolVersion
@@ -82,30 +87,104 @@ type (
 	ClientError  = internal.ClientError
 )
 
-var (
-	ErrTurnPathNotFound = internal.ErrTurnPathNotFound
+var ErrTurnPathNotFound = internal.ErrTurnPathNotFound
 
-	ValidateTurnPathSegment = internal.ValidateTurnPathSegment
-	TurnResourcePath        = internal.TurnResourcePath
-	EventStreamPath         = internal.EventStreamPath
-	CancelTurnPath          = internal.CancelTurnPath
-	ContinueTurnPath        = internal.ContinueTurnPath
-	OutputTurnPath          = internal.OutputTurnPath
-	ParseTurnResourcePath   = internal.ParseTurnResourcePath
+// ValidateTurnPathSegment validates that a turn ID occupies one URL path segment.
+func ValidateTurnPathSegment(turnID HarnessTurnID) error {
+	return internal.ValidateTurnPathSegment(turnID)
+}
 
-	IsKnownFrameType          = internal.IsKnownFrameType
-	IsKnownToolExecutionMode  = internal.IsKnownToolExecutionMode
-	IsKnownBrokeredToolClass  = internal.IsKnownBrokeredToolClass
-	IsKnownHealthStatus       = internal.IsKnownHealthStatus
-	ToolRequestIdempotencyKey = internal.ToolRequestIdempotencyKey
+// TurnResourcePath builds the escaped path for a harness turn sub-resource.
+func TurnResourcePath(turnID HarnessTurnID, resource string) (string, error) {
+	return internal.TurnResourcePath(turnID, resource)
+}
 
-	NewClient          = internal.NewClient
-	WithHTTPClient     = internal.WithHTTPClient
-	WithControlTimeout = internal.WithControlTimeout
-	WithBearerToken    = internal.WithBearerToken
+// EventStreamPath builds the escaped SSE event stream path for a turn.
+func EventStreamPath(turnID HarnessTurnID) (string, error) {
+	return internal.EventStreamPath(turnID)
+}
 
-	WriteJSON     = internal.WriteJSON
-	WriteError    = internal.WriteError
-	WriteSSEFrame = internal.WriteSSEFrame
-	WriteSSEDone  = internal.WriteSSEDone
-)
+// CancelTurnPath builds the escaped cancel path for a turn.
+func CancelTurnPath(turnID HarnessTurnID) (string, error) {
+	return internal.CancelTurnPath(turnID)
+}
+
+// ContinueTurnPath builds the continuation path for a suspended turn.
+func ContinueTurnPath(turnID HarnessTurnID) (string, error) {
+	return internal.ContinueTurnPath(turnID)
+}
+
+// OutputTurnPath builds the escaped output fetch path for a turn.
+func OutputTurnPath(turnID HarnessTurnID) (string, error) {
+	return internal.OutputTurnPath(turnID)
+}
+
+// ParseTurnResourcePath extracts the turn ID and resource from a turn resource path.
+func ParseTurnResourcePath(rawPath string) (HarnessTurnID, string, error) {
+	return internal.ParseTurnResourcePath(rawPath)
+}
+
+// IsKnownFrameType reports whether value is a protocol-defined frame type.
+func IsKnownFrameType(value FrameType) bool {
+	return internal.IsKnownFrameType(value)
+}
+
+// IsKnownToolExecutionMode reports whether value is a protocol-defined tool execution mode.
+func IsKnownToolExecutionMode(value ToolExecutionMode) bool {
+	return internal.IsKnownToolExecutionMode(value)
+}
+
+// IsKnownBrokeredToolClass reports whether value is a protocol-defined brokered tool class.
+func IsKnownBrokeredToolClass(value BrokeredToolClass) bool {
+	return internal.IsKnownBrokeredToolClass(value)
+}
+
+// IsKnownHealthStatus reports whether value is a protocol-defined health status.
+func IsKnownHealthStatus(value HealthStatus) bool {
+	return internal.IsKnownHealthStatus(value)
+}
+
+// ToolRequestIdempotencyKey returns the canonical idempotency key for a brokered tool call.
+func ToolRequestIdempotencyKey(runtimeSessionID RuntimeSessionID, turnID HarnessTurnID, toolCallID string) string {
+	return internal.ToolRequestIdempotencyKey(runtimeSessionID, turnID, toolCallID)
+}
+
+// NewClient creates a harness protocol client for baseURL.
+func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
+	return internal.NewClient(baseURL, opts...)
+}
+
+// WithHTTPClient configures the HTTP client used by a harness client.
+func WithHTTPClient(httpClient *http.Client) ClientOption {
+	return internal.WithHTTPClient(httpClient)
+}
+
+// WithControlTimeout configures the timeout used for non-streaming control requests.
+func WithControlTimeout(timeout time.Duration) ClientOption {
+	return internal.WithControlTimeout(timeout)
+}
+
+// WithBearerToken configures bearer authentication for harness requests.
+func WithBearerToken(token string) ClientOption {
+	return internal.WithBearerToken(token)
+}
+
+// WriteJSON writes value as a JSON response with status.
+func WriteJSON(w http.ResponseWriter, status int, value any) {
+	internal.WriteJSON(w, status, value)
+}
+
+// WriteError writes a JSON error response with status.
+func WriteError(w http.ResponseWriter, status int, message string) {
+	internal.WriteError(w, status, message)
+}
+
+// WriteSSEFrame writes one harness event frame to an SSE response.
+func WriteSSEFrame(w http.ResponseWriter, frame HarnessEventFrame) error {
+	return internal.WriteSSEFrame(w, frame)
+}
+
+// WriteSSEDone writes the terminal SSE sentinel.
+func WriteSSEDone(w http.ResponseWriter) error {
+	return internal.WriteSSEDone(w)
+}
