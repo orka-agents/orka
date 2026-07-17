@@ -16,7 +16,7 @@ Orka API + governance plane
 | Fibey observed + backend switch facades | `../fibey-custom-agent-demo` | Harness bearer token only for generic HTTP; adapter credentials for optional backends | Optional; default observed |
 | Support escalation brokered read | `../support-escalation-runtime-demo` | Harness bearer token only | `support-ticket-lookup` read tool |
 
-AgentKit Serve adapter changes are intentionally not in this repository. Foundry/AgentKit samples are namespace-local facades that point at operator-provided adapter Services.
+AgentKit Serve adapter changes are intentionally not in this repository. The Foundry facade targets the separately maintained Microsoft Foundry Hosted Agents Responses adapter [`orka-agents/agent-runtime-foundry`](https://github.com/orka-agents/agent-runtime-foundry); Foundry and AgentKit samples remain namespace-local facades that point at operator-provided adapter Services.
 
 ## Run the generic HTTP demo
 

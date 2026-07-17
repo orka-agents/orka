@@ -461,18 +461,28 @@ func (r ContinueTurnRequest) Validate() error {
 	if len(r.ToolResults) == 0 {
 		return fmt.Errorf("at least one tool result is required")
 	}
+	seenToolCallIDs := make(map[string]struct{}, len(r.ToolResults))
 	for i, result := range r.ToolResults {
 		if err := result.Validate(); err != nil {
 			return fmt.Errorf("tool result %d is invalid: %w", i, err)
-		}
-		if len(result.Output) == 0 && result.Error == nil {
-			return fmt.Errorf("tool result %d output or error is required", i)
 		}
 		if result.RuntimeSessionID != r.RuntimeSessionID {
 			return fmt.Errorf("tool result %d runtime session id %q does not match continue request %q", i, result.RuntimeSessionID, r.RuntimeSessionID)
 		}
 		if result.TurnID != r.TurnID {
 			return fmt.Errorf("tool result %d turn id %q does not match continue request %q", i, result.TurnID, r.TurnID)
+		}
+		toolCallID := strings.TrimSpace(result.ToolCallID)
+		if _, exists := seenToolCallIDs[toolCallID]; exists {
+			return fmt.Errorf("tool result %d duplicates tool call id %q", i, toolCallID)
+		}
+		seenToolCallIDs[toolCallID] = struct{}{}
+		expectedKey := ToolRequestIdempotencyKey(r.RuntimeSessionID, r.TurnID, toolCallID)
+		if result.IdempotencyKey != expectedKey {
+			return fmt.Errorf("tool result %d idempotency key %q does not match canonical key %q", i, result.IdempotencyKey, expectedKey)
+		}
+		if len(result.Output) == 0 && result.Error == nil {
+			return fmt.Errorf("tool result %d output or error is required", i)
 		}
 	}
 	return nil
@@ -528,6 +538,12 @@ func (r CapabilitiesResponse) Validate() error {
 	}
 	if len(r.BrokeredToolClasses) > 0 && !containsToolExecutionMode(r.ToolExecutionModes, ToolExecutionModeBrokered) {
 		return fmt.Errorf("brokeredToolClasses require tool execution mode %q", ToolExecutionModeBrokered)
+	}
+	if containsToolExecutionMode(r.ToolExecutionModes, ToolExecutionModeBrokered) && len(r.BrokeredToolClasses) == 0 {
+		return fmt.Errorf("brokered tool execution mode requires at least one brokeredToolClass")
+	}
+	if containsToolExecutionMode(r.ToolExecutionModes, ToolExecutionModeBrokered) && !r.SupportsContinuation {
+		return fmt.Errorf("brokered tool execution mode requires supportsContinuation")
 	}
 	if r.MaxConcurrentTurns < 0 {
 		return fmt.Errorf("max concurrent turns must be non-negative")

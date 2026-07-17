@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	protocolTestNamespace = "default"
-	protocolTestTaskName  = "task-a"
+	protocolTestNamespace    = "default"
+	protocolTestTaskName     = "task-a"
+	protocolTestUnrelatedKey = "unrelated-key"
 )
 
 func TestStartTurnRequestValidationAndJSONRoundTrip(t *testing.T) {
@@ -235,5 +236,120 @@ func TestToolRequestIdempotencyKey(t *testing.T) {
 	got := ToolRequestIdempotencyKey(" runtime ", " turn ", " tool ")
 	if got != "runtime:turn:tool" {
 		t.Fatalf("ToolRequestIdempotencyKey() = %q", got)
+	}
+}
+
+func TestCapabilitiesBrokeredModeRequiresContinuation(t *testing.T) {
+	capabilities := CapabilitiesResponse{
+		Version:             ProtocolVersion,
+		ProtocolVersion:     ProtocolVersion,
+		Transport:           HTTPTransport,
+		RuntimeName:         "brokered-runtime",
+		ProviderKind:        ProviderKindRemote,
+		ToolExecutionModes:  []ToolExecutionMode{ToolExecutionModeBrokered},
+		BrokeredToolClasses: []BrokeredToolClass{BrokeredToolClassRead},
+	}
+	if err := capabilities.Validate(); err == nil || !strings.Contains(err.Error(), "supportsContinuation") {
+		t.Fatalf("Capabilities Validate() = %v, want continuation requirement", err)
+	}
+	capabilities.SupportsContinuation = true
+	if err := capabilities.Validate(); err != nil {
+		t.Fatalf("Capabilities Validate() error = %v", err)
+	}
+}
+
+func TestContinueTurnRequestRejectsDuplicateAndNonCanonicalToolResults(t *testing.T) {
+	base := ToolCallResult{
+		Version:          ProtocolVersion,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		ToolCallID:       "tool-a",
+		IdempotencyKey:   ToolRequestIdempotencyKey("runtime-a", "turn-a", "tool-a"),
+		Output:           json.RawMessage(`{"ok":true}`),
+	}
+	request := ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "correlation-a",
+		ToolResults:      []ToolCallResult{base, base},
+	}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "duplicates tool call id") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want duplicate rejection", err)
+	}
+	spacePadded := base
+	spacePadded.ToolCallID = " tool-a "
+	request.ToolResults = []ToolCallResult{base, spacePadded}
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "duplicates tool call id") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want normalized duplicate rejection", err)
+	}
+	request.ToolResults = []ToolCallResult{base}
+	request.ToolResults[0].IdempotencyKey = protocolTestUnrelatedKey
+	if err := request.Validate(); err == nil || !strings.Contains(err.Error(), "canonical key") {
+		t.Fatalf("ContinueTurnRequest Validate() = %v, want canonical key rejection", err)
+	}
+}
+
+func TestContinueTurnRequestReportsIdentityMismatchBeforeCanonicalKey(t *testing.T) {
+	base := ToolCallResult{
+		Version:          ProtocolVersion,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		ToolCallID:       "tool-a",
+		IdempotencyKey:   ToolRequestIdempotencyKey("runtime-a", "turn-a", "tool-a"),
+		Output:           json.RawMessage(`{"ok":true}`),
+	}
+	request := ContinueTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "correlation-a",
+	}
+	for _, test := range []struct {
+		name   string
+		result ToolCallResult
+		want   string
+	}{
+		{name: "runtime session", result: func() ToolCallResult {
+			result := base
+			result.RuntimeSessionID = "runtime-b"
+			result.IdempotencyKey = protocolTestUnrelatedKey
+			return result
+		}(), want: "runtime session id"},
+		{name: "turn", result: func() ToolCallResult {
+			result := base
+			result.TurnID = "turn-b"
+			result.IdempotencyKey = protocolTestUnrelatedKey
+			return result
+		}(), want: "turn id"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request.ToolResults = []ToolCallResult{test.result}
+			err := request.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "canonical key") {
+				t.Fatalf("ContinueTurnRequest Validate() = %v, want %s mismatch before canonical key", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCapabilitiesBrokeredModeRequiresToolClass(t *testing.T) {
+	capabilities := CapabilitiesResponse{
+		Version:              ProtocolVersion,
+		ProtocolVersion:      ProtocolVersion,
+		Transport:            HTTPTransport,
+		RuntimeName:          "brokered-runtime",
+		ProviderKind:         ProviderKindRemote,
+		ToolExecutionModes:   []ToolExecutionMode{ToolExecutionModeBrokered},
+		SupportsContinuation: true,
+	}
+	if err := capabilities.Validate(); err == nil || !strings.Contains(err.Error(), "brokeredToolClass") {
+		t.Fatalf("Capabilities Validate() = %v, want brokered class requirement", err)
 	}
 }

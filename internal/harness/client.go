@@ -18,7 +18,10 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 )
 
-const maxFetchTurnOutputBytes = 50 << 20
+const (
+	maxFetchTurnOutputBytes        = 50 << 20
+	maxHarnessControlResponseBytes = 1 << 20
+)
 
 type Client struct {
 	baseURL         *url.URL
@@ -27,7 +30,13 @@ type Client struct {
 	authBearerValue string
 }
 
-const maxHarnessSSEFrameBytes = 1 << 20
+const (
+	// A 1 MiB decoded result can expand by up to 6x when JSON escapes control
+	// bytes. Keep enough room for the frame envelope while bounding both each
+	// SSE line and the complete multi-line event.
+	maxHarnessSSELineBytes  = 8 << 20
+	maxHarnessSSEEventBytes = 8 << 20
+)
 
 var errSSEDone = errors.New("harness SSE stream done")
 
@@ -103,13 +112,13 @@ func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (*Star
 		return nil, err
 	}
 	if strings.TrimSpace(response.Version) != ProtocolVersion {
-		return nil, safeClientError("start_turn", 0, fmt.Sprintf("unsupported version %q", response.Version))
+		return nil, acceptedClientError("start_turn", fmt.Sprintf("unsupported version %q", response.Version))
 	}
 	if !response.Accepted {
 		return nil, safeClientError("start_turn", 0, "harness did not accept turn")
 	}
 	if err := validateAcceptedTurn(request, response); err != nil {
-		return nil, safeClientError("start_turn", 0, err.Error())
+		return nil, acceptedClientError("start_turn", err.Error())
 	}
 	return &response, nil
 }
@@ -256,10 +265,7 @@ func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return c.statusError("get", resp)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return safeClientError("get", resp.StatusCode, err.Error())
-	}
-	return nil
+	return decodeBoundedJSON("get", resp.StatusCode, resp.Body, out)
 }
 
 func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
@@ -284,8 +290,22 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return c.statusError("post", resp)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return safeClientError("post", resp.StatusCode, err.Error())
+	return decodeBoundedJSON("post", resp.StatusCode, resp.Body, out)
+}
+
+func decodeBoundedJSON(op string, status int, body io.Reader, out any) error {
+	data, err := io.ReadAll(io.LimitReader(body, maxHarnessControlResponseBytes+1))
+	if err != nil {
+		return safeClientError(op, status, err.Error())
+	}
+	if len(data) > maxHarnessControlResponseBytes {
+		return safeClientError(op, status, "JSON response exceeds harness control limit")
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return safeClientError(op, status, err.Error())
 	}
 	return nil
 }
@@ -299,9 +319,6 @@ func (c *Client) setAuthHeader(req *http.Request) {
 
 func (c *Client) controlContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if c.controlTimeout <= 0 {
-		return ctx, func() {}
-	}
-	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, c.controlTimeout)
@@ -318,16 +335,23 @@ func (c *Client) statusError(op string, resp *http.Response) error {
 
 func (c *Client) resolve(rel string) *url.URL {
 	copy := *c.baseURL
-	copy.Path = path.Join(copy.Path, rel)
-	if strings.HasSuffix(rel, "/") && !strings.HasSuffix(copy.Path, "/") {
-		copy.Path += "/"
+	escapedPath := path.Join(copy.EscapedPath(), rel)
+	if strings.HasSuffix(rel, "/") && !strings.HasSuffix(escapedPath, "/") {
+		escapedPath += "/"
 	}
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		decodedPath = escapedPath
+		escapedPath = ""
+	}
+	copy.Path = decodedPath
+	copy.RawPath = escapedPath
 	return &copy
 }
 
 func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSEFrameBytes)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSELineBytes)
 	var data strings.Builder
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -344,12 +368,14 @@ func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
 		if strings.HasPrefix(line, ":") {
 			continue
 		}
-		if strings.HasPrefix(line, "data:") {
-			if data.Len() > 0 {
-				data.WriteByte('\n')
+		if after, ok := strings.CutPrefix(line, "data:"); ok {
+			if err := appendSSEData(&data, strings.TrimSpace(after)); err != nil {
+				return err
 			}
-			data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return safeClientError("stream_frames", 0, err.Error())
 	}
 	if data.Len() > 0 {
 		if err := emitSSEData(data.String(), emit); err != nil {
@@ -359,9 +385,21 @@ func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return safeClientError("stream_frames", 0, err.Error())
+	return nil
+}
+
+func appendSSEData(data *strings.Builder, value string) error {
+	additional := len(value)
+	if data.Len() > 0 {
+		additional++
 	}
+	if data.Len()+additional > maxHarnessSSEEventBytes {
+		return safeClientError("stream_frames", 0, "SSE event exceeds harness frame limit")
+	}
+	if data.Len() > 0 {
+		data.WriteByte('\n')
+	}
+	data.WriteString(value)
 	return nil
 }
 
@@ -384,9 +422,10 @@ func emitSSEData(raw string, emit func(HarnessEventFrame) error) error {
 }
 
 type ClientError struct {
-	Op         string
-	StatusCode int
-	Message    string
+	Op             string
+	StatusCode     int
+	Message        string
+	RemoteAccepted bool
 }
 
 func (e ClientError) Error() string {
@@ -394,6 +433,14 @@ func (e ClientError) Error() string {
 		return fmt.Sprintf("harness %s failed (%d): %s", e.Op, e.StatusCode, e.Message)
 	}
 	return fmt.Sprintf("harness %s failed: %s", e.Op, e.Message)
+}
+
+func acceptedClientError(op, message string) error {
+	return ClientError{
+		Op:             op,
+		Message:        events.RedactExecutionEventText(message),
+		RemoteAccepted: true,
+	}
 }
 
 func safeClientError(op string, status int, message string) error {
