@@ -8,7 +8,7 @@ This directory vendors the OpenClaw `autoreview` skill with downstream hardening
 - Source snapshot: [`skills/autoreview` at commit `3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/tree/3300b1086017741ad9bb5f00b9cceae4e7354f89/skills/autoreview)
 - Commit: [`3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/commit/3300b1086017741ad9bb5f00b9cceae4e7354f89) (`fix(autoreview): restrict quoted credential keys (#99)`, July 14, 2026)
 
-OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it; the repository root also has [`LICENSE`](../../LICENSE).
+OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it.
 
 ## Local differences
 

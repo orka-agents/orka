@@ -430,6 +430,11 @@ SECRET_PLACEHOLDER_VALUES = {
     "matrix_qa_e2ee_cli_gateway",
     "matrix_qa_e2ee_thread",
     "matrix_qa_e2ee_verify_notice",
+    "mock api key value",
+    "mock secret phrase value",
+    "mock-password",
+    "mock-secret-value",
+    "mock-token",
     "not-a-real",
     "not-a-valid-matrix-recovery-key",
     "placeholder",
@@ -437,6 +442,7 @@ SECRET_PLACEHOLDER_VALUES = {
     "sample",
     "secret-token",
     "test-auth-token",
+    "test-cookie",
     "test-token-placeholder",
     "token-oversized",
     "clawrouter-e2e-secret",
@@ -448,6 +454,7 @@ URI_PASSWORD_PLACEHOLDER_VALUES = {
     "dummy",
     "example",
     "fake",
+    "mock-password",
     "not-a-real",
     "placeholder",
     "redacted",
@@ -6596,7 +6603,11 @@ def local_bundle(repo: Path) -> tuple[str, bool]:
     return "\n\n".join(parts), input_truncated
 
 
-def source_file_fingerprint(path: Path) -> tuple[str, int, int, str]:
+def source_file_fingerprint(
+    path: Path,
+    *,
+    max_content_bytes: int | None = None,
+) -> tuple[str, int, int, str]:
     try:
         before = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
@@ -6645,10 +6656,41 @@ def source_file_fingerprint(path: Path) -> tuple[str, int, int, str]:
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_mode,
+                opened.st_size,
+                opened.st_mtime_ns,
+            )
         ):
             raise OSError("file changed while opening")
-        while chunk := os.read(descriptor, 1024 * 1024):
+        if max_content_bytes is not None and opened.st_size > max_content_bytes:
+            raise SystemExit(
+                f"refusing to fingerprint oversized file: {display_escape(path, 500)} "
+                f"({opened.st_size} bytes; limit {max_content_bytes})"
+            )
+        bytes_read = 0
+        while True:
+            read_size = 1024 * 1024
+            if max_content_bytes is not None:
+                read_size = min(read_size, max_content_bytes - bytes_read + 1)
+            chunk = os.read(descriptor, read_size)
+            if not chunk:
+                break
+            bytes_read += len(chunk)
+            if max_content_bytes is not None and bytes_read > max_content_bytes:
+                raise SystemExit(
+                    f"refusing to fingerprint oversized file: {display_escape(path, 500)} "
+                    f"(more than {max_content_bytes} bytes)"
+                )
             digest.update(chunk)
         after = os.fstat(descriptor)
         if (
@@ -6734,13 +6776,19 @@ def source_tree_snapshot(
         "--exclude-standard",
         "-z",
     )
+    untracked_set = set(untracked)
     fingerprints = tuple(
         (
             rel,
             source_tree_snapshot(repo / rel)
             if index_modes.get(rel) == "160000"
             and (repo / rel / ".git").exists()
-            else source_file_fingerprint(repo / rel),
+            else source_file_fingerprint(
+                repo / rel,
+                max_content_bytes=(
+                    MAX_BUNDLE_TEXT_BYTES if rel in untracked_set else None
+                ),
+            ),
         )
         for rel in sorted(set(tracked + untracked))
     )
