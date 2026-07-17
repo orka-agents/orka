@@ -159,6 +159,10 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 			workerenv.OpenAIBaseURL + "=http://models.example/v1",
 			"OPENCODE_PERMISSION={\"bash\":\"allow\"}",
 			"OPENCODE_CONFIG_CONTENT={}",
+			"XDG_CONFIG_HOME=/workspace/config",
+			"XDG_DATA_HOME=/workspace/data",
+			"XDG_CACHE_HOME=/workspace/cache",
+			"XDG_STATE_HOME=/workspace/state",
 		},
 	})
 	if err != nil {
@@ -182,6 +186,17 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 	}
 	if got := envEntryValue(spec.Env, opencodeDisableExternalSkills); got != opencodeEnvTrue {
 		t.Fatalf("%s = %q, want true", opencodeDisableExternalSkills, got)
+	}
+	scratchDir := spec.TempFiles[1]
+	for name, want := range map[string]string{
+		"XDG_CONFIG_HOME": filepath.Join(scratchDir, "config"),
+		"XDG_DATA_HOME":   filepath.Join(scratchDir, "data"),
+		"XDG_CACHE_HOME":  filepath.Join(scratchDir, "cache"),
+		"XDG_STATE_HOME":  filepath.Join(scratchDir, "state"),
+	} {
+		if got := envEntryValue(spec.Env, name); got != want {
+			t.Fatalf("%s = %q, want isolated path %q", name, got, want)
+		}
 	}
 }
 
@@ -217,11 +232,128 @@ func TestOpencodeAdapterDenyBash(t *testing.T) {
 	}
 }
 
+func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
+	permissions, err := opencodePermissions(&agentEnvConfig{
+		AllowedToolsSet: true,
+		AllowedTools:    []string{"Read", "Glob", "Grep"},
+		AllowBash:       true,
+	})
+	if err != nil {
+		t.Fatalf("opencodePermissions() error = %v", err)
+	}
+
+	for _, permission := range []string{"read", "glob", "grep"} {
+		if permissions[permission] != opencodePermissionAllow {
+			t.Fatalf("permission %q = %q, want allow", permission, permissions[permission])
+		}
+	}
+	for _, permission := range []string{"edit", "bash", "webfetch", opencodePermissionWebSearch, "task"} {
+		if permissions[permission] != opencodePermissionDeny {
+			t.Fatalf("permission %q = %q, want deny when excluded from allowlist", permission, permissions[permission])
+		}
+	}
+}
+
+func TestOpencodePermissionsMapListAliasesToRead(t *testing.T) {
+	for _, tool := range []string{"LS", "List"} {
+		permissions, err := opencodePermissions(&agentEnvConfig{
+			AllowedToolsSet: true,
+			AllowedTools:    []string{tool},
+		})
+		if err != nil {
+			t.Fatalf("opencodePermissions(%q) error = %v", tool, err)
+		}
+		if permissions["read"] != opencodePermissionAllow {
+			t.Fatalf("permission.read = %q, want allow for %s", permissions["read"], tool)
+		}
+		if _, ok := permissions["list"]; ok {
+			t.Fatalf("permissions = %#v, want no unsupported list permission", permissions)
+		}
+	}
+}
+
+func TestOpencodePermissionsRespectDisallowedTools(t *testing.T) {
+	permissions, err := opencodePermissions(&agentEnvConfig{
+		DisallowedTools: []string{"Patch", "WebSearch"},
+		AllowBash:       true,
+	})
+	if err != nil {
+		t.Fatalf("opencodePermissions() error = %v", err)
+	}
+
+	if permissions["edit"] != opencodePermissionDeny {
+		t.Fatalf("permission.edit = %q, want deny for Patch", permissions["edit"])
+	}
+	if permissions[opencodePermissionWebSearch] != opencodePermissionDeny {
+		t.Fatalf("permission.websearch = %q, want deny", permissions[opencodePermissionWebSearch])
+	}
+	if permissions["bash"] != opencodePermissionAllow {
+		t.Fatalf("permission.bash = %q, want allow", permissions["bash"])
+	}
+}
+
+func TestOpencodePermissionsDisallowedToolsTakePrecedence(t *testing.T) {
+	permissions, err := opencodePermissions(&agentEnvConfig{
+		AllowedToolsSet: true,
+		AllowedTools:    []string{"Write", "Bash"},
+		DisallowedTools: []string{"Edit", "Shell"},
+		AllowBash:       true,
+	})
+	if err != nil {
+		t.Fatalf("opencodePermissions() error = %v", err)
+	}
+
+	if permissions["edit"] != opencodePermissionDeny {
+		t.Fatalf("permission.edit = %q, want deny", permissions["edit"])
+	}
+	if permissions["bash"] != opencodePermissionDeny {
+		t.Fatalf("permission.bash = %q, want deny", permissions["bash"])
+	}
+}
+
+func TestOpencodePermissionsRejectScopedToolPolicy(t *testing.T) {
+	for _, cfg := range []*agentEnvConfig{
+		{AllowedToolsSet: true, AllowedTools: []string{"Bash(git:*)"}, AllowBash: true},
+		{DisallowedTools: []string{"Read(/workspace/private/**)"}},
+	} {
+		if _, err := opencodePermissions(cfg); err == nil || !strings.Contains(err.Error(), "scoped tool policy") {
+			t.Fatalf("opencodePermissions(%#v) error = %v, want scoped policy rejection", cfg, err)
+		}
+	}
+}
+
+func TestOpencodePermissionsMapTodoRead(t *testing.T) {
+	permissions, err := opencodePermissions(&agentEnvConfig{
+		AllowedToolsSet: true,
+		AllowedTools:    []string{"TodoRead"},
+	})
+	if err != nil {
+		t.Fatalf("opencodePermissions() error = %v", err)
+	}
+	if permissions["todowrite"] != opencodePermissionAllow {
+		t.Fatalf("permission.todowrite = %q, want allow for TodoRead", permissions["todowrite"])
+	}
+}
+
 func TestOpencodeAdapterRequiresBaseURL(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
-	_, err := adapter.BuildCommand(context.Background(), TurnContext{WorkDir: t.TempDir()})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir:  t.TempDir(),
+		Metadata: map[string]string{"model": "kimi-k2"},
+	})
 	if err == nil {
 		t.Fatalf("BuildCommand() error = nil, want missing %s", workerenv.OpenAIBaseURL)
+	}
+}
+
+func TestOpencodeAdapterRequiresModel(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir: t.TempDir(),
+		Env:     []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), workerenv.Model) {
+		t.Fatalf("BuildCommand() error = %v, want missing %s", err, workerenv.Model)
 	}
 }
 

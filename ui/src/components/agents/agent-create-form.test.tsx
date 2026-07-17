@@ -113,6 +113,16 @@ describe('AgentCreateForm', () => {
     expect(screen.getAllByText('OpenAI Codex').length).toBeGreaterThan(0)
   })
 
+  it('Runtime mode includes OpenCode as an available runtime option', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    const selects = screen.getAllByRole('combobox')
+    await user.click(selects[1])
+    expect(screen.getAllByText('OpenCode').length).toBeGreaterThan(0)
+  })
+
   it('secret reference select is shown', () => {
     render(<AgentCreateForm />)
     expect(screen.getByText('Secret Reference')).toBeInTheDocument()
@@ -180,6 +190,52 @@ describe('AgentCreateForm', () => {
       expect(toast.success).toHaveBeenCalledWith('Agent created')
     })
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/agents' })
+  })
+
+  it('submits the endpoint model for an OpenCode runtime agent', async () => {
+    useStateModeOverride = 'runtime'
+    let submitted: any
+    server.use(
+      http.post('/api/v1/agents', async ({ request }) => {
+        submitted = await request.json()
+        return HttpResponse.json({ metadata: { name: 'opencode-agent' }, spec: submitted.spec })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-agent'), 'opencode-agent')
+    const selects = screen.getAllByRole('combobox')
+    await user.click(selects[1])
+    const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+    expect(opencodeOption).toBeDefined()
+    await user.click(opencodeOption!)
+    await user.type(screen.getByPlaceholderText('Endpoint model ID'), 'moonshotai/Kimi-K2-Instruct-0905')
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith('Agent created')
+    })
+    expect(submitted.spec.runtime.type).toBe('opencode')
+    expect(submitted.spec.model).toEqual({ name: 'moonshotai/Kimi-K2-Instruct-0905' })
+  })
+
+  it('rejects a whitespace-only OpenCode model', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-agent'), 'opencode-agent')
+    const selects = screen.getAllByRole('combobox')
+    await user.click(selects[1])
+    const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+    expect(opencodeOption).toBeDefined()
+    await user.click(opencodeOption!)
+    await user.type(screen.getByPlaceholderText('Endpoint model ID'), '   ')
+    await user.click(screen.getByRole('button', { name: 'Create Agent' }))
+
+    expect(toast.error).toHaveBeenCalledWith('OpenCode requires an endpoint model ID')
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it('submits runtime agent with empty allowed tools', async () => {

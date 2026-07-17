@@ -622,6 +622,22 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
+	t.Run("opencode runtime detected from opencode-credentials secret", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: "default"},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		b := NewSystemPromptBuilder(c, "default")
+
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(providers, "opencode") {
+			t.Errorf("providers = %q, expected opencode runtime", providers)
+		}
+	})
+
 	t.Run("no runtime secrets means agent_runtimes=none", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default")

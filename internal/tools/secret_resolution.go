@@ -21,10 +21,11 @@ import (
 )
 
 var (
-	copilotRuntimeSecretCandidates = []string{"copilot-token"}
-	claudeRuntimeSecretCandidates  = []string{claudeCredentialsSecretName, claudeAPIKeySecretName}
-	codexRuntimeSecretCandidates   = []string{codexRuntimeCopilotSecretName, "codex-runtime-openai", "codex-credentials", "codex-api-key", codexProxyTokenSecretName, "openai-api-key"}
-	gitCredentialSecretCandidates  = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
+	copilotRuntimeSecretCandidates  = []string{"copilot-token"}
+	claudeRuntimeSecretCandidates   = []string{claudeCredentialsSecretName, claudeAPIKeySecretName}
+	codexRuntimeSecretCandidates    = []string{codexRuntimeCopilotSecretName, "codex-runtime-openai", "codex-credentials", "codex-api-key", codexProxyTokenSecretName, "openai-api-key"}
+	opencodeRuntimeSecretCandidates = []string{"opencode-credentials", "opencode-api-key"}
+	gitCredentialSecretCandidates   = []string{"git-credentials", "github-credentials", "copilot-token", "github-token", "git-token"}
 )
 
 // RuntimeSecretCandidates returns the supported secret names for the given runtime.
@@ -36,6 +37,8 @@ func RuntimeSecretCandidates(runtimeType corev1alpha1.AgentRuntimeType) []string
 		return append([]string(nil), claudeRuntimeSecretCandidates...)
 	case corev1alpha1.AgentRuntimeCodex:
 		return append([]string(nil), codexRuntimeSecretCandidates...)
+	case corev1alpha1.AgentRuntimeOpencode:
+		return append([]string(nil), opencodeRuntimeSecretCandidates...)
 	default:
 		return nil
 	}
