@@ -8,13 +8,14 @@ This directory vendors the OpenClaw `autoreview` skill with downstream hardening
 - Source snapshot: [`skills/autoreview` at commit `3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/tree/3300b1086017741ad9bb5f00b9cceae4e7354f89/skills/autoreview)
 - Commit: [`3300b1086017741ad9bb5f00b9cceae4e7354f89`](https://github.com/openclaw/agent-skills/commit/3300b1086017741ad9bb5f00b9cceae4e7354f89) (`fix(autoreview): restrict quoted credential keys (#99)`, July 14, 2026)
 
-OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it.
+OpenClaw's work is used under the MIT License. The full notice is included below so single-skill installations retain it; the repository root also has [`LICENSE`](../../LICENSE).
 
 ## Local differences
 
 Compared with the upstream snapshot above:
 
 - Codex defaults to `gpt-5.6-sol` with `max` reasoning instead of upstream's `high` reasoning.
+- Non-runtime tests live in [`tests/autoreview`](../../tests/autoreview) so the installed skill payload contains only its documentation and runtime helpers; JVM-specific hardening tests skip when a Java launcher exists but no usable runtime is available.
 - Native Windows CI and a PowerShell review-harness launcher are included.
 - Bootstrap requires Python 3.9+ and refuses Python, Git, GitHub CLI, reviewer, or PowerShell executables resolved from the reviewed checkout.
 - Git reads neutralize repository-controlled filters, replacement refs, hooks, signing, color, submodule ignore settings, diff formatting, and excludes.

@@ -58,72 +58,14 @@ resolve_candidate() {
   printf '%s/%s\n' "$physical_parent" "$candidate_name"
 }
 
-find_path_candidate() {
-  command_name=$1
-  remaining_path=${PATH:-}
-  while :; do
-    case $remaining_path in
-      *:*)
-        path_entry=${remaining_path%%:*}
-        remaining_path=${remaining_path#*:}
-        has_more=true
-        ;;
-      *)
-        path_entry=$remaining_path
-        has_more=false
-        ;;
-    esac
-    [ -n "$path_entry" ] || path_entry=.
-    case $path_entry in
-      /*) candidate=$path_entry/$command_name ;;
-      *) candidate=$cwd_physical/$path_entry/$command_name ;;
-    esac
-    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-    [ "$has_more" = true ] || break
-  done
-  return 1
-}
-
 cwd_physical=$(CDPATH='' cd -P -- "${PWD:-.}" 2>/dev/null && pwd -P) || cwd_physical=${PWD:-.}
-readlink_bin=""
-for candidate in /usr/bin/readlink /bin/readlink; do
-  if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-    readlink_bin=$candidate
-    break
-  fi
-done
-
 script_path=$0
 case $script_path in
-  /*) ;;
-  */*) script_path=$cwd_physical/$script_path ;;
-  *)
-    cwd_script=$(resolve_candidate "$cwd_physical/$script_path" || true)
-    path_script_raw=$(find_path_candidate "$script_path" || true)
-    path_script=""
-    if [ -n "$path_script_raw" ]; then
-      path_script=$(resolve_candidate "$path_script_raw" || true)
-    fi
-    if [ -n "$cwd_script" ] && [ -n "$path_script" ] && [ "$cwd_script" != "$path_script" ]; then
-      echo "Ambiguous test-review-harness invocation: cwd and PATH resolve to different launchers." >&2
-      exit 127
-    fi
-    script_path=${cwd_script:-$path_script}
-    if [ -z "$script_path" ]; then
-      echo "Unable to resolve test-review-harness through PATH." >&2
-      exit 127
-    fi
-    ;;
+  /*) script_dir_raw=${script_path%/*} ;;
+  */*) script_dir_raw=$cwd_physical/${script_path%/*} ;;
+  *) script_dir_raw=$cwd_physical ;;
 esac
-if ! script_path=$(resolve_candidate "$script_path"); then
-  echo "Unable to resolve the test-review-harness launcher path." >&2
-  exit 127
-fi
-script_root_dir=${script_path%/*}
-[ -n "$script_root_dir" ] || script_root_dir=/
+script_root_dir=$(CDPATH='' cd -P -- "$script_dir_raw" 2>/dev/null && pwd -P) || script_root_dir=$script_dir_raw
 cwd_root=$(find_checkout_root "$cwd_physical" || true)
 script_root=$(find_checkout_root "$script_root_dir" || true)
 harness=$script_root_dir/test-review-harness.py
@@ -147,6 +89,14 @@ done
 IFS=$old_ifs
 PATH=$safe_path
 export PATH
+
+readlink_bin=""
+for candidate in /usr/bin/readlink /bin/readlink; do
+  if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+    readlink_bin=$candidate
+    break
+  fi
+done
 
 for interpreter_name in python3 python; do
   old_ifs=$IFS
