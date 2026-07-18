@@ -285,7 +285,7 @@ func (h *Handlers) ListGatewayEvents(c fiber.Ctx) error {
 	if gatewayName == "" && len(gatewayUIDs) == 0 {
 		return c.JSON(ListResponse{Items: []store.GatewayEvent{}, Metadata: ListMeta{}})
 	}
-	pageLimit := int(pagination.Limit)
+	pageLimit := gatewayPageLimit(pagination.Limit)
 	events, err := h.gatewayEventStore.ListGatewayEvents(c.Context(), store.GatewayEventFilter{
 		Namespace: namespace, NamespaceUID: namespaceUID, GatewayUID: gatewayUID, GatewayUIDs: gatewayUIDs,
 		GatewayName: gatewayName, BindingName: c.Query("binding", ""),
@@ -373,7 +373,7 @@ func (h *Handlers) ListGatewayDeliveries(c fiber.Ctx) error {
 	if gatewayName == "" && len(gatewayUIDs) == 0 {
 		return c.JSON(ListResponse{Items: []store.GatewayDelivery{}, Metadata: ListMeta{}})
 	}
-	pageLimit := int(pagination.Limit)
+	pageLimit := gatewayPageLimit(pagination.Limit)
 	deliveries, err := h.gatewayDeliveryStore.ListGatewayDeliveries(c.Context(), store.GatewayDeliveryFilter{
 		Namespace: namespace, NamespaceUID: namespaceUID, GatewayUID: gatewayUID, GatewayUIDs: gatewayUIDs,
 		GatewayName: gatewayName, BindingName: c.Query("binding", ""),
@@ -567,6 +567,13 @@ func decodeGatewayListCursor(raw string) (gatewayListCursor, error) {
 func encodeGatewayListCursor(createdAt time.Time, id string) string {
 	data, _ := json.Marshal(gatewayListCursor{CreatedAt: &createdAt, ID: id})
 	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func gatewayPageLimit(limit int64) int {
+	if limit < 1 || limit > int64(MaxLimit) {
+		return MaxLimit
+	}
+	return int(limit)
 }
 
 func gatewayStoreListLimit(pageLimit int) int {

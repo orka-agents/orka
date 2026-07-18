@@ -247,6 +247,12 @@ func TestGatewayLedgerCursorRoundTrip(t *testing.T) {
 	if _, err := decodeGatewayListCursor("not-base64"); err == nil {
 		t.Fatal("invalid cursor was accepted")
 	}
+	if got := gatewayPageLimit(25); got != 25 {
+		t.Fatalf("bounded page limit = %d, want 25", got)
+	}
+	if got := gatewayPageLimit(int64(MaxLimit) + 1); got != MaxLimit {
+		t.Fatalf("oversized page limit = %d, want %d", got, MaxLimit)
+	}
 	if got := gatewayStoreListLimit(0); got != MaxLimit+1 {
 		t.Fatalf("zero-limit store request = %d, want %d", got, MaxLimit+1)
 	}
