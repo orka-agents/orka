@@ -174,8 +174,11 @@ func TestIntegration_LargeSessionTranscript(t *testing.T) {
 	if len(page) != 10 {
 		t.Errorf("got %d messages with limit 10, want 10", len(page))
 	}
-	if page[0].Content != "Message 0 with some content to make it realistic" {
-		t.Errorf("first message = %q", page[0].Content)
+	if page[0].Content != "Message 490 with some content to make it realistic" {
+		t.Errorf("first limited message = %q", page[0].Content)
+	}
+	if page[len(page)-1].Content != "Message 499 with some content to make it realistic" {
+		t.Errorf("last limited message = %q", page[len(page)-1].Content)
 	}
 }
 
@@ -285,7 +288,7 @@ func TestIntegration_ConcurrentLocking(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := s.AcquireLock(ctx, "ns", "lock-race", fmt.Sprintf("task-%d", i))
+			err := s.AcquireLock(ctx, "ns", "lock-race", fmt.Sprintf("task-%d", i), "")
 			if err == nil {
 				winners <- i
 			}
@@ -322,7 +325,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// 2. Acquire lock
-	if err := s.AcquireLock(ctx, ns, sessionName, taskName); err != nil {
+	if err := s.AcquireLock(ctx, ns, sessionName, taskName, ""); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
@@ -708,7 +711,7 @@ func TestIntegration_ReleaseLockWrongTask(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	if err := s.AcquireLock(ctx, "ns", "wrong-release", "task-a"); err != nil {
+	if err := s.AcquireLock(ctx, "ns", "wrong-release", "task-a", ""); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 

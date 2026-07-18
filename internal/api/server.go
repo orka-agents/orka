@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"strings"
 
@@ -17,11 +18,14 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"github.com/valyala/fasthttp"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/orka-agents/orka/internal/controller"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/uiembed"
 )
@@ -48,8 +52,12 @@ type ServerConfig struct {
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	ExecutionEventStore       store.ExecutionEventStore
+	GatewayEventStore         store.GatewayEventStore
+	GatewayDeliveryStore      store.GatewayDeliveryStore
+	GatewayService            *gatewayruntime.Service
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
+	APIReader                 client.Reader
 }
 
 // Server is the REST API server
@@ -73,6 +81,9 @@ type Server struct {
 	SecurityStore          store.SecurityStore
 	RepositoryMonitorStore store.RepositoryMonitorStore
 	ExecutionEventStore    store.ExecutionEventStore
+	GatewayEventStore      store.GatewayEventStore
+	GatewayDeliveryStore   store.GatewayDeliveryStore
+	GatewayService         *gatewayruntime.Service
 }
 
 // NewServer creates a new API server
@@ -82,6 +93,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		BodyLimit:    15 << 20, // 15MB — allows artifact uploads up to 10MB + overhead
 		ErrorHandler: customErrorHandler,
 	})
+	app.Server().HeaderReceived = requestBodyConfig
 
 	server := &Server{
 		app:                    app,
@@ -98,10 +110,14 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SecurityStore:          config.SecurityStore,
 		RepositoryMonitorStore: config.RepositoryMonitorStore,
 		ExecutionEventStore:    config.ExecutionEventStore,
+		GatewayEventStore:      config.GatewayEventStore,
+		GatewayDeliveryStore:   config.GatewayDeliveryStore,
+		GatewayService:         config.GatewayService,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
 		Client:                    c,
+		APIReader:                 config.APIReader,
 		WatchNamespace:            config.WatchNamespace,
 		EnforceNamespaceIsolation: config.EnforceNamespaceIsolation,
 		ContextTokenAuthorization: config.ContextTokenAuthorization,
@@ -116,6 +132,9 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
+		GatewayEventStore:         config.GatewayEventStore,
+		GatewayDeliveryStore:      config.GatewayDeliveryStore,
+		GatewayService:            config.GatewayService,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
@@ -129,6 +148,23 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.setupStaticFiles()
 
 	return server
+}
+
+func requestBodyConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	if string(header.Method()) != fiber.MethodPost {
+		return fasthttp.RequestConfig{}
+	}
+	rawTarget := string(header.RequestURI())
+	path := strings.SplitN(rawTarget, "?", 2)[0]
+	if parsed, err := url.ParseRequestURI(rawTarget); err == nil && parsed.EscapedPath() != "" {
+		path = parsed.EscapedPath()
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 6 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], "gateways") && strings.EqualFold(parts[5], "events") {
+		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	return fasthttp.RequestConfig{}
 }
 
 // setupMiddleware configures middleware for the server
@@ -192,6 +228,9 @@ func (s *Server) setupRoutes() {
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
 
+	// Gateway ingress uses the Gateway-bound inbound bearer Secret rather than user/OIDC auth.
+	s.app.Post("/api/v1/gateways/:namespace/:name/events", s.handlers.HandleGatewayEvent)
+
 	// GitHub webhooks use HMAC verification instead of Kubernetes/OIDC bearer auth.
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
 
@@ -227,6 +266,19 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+
+	// Generic gateway operator endpoints.
+	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)
+	api.Get("/gatewayclasses/:name", s.handlers.GetGatewayClass)
+	api.Get("/gateways", s.handlers.ListGateways)
+	api.Get("/gateways/:name", s.handlers.GetGateway)
+	api.Get("/gatewaybindings", s.handlers.ListGatewayBindings)
+	api.Get("/gatewaybindings/:name", s.handlers.GetGatewayBinding)
+	api.Get("/gateway-events", s.handlers.ListGatewayEvents)
+	api.Get("/gateway-events/:id", s.handlers.GetGatewayEvent)
+	api.Get("/gateway-deliveries", s.handlers.ListGatewayDeliveries)
+	api.Get("/gateway-deliveries/:id", s.handlers.GetGatewayDelivery)
+	api.Post("/gateway-deliveries/:id/retry", s.handlers.RetryGatewayDelivery)
 
 	// Memory endpoints
 	api.Get("/memories", s.handlers.ListMemories)
@@ -349,9 +401,11 @@ func (s *Server) setupRoutes() {
 			s.ArtifactStore,
 			InternalHandlersConfig{
 				Client:              s.client,
+				APIReader:           s.config.APIReader,
 				MemoryStore:         s.MemoryStore,
 				MemoryProposalStore: s.MemoryProposalStore,
 				ExecutionEventStore: s.ExecutionEventStore,
+				GatewayEventStore:   s.GatewayEventStore,
 			},
 		)
 		internal := s.app.Group("/internal/v1")

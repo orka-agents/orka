@@ -20,7 +20,8 @@ import (
 // It delegates persistence to a store.SessionStore and orchestrates
 // the acquire → job → append → release lifecycle.
 type SessionManager struct {
-	store store.SessionStore
+	store             store.SessionStore
+	gatewayEventStore store.GatewayEventStore
 }
 
 // NewSessionManager creates a new SessionManager backed by the given store.
@@ -28,8 +29,23 @@ func NewSessionManager(ss store.SessionStore) *SessionManager {
 	return &SessionManager{store: ss}
 }
 
+// SetGatewayEventStore enables durable gateway transcript policy resolution.
+func (m *SessionManager) SetGatewayEventStore(events store.GatewayEventStore) {
+	if m != nil {
+		m.gatewayEventStore = events
+	}
+}
+
 // IsLocked checks if a session is locked by another task.
 func (m *SessionManager) IsLocked(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if event, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+		return false, err
+	} else if ok {
+		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
+			return false, err
+		}
+		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name)
+	}
 	if task.Spec.SessionRef == nil {
 		return false, nil
 	}
@@ -48,6 +64,14 @@ func (m *SessionManager) IsLocked(ctx context.Context, task *corev1alpha1.Task) 
 
 // AcquireLock acquires the session lock for a task.
 func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Task) error {
+	if event, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+		return err
+	} else if ok {
+		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
+			return err
+		}
+		return m.store.AcquireLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
+	}
 	if task.Spec.SessionRef == nil {
 		return nil
 	}
@@ -65,11 +89,16 @@ func (m *SessionManager) AcquireLock(ctx context.Context, task *corev1alpha1.Tas
 		return fmt.Errorf("session %s not found and create=false: %w", task.Spec.SessionRef.Name, store.ErrNotFound)
 	}
 
-	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name)
+	return m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
 }
 
 // ReleaseLock releases the session lock for a task.
 func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Task) error {
+	if event, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
+		return err
+	} else if ok {
+		return m.store.ReleaseLock(ctx, event.Namespace, event.SessionName, task.Name)
+	}
 	if task.Spec.SessionRef == nil {
 		return nil
 	}
@@ -81,6 +110,35 @@ func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Tas
 			return nil
 		}
 		return err
+	}
+	return nil
+}
+
+func (m *SessionManager) gatewayEventForTask(
+	ctx context.Context, task *corev1alpha1.Task,
+) (*store.GatewayEvent, bool, error) {
+	if m == nil || m.gatewayEventStore == nil || task == nil || task.UID == "" {
+		return nil, false, nil
+	}
+	event, err := m.gatewayEventStore.GetGatewayEventForTask(ctx, task.Namespace, task.Name, string(task.UID))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return event, true, nil
+}
+
+func validateGatewayTaskSessionPolicy(task *corev1alpha1.Task, event *store.GatewayEvent) error {
+	if task == nil || event == nil || task.Spec.SessionRef == nil {
+		return store.ValidationErrorf("gateway Task session policy is missing")
+	}
+	ref := task.Spec.SessionRef
+	if ref.Name != event.SessionName || ref.Create || ref.Append ||
+		ref.MaxMessages != store.GatewayTranscriptMessageLimit ||
+		ref.ThroughMessageID != store.GatewayUserMessageID(event.ID) || !ref.PromptIncluded {
+		return store.ValidationErrorf("gateway Task session policy was modified")
 	}
 	return nil
 }
@@ -116,10 +174,12 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 
 	var prompt, response string
 
-	if task.Spec.AI != nil && task.Spec.AI.Prompt != "" {
-		prompt = task.Spec.AI.Prompt
-	} else if task.Spec.Prompt != "" {
-		prompt = task.Spec.Prompt
+	if !task.Spec.SessionRef.PromptIncluded {
+		if task.Spec.AI != nil && task.Spec.AI.Prompt != "" {
+			prompt = task.Spec.AI.Prompt
+		} else if task.Spec.Prompt != "" {
+			prompt = task.Spec.Prompt
+		}
 	}
 
 	// Try to get the response from the result store
@@ -158,6 +218,24 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 
 // LoadTranscript loads the session transcript for a task.
 func (m *SessionManager) LoadTranscript(ctx context.Context, task *corev1alpha1.Task) ([]store.SessionMessage, error) {
+	if task == nil {
+		return nil, nil
+	}
+	if m.gatewayEventStore != nil && task.UID != "" {
+		event, err := m.gatewayEventStore.GetGatewayEventForTask(ctx, task.Namespace, task.Name, string(task.UID))
+		if err == nil {
+			return m.store.LoadTranscriptThrough(
+				ctx,
+				event.Namespace,
+				event.SessionName,
+				store.GatewayUserMessageID(event.ID),
+				store.GatewayTranscriptMessageLimit,
+			)
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+	}
 	if task.Spec.SessionRef == nil {
 		return nil, nil
 	}
@@ -167,7 +245,15 @@ func (m *SessionManager) LoadTranscript(ctx context.Context, task *corev1alpha1.
 		maxMessages = int(task.Spec.SessionRef.MaxMessages)
 	}
 
-	messages, err := m.store.LoadTranscript(ctx, task.Namespace, task.Spec.SessionRef.Name, maxMessages)
+	var messages []store.SessionMessage
+	var err error
+	if task.Spec.SessionRef.ThroughMessageID != "" {
+		messages, err = m.store.LoadTranscriptThrough(
+			ctx, task.Namespace, task.Spec.SessionRef.Name, task.Spec.SessionRef.ThroughMessageID, maxMessages,
+		)
+	} else {
+		messages, err = m.store.LoadTranscript(ctx, task.Namespace, task.Spec.SessionRef.Name, maxMessages)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil

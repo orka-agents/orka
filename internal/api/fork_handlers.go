@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	forkcontext "github.com/orka-agents/orka/internal/fork"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -145,17 +147,16 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		},
 		Spec: spec,
 	}
-	stampTaskRequesterFromUserInfo(forked, GetUserInfo(c))
 	tracing.StampTaskTraceContext(c.Context(), forked)
+	sourceSessionName, forkedSessionName, err := h.resolveForkSessionNames(c.Context(), namespace, source, forked)
+	if err != nil {
+		return err
+	}
+	stampTaskRequesterFromUserInfo(forked, GetUserInfo(c))
 	if err := h.authorizeContextTokenTaskCreate(c, createTaskRequestFromTask(forked), namespace); err != nil {
 		return err
 	}
 	if err := h.authorizeTaskCreate(c.Context(), c, forked); err != nil {
-		return err
-	}
-
-	sourceSessionName, forkedSessionName, err := h.resolveForkSessionNames(c.Context(), namespace, source, forked)
-	if err != nil {
 		return err
 	}
 
@@ -393,18 +394,77 @@ func (h *Handlers) resolveForkSessionNames(
 	source *corev1alpha1.Task,
 	forked *corev1alpha1.Task,
 ) (string, string, error) {
-	sourceSessionName, err := h.existingSessionNameForTask(ctx, namespace, source)
+	sourceSessionName := sessionNameForTask(source)
+	forkedSessionName := sessionNameForTask(forked)
+	gatewayOwned, err := h.gatewayOwnedForkSource(ctx, source)
+	if err != nil {
+		return "", "", err
+	}
+	if gatewayOwned {
+		detachGatewayFork(forked)
+	}
+	if sourceSessionName == "" || h.sessionStore == nil {
+		if gatewayOwned {
+			return sourceSessionName, "", nil
+		}
+		return sourceSessionName, forkedSessionName, nil
+	}
+
+	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, sourceSessionName)
+	if errors.Is(err, store.ErrNotFound) {
+		forked.Spec.SessionRef = nil
+		if gatewayOwned {
+			return sourceSessionName, "", nil
+		}
+		return "", "", nil
+	}
 	if err != nil {
 		return "", "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get source session: %v", err))
 	}
-	if sessionNameForTask(source) != "" && sourceSessionName == "" {
-		forked.Spec.SessionRef = nil
-	}
-	forkedSessionName, err := h.existingSessionNameForTask(ctx, namespace, forked)
-	if err != nil {
-		return "", "", fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get forked session: %v", err))
+	if sessionType == store.SessionTypeGateway {
+		detachGatewayFork(forked)
+		return sourceSessionName, "", nil
 	}
 	return sourceSessionName, forkedSessionName, nil
+}
+
+func (h *Handlers) gatewayOwnedForkSource(ctx context.Context, source *corev1alpha1.Task) (bool, error) {
+	if _, owned := gatewayruntime.TaskIdentity(source); owned {
+		return true, nil
+	}
+	if h.gatewayEventStore == nil || source == nil || source.UID == "" {
+		return false, nil
+	}
+	if _, err := h.gatewayEventStore.GetGatewayEventForTask(ctx, source.Namespace, source.Name, string(source.UID)); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fiber.NewError(fiber.StatusInternalServerError, "failed to resolve source gateway ownership")
+	}
+	return true, nil
+}
+
+func detachGatewayFork(forked *corev1alpha1.Task) {
+	if forked == nil {
+		return
+	}
+	forked.Spec.SessionRef = nil
+	forked.Spec.RequestedBy = nil
+	forked.Spec.Transaction = nil
+	for _, key := range []string{
+		gatewayruntime.TaskGatewayNameLabel, gatewayruntime.TaskGatewayBindingLabel,
+		gatewayruntime.TaskGatewayEventLabel,
+	} {
+		delete(forked.Labels, key)
+	}
+	for _, key := range []string{
+		gatewayruntime.TaskGatewayEventAnnotation, gatewayruntime.TaskGatewayExternalEvent,
+		gatewayruntime.TaskGatewaySession, gatewayruntime.TaskGatewayNameAnnotation,
+		gatewayruntime.TaskGatewayBindingAnnotation, gatewayruntime.TaskGatewayDelivery,
+		gatewayruntime.TaskGatewayProviderMessage,
+	} {
+		delete(forked.Annotations, key)
+	}
 }
 
 func marshalForkEventContent(sourceName, newName string, afterSeq int64, eventKind string) (json.RawMessage, error) {

@@ -71,6 +71,8 @@ const (
 var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
 
 const modelLoopEventTimeout = 250 * time.Millisecond
+const maxSessionContextBytes = 96 << 10
+const roleUser = "user"
 
 func main() {
 	if err := run(); err != nil {
@@ -244,6 +246,8 @@ func run() (err error) {
 	}
 
 	// Autonomous mode: fetch plan state and augment system prompt
+	planPromptContext := ""
+	approvalPromptContext := ""
 	if coordinationEnv.AutonomousMode {
 		iteration := coordinationEnv.AutonomousIteration
 		maxIter := coordinationEnv.AutonomousMaxIterations
@@ -258,12 +262,22 @@ func run() (err error) {
 			return err
 		}
 		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
-		if planContext != "" && resolvedContext != "" {
-			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n%s\n\n## Task\n\n%s", planContext, resolvedContext, prompt)
-		} else if planContext != "" {
-			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n## Task\n\n%s", planContext, prompt)
-		} else if resolvedContext != "" {
-			prompt = prependResolvedApprovalsContext(prompt, resolvedApprovals)
+		if planContext != "" {
+			planPromptContext = "## Previous Plan State\n\n" + planContext
+		}
+		if resolvedContext != "" {
+			approvalPromptContext = resolvedContext
+		}
+		promptSections := make([]string, 0, 2)
+		if planPromptContext != "" {
+			promptSections = append(promptSections, planPromptContext)
+		}
+		if approvalPromptContext != "" {
+			promptSections = append(promptSections, approvalPromptContext)
+		}
+		promptContext := strings.Join(promptSections, "\n\n")
+		if promptContext != "" {
+			prompt = promptContext + "\n\n## Task\n\n" + prompt
 		}
 
 		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
@@ -280,12 +294,8 @@ func run() (err error) {
 	}
 
 	// Build messages
-	messages := make([]llm.Message, 0, len(sessionContext)+1)
-	messages = append(messages, sessionContext...)
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: prompt,
-	})
+	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
+	messages := buildInitialMessages(sessionContext, prompt, promptIncluded, planPromptContext, approvalPromptContext)
 
 	// Build tools for LLM (built-in + custom)
 	llmTools := buildLLMTools(enabledTools, customTools)
@@ -792,6 +802,101 @@ func getAPIKey(provider string) string {
 	return ""
 }
 
+func buildInitialMessages(
+	sessionContext []llm.Message,
+	prompt string,
+	promptIncluded bool,
+	planPromptContext string,
+	approvalPromptContext string,
+) []llm.Message {
+	messages := make([]llm.Message, 0, len(sessionContext)+1)
+	messages = append(messages, sessionContext...)
+	if !promptIncluded || len(sessionContext) == 0 {
+		messages = append(messages, llm.Message{Role: roleUser, Content: prompt})
+		return boundInitialMessages(messages)
+	}
+	planPromptContext = strings.TrimSpace(planPromptContext)
+	approvalPromptContext = strings.TrimSpace(approvalPromptContext)
+	if planPromptContext == "" && approvalPromptContext == "" {
+		return boundInitialMessages(messages)
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != roleUser {
+			continue
+		}
+		messages[i].Content = mergePromptContext(messages[i].Content, planPromptContext, approvalPromptContext)
+		return boundInitialMessages(messages)
+	}
+	messages = append(messages, llm.Message{Role: roleUser, Content: strings.Join(
+		compactPromptSections(planPromptContext, approvalPromptContext), "\n\n",
+	)})
+	return boundInitialMessages(messages)
+}
+
+func mergePromptContext(currentUserMessage, planPromptContext, approvalPromptContext string) string {
+	const separator = "\n\n## Current User Message\n\n"
+	planPromptContext = strings.TrimSpace(planPromptContext)
+	approvalPromptContext = strings.TrimSpace(approvalPromptContext)
+	fixedBytes := initialMessageBytes(llm.Message{Role: roleUser}) + len(currentUserMessage) + len(separator)
+	if approvalPromptContext != "" {
+		fixedBytes += len(approvalPromptContext)
+		if planPromptContext != "" {
+			fixedBytes += 2
+		}
+	}
+	planPromptContext = truncateUTF8(planPromptContext, max(0, maxSessionContextBytes-fixedBytes))
+	sections := compactPromptSections(planPromptContext, approvalPromptContext)
+	if len(sections) == 0 {
+		return currentUserMessage
+	}
+	return strings.Join(sections, "\n\n") + separator + currentUserMessage
+}
+
+func compactPromptSections(sections ...string) []string {
+	result := make([]string, 0, len(sections))
+	for _, section := range sections {
+		if section = strings.TrimSpace(section); section != "" {
+			result = append(result, section)
+		}
+	}
+	return result
+}
+
+func boundInitialMessages(messages []llm.Message) []llm.Message {
+	const maxBytes = maxSessionContextBytes
+	if len(messages) == 0 || maxBytes <= 0 {
+		return nil
+	}
+	mandatory := len(messages) - 1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == roleUser {
+			mandatory = i
+			break
+		}
+	}
+	mandatoryMessage := messages[mandatory]
+	used := initialMessageBytes(mandatoryMessage)
+	start := mandatory
+	for i := mandatory - 1; i >= 0; i-- {
+		size := initialMessageBytes(messages[i])
+		if used+size > maxBytes {
+			break
+		}
+		start = i
+		used += size
+	}
+	for start < mandatory && messages[start].Role != roleUser {
+		start++
+	}
+	bounded := append([]llm.Message(nil), messages[start:mandatory+1]...)
+	bounded[len(bounded)-1] = mandatoryMessage
+	return bounded
+}
+
+func initialMessageBytes(message llm.Message) int {
+	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
+}
+
 // loadSessionContext loads messages from the session transcript
 func loadSessionContext() []llm.Message {
 	transcriptPath := "/session/transcript.jsonl"
@@ -799,7 +904,10 @@ func loadSessionContext() []llm.Message {
 	if err != nil {
 		return nil
 	}
+	return parseSessionContext(data)
+}
 
+func parseSessionContext(data []byte) []llm.Message {
 	var messages []llm.Message
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
@@ -808,18 +916,15 @@ func loadSessionContext() []llm.Message {
 			continue
 		}
 
-		var msg struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}
+		var msg store.SessionMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue
 		}
 
-		if msg.Role == "user" || msg.Role == "assistant" {
+		if msg.Role == roleUser || msg.Role == "assistant" {
 			messages = append(messages, llm.Message{
 				Role:    msg.Role,
-				Content: msg.Content,
+				Content: store.RuntimeSessionMessageContent(msg),
 			})
 		}
 	}

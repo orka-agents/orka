@@ -32,8 +32,9 @@ import (
 )
 
 const (
-	testAgentCreatedMsg = "Agent created and task started"
-	testLimitReached    = "limit_reached"
+	testAgentCreatedMsg  = "Agent created and task started"
+	testLimitReached     = "limit_reached"
+	testDefaultNamespace = "default"
 )
 
 // --- test helpers ---
@@ -188,7 +189,7 @@ func newTestExecutor(objs ...runtime.Object) *ToolExecutor {
 	}
 	c := cb.Build()
 	sm := controller.NewSessionManager(&fakeSessionStore{})
-	return NewToolExecutor(c, sm, "default", "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
+	return NewToolExecutor(c, sm, testDefaultNamespace, "sess-12345678", "", false, 5, 30*time.Second, &fakeResultStore{})
 }
 
 // fakeResultStore implements store.ResultStore for testing.
@@ -246,8 +247,8 @@ func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) err
 	f.deleted[ns+"/"+name] = true
 	return nil
 }
-func (f *fakeSessionStore) AcquireLock(_ context.Context, _, _, _ string) error { return nil }
-func (f *fakeSessionStore) ReleaseLock(_ context.Context, _, _, _ string) error { return nil }
+func (f *fakeSessionStore) AcquireLock(_ context.Context, _, _, _, _ string) error { return nil }
+func (f *fakeSessionStore) ReleaseLock(_ context.Context, _, _, _ string) error    { return nil }
 func (f *fakeSessionStore) IsLocked(_ context.Context, _, _, _ string) (bool, error) {
 	return false, nil
 }
@@ -255,6 +256,9 @@ func (f *fakeSessionStore) AppendMessages(_ context.Context, _, _ string, _ []st
 	return nil
 }
 func (f *fakeSessionStore) LoadTranscript(_ context.Context, _, _ string, _ int) ([]store.SessionMessage, error) {
+	return nil, nil
+}
+func (f *fakeSessionStore) LoadTranscriptThrough(_ context.Context, _, _, _ string, _ int) ([]store.SessionMessage, error) {
 	return nil, nil
 }
 func (f *fakeSessionStore) SearchTranscript(_ context.Context, _ store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
@@ -458,8 +462,8 @@ func TestNewToolExecutor(t *testing.T) {
 	if e == nil {
 		t.Fatal("expected non-nil executor")
 	}
-	if e.namespace != "default" {
-		t.Errorf("namespace = %q, want %q", e.namespace, "default")
+	if e.namespace != testDefaultNamespace {
+		t.Errorf("namespace = %q, want %q", e.namespace, testDefaultNamespace)
 	}
 	if e.sessionID != "sess-12345678" {
 		t.Errorf("sessionID = %q, want %q", e.sessionID, "sess-12345678")

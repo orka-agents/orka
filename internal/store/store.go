@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrNotFound is returned when a requested resource does not exist.
@@ -12,8 +13,20 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a resource cannot be updated because it changed concurrently.
 var ErrConflict = errors.New("conflict")
 
+// ErrNotReady is returned when a durable prerequisite is expected to become ready shortly.
+var ErrNotReady = errors.New("not ready")
+
+// ErrDuplicateMismatch is returned when a stable external identifier is reused with a different payload.
+var ErrDuplicateMismatch = errors.New("duplicate payload mismatch")
+
+// ErrCapacity is returned when a bounded durable store quota is full.
+var ErrCapacity = errors.New("capacity exceeded")
+
 // ErrValidation is returned when supplied input fails store-level validation.
 var ErrValidation = errors.New("validation error")
+
+// ErrGatewayOwnedSession is returned when a generic deletion targets canonical gateway history.
+var ErrGatewayOwnedSession = errors.New("gateway-owned session")
 
 // ValidationError carries a client-safe validation message while remaining
 // comparable with ErrValidation via errors.Is.
@@ -54,17 +67,49 @@ type SessionStore interface {
 	DeleteSession(ctx context.Context, namespace, name string) error
 
 	// Locking
-	AcquireLock(ctx context.Context, namespace, name, taskName string) error
+	AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error
 	ReleaseLock(ctx context.Context, namespace, name, taskName string) error
 	IsLocked(ctx context.Context, namespace, name, currentTask string) (bool, error)
 
 	// Transcript
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]SessionMessage, error)
+	LoadTranscriptThrough(ctx context.Context, namespace, name, throughMessageID string, maxMessages int) ([]SessionMessage, error)
 	SearchTranscript(ctx context.Context, filter TranscriptSearchFilter) ([]TranscriptSearchResult, error)
 
 	// Token tracking
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
+}
+
+// GatewayEventStore handles durable normalized ingress records and atomic Session projection.
+type GatewayEventStore interface {
+	AdmitGatewayEvent(ctx context.Context, admission GatewayEventAdmission) (*GatewayEvent, bool, error)
+	GetGatewayEvent(ctx context.Context, namespace, id string) (*GatewayEvent, error)
+	GetGatewayEventDuplicate(ctx context.Context, candidate *GatewayEvent, now time.Time) (*GatewayEvent, error)
+	GetGatewayEventForTask(ctx context.Context, namespace, taskName, taskUID string) (*GatewayEvent, error)
+	HasGatewayTaskTombstone(ctx context.Context, namespace, taskName, taskUID string) (bool, error)
+	ListGatewayEvents(ctx context.Context, filter GatewayEventFilter) ([]GatewayEvent, error)
+	ClaimNextGatewayEvent(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
+	RenewGatewayEventClaim(ctx context.Context, namespace, id, owner string, now time.Time, lease time.Duration) (*GatewayEvent, error)
+	MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, taskName, taskUID, owner string, now time.Time) error
+	RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
+	DeferGatewayEventProjection(ctx context.Context, namespace, id string, nextAttemptAt time.Time) error
+	ExpireGatewayEvent(ctx context.Context, namespace, id, owner, reason string, now time.Time) error
+	ProjectGatewayTerminal(ctx context.Context, projection GatewayTerminalProjection) (*GatewayDelivery, bool, error)
+	GetGatewayQueueStats(ctx context.Context, namespace string) (GatewayQueueStats, error)
+}
+
+// GatewayDeliveryStore handles durable adapter outbox records.
+type GatewayDeliveryStore interface {
+	CreateGatewayDelivery(ctx context.Context, delivery *GatewayDelivery) (*GatewayDelivery, bool, error)
+	GetGatewayDelivery(ctx context.Context, namespace, id string) (*GatewayDelivery, error)
+	ListGatewayDeliveries(ctx context.Context, filter GatewayDeliveryFilter) ([]GatewayDelivery, error)
+	ClaimNextGatewayDelivery(ctx context.Context, namespace, owner string, now time.Time, lease time.Duration) (*GatewayDelivery, error)
+	MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error
+	ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
+	MarkGatewayDeliveryTerminal(ctx context.Context, namespace, id, owner string, state GatewayDeliveryState, reason string, now time.Time) error
+	RetryGatewayDelivery(ctx context.Context, namespace, id string, now, expiresAt time.Time) (*GatewayDelivery, error)
+	MaintainGatewayRecords(ctx context.Context, namespace string, now, terminalCutoff time.Time) (GatewayMaintenanceResult, error)
 }
 
 // MemoryStore handles durable namespace-scoped memory persistence.

@@ -628,6 +628,12 @@ func TestTranscriptSearch(t *testing.T) {
 			t.Fatalf("CreateSession %s: %v", name, err)
 		}
 	}
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns-transcript", Name: "gateway-private", SessionType: store.SessionTypeGateway,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateSession gateway-private: %v", err)
+	}
 
 	priorLong := strings.Repeat("prefix ", 80) + "needle migration details live here" + strings.Repeat(" suffix", 80)
 	if err := s.AppendMessages(ctx, "ns-transcript", "prior", []store.SessionMessage{
@@ -640,6 +646,11 @@ func TestTranscriptSearch(t *testing.T) {
 		{Role: "assistant", Content: "needle from the current active session should be excluded", Timestamp: now.Add(2 * time.Second)},
 	}); err != nil {
 		t.Fatalf("AppendMessages current: %v", err)
+	}
+	if err := s.AppendMessages(ctx, "ns-transcript", "gateway-private", []store.SessionMessage{
+		{Role: "user", Content: "needle from another gateway conversation must never be searchable", Timestamp: now.Add(3 * time.Second)},
+	}); err != nil {
+		t.Fatalf("AppendMessages gateway-private: %v", err)
 	}
 
 	results, err := s.SearchTranscript(ctx, store.TranscriptSearchFilter{

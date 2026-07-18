@@ -84,6 +84,9 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "decideTaskApproval", task); err != nil {
+		return err
+	}
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
 	}

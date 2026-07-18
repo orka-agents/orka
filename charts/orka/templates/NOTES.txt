@@ -7,6 +7,9 @@ Namespace:  {{ .Release.Namespace }}
 
 ⚠️  STORAGE WARNING: SQLite store is using ephemeral storage (emptyDir).
    Task results and session data will be LOST on pod restart.
+{{- if .Values.controller.gateway.enabled }}
+   Gateway acknowledgements, deduplication, and queued deliveries are also NOT durable.
+{{- end }}
    For production use, enable persistent storage:
 
      helm upgrade {{ .Release.Name }} orka \
@@ -18,3 +21,14 @@ Namespace:  {{ .Release.Namespace }}
    Data will survive pod restarts.
 
 {{- end }}
+
+Generic Gateway CRD upgrade:
+  Helm installs CRDs on first install but does not upgrade them automatically.
+  If CRDs are managed separately, pass --skip-crds to helm install/upgrade.
+  Before enabling gateways on an existing release, apply the CRDs from the published chart version, then upgrade again:
+
+    helm repo add orka https://orka-agents.github.io/orka/charts
+    helm repo update orka
+    helm show crds orka/orka --version {{ .Chart.Version }} | kubectl apply -f -
+
+  The controller remains gateway-disabled until all three Gateway CRDs and the Task session-cutoff schema are observed.

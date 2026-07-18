@@ -68,7 +68,7 @@ func TestInternalCallerAuthorizerVerifyTaskWorker(t *testing.T) {
 	task := internalCallerAuthTask()
 	job := internalCallerAuthJob(task, "job-a", "job-uid")
 	pod := internalCallerAuthPod(task, "pod-a", "pod-uid", job)
-	authorizer := internalCallerAuthorizer{k8sClient: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()}
+	authorizer := internalCallerAuthorizer{k8sReader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()}
 
 	err := authorizer.verifyTaskWorker(context.Background(), &UserInfo{Username: "system:serviceaccount:default:worker"}, task)
 	fiberErr := &fiber.Error{}
@@ -84,6 +84,11 @@ func TestInternalCallerAuthorizerVerifyTaskWorker(t *testing.T) {
 	err = authorizer.verifyTaskWorker(context.Background(), internalCallerAuthWorkerUser("pod-a", "pod-uid"), task)
 	if err != nil {
 		t.Fatalf("valid worker error = %v, want nil", err)
+	}
+	task.Status.JobName = ""
+	err = authorizer.verifyTaskWorker(context.Background(), internalCallerAuthWorkerUser("pod-a", "pod-uid"), task)
+	if !errorsAsFiber(err, &fiberErr) || fiberErr.Code != http.StatusForbidden || fiberErr.Message != "task has no active worker job" {
+		t.Fatalf("worker before JobName status error = %v, want task has no active worker job", err)
 	}
 }
 

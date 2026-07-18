@@ -2,11 +2,14 @@ package store
 
 import "time"
 
+// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
+const SessionTypeGateway = "gateway"
+
 // SessionRecord represents a full session.
 type SessionRecord struct {
 	Namespace    string
 	Name         string
-	SessionType  string // "task" or "chat"
+	SessionType  string // "task", "chat", or "gateway"
 	ActiveTask   string
 	MessageCount int
 	InputTokens  int
@@ -31,13 +34,18 @@ type SessionMetadata struct {
 
 // SessionMessage is a single transcript entry.
 type SessionMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content"`
-	Name       string         `json:"name,omitempty"`
-	Input      map[string]any `json:"input,omitempty"`
-	ToolCalls  any            `json:"toolCalls,omitempty"`
-	ToolCallID string         `json:"toolCallID,omitempty"`
-	Timestamp  time.Time      `json:"ts"`
+	ID         string            `json:"id"`
+	Order      int64             `json:"order,omitempty"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content"`
+	Name       string            `json:"name,omitempty"`
+	Input      map[string]any    `json:"input,omitempty"`
+	ToolCalls  any               `json:"toolCalls,omitempty"`
+	ToolCallID string            `json:"toolCallID,omitempty"`
+	SourceType string            `json:"sourceType,omitempty"`
+	SourceRef  string            `json:"sourceRef,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	Timestamp  time.Time         `json:"ts"`
 }
 
 // ArtifactMetadata describes a stored artifact file.
@@ -111,12 +119,13 @@ type TranscriptSearchFilter struct {
 
 // TranscriptSearchResult is a compact prior transcript hit.
 type TranscriptSearchResult struct {
-	SessionName string    `json:"sessionName"`
-	MessageID   int64     `json:"messageId"`
-	Role        string    `json:"role"`
-	Name        string    `json:"name,omitempty"`
-	Snippet     string    `json:"snippet"`
-	CreatedAt   time.Time `json:"createdAt"`
+	SessionName     string    `json:"sessionName"`
+	MessageID       int64     `json:"messageId"`
+	StableMessageID string    `json:"stableMessageId,omitempty"`
+	Role            string    `json:"role"`
+	Name            string    `json:"name,omitempty"`
+	Snippet         string    `json:"snippet"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 // MemoryProposal represents a proposed memory-adjacent change such as a reusable skill.

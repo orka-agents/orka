@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -75,6 +76,10 @@ const (
 
 	// TaskNamespaceEnvVar is the env var for the task namespace
 	TaskNamespaceEnvVar = workerenv.TaskNamespace
+
+	sessionTranscriptURLEnv         = "ORKA_SESSION_TRANSCRIPT_URL"
+	sessionTranscriptRequiredEnv    = "ORKA_SESSION_TRANSCRIPT_REQUIRED"
+	sessionTranscriptMaxAttemptsEnv = "ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS"
 
 	// defaultSecretKey is the default key name in provider secrets
 	defaultSecretKey = "api-key"
@@ -1555,8 +1560,8 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	)
 
 	// Build the transcript fetch URL
-	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript",
-		b.ControllerURL, task.Namespace, sessionName)
+	transcriptURL := fmt.Sprintf("%s/internal/v1/sessions/%s/%s/transcript?taskName=%s",
+		b.ControllerURL, url.PathEscape(task.Namespace), url.PathEscape(sessionName), url.QueryEscape(task.Name))
 
 	volumeMounts := []corev1.VolumeMount{
 		{
@@ -1564,28 +1569,28 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 			MountPath: "/session",
 		},
 	}
-	if !podShouldAutomountServiceAccountToken(task) {
-		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
-			Name: "session-token",
-			VolumeSource: corev1.VolumeSource{
-				Projected: &corev1.ProjectedVolumeSource{
-					Sources: []corev1.VolumeProjection{
-						{
-							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-								Path:              "token",
-								ExpirationSeconds: new(int64(3600)),
-							},
+	// Always project a short-lived token exclusively into the trusted init container.
+	// This keeps transcript loading available even when the main pod disables automount.
+	job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
+		Name: "session-token",
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{
+						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+							Path:              "token",
+							ExpirationSeconds: new(int64(3600)),
 						},
 					},
 				},
 			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "session-token",
-			MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
-			ReadOnly:  true,
-		})
-	}
+		},
+	})
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      "session-token",
+		MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+		ReadOnly:  true,
+	})
 
 	// Add init container that fetches the transcript via HTTP
 	initContainer := corev1.Container{
@@ -1593,12 +1598,12 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 		Image:           b.InitImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: b.buildContainerSecurityContext(),
-		Command: []string{"sh", "-c", fmt.Sprintf(
-			`TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) && `+
-				`wget --header="Authorization: Bearer $TOKEN" -q -O /session/transcript.jsonl "%s" || `+
-				`touch /session/transcript.jsonl`,
-			transcriptURL,
-		)},
+		Command:         []string{"sh", "-c", sessionTranscriptFetchCommand()},
+		Env: []corev1.EnvVar{
+			{Name: sessionTranscriptURLEnv, Value: transcriptURL},
+			{Name: sessionTranscriptRequiredEnv, Value: strconv.FormatBool(task.Spec.SessionRef.PromptIncluded)},
+			{Name: sessionTranscriptMaxAttemptsEnv, Value: sessionTranscriptMaxAttempts(task.Spec.SessionRef.PromptIncluded, task.Spec.Timeout)},
+		},
 		VolumeMounts: volumeMounts,
 	}
 
@@ -1608,7 +1613,49 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 	job.Spec.Template.Spec.Containers[0].Env = append(
 		job.Spec.Template.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: workerenv.SessionName, Value: sessionName},
+		corev1.EnvVar{Name: workerenv.SessionPromptIncluded, Value: strconv.FormatBool(task.Spec.SessionRef.PromptIncluded)},
 	)
+}
+
+func sessionTranscriptMaxAttempts(promptIncluded bool, timeout *metav1.Duration) string {
+	attempts := 5
+	if promptIncluded {
+		attempts = 60
+	}
+	if timeout != nil && timeout.Duration > 0 {
+		deadlineBudget := max(1, int(timeout.Duration/time.Second)/2)
+		attempts = min(attempts, deadlineBudget)
+	}
+	return strconv.Itoa(attempts)
+}
+
+func sessionTranscriptFetchCommand() string {
+	return `set -eu
+SA_JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+TMP=/session/transcript.jsonl.tmp
+FINAL=/session/transcript.jsonl
+: "${ORKA_SESSION_TRANSCRIPT_URL:?}"
+: "${ORKA_SESSION_TRANSCRIPT_REQUIRED:?}"
+: "${ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS:?}"
+rm -f "$TMP"
+attempt=0
+while true; do
+  if wget --header="Authorization: Bearer $SA_JWT" -q -O "$TMP" "$ORKA_SESSION_TRANSCRIPT_URL"; then
+    mv "$TMP" "$FINAL"
+    exit 0
+  fi
+  rm -f "$TMP"
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge "$ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS" ]; then
+    if [ "$ORKA_SESSION_TRANSCRIPT_REQUIRED" = "true" ]; then
+      exit 1
+    fi
+    : > "$TMP"
+    mv "$TMP" "$FINAL"
+    exit 0
+  fi
+  sleep 1
+done`
 }
 
 func workerReachableOTLPEndpointConfigured(getenv func(string) string) bool {
