@@ -592,11 +592,12 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 	if required, ok := findEnvVar(initContainer.Env, sessionTranscriptRequiredEnv); !ok || required.Value != scheduledRunLabelValue {
 		t.Fatalf("%s env = %#v, want true", sessionTranscriptRequiredEnv, required)
 	}
-	if attempts, ok := findEnvVar(initContainer.Env, sessionTranscriptMaxAttemptsEnv); !ok || attempts.Value != "60" {
-		t.Fatalf("%s env = %#v, want 60", sessionTranscriptMaxAttemptsEnv, attempts)
+	if attempts, ok := findEnvVar(initContainer.Env, sessionTranscriptMaxAttemptsEnv); !ok || attempts.Value != "300" {
+		t.Fatalf("%s env = %#v, want 300", sessionTranscriptMaxAttemptsEnv, attempts)
 	}
 	for _, want := range []string{
 		"transcript.jsonl.tmp", `mv "$TMP" "$FINAL"`, "attempt=$((attempt + 1))",
+		`SA_JWT=$(cat "$TOKEN_FILE")`,
 		`"$ORKA_SESSION_TRANSCRIPT_URL"`, `"$ORKA_SESSION_TRANSCRIPT_MAX_ATTEMPTS"`,
 		`if [ "$ORKA_SESSION_TRANSCRIPT_REQUIRED" = "true" ]`, "exit 1",
 	} {
@@ -612,8 +613,11 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 func TestSessionTranscriptFetchCommandAllowsEmptyFallbackOnlyWhenPromptIsNotIncluded(t *testing.T) {
 	command := sessionTranscriptFetchCommand()
 	shortTimeout := &metav1.Duration{Duration: 2 * time.Second}
-	if sessionTranscriptMaxAttempts(false, nil) != "5" || sessionTranscriptMaxAttempts(true, nil) != "60" ||
+	longTimeout := &metav1.Duration{Duration: 2 * time.Minute}
+	if sessionTranscriptMaxAttempts(false, nil) != "5" || sessionTranscriptMaxAttempts(true, nil) != "300" ||
 		sessionTranscriptMaxAttempts(false, shortTimeout) != "1" ||
+		sessionTranscriptMaxAttempts(true, shortTimeout) != "1" ||
+		sessionTranscriptMaxAttempts(true, longTimeout) != "119" ||
 		!strings.Contains(command, `: > "$TMP"`) || !strings.Contains(command, `mv "$TMP" "$FINAL"`) {
 		t.Fatalf("sessionTranscriptFetchCommand() = %q", command)
 	}

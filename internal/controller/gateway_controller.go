@@ -324,7 +324,7 @@ func (r *GatewayBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 				capabilities = &copy
 				if err := validateBindingCapabilities(object, copy); err != nil {
 					message = err.Error()
-				} else if conflict, err := r.findAmbiguousGatewayBinding(ctx, object); err != nil {
+				} else if conflict, err := r.findAmbiguousGatewayBinding(ctx, object, copy); err != nil {
 					return ctrl.Result{}, err
 				} else if conflict != "" {
 					message = fmt.Sprintf("equal-priority match overlaps GatewayBinding %q", conflict)
@@ -392,9 +392,29 @@ func (r *GatewayBindingReconciler) bindingsForAgent(ctx context.Context, object 
 	if !ok {
 		return nil
 	}
-	return r.bindingsForReference(ctx, agent.Namespace, func(binding *gatewayv1alpha1.GatewayBinding) bool {
-		return binding.Spec.AgentRef.Name == agent.Name
-	})
+	list := &gatewayv1alpha1.GatewayBindingList{}
+	if err := r.List(ctx, list, client.InNamespace(agent.Namespace)); err != nil {
+		return nil
+	}
+	references := make([]*gatewayv1alpha1.GatewayBinding, 0)
+	for i := range list.Items {
+		binding := &list.Items[i]
+		if binding.Spec.AgentRef.Name == agent.Name {
+			references = append(references, binding)
+		}
+	}
+	requests := make([]reconcile.Request, 0)
+	for i := range list.Items {
+		binding := &list.Items[i]
+		for _, reference := range references {
+			if binding.Name == reference.Name ||
+				(binding.Spec.Priority == reference.Spec.Priority && gatewayBindingsOverlap(binding, reference)) {
+				requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(binding)})
+				break
+			}
+		}
+	}
+	return requests
 }
 
 func (r *GatewayBindingReconciler) bindingsForReference(ctx context.Context, namespace string, matches func(*gatewayv1alpha1.GatewayBinding) bool) []reconcile.Request {
@@ -412,21 +432,53 @@ func (r *GatewayBindingReconciler) bindingsForReference(ctx context.Context, nam
 	return requests
 }
 
-func (r *GatewayBindingReconciler) findAmbiguousGatewayBinding(ctx context.Context, current *gatewayv1alpha1.GatewayBinding) (string, error) {
+func (r *GatewayBindingReconciler) findAmbiguousGatewayBinding(
+	ctx context.Context,
+	current *gatewayv1alpha1.GatewayBinding,
+	capabilities gatewayv1alpha1.GatewayCapabilities,
+) (string, error) {
 	list := &gatewayv1alpha1.GatewayBindingList{}
 	if err := r.List(ctx, list, client.InNamespace(current.Namespace)); err != nil {
 		return "", err
 	}
+	conflict := ""
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == current.Name || other.Spec.Priority != current.Spec.Priority {
 			continue
 		}
-		if gatewayBindingsOverlap(current, other) {
-			return other.Name, nil
+		if !gatewayBindingsOverlap(current, other) {
+			continue
+		}
+		// Overlap requires the same GatewayRef, so the current Gateway's observed
+		// capabilities are also the peer binding's capabilities.
+		programmable, err := r.gatewayBindingCanBeProgrammed(ctx, other, capabilities)
+		if err != nil {
+			return "", err
+		}
+		if programmable && (conflict == "" || other.Name < conflict) {
+			conflict = other.Name
 		}
 	}
-	return "", nil
+	return conflict, nil
+}
+
+func (r *GatewayBindingReconciler) gatewayBindingCanBeProgrammed(
+	ctx context.Context,
+	binding *gatewayv1alpha1.GatewayBinding,
+	capabilities gatewayv1alpha1.GatewayCapabilities,
+) (bool, error) {
+	if validateGatewayBindingSpec(binding) != nil || validateBindingCapabilities(binding, capabilities) != nil {
+		return false, nil
+	}
+	agent := &corev1alpha1.Agent{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.AgentRef.Name}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func validateGatewayClass(object *gatewayv1alpha1.GatewayClass) error {

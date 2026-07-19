@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/referenceadapter"
 )
@@ -174,5 +175,145 @@ func TestGatewayBindingsOverlapAtEqualPriority(t *testing.T) {
 	right.Spec.Match.SenderID = "left"
 	if !gatewayBindingsOverlap(left, right) {
 		t.Fatal("matching exact-sender bindings should overlap")
+	}
+}
+
+func TestGatewayBindingReconcilerIgnoresUnprogrammableOverlappingPeer(t *testing.T) {
+	scheme := newGatewayBindingTestScheme(t)
+	current := gatewayBindingTestObject("current", "current-agent")
+	peer := gatewayBindingTestObject("peer", "missing-agent")
+	peer.Status = gatewayv1alpha1.GatewayBindingStatus{
+		Accepted: true, ObservedGeneration: peer.Generation,
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&gatewayv1alpha1.GatewayBinding{}).
+		WithObjects(
+			gatewayBindingTestGateway(),
+			&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "current-agent", Namespace: "default"}},
+			current,
+			peer,
+		).Build()
+	reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: current.Name}}
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &gatewayv1alpha1.GatewayBinding{}
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Status.Accepted || !updated.Status.ResolvedRefs || !updated.Status.Programmed || !updated.Status.Ready {
+		t.Fatalf("GatewayBinding status = %+v, want ready despite unprogrammable peer", updated.Status)
+	}
+}
+
+func TestGatewayBindingReconcilerRejectsProgrammablePeerRegardlessOfStatusOrder(t *testing.T) {
+	orders := []struct {
+		name  string
+		names []string
+	}{
+		{name: "current first", names: []string{"current", "peer"}},
+		{name: "peer first", names: []string{"peer", "current"}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			scheme := newGatewayBindingTestScheme(t)
+			current := gatewayBindingTestObject("current", "current-agent")
+			peer := gatewayBindingTestObject("peer", "peer-agent")
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&gatewayv1alpha1.GatewayBinding{}).
+				WithObjects(
+					gatewayBindingTestGateway(),
+					&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "current-agent", Namespace: "default"}},
+					&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "peer-agent", Namespace: "default"}},
+					current,
+					peer,
+				).Build()
+			reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+			for _, name := range order.names {
+				request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: name}}
+				if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+					t.Fatalf("Reconcile(%q) error = %v", name, err)
+				}
+			}
+
+			for _, name := range []string{"current", "peer"} {
+				updated := &gatewayv1alpha1.GatewayBinding{}
+				key := types.NamespacedName{Namespace: "default", Name: name}
+				if err := fakeClient.Get(context.Background(), key, updated); err != nil {
+					t.Fatal(err)
+				}
+				if !updated.Status.Accepted || !updated.Status.ResolvedRefs || updated.Status.Programmed || updated.Status.Ready {
+					t.Fatalf("GatewayBinding %q status = %+v, want independently valid but ambiguous", name, updated.Status)
+				}
+			}
+		})
+	}
+}
+
+func TestGatewayBindingReconcilerAgentChangeEnqueuesOverlappingPeers(t *testing.T) {
+	scheme := newGatewayBindingTestScheme(t)
+	direct := gatewayBindingTestObject("direct", "changed-agent")
+	overlap := gatewayBindingTestObject("overlap", "other-agent")
+	differentPriority := gatewayBindingTestObject("different-priority", "other-agent")
+	differentPriority.Spec.Priority = 1
+	differentContext := gatewayBindingTestObject("different-context", "other-agent")
+	differentContext.Spec.Match.ContextID = "elsewhere"
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(direct, overlap, differentPriority, differentContext).
+		Build()
+	reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
+	requests := reconciler.bindingsForAgent(context.Background(), &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "changed-agent", Namespace: "default"},
+	})
+	got := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		got[request.Name] = true
+	}
+	if len(got) != 2 || !got[direct.Name] || !got[overlap.Name] {
+		t.Fatalf("bindingsForAgent() = %v, want direct and overlapping peer", got)
+	}
+}
+
+func newGatewayBindingTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := gatewayv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	return scheme
+}
+
+func gatewayBindingTestGateway() *gatewayv1alpha1.Gateway {
+	return &gatewayv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "default", Generation: 1},
+		Status: gatewayv1alpha1.GatewayStatus{
+			Ready:              true,
+			ObservedGeneration: 1,
+			ObservedCapabilities: &gatewayv1alpha1.GatewayObservedCapabilities{
+				Capabilities: gatewayv1alpha1.GatewayCapabilities{
+					InboundText: true, OutboundText: true, IdempotentDelivery: true,
+				},
+			},
+		},
+	}
+}
+
+func gatewayBindingTestObject(name, agentName string) *gatewayv1alpha1.GatewayBinding {
+	return &gatewayv1alpha1.GatewayBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Generation: 1},
+		Spec: gatewayv1alpha1.GatewayBindingSpec{
+			GatewayRef:   gatewayv1alpha1.GatewayBindingReference{Name: "chat"},
+			AgentRef:     gatewayv1alpha1.GatewayBindingReference{Name: agentName},
+			Match:        gatewayv1alpha1.GatewayBindingMatch{AccountID: "acct", ContextID: "room"},
+			SenderPolicy: gatewayv1alpha1.GatewaySenderPolicy{Mode: gatewayv1alpha1.GatewaySenderPolicyAll},
+		},
 	}
 }

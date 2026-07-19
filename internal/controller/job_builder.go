@@ -1620,18 +1620,26 @@ func (b *JobBuilder) addSessionVolume(job *batchv1.Job, task *corev1alpha1.Task)
 func sessionTranscriptMaxAttempts(promptIncluded bool, timeout *metav1.Duration) string {
 	attempts := 5
 	if promptIncluded {
-		attempts = 60
+		// Required transcripts must keep retrying through the Task startup window.
+		// Worker authorization intentionally waits for controller-persisted JobName;
+		// extending this retry budget preserves that security boundary without a
+		// pre-status identity fallback.
+		attempts = 300
 	}
 	if timeout != nil && timeout.Duration > 0 {
-		deadlineBudget := max(1, int(timeout.Duration/time.Second)/2)
-		attempts = min(attempts, deadlineBudget)
+		deadlineBudget := max(1, int(timeout.Duration/time.Second)-1)
+		if promptIncluded {
+			attempts = deadlineBudget
+		} else {
+			attempts = min(attempts, deadlineBudget)
+		}
 	}
 	return strconv.Itoa(attempts)
 }
 
 func sessionTranscriptFetchCommand() string {
 	return `set -eu
-SA_JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token
 TMP=/session/transcript.jsonl.tmp
 FINAL=/session/transcript.jsonl
 : "${ORKA_SESSION_TRANSCRIPT_URL:?}"
@@ -1640,6 +1648,7 @@ FINAL=/session/transcript.jsonl
 rm -f "$TMP"
 attempt=0
 while true; do
+  SA_JWT=$(cat "$TOKEN_FILE")
   if wget --header="Authorization: Bearer $SA_JWT" -q -O "$TMP" "$ORKA_SESSION_TRANSCRIPT_URL"; then
     mv "$TMP" "$FINAL"
     exit 0

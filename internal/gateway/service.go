@@ -1562,7 +1562,14 @@ func taskForGatewayEvent(event *store.GatewayEvent, binding *gatewayv1alpha1.Gat
 }
 
 func (s *Service) ensureDenialDelivery(ctx context.Context, event *store.GatewayEvent, reason string) error {
-	if s.DeliveryStore == nil || event == nil || strings.TrimSpace(event.ReplyTarget) == "" {
+	if s.DeliveryStore == nil || event == nil {
+		return nil
+	}
+	replyTarget := strings.TrimSpace(event.ReplyTarget)
+	if replyTarget == "" {
+		replyTarget = strings.TrimSpace(event.ContextID)
+	}
+	if replyTarget == "" {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -1577,7 +1584,7 @@ func (s *Service) ensureDenialDelivery(ctx context.Context, event *store.Gateway
 		GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
 		Kind: protocol.DeliveryKindError, State: store.GatewayDeliveryPending,
 		AccountID: event.AccountID, ContextID: event.ContextID, ThreadID: event.ThreadID,
-		ReplyTarget: event.ReplyTarget, Text: text, Metadata: map[string]string{"eventId": event.ID},
+		ReplyTarget: replyTarget, Text: text, Metadata: map[string]string{"eventId": event.ID},
 		TraceParent: event.TraceParent, TraceState: event.TraceState,
 		MaxAttempts: s.Config.DeliveryMaxAttempts, NextAttemptAt: now, ExpiresAt: event.ExpiresAt,
 		CreatedAt: now, UpdatedAt: now,

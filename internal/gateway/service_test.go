@@ -411,6 +411,30 @@ func TestServiceRejectsUnauthorizedSenderDurably(t *testing.T) {
 	}
 }
 
+func TestRejectedEventFallsBackToContextForDenialDelivery(t *testing.T) {
+	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	var envelope map[string]any
+	if err := json.Unmarshal(gatewayEventBody(t, "denial-context-fallback", "intruder"), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	delete(envelope, "replyTarget")
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", body)
+	if err != nil || response.Status != ingressStatusRejected {
+		t.Fatalf("AdmitEvent() = (%+v, %v)", response, err)
+	}
+	deliveries, err := sqliteStore.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{
+		Namespace: "default", EventID: response.EventID,
+	})
+	if err != nil || len(deliveries) != 1 || deliveries[0].ReplyTarget != "room" {
+		t.Fatalf("denial deliveries = (%+v, %v), want context fallback", deliveries, err)
+	}
+}
+
 func TestServiceRejectsBadInboundAuthentication(t *testing.T) {
 	service, _, _ := newGatewayServiceFixture(t)
 	_, err := service.AdmitEvent(context.Background(), "default", "chat", "Bearer wrong", gatewayEventBody(t, "bad-auth", "user-1"))
