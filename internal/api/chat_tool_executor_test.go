@@ -248,8 +248,8 @@ func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) err
 	return nil
 }
 func (f *fakeSessionStore) AcquireLock(_ context.Context, _, _, _, _ string) error { return nil }
-func (f *fakeSessionStore) ReleaseLock(_ context.Context, _, _, _ string) error    { return nil }
-func (f *fakeSessionStore) IsLocked(_ context.Context, _, _, _ string) (bool, error) {
+func (f *fakeSessionStore) ReleaseLock(_ context.Context, _, _, _, _ string) error { return nil }
+func (f *fakeSessionStore) IsLocked(_ context.Context, _, _, _, _ string) (bool, error) {
 	return false, nil
 }
 func (f *fakeSessionStore) AppendMessages(_ context.Context, _, _ string, _ []store.SessionMessage) error {

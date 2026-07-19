@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,9 +16,9 @@ import (
 // CreateSession inserts a new session record.
 func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (namespace, name, session_type, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.Namespace, session.Name, session.SessionType, session.ActiveTask,
+		`INSERT INTO sessions (namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.Namespace, session.Name, session.SessionType, session.ActiveTask, session.ActiveTaskUID,
 		session.MessageCount, session.InputTokens, session.OutputTokens, session.Cancelled,
 		session.CreatedAt, session.UpdatedAt,
 	)
@@ -27,11 +29,11 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	session := &store.SessionRecord{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT namespace, name, session_type, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
+		`SELECT namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
 	).Scan(
-		&session.Namespace, &session.Name, &session.SessionType, &session.ActiveTask,
+		&session.Namespace, &session.Name, &session.SessionType, &session.ActiveTask, &session.ActiveTaskUID,
 		&session.MessageCount, &session.InputTokens, &session.OutputTokens, &session.Cancelled,
 		&session.CreatedAt, &session.UpdatedAt,
 	)
@@ -67,7 +69,7 @@ func (s *Store) GetSessionType(ctx context.Context, namespace, name string) (str
 // ListSessions returns metadata for all sessions in a namespace.
 func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT name, session_type, message_count, input_tokens, output_tokens, created_at, updated_at, active_task
+		`SELECT name, session_type, message_count, input_tokens, output_tokens, created_at, updated_at, active_task, active_task_uid
 		 FROM sessions WHERE namespace = ?`,
 		namespace,
 	)
@@ -79,7 +81,7 @@ func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.Ses
 	var sessions []store.SessionMetadata
 	for rows.Next() {
 		var m store.SessionMetadata
-		if err := rows.Scan(&m.Name, &m.SessionType, &m.MessageCount, &m.InputTokens, &m.OutputTokens, &m.CreatedAt, &m.UpdatedAt, &m.ActiveTask); err != nil {
+		if err := rows.Scan(&m.Name, &m.SessionType, &m.MessageCount, &m.InputTokens, &m.OutputTokens, &m.CreatedAt, &m.UpdatedAt, &m.ActiveTask, &m.ActiveTaskUID); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, m)
@@ -196,10 +198,13 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, task
 		}
 	}
 
-	// Try to acquire lock
+	// Try to acquire the exact Task incarnation. Empty stored UIDs are adopted only for
+	// compatibility with locks created before the fencing column existed.
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET active_task = ? WHERE namespace = ? AND name = ? AND (active_task = '' OR active_task = ?)`,
-		taskName, namespace, name, taskName,
+		`UPDATE sessions SET active_task = ?, active_task_uid = ?
+		 WHERE namespace = ? AND name = ? AND (active_task = '' OR
+		   (active_task = ? AND (active_task_uid = '' OR active_task_uid = ?)))`,
+		taskName, taskUID, namespace, name, taskName, taskUID,
 	)
 	if err != nil {
 		return err
@@ -215,29 +220,34 @@ func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, task
 	return nil
 }
 
-// ReleaseLock clears the active_task if it matches the given task name.
-func (s *Store) ReleaseLock(ctx context.Context, namespace, name, taskName string) error {
+// ReleaseLock clears the lock only for the exact Task incarnation.
+func (s *Store) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET active_task = '' WHERE namespace = ? AND name = ? AND active_task = ?`,
-		namespace, name, taskName,
+		`UPDATE sessions SET active_task = '', active_task_uid = ''
+		 WHERE namespace = ? AND name = ? AND active_task = ?
+		   AND active_task_uid = ?`,
+		namespace, name, taskName, taskUID,
 	)
 	return err
 }
 
-// IsLocked returns true if the session is locked by a task other than currentTask.
-func (s *Store) IsLocked(ctx context.Context, namespace, name, currentTask string) (bool, error) {
-	var activeTask string
+// IsLocked returns true if the session is locked by another Task incarnation.
+func (s *Store) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error) {
+	var activeTask, activeTaskUID string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT active_task FROM sessions WHERE namespace = ? AND name = ?`,
+		`SELECT active_task, active_task_uid FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
-	).Scan(&activeTask)
+	).Scan(&activeTask, &activeTaskUID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, store.ErrNotFound
 	}
 	if err != nil {
 		return false, err
 	}
-	return activeTask != "" && activeTask != currentTask, nil
+	if activeTask == "" {
+		return false, nil
+	}
+	return activeTask != currentTask || (activeTaskUID != "" && activeTaskUID != currentTaskUID), nil
 }
 
 // AppendMessages inserts messages into a session's logical transcript and updates session metadata.
@@ -274,8 +284,7 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 	defer stmt.Close() //nolint:errcheck
 
 	inserted := 0
-	batchID := time.Now().UTC().UnixNano()
-	for i, msg := range messages {
+	for _, msg := range messages {
 		inputJSON, toolCallsJSON, metadataJSON, err := encodeSessionMessagePayload(msg)
 		if err != nil {
 			return err
@@ -286,7 +295,10 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 		}
 		messageID := msg.ID
 		if messageID == "" {
-			messageID = fmt.Sprintf("local:%d:%d", batchID, i)
+			messageID, err = newSessionMessageID()
+			if err != nil {
+				return err
+			}
 		}
 		logicalOrder := msg.Order
 		if logicalOrder <= 0 {
@@ -305,6 +317,17 @@ func (s *Store) AppendMessages(ctx context.Context, namespace, name string, mess
 		rows, err := result.RowsAffected()
 		if err != nil {
 			return err
+		}
+		if rows == 0 {
+			matches, matchErr := sessionMessageMatchesTx(
+				ctx, tx, namespace, name, messageID, logicalOrder, msg.Order > 0, msg, inputJSON, toolCallsJSON, metadataJSON,
+			)
+			if matchErr != nil {
+				return matchErr
+			}
+			if !matches {
+				return store.ErrDuplicateMismatch
+			}
 		}
 		inserted += int(rows)
 	}
@@ -412,6 +435,48 @@ func scanSessionMessage(row gatewayRowScanner) (store.SessionMessage, error) {
 		}
 	}
 	return msg, nil
+}
+
+func newSessionMessageID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate session message ID: %w", err)
+	}
+	return "local:" + hex.EncodeToString(value[:]), nil
+}
+
+func sessionMessageMatchesTx(
+	ctx context.Context, tx *sql.Tx, namespace, name, messageID string, logicalOrder int64, compareOrder bool,
+	msg store.SessionMessage, inputJSON, toolCallsJSON *string, metadataJSON string,
+) (bool, error) {
+	var storedOrder int64
+	var storedTimestamp time.Time
+	var storedRole, storedContent, storedSourceType, storedSourceRef, storedMetadata string
+	var storedName, storedInput, storedToolCalls, storedToolCallID sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT sort_order, role, content, name, input, tool_calls, tool_call_id,
+		source_type, source_ref, metadata_json, created_at FROM session_messages
+		WHERE namespace = ? AND session_name = ? AND message_id = ?`, namespace, name, messageID).Scan(
+		&storedOrder, &storedRole, &storedContent, &storedName, &storedInput, &storedToolCalls, &storedToolCallID,
+		&storedSourceType, &storedSourceRef, &storedMetadata, &storedTimestamp,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, store.ErrConflict
+	}
+	if err != nil {
+		return false, err
+	}
+	return (!compareOrder || storedOrder == logicalOrder) && storedRole == msg.Role && storedContent == msg.Content &&
+		nullableStringMatches(storedName, nilIfEmpty(msg.Name)) && nullableStringMatches(storedInput, inputJSON) &&
+		nullableStringMatches(storedToolCalls, toolCallsJSON) && nullableStringMatches(storedToolCallID, nilIfEmpty(msg.ToolCallID)) &&
+		storedSourceType == msg.SourceType && storedSourceRef == msg.SourceRef && storedMetadata == metadataJSON &&
+		(msg.Timestamp.IsZero() || storedTimestamp.Equal(msg.Timestamp)), nil
+}
+
+func nullableStringMatches(stored sql.NullString, expected *string) bool {
+	if expected == nil {
+		return !stored.Valid
+	}
+	return stored.Valid && stored.String == *expected
 }
 
 func encodeSessionMessagePayload(msg store.SessionMessage) (*string, *string, string, error) {

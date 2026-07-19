@@ -102,6 +102,9 @@ spec:
                     description: Name is the Secret name.
                     minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: name must not contain surrounding whitespace
+                      rule: self == self.trim()
                 required:
                 - key
                 - name
@@ -123,6 +126,9 @@ spec:
                     description: Name is the Secret name.
                     minLength: 1
                     type: string
+                    x-kubernetes-validations:
+                    - message: name must not contain surrounding whitespace
+                      rule: self == self.trim()
                 required:
                 - key
                 - name
@@ -135,7 +141,7 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: inbound and outbound authentication must use separate Secrets
-              rule: self.inboundAuthRef.name != self.outboundAuthRef.name
+              rule: self.inboundAuthRef.name.trim() != self.outboundAuthRef.name.trim()
           status:
             description: GatewayStatus reports reference resolution and adapter connectivity.
             properties:

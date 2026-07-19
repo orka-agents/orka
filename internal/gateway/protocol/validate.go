@@ -40,7 +40,9 @@ func DecodeEvent(body []byte) (*EventEnvelope, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return nil, err
 	}
-	NormalizeEvent(&event)
+	if err := NormalizeEvent(&event); err != nil {
+		return nil, err
+	}
 	if err := ValidateEvent(&event); err != nil {
 		return nil, err
 	}
@@ -48,10 +50,26 @@ func DecodeEvent(body []byte) (*EventEnvelope, error) {
 }
 
 // NormalizeEvent trims boundary whitespace while preserving provider-owned identity case.
-func NormalizeEvent(event *EventEnvelope) {
+// It rejects metadata that exceeds the raw entry bound or has ambiguous normalized keys.
+func NormalizeEvent(event *EventEnvelope) error {
 	if event == nil {
-		return
+		return nil
 	}
+	var normalizedMetadata map[string]string
+	if event.Metadata != nil {
+		if len(event.Metadata) > MaxMetadataEntries {
+			return fmt.Errorf("metadata exceeds %d entries", MaxMetadataEntries)
+		}
+		normalizedMetadata = make(map[string]string, len(event.Metadata))
+		for key, value := range event.Metadata {
+			normalizedKey := strings.TrimSpace(key)
+			if _, exists := normalizedMetadata[normalizedKey]; exists {
+				return fmt.Errorf("metadata contains duplicate normalized key %q", truncateForError(normalizedKey))
+			}
+			normalizedMetadata[normalizedKey] = strings.TrimSpace(value)
+		}
+	}
+
 	event.ProtocolVersion = strings.TrimSpace(event.ProtocolVersion)
 	event.ExternalEventID = strings.TrimSpace(event.ExternalEventID)
 	event.EventType = strings.TrimSpace(event.EventType)
@@ -61,14 +79,8 @@ func NormalizeEvent(event *EventEnvelope) {
 	event.Sender.ID = strings.TrimSpace(event.Sender.ID)
 	event.Sender.DisplayName = strings.TrimSpace(event.Sender.DisplayName)
 	event.ReplyTarget = strings.TrimSpace(event.ReplyTarget)
-	if event.Metadata == nil {
-		return
-	}
-	normalized := make(map[string]string, len(event.Metadata))
-	for key, value := range event.Metadata {
-		normalized[strings.TrimSpace(key)] = strings.TrimSpace(value)
-	}
-	event.Metadata = normalized
+	event.Metadata = normalizedMetadata
+	return nil
 }
 
 // ValidateEvent enforces V1 text, identity, timestamp, and metadata bounds.
@@ -121,10 +133,10 @@ func ValidateEvent(event *EventEnvelope) error {
 	}
 	for key, value := range event.Metadata {
 		if key == "" || len(key) > MaxMetadataKeyBytes || !metadataKeyPattern.MatchString(key) {
-			return fmt.Errorf("metadata key %q is invalid", truncateForError(key, 32))
+			return fmt.Errorf("metadata key %q is invalid", truncateForError(key))
 		}
 		if len(value) > MaxMetadataValueBytes || !utf8.ValidString(value) || containsUnsafeControl(value, false) {
-			return fmt.Errorf("metadata value for %q is invalid", truncateForError(key, 32))
+			return fmt.Errorf("metadata value for %q is invalid", truncateForError(key))
 		}
 	}
 	return nil
@@ -138,7 +150,7 @@ func ValidateAllowedMetadata(metadata map[string]string, allowed []string) error
 	}
 	for key := range metadata {
 		if _, ok := allowedSet[key]; !ok {
-			return fmt.Errorf("metadata key %q is not allowed", truncateForError(key, 32))
+			return fmt.Errorf("metadata key %q is not allowed", truncateForError(key))
 		}
 	}
 	return nil
@@ -312,8 +324,8 @@ func containsUnsafeControl(value string, allowNewlines bool) bool {
 	})
 }
 
-func truncateForError(value string, limit int) string {
-	value = SanitizeMessage(value, limit)
+func truncateForError(value string) string {
+	value = SanitizeMessage(value, 32)
 	if value == "" {
 		return "<empty>"
 	}

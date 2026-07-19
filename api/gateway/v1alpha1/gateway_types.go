@@ -155,6 +155,7 @@ type GatewayBearerAuthReference struct {
 	// Name is the Secret name.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self == self.trim()",message="name must not contain surrounding whitespace"
 	Name string `json:"name"`
 
 	// Key is the Secret data key.
@@ -164,7 +165,7 @@ type GatewayBearerAuthReference struct {
 }
 
 // GatewaySpec defines one configured adapter instance.
-// +kubebuilder:validation:XValidation:rule="self.inboundAuthRef.name != self.outboundAuthRef.name",message="inbound and outbound authentication must use separate Secrets"
+// +kubebuilder:validation:XValidation:rule="self.inboundAuthRef.name.trim() != self.outboundAuthRef.name.trim()",message="inbound and outbound authentication must use separate Secrets"
 type GatewaySpec struct {
 	// GatewayClassName references a cluster-scoped GatewayClass.
 	// +kubebuilder:validation:Required

@@ -15,6 +15,8 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+const memoryTestTaskA = "task-a"
+
 func TestMemoryStore(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -23,7 +25,7 @@ func TestMemoryStore(t *testing.T) {
 		Namespace:   "ns-mem",
 		SessionName: "session-a",
 		AgentName:   "agent-a",
-		TaskName:    "task-a",
+		TaskName:    memoryTestTaskA,
 		ParentTask:  "parent-a",
 		Source:      "remember_tool",
 		Content:     "Prefer Postgres migrations for durable storage work.",
@@ -113,7 +115,7 @@ func TestMemoryProposalStore(t *testing.T) {
 
 	proposal := &store.MemoryProposal{
 		Namespace:   "ns-prop",
-		TaskName:    "task-a",
+		TaskName:    memoryTestTaskA,
 		AgentName:   "agent-a",
 		Type:        "skill",
 		SkillName:   "sqlite-memory",
@@ -191,7 +193,7 @@ func TestApplyMemoryProposal(t *testing.T) {
 
 	proposal := &store.MemoryProposal{
 		Namespace:   "ns-apply",
-		TaskName:    "task-a",
+		TaskName:    memoryTestTaskA,
 		AgentName:   "agent-a",
 		Type:        "memory",
 		Title:       "Prefer explicit migrations",
@@ -221,7 +223,7 @@ func TestApplyMemoryProposal(t *testing.T) {
 	if memory.ID == "" || memory.Source != "memory_proposal" || memory.SourceProposalID != proposal.ID {
 		t.Fatalf("unexpected applied memory provenance: %+v", memory)
 	}
-	if memory.Content != proposal.Content || memory.Namespace != "ns-apply" || memory.TaskName != "task-a" || memory.AgentName != "agent-a" {
+	if memory.Content != proposal.Content || memory.Namespace != "ns-apply" || memory.TaskName != memoryTestTaskA || memory.AgentName != "agent-a" {
 		t.Fatalf("unexpected applied memory: %+v", memory)
 	}
 	if got, want := strings.Join(memory.Tags, ","), "storage,sqlite"; got != want {

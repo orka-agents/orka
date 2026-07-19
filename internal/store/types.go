@@ -7,29 +7,31 @@ const SessionTypeGateway = "gateway"
 
 // SessionRecord represents a full session.
 type SessionRecord struct {
-	Namespace    string
-	Name         string
-	SessionType  string // "task", "chat", or "gateway"
-	ActiveTask   string
-	MessageCount int
-	InputTokens  int
-	OutputTokens int
-	Cancelled    bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	Messages     []SessionMessage
+	Namespace     string
+	Name          string
+	SessionType   string // "task", "chat", or "gateway"
+	ActiveTask    string
+	ActiveTaskUID string
+	MessageCount  int
+	InputTokens   int
+	OutputTokens  int
+	Cancelled     bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	Messages      []SessionMessage
 }
 
 // SessionMetadata is the lightweight listing representation.
 type SessionMetadata struct {
-	Name         string
-	SessionType  string
-	MessageCount int
-	InputTokens  int
-	OutputTokens int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	ActiveTask   string
+	Name          string
+	SessionType   string
+	MessageCount  int
+	InputTokens   int
+	OutputTokens  int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	ActiveTask    string
+	ActiveTaskUID string
 }
 
 // SessionMessage is a single transcript entry.

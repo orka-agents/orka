@@ -590,6 +590,10 @@ func (s *Service) DispatchOnce(ctx context.Context) error {
 	defer span.End()
 	span.SetAttributes(attribute.String("orka.gateway.event.id", event.ID))
 
+	recoveryNow := time.Now().UTC()
+	if handled, recoveryErr := s.reconcileExistingDispatchTask(ctx, event, recoveryNow); handled || recoveryErr != nil {
+		return recoveryErr
+	}
 	binding, ready, err := s.resolveDispatchBinding(ctx, event)
 	if err != nil || !ready {
 		return err
@@ -666,6 +670,62 @@ func (s *Service) namespaceTaskCapacityAvailable(ctx context.Context, namespace,
 	return active < s.Config.MaxTasksPerNamespace, nil
 }
 
+func (s *Service) reconcileExistingDispatchTask(
+	ctx context.Context, event *store.GatewayEvent, now time.Time,
+) (bool, error) {
+	existing := &corev1alpha1.Task{}
+	if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return true, fmt.Errorf("read deterministic gateway Task during claim recovery: %w", err)
+	}
+
+	gatewayObject := &gatewayv1alpha1.Gateway{}
+	if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.GatewayName}, gatewayObject); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, s.expireDispatchEvent(ctx, event, "The admitted Gateway no longer exists.")
+		}
+		return true, fmt.Errorf("read admitted Gateway during Task recovery: %w", err)
+	}
+	if string(gatewayObject.UID) != event.GatewayUID || gatewayObject.Generation != event.GatewayGeneration {
+		return true, s.expireDispatchEvent(ctx, event, "The admitted Gateway identity changed.")
+	}
+
+	binding := &gatewayv1alpha1.GatewayBinding{}
+	if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.BindingName}, binding); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding no longer exists.")
+		}
+		return true, fmt.Errorf("read admitted GatewayBinding during Task recovery: %w", err)
+	}
+	if !bindingIdentityMatchesAdmittedEvent(binding, event) {
+		return true, s.expireDispatchEvent(ctx, event, "The admitted GatewayBinding identity or routing changed.")
+	}
+
+	agent := &corev1alpha1.Agent{}
+	if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.AgentName}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, s.expireDispatchEvent(ctx, event, "The admitted Agent no longer exists.")
+		}
+		return true, fmt.Errorf("read admitted Agent during Task recovery: %w", err)
+	}
+	if event.AgentUID != "" && string(agent.UID) != event.AgentUID {
+		return true, s.expireDispatchEvent(ctx, event, "The admitted Agent identity changed.")
+	}
+
+	expected := taskForGatewayEvent(event, binding, now)
+	if gatewayTaskMatchesExpected(existing, expected, event, binding) {
+		return true, s.EventStore.MarkGatewayEventTaskCreated(
+			ctx, event.Namespace, event.ID, event.TaskName, string(existing.UID), s.Owner, now,
+		)
+	}
+	if event.ExpiresAt.Sub(now) < minimumGatewayExecutionWindow {
+		return true, s.expireDispatchEvent(ctx, event, "The message expired after a Task identity conflict.")
+	}
+	return false, nil
+}
+
 func (s *Service) handleExpiredDispatchClaim(
 	ctx context.Context, event *store.GatewayEvent, binding *gatewayv1alpha1.GatewayBinding, now time.Time,
 ) (bool, error) {
@@ -709,13 +769,7 @@ func (s *Service) resolveDispatchBinding(
 	gatewayObject := &gatewayv1alpha1.Gateway{}
 	err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.GatewayName}, gatewayObject)
 	if apierrors.IsNotFound(err) {
-		expireErr := s.EventStore.ExpireGatewayEvent(
-			ctx, event.Namespace, event.ID, s.Owner, "The admitted Gateway no longer exists.", time.Now().UTC(),
-		)
-		if expireErr == nil {
-			gatewayDeadLettersTotal.WithLabelValues("event").Inc()
-		}
-		return nil, false, expireErr
+		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway no longer exists.")
 	}
 	if err != nil {
 		s.retryEvent(ctx, event, "admitted Gateway is not ready", eventBackoff(event.AttemptCount))
@@ -723,13 +777,7 @@ func (s *Service) resolveDispatchBinding(
 		return nil, false, nil
 	}
 	if string(gatewayObject.UID) != event.GatewayUID {
-		expireErr := s.EventStore.ExpireGatewayEvent(
-			ctx, event.Namespace, event.ID, s.Owner, "The admitted Gateway identity changed.", time.Now().UTC(),
-		)
-		if expireErr == nil {
-			gatewayDeadLettersTotal.WithLabelValues("event").Inc()
-		}
-		return nil, false, expireErr
+		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway identity changed.")
 	}
 	if gatewayObject.Generation != event.GatewayGeneration {
 		return nil, false, s.expireDispatchEvent(ctx, event, "The admitted Gateway generation changed.")
@@ -777,11 +825,44 @@ func (s *Service) resolveDispatchBinding(
 }
 
 func (s *Service) expireDispatchEvent(ctx context.Context, event *store.GatewayEvent, reason string) error {
+	if err := s.deleteUnlinkedGatewayTask(ctx, event); err != nil {
+		return err
+	}
 	err := s.EventStore.ExpireGatewayEvent(ctx, event.Namespace, event.ID, s.Owner, reason, time.Now().UTC())
 	if err == nil {
 		gatewayDeadLettersTotal.WithLabelValues("event").Inc()
 	}
 	return err
+}
+
+func (s *Service) deleteUnlinkedGatewayTask(ctx context.Context, event *store.GatewayEvent) error {
+	if event == nil || event.TaskUID != "" {
+		return nil
+	}
+	task := &corev1alpha1.Task{}
+	key := client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}
+	if err := s.freshReader().Get(ctx, key, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("read unlinked gateway Task before expiry: %w", err)
+	}
+	if !gatewayTaskCorrelatesWithEvent(task, event) {
+		return nil
+	}
+	if task.DeletionTimestamp.IsZero() {
+		if err := deleteGatewayTaskWithUID(ctx, s.Client, task); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete unlinked gateway Task before expiry: %w", err)
+		}
+	}
+	remaining := &corev1alpha1.Task{}
+	if err := s.freshReader().Get(ctx, key, remaining); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("confirm unlinked gateway Task cleanup: %w", err)
+	}
+	return fmt.Errorf("%w: unlinked gateway Task cleanup is pending", store.ErrNotReady)
 }
 
 func (s *Service) createOrFindGatewayTask(
@@ -1332,20 +1413,33 @@ func deriveSessionName(object *gatewayv1alpha1.Gateway, binding *gatewayv1alpha1
 }
 
 func gatewayTaskCorrelatesWithEvent(task *corev1alpha1.Task, event *store.GatewayEvent) bool {
-	if task == nil || event == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Spec.AgentRef == nil ||
-		task.Spec.AgentRef.Name != event.AgentName || task.Spec.Prompt != "" || task.Spec.SessionRef == nil ||
-		task.Spec.SessionRef.Name != event.SessionName || task.Spec.SessionRef.ThroughMessageID != "gateway:"+event.ID+":user" ||
-		!task.Spec.SessionRef.PromptIncluded || task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Subject != event.SenderID {
+	if task == nil || event == nil || task.Name != event.TaskName || task.Namespace != event.Namespace ||
+		task.Spec.Type != corev1alpha1.TaskTypeAgent || task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != event.AgentName ||
+		task.Spec.Prompt != "" || task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != event.SessionName ||
+		task.Spec.SessionRef.ThroughMessageID != store.GatewayUserMessageID(event.ID) || !task.Spec.SessionRef.PromptIncluded ||
+		task.Spec.RequestedBy == nil || task.Spec.RequestedBy.Subject != event.SenderID ||
+		task.Spec.RequestedBy.Issuer != gatewayTaskIssuer(event) || task.Spec.RequestedBy.Username != event.SenderDisplayName ||
+		!slices.Equal(task.Spec.RequestedBy.Groups, []string{"gateway:" + event.GatewayName}) ||
+		!slices.Equal(task.Spec.RequestedBy.Roles, []string{"gateway-sender"}) {
 		return false
 	}
-	return task.Annotations[TaskGatewayEventAnnotation] == event.ID &&
+	return task.Labels[TaskGatewayNameLabel] == orkalabels.SelectorValue(event.GatewayName) &&
+		task.Labels[TaskGatewayBindingLabel] == orkalabels.SelectorValue(event.BindingName) &&
+		task.Labels[TaskGatewayEventLabel] == event.ID &&
+		task.Annotations[TaskGatewayEventAnnotation] == event.ID &&
+		task.Annotations[TaskGatewayExternalEvent] == event.ExternalEventID &&
 		task.Annotations[TaskGatewaySession] == event.SessionName &&
 		task.Annotations[TaskGatewayNameAnnotation] == event.GatewayName &&
 		task.Annotations[TaskGatewayBindingAnnotation] == event.BindingName
 }
 
 func bindingMatchesAdmittedEvent(binding *gatewayv1alpha1.GatewayBinding, event *store.GatewayEvent) bool {
-	if binding == nil || event == nil || !binding.Status.Ready || binding.Status.ObservedGeneration != binding.Generation {
+	return binding != nil && binding.Status.Ready && binding.Status.ObservedGeneration == binding.Generation &&
+		bindingIdentityMatchesAdmittedEvent(binding, event)
+}
+
+func bindingIdentityMatchesAdmittedEvent(binding *gatewayv1alpha1.GatewayBinding, event *store.GatewayEvent) bool {
+	if binding == nil || event == nil {
 		return false
 	}
 	if event.BindingUID != "" && string(binding.UID) != event.BindingUID {
@@ -1358,6 +1452,10 @@ func bindingMatchesAdmittedEvent(binding *gatewayv1alpha1.GatewayBinding, event 
 	return binding.Spec.GatewayRef.Name == event.GatewayName && binding.Spec.AgentRef.Name == event.AgentName &&
 		match.AccountID == event.AccountID && match.ContextID == event.ContextID &&
 		(match.ThreadID == "" || match.ThreadID == event.ThreadID) && senderAllowed(binding, event.SenderID)
+}
+
+func gatewayTaskIssuer(event *store.GatewayEvent) string {
+	return "gateway.orka.ai/" + event.Namespace + "/" + event.NamespaceUID + "/" + event.GatewayName + "/" + event.GatewayUID
 }
 
 func gatewayTaskMatchesExpected(
@@ -1429,7 +1527,7 @@ func taskForGatewayEvent(event *store.GatewayEvent, binding *gatewayv1alpha1.Gat
 	startingDeadline := int64(100)
 	successfulHistory := int32(3)
 	failedHistory := int32(1)
-	issuer := "gateway.orka.ai/" + event.Namespace + "/" + event.NamespaceUID + "/" + event.GatewayName + "/" + event.GatewayUID
+	issuer := gatewayTaskIssuer(event)
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: event.TaskName, Namespace: event.Namespace,

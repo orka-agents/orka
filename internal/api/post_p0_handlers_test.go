@@ -61,10 +61,10 @@ func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, n
 func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return nil
 }
-func (f *postP0FakeSessionStore) ReleaseLock(ctx context.Context, namespace, name, taskName string) error {
+func (f *postP0FakeSessionStore) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return nil
 }
-func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask string) (bool, error) {
+func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error) {
 	return false, nil
 }
 func (f *postP0FakeSessionStore) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {

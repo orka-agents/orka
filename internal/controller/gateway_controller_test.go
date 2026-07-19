@@ -82,6 +82,47 @@ func TestGatewayReconcilerProbesReferenceAdapter(t *testing.T) {
 	}
 }
 
+func TestValidateGatewaySpecRejectsNonCanonicalAuthSecretNames(t *testing.T) {
+	tests := []struct {
+		name         string
+		inboundName  string
+		outboundName string
+		wantError    string
+	}{
+		{
+			name:         "trim-equivalent names",
+			inboundName:  "shared",
+			outboundName: " shared ",
+			wantError:    "must use separate Secrets",
+		},
+		{
+			name:         "non-canonical inbound name",
+			inboundName:  " inbound ",
+			outboundName: "outbound",
+			wantError:    "inboundAuthRef name must not contain surrounding whitespace",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			object := &gatewayv1alpha1.Gateway{
+				Spec: gatewayv1alpha1.GatewaySpec{
+					GatewayClassName: "generic-chat",
+					InboundAuthRef: gatewayv1alpha1.GatewayBearerAuthReference{
+						Name: test.inboundName, Key: "token",
+					},
+					OutboundAuthRef: gatewayv1alpha1.GatewayBearerAuthReference{
+						Name: test.outboundName, Key: "token",
+					},
+				},
+			}
+			if err := validateGatewaySpec(object); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("validateGatewaySpec() = %v, want error containing %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateGatewayBindingFailsClosed(t *testing.T) {
 	binding := &gatewayv1alpha1.GatewayBinding{
 		Spec: gatewayv1alpha1.GatewayBindingSpec{

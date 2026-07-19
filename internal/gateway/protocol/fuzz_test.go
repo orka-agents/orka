@@ -10,6 +10,7 @@ import (
 func FuzzDecodeEvent(f *testing.F) {
 	f.Add([]byte(`{"protocolVersion":"orka.gateway.v1","externalEventId":"e","eventType":"text","accountId":"a","contextId":"c","sender":{"id":"s"},"text":"hello"}`))
 	f.Add([]byte(`{"protocolVersion":"orka.gateway.v1","externalEventId":"e","eventType":"text","accountId":"a","contextId":"c","sender":{"id":"s"},"text":"hello","metadata":{"trace":"safe"}}`))
+	f.Add([]byte(`{"protocolVersion":"orka.gateway.v1","externalEventId":"e","eventType":"text","accountId":"a","contextId":"c","sender":{"id":"s"},"text":"hello","metadata":{"trace":"first"," trace ":"second"}}`))
 	f.Add([]byte(`{"raw":"provider payload"}`))
 	f.Fuzz(func(t *testing.T, body []byte) {
 		event, err := DecodeEvent(body)
@@ -154,7 +155,9 @@ func FuzzValidateAllowedMetadata(f *testing.F) {
 			Text:            "hello",
 			Metadata:        map[string]string{key: value},
 		}
-		NormalizeEvent(event)
+		if err := NormalizeEvent(event); err != nil {
+			t.Fatalf("NormalizeEvent() error = %v", err)
+		}
 		if err := ValidateEvent(event); err == nil {
 			for normalizedKey, normalizedValue := range event.Metadata {
 				if normalizedKey == "" || len(normalizedKey) > MaxMetadataKeyBytes || !metadataKeyPattern.MatchString(normalizedKey) {

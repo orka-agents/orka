@@ -462,14 +462,20 @@ func validateGatewaySpec(object *gatewayv1alpha1.Gateway) error {
 	if strings.TrimSpace(object.Spec.GatewayClassName) == "" {
 		return fmt.Errorf("gatewayClassName is required")
 	}
-	if object.Spec.InboundAuthRef.Name == object.Spec.OutboundAuthRef.Name {
+	inboundName := strings.TrimSpace(object.Spec.InboundAuthRef.Name)
+	outboundName := strings.TrimSpace(object.Spec.OutboundAuthRef.Name)
+	if inboundName == outboundName {
 		return fmt.Errorf("inboundAuthRef and outboundAuthRef must use separate Secrets")
 	}
 	for direction, ref := range map[string]gatewayv1alpha1.GatewayBearerAuthReference{
 		"inboundAuthRef": object.Spec.InboundAuthRef, "outboundAuthRef": object.Spec.OutboundAuthRef,
 	} {
-		if strings.TrimSpace(ref.Name) == "" || strings.TrimSpace(ref.Key) == "" {
+		canonicalName := strings.TrimSpace(ref.Name)
+		if canonicalName == "" || strings.TrimSpace(ref.Key) == "" {
 			return fmt.Errorf("%s name and key are required", direction)
+		}
+		if ref.Name != canonicalName {
+			return fmt.Errorf("%s name must not contain surrounding whitespace", direction)
 		}
 	}
 	if len(object.Spec.Metadata) > protocol.MaxMetadataEntries {

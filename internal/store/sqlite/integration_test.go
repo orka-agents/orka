@@ -330,7 +330,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// 3. Verify locked for other tasks
-	locked, err := s.IsLocked(ctx, ns, sessionName, "other-task")
+	locked, err := s.IsLocked(ctx, ns, sessionName, "other-task", "")
 	if err != nil {
 		t.Fatalf("IsLocked: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// 7. Release lock
-	if err := s.ReleaseLock(ctx, ns, sessionName, taskName); err != nil {
+	if err := s.ReleaseLock(ctx, ns, sessionName, taskName, ""); err != nil {
 		t.Fatalf("ReleaseLock: %v", err)
 	}
 
@@ -716,12 +716,12 @@ func TestIntegration_ReleaseLockWrongTask(t *testing.T) {
 	}
 
 	// Release with wrong task name — should be a no-op (lock stays)
-	if err := s.ReleaseLock(ctx, "ns", "wrong-release", "task-b"); err != nil {
+	if err := s.ReleaseLock(ctx, "ns", "wrong-release", "task-b", ""); err != nil {
 		t.Fatalf("ReleaseLock wrong task: %v", err)
 	}
 
 	// Lock should still be held by task-a
-	locked, err := s.IsLocked(ctx, "ns", "wrong-release", "task-b")
+	locked, err := s.IsLocked(ctx, "ns", "wrong-release", "task-b", "")
 	if err != nil {
 		t.Fatalf("IsLocked: %v", err)
 	}

@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -31,6 +33,46 @@ func TestDecodeEventRejectsBoundsAndUnknownFields(t *testing.T) {
 	}
 	if _, err := DecodeEvent([]byte(strings.Repeat("x", MaxHTTPBodyBytes+1))); err == nil {
 		t.Fatal("DecodeEvent() accepted oversized body")
+	}
+}
+
+func TestDecodeEventRejectsRawMetadataEntryOverflow(t *testing.T) {
+	metadata := make(map[string]string, MaxMetadataEntries+1)
+	for i := 0; i <= MaxMetadataEntries; i++ {
+		metadata[strings.Repeat(" ", i)+"trace"] = "safe"
+	}
+	body, err := json.Marshal(EventEnvelope{
+		ProtocolVersion: Version,
+		ExternalEventID: "event",
+		EventType:       EventTypeText,
+		AccountID:       "account",
+		ContextID:       "context",
+		Sender:          Sender{ID: "sender"},
+		Text:            "hello",
+		Metadata:        metadata,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	wantError := fmt.Sprintf("metadata exceeds %d entries", MaxMetadataEntries)
+	if _, err := DecodeEvent(body); err == nil || !strings.Contains(err.Error(), wantError) {
+		t.Fatalf("DecodeEvent() = %v, want raw metadata entry bound error", err)
+	}
+}
+
+func TestDecodeEventRejectsMetadataKeyNormalizationCollision(t *testing.T) {
+	body := []byte(`{
+		"protocolVersion":"orka.gateway.v1",
+		"externalEventId":"event",
+		"eventType":"text",
+		"accountId":"account",
+		"contextId":"context",
+		"sender":{"id":"sender"},
+		"text":"hello",
+		"metadata":{"trace":"first"," trace ":"second"}
+	}`)
+	if _, err := DecodeEvent(body); err == nil || !strings.Contains(err.Error(), `duplicate normalized key "trace"`) {
+		t.Fatalf("DecodeEvent() = %v, want normalized metadata key collision error", err)
 	}
 }
 

@@ -685,6 +685,51 @@ func TestGatewayBackupRestoreResumesQueuedWorkWithoutReplayingTerminalDelivery(t
 	}
 }
 
+func TestGatewayMigrationBackfillsActiveTaskUID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "active-task-uid.db")
+	db, err := NewDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(db, path)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	event := testGatewayEvent(now, "active-task-uid")
+	event.BindingUID = testGatewayBindingUID
+	if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+		Event: event, AppendUserMessage: true, PendingLimit: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimNextGatewayEvent(ctx, event.Namespace, "dispatcher", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkGatewayEventTaskCreated(
+		ctx, event.Namespace, event.ID, event.TaskName, "task-uid", "dispatcher", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE sessions SET active_task_uid = ''
+		WHERE namespace = ? AND name = ?`, event.Namespace, event.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = NewDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s = NewStore(db, path)
+	session, err := s.GetSession(ctx, event.Namespace, event.SessionName)
+	if err != nil || session.ActiveTask != claimed.TaskName || session.ActiveTaskUID != "task-uid" {
+		t.Fatalf("migrated active Task identity = (%+v, %v)", session, err)
+	}
+}
+
 func TestGatewayMigrationBackfillsLegacySessionMessageIDs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open("sqlite", path)
@@ -1367,8 +1412,9 @@ func TestProjectGatewayTerminalRejectsMismatchedDeliveryIdentity(t *testing.T) {
 
 func TestGatewayMaintenanceExpiresStaleIngressAndReleasesSessionReservations(t *testing.T) {
 	states := []struct {
-		name  string
-		setup func(*testing.T, *Store, context.Context, store.GatewayEvent, time.Time)
+		name        string
+		taskCreated bool
+		setup       func(*testing.T, *Store, context.Context, store.GatewayEvent, time.Time)
 	}{
 		{name: "queued"},
 		{
@@ -1381,7 +1427,8 @@ func TestGatewayMaintenanceExpiresStaleIngressAndReleasesSessionReservations(t *
 			},
 		},
 		{
-			name: "task-created",
+			name:        "task-created",
+			taskCreated: true,
 			setup: func(t *testing.T, s *Store, ctx context.Context, event store.GatewayEvent, claimAt time.Time) {
 				t.Helper()
 				if _, err := s.ClaimNextGatewayEvent(ctx, event.Namespace, "dispatcher", claimAt, time.Minute); err != nil {
@@ -1426,22 +1473,34 @@ func TestGatewayMaintenanceExpiresStaleIngressAndReleasesSessionReservations(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.ExpiredEvents != 1 {
-				t.Fatalf("ExpiredEvents = %d, want 1", result.ExpiredEvents)
+			wantExpired := 1
+			wantState := store.GatewayEventExpired
+			wantActiveTask := ""
+			if tc.taskCreated {
+				wantExpired = 0
+				wantState = store.GatewayEventTaskCreated
+				wantActiveTask = stale.TaskName
+			}
+			if result.ExpiredEvents != wantExpired {
+				t.Fatalf("ExpiredEvents = %d, want %d", result.ExpiredEvents, wantExpired)
 			}
 			stored, err := s.GetGatewayEvent(ctx, stale.Namespace, stale.ID)
-			if err != nil || stored.State != store.GatewayEventExpired {
-				t.Fatalf("stale event = (%+v, %v)", stored, err)
+			if err != nil || stored.State != wantState {
+				t.Fatalf("stale event = (%+v, %v), want state %s", stored, err, wantState)
 			}
 			session, err := s.GetSession(ctx, stale.Namespace, stale.SessionName)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if session.ActiveTask != "" {
-				t.Fatalf("active task after maintenance = %q", session.ActiveTask)
+			if session.ActiveTask != wantActiveTask {
+				t.Fatalf("active task after maintenance = %q, want %q", session.ActiveTask, wantActiveTask)
 			}
 			claimed, err := s.ClaimNextGatewayEvent(ctx, stale.Namespace, "next-dispatcher", now, time.Minute)
-			if err != nil || claimed.ID != later.ID {
+			if tc.taskCreated {
+				if !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("next claim = (%+v, %v), want retained TaskCreated reservation", claimed, err)
+				}
+			} else if err != nil || claimed.ID != later.ID {
 				t.Fatalf("next claim = (%+v, %v), want %s", claimed, err, later.ID)
 			}
 		})

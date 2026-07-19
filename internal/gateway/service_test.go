@@ -1184,6 +1184,21 @@ func TestExpiredDispatchClaimRejectsRecreatedDependencies(t *testing.T) {
 			},
 		},
 		{
+			name: "Binding",
+			replace: func(t *testing.T, service *Service, ctx context.Context) {
+				t.Helper()
+				object := &gatewayv1alpha1.GatewayBinding{}
+				key := client.ObjectKey{Namespace: "default", Name: "room"}
+				if err := service.Client.Get(ctx, key, object); err != nil {
+					t.Fatal(err)
+				}
+				object.Generation++
+				if err := service.Client.Update(ctx, object); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
 			name: "Agent",
 			replace: func(t *testing.T, service *Service, ctx context.Context) {
 				t.Helper()
@@ -1233,6 +1248,11 @@ func TestExpiredDispatchClaimRejectsRecreatedDependencies(t *testing.T) {
 			event, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
 			if err != nil || event.State != store.GatewayEventExpired || event.TaskUID != "" {
 				t.Fatalf("event after %s replacement = (%+v, %v)", testCase.name, event, err)
+			}
+			remaining := &corev1alpha1.Task{}
+			err = service.Client.Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, remaining)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("unlinked Task after %s replacement = (%+v, %v), want deleted", testCase.name, remaining, err)
 			}
 		})
 	}

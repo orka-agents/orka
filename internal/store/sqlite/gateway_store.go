@@ -307,8 +307,8 @@ func prepareGatewaySessionOrderTx(
 ) (int64, error) {
 	ownerRef := event.GatewayUID + "/" + event.BindingUID
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions
-		(namespace, name, session_type, owner_type, owner_ref, active_task, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
-		VALUES (?, ?, 'gateway', 'gateway', ?, '', 0, 0, 0, FALSE, ?, ?)
+		(namespace, name, session_type, owner_type, owner_ref, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at)
+		VALUES (?, ?, 'gateway', 'gateway', ?, '', '', 0, 0, 0, FALSE, ?, ?)
 		ON CONFLICT(namespace, name) DO NOTHING`, event.Namespace, event.SessionName, ownerRef, now, now); err != nil {
 		return 0, err
 	}
@@ -546,7 +546,7 @@ func (s *Store) ClaimNextGatewayEvent(ctx context.Context, namespace, owner stri
 		WHERE (? = '' OR e.namespace = ?) AND e.next_attempt_at <= ? AND e.session_name <> ''
 		  AND ((e.state = ? AND e.expires_at > ?) OR
 		       (e.state = ? AND (e.claim_until IS NULL OR e.claim_until <= ?)))
-		  AND (s.active_task = '' OR s.active_task = e.task_name)
+		  AND (s.active_task = '' OR (s.active_task = e.task_name AND s.active_task_uid = e.task_uid))
 		  AND NOT EXISTS (
 			SELECT 1 FROM gateway_events earlier
 			WHERE earlier.namespace = e.namespace AND earlier.session_name = e.session_name
@@ -587,9 +587,10 @@ func (s *Store) ClaimNextGatewayEvent(ctx context.Context, namespace, owner stri
 	if updated == 0 {
 		return nil, store.ErrNotFound
 	}
-	lockResult, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = ?, updated_at = ?
-		WHERE namespace = ? AND name = ? AND (active_task = '' OR active_task = ?)`,
-		event.TaskName, now, event.Namespace, event.SessionName, event.TaskName,
+	lockResult, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = ?, active_task_uid = ?, updated_at = ?
+		WHERE namespace = ? AND name = ? AND (active_task = '' OR
+		  (active_task = ? AND active_task_uid = ?))`,
+		event.TaskName, event.TaskUID, now, event.Namespace, event.SessionName, event.TaskName, event.TaskUID,
 	)
 	if err != nil {
 		return nil, err
@@ -667,12 +668,12 @@ func (s *Store) MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, 
 	if event.State != store.GatewayEventDispatching || event.ClaimOwner != owner {
 		return store.ErrConflict
 	}
-	var activeTask string
-	if err := tx.QueryRowContext(ctx, `SELECT active_task FROM sessions
-		WHERE namespace = ? AND name = ?`, namespace, event.SessionName).Scan(&activeTask); err != nil {
+	var activeTask, activeTaskUID string
+	if err := tx.QueryRowContext(ctx, `SELECT active_task, active_task_uid FROM sessions
+		WHERE namespace = ? AND name = ?`, namespace, event.SessionName).Scan(&activeTask, &activeTaskUID); err != nil {
 		return err
 	}
-	if activeTask != taskName {
+	if activeTask != taskName || (activeTaskUID != "" && activeTaskUID != taskUID) {
 		return store.ErrConflict
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE gateway_events SET state = ?, task_uid = ?,
@@ -689,6 +690,19 @@ func (s *Store) MarkGatewayEventTaskCreated(ctx context.Context, namespace, id, 
 		return err
 	}
 	if rows == 0 {
+		return store.ErrConflict
+	}
+	lockResult, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task_uid = ?, updated_at = ?
+		WHERE namespace = ? AND name = ? AND active_task = ? AND (active_task_uid = '' OR active_task_uid = ?)`,
+		taskUID, now, namespace, event.SessionName, taskName, taskUID)
+	if err != nil {
+		return err
+	}
+	locked, err := lockResult.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if locked == 0 {
 		return store.ErrConflict
 	}
 	return tx.Commit()
@@ -722,9 +736,10 @@ func (s *Store) RetryGatewayEvent(ctx context.Context, namespace, id, owner, rea
 		return store.ErrConflict
 	}
 	if event.SessionName != "" && event.TaskName != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', updated_at = ?
-			WHERE namespace = ? AND name = ? AND active_task = ?`,
-			time.Now().UTC(), namespace, event.SessionName, event.TaskName); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', active_task_uid = '', updated_at = ?
+			WHERE namespace = ? AND name = ? AND active_task = ?
+			  AND active_task_uid = ?`,
+			time.Now().UTC(), namespace, event.SessionName, event.TaskName, event.TaskUID); err != nil {
 			return err
 		}
 	}
@@ -842,9 +857,10 @@ func expireGatewayEventTx(
 		return false, store.ErrConflict
 	}
 	if event.SessionName != "" && event.TaskName != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', updated_at = ?
-			WHERE namespace = ? AND name = ? AND active_task = ?`,
-			now, event.Namespace, event.SessionName, event.TaskName); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', active_task_uid = '', updated_at = ?
+			WHERE namespace = ? AND name = ? AND active_task = ?
+			  AND active_task_uid = ?`,
+			now, event.Namespace, event.SessionName, event.TaskName, event.TaskUID); err != nil {
 			return false, err
 		}
 	}
@@ -923,9 +939,10 @@ func (s *Store) ProjectGatewayTerminal(ctx context.Context, projection store.Gat
 		store.GatewayEventCompleted, delivery.ID, completedAt, completedAt, event.Namespace, event.ID); err != nil {
 		return nil, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', updated_at = ?
-		WHERE namespace = ? AND name = ? AND active_task = ?`,
-		completedAt, event.Namespace, event.SessionName, event.TaskName); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', active_task_uid = '', updated_at = ?
+		WHERE namespace = ? AND name = ? AND active_task = ?
+		  AND active_task_uid = ?`,
+		completedAt, event.Namespace, event.SessionName, event.TaskName, event.TaskUID); err != nil {
 		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1515,11 +1532,10 @@ func listGatewayEventsForExpiry(
 ) ([]store.GatewayEvent, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events
 		WHERE (? = '' OR namespace = ?) AND expires_at <= ?
-		  AND (state IN (?, ?, ?) OR (state = ? AND (claim_until IS NULL OR claim_until <= ?)))
+		  AND (state IN (?, ?) OR (state = ? AND (claim_until IS NULL OR claim_until <= ?)))
 		ORDER BY expires_at, received_at, id`,
 		namespace, namespace, now,
-		store.GatewayEventAccepted, store.GatewayEventQueued, store.GatewayEventTaskCreated,
-		store.GatewayEventDispatching, now,
+		store.GatewayEventAccepted, store.GatewayEventQueued, store.GatewayEventDispatching, now,
 	)
 	if err != nil {
 		return nil, err

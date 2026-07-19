@@ -82,8 +82,9 @@ func migrate(db *sql.DB) error {
 			session_type  TEXT NOT NULL DEFAULT 'task',
 			owner_type    TEXT NOT NULL DEFAULT '',
 			owner_ref     TEXT NOT NULL DEFAULT '',
-			active_task   TEXT NOT NULL DEFAULT '',
-			message_count INTEGER NOT NULL DEFAULT 0,
+			active_task     TEXT NOT NULL DEFAULT '',
+			active_task_uid TEXT NOT NULL DEFAULT '',
+			message_count   INTEGER NOT NULL DEFAULT 0,
 			input_tokens  INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			cancelled     BOOLEAN NOT NULL DEFAULT FALSE,
@@ -702,8 +703,17 @@ func migrate(db *sql.DB) error {
 	if err := ensureSQLiteColumns(db, "sessions", []sqliteColumnMigration{
 		{Name: "owner_type", Definition: "owner_type TEXT NOT NULL DEFAULT ''"},
 		{Name: "owner_ref", Definition: "owner_ref TEXT NOT NULL DEFAULT ''"},
+		{Name: "active_task_uid", Definition: "active_task_uid TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return err
+	}
+	if _, err := db.Exec(`UPDATE sessions SET active_task_uid = COALESCE((
+		SELECT event.task_uid FROM gateway_events event
+		WHERE event.namespace = sessions.namespace AND event.session_name = sessions.name
+		  AND event.task_name = sessions.active_task AND event.state = 'TaskCreated' AND event.task_uid <> ''
+		ORDER BY event.created_at DESC, event.id DESC LIMIT 1
+	), '') WHERE active_task <> '' AND active_task_uid = ''`); err != nil {
+		return fmt.Errorf("migration failed: %w", err)
 	}
 	if err := ensureSQLiteColumns(db, "gateway_events", []sqliteColumnMigration{
 		{Name: "namespace_uid", Definition: "namespace_uid TEXT NOT NULL DEFAULT ''"},

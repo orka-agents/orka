@@ -743,7 +743,7 @@ func (r *TaskReconciler) acquireSessionLock(ctx context.Context, task *corev1alp
 			if getErr != nil {
 				return ctrl.Result{}, getErr, true
 			}
-			if session.ActiveTask == task.Name {
+			if session.ActiveTask == task.Name && (session.ActiveTaskUID == "" || session.ActiveTaskUID == string(task.UID)) {
 				return ctrl.Result{}, nil, false
 			}
 			if session.ActiveTask == "" {

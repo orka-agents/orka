@@ -44,13 +44,13 @@ func (m *SessionManager) IsLocked(ctx context.Context, task *corev1alpha1.Task) 
 		if err := validateGatewayTaskSessionPolicy(task, event); err != nil {
 			return false, err
 		}
-		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name)
+		return m.store.IsLocked(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
 	}
 	if task.Spec.SessionRef == nil {
 		return false, nil
 	}
 
-	locked, err := m.store.IsLocked(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name)
+	locked, err := m.store.IsLocked(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Session doesn't exist yet, not locked
@@ -97,13 +97,23 @@ func (m *SessionManager) ReleaseLock(ctx context.Context, task *corev1alpha1.Tas
 	if event, ok, err := m.gatewayEventForTask(ctx, task); err != nil {
 		return err
 	} else if ok {
-		return m.store.ReleaseLock(ctx, event.Namespace, event.SessionName, task.Name)
+		return m.store.ReleaseLock(ctx, event.Namespace, event.SessionName, task.Name, string(task.UID))
 	}
 	if task.Spec.SessionRef == nil {
 		return nil
 	}
 
-	err := m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name)
+	if task.UID != "" {
+		session, getErr := m.store.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+		if getErr == nil && session.ActiveTask == task.Name && session.ActiveTaskUID == "" {
+			if acquireErr := m.store.AcquireLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID)); acquireErr != nil {
+				return acquireErr
+			}
+		} else if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+			return getErr
+		}
+	}
+	err := m.store.ReleaseLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID))
 	if err != nil {
 		// Ignore not-found errors (session may have been deleted)
 		if errors.Is(err, store.ErrNotFound) {
@@ -147,12 +157,13 @@ func validateGatewayTaskSessionPolicy(task *corev1alpha1.Task, event *store.Gate
 func (m *SessionManager) createSession(ctx context.Context, task *corev1alpha1.Task) error {
 	now := time.Now()
 	session := &store.SessionRecord{
-		Namespace:   task.Namespace,
-		Name:        task.Spec.SessionRef.Name,
-		SessionType: "task",
-		ActiveTask:  task.Name,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		Namespace:     task.Namespace,
+		Name:          task.Spec.SessionRef.Name,
+		SessionType:   "task",
+		ActiveTask:    task.Name,
+		ActiveTaskUID: string(task.UID),
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	return m.store.CreateSession(ctx, session)

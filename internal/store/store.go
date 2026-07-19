@@ -68,8 +68,8 @@ type SessionStore interface {
 
 	// Locking
 	AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error
-	ReleaseLock(ctx context.Context, namespace, name, taskName string) error
-	IsLocked(ctx context.Context, namespace, name, currentTask string) (bool, error)
+	ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error
+	IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error)
 
 	// Transcript
 	AppendMessages(ctx context.Context, namespace, name string, messages []SessionMessage) error
