@@ -505,7 +505,25 @@ func (s *Store) ListGatewayEvents(ctx context.Context, filter store.GatewayEvent
 		}
 		query += ` AND state IN (` + strings.Join(placeholders, ",") + `)`
 	}
-	if filter.OrderByNextAttempt {
+	if filter.SessionHeadOnly {
+		query += ` AND (gateway_events.session_name = '' OR NOT EXISTS (
+			SELECT 1 FROM gateway_events earlier
+			WHERE earlier.namespace = gateway_events.namespace
+			  AND earlier.session_name = gateway_events.session_name
+			  AND earlier.transcript_order > 0
+			  AND earlier.transcript_order < gateway_events.transcript_order
+			  AND (earlier.state IN (?, ?, ?, ?)
+			       OR (earlier.state = ? AND earlier.delivery_id = ''))
+		))`
+		args = append(args, store.GatewayEventAccepted, store.GatewayEventQueued,
+			store.GatewayEventDispatching, store.GatewayEventTaskCreated, store.GatewayEventExpired)
+	}
+	if filter.MissingDelivery {
+		query += ` AND delivery_id = ''`
+	}
+	if filter.OrderByExpiry {
+		query += ` ORDER BY expires_at ASC, received_at ASC, id ASC`
+	} else if filter.OrderByNextAttempt {
 		query += ` ORDER BY next_attempt_at ASC, received_at ASC, id ASC`
 	} else {
 		query += gatewayListOrder
@@ -785,10 +803,78 @@ func (s *Store) ExpireGatewayEvent(
 	if err != nil {
 		return err
 	}
-	if _, err := expireGatewayEventTx(ctx, tx, event, owner, reason, now, false); err != nil {
+	if err := expireGatewayEventTx(ctx, tx, event, owner, reason, now); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ExpireGatewayEventWithDelivery atomically expires stale work and creates the
+// corresponding adapter outbox record.
+func (s *Store) ExpireGatewayEventWithDelivery(
+	ctx context.Context,
+	projection store.GatewayExpiryProjection,
+) (*store.GatewayDelivery, bool, error) {
+	if projection.EventID == "" || projection.Delivery.EventID != projection.EventID {
+		return nil, false, store.ValidationErrorf("event ID and delivery event ID must match")
+	}
+	if err := validateGatewayDelivery(&projection.Delivery); err != nil {
+		return nil, false, err
+	}
+	reason := sanitizeGatewayStoreText(projection.Reason, 1024)
+	now := projection.CompletedAt.UTC()
+	if now.IsZero() {
+		return nil, false, store.ValidationErrorf("completion time is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	event, err := getGatewayEventQuery(ctx, tx, projection.Delivery.Namespace, projection.EventID)
+	if err != nil {
+		return nil, false, err
+	}
+	if event.State == store.GatewayEventExpired {
+		existing, getErr := getGatewayDeliveryByEventQuery(ctx, tx, event.Namespace, event.ID)
+		if errors.Is(getErr, store.ErrNotFound) {
+			delivery, created, createErr := createGatewayDeliveryTx(ctx, tx, &projection.Delivery)
+			if createErr != nil {
+				return nil, false, createErr
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, false, err
+			}
+			return delivery, created, nil
+		}
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		if existing.ID != projection.Delivery.ID || existing.IdempotencyID != projection.Delivery.IdempotencyID ||
+			existing.EventID != projection.Delivery.EventID || existing.Namespace != projection.Delivery.Namespace {
+			return nil, false, store.ErrDuplicateMismatch
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = ?, updated_at = ?
+			WHERE namespace = ? AND id = ? AND delivery_id = ''`,
+			existing.ID, now, event.Namespace, event.ID); err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		return existing, false, nil
+	}
+	if err := expireGatewayEventTx(ctx, tx, event, projection.Owner, reason, now); err != nil {
+		return nil, false, err
+	}
+	delivery, created, err := createGatewayDeliveryTx(ctx, tx, &projection.Delivery)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return delivery, created, nil
 }
 
 func expireGatewayEventTx(
@@ -797,30 +883,25 @@ func expireGatewayEventTx(
 	event *store.GatewayEvent,
 	owner, reason string,
 	now time.Time,
-	allowStaleClaim bool,
-) (bool, error) {
+) error {
 	if event == nil {
-		return false, store.ValidationErrorf("gateway event is required")
+		return store.ValidationErrorf("gateway event is required")
 	}
 	switch event.State {
 	case store.GatewayEventAccepted, store.GatewayEventQueued, store.GatewayEventTaskCreated:
 	case store.GatewayEventDispatching:
-		if allowStaleClaim {
-			if event.ClaimUntil != nil && event.ClaimUntil.After(now) {
-				return false, store.ErrConflict
-			}
-		} else if owner == "" || event.ClaimOwner != owner {
-			return false, store.ErrConflict
+		if owner == "" || event.ClaimOwner != owner {
+			return store.ErrConflict
 		}
 	default:
-		return false, store.ErrConflict
+		return store.ErrConflict
 	}
 	if event.SessionName != "" && event.TranscriptOrder > 0 {
 		metadataJSON, err := marshalStringMap(map[string]string{
 			"gateway": event.GatewayName, "binding": event.BindingName, "eventId": event.ID,
 		})
 		if err != nil {
-			return false, err
+			return err
 		}
 		messageResult, err := tx.ExecContext(ctx, `INSERT INTO session_messages
 			(namespace, session_name, message_id, sort_order, role, content, source_type, source_ref, metadata_json, created_at)
@@ -830,16 +911,16 @@ func expireGatewayEventTx(
 			reason, event.ID, metadataJSON, now,
 		)
 		if err != nil {
-			return false, err
+			return err
 		}
 		inserted, err := messageResult.RowsAffected()
 		if err != nil {
-			return false, err
+			return err
 		}
 		if inserted > 0 {
 			if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count = message_count + 1, updated_at = ?
 				WHERE namespace = ? AND name = ?`, now, event.Namespace, event.SessionName); err != nil {
-				return false, err
+				return err
 			}
 		}
 	}
@@ -847,24 +928,24 @@ func expireGatewayEventTx(
 		claim_owner = '', claim_until = NULL, updated_at = ? WHERE namespace = ? AND id = ?`,
 		store.GatewayEventExpired, reason, now, now, event.Namespace, event.ID)
 	if err != nil {
-		return false, err
+		return err
 	}
 	updated, err := result.RowsAffected()
 	if err != nil {
-		return false, err
+		return err
 	}
 	if updated == 0 {
-		return false, store.ErrConflict
+		return store.ErrConflict
 	}
 	if event.SessionName != "" && event.TaskName != "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET active_task = '', active_task_uid = '', updated_at = ?
 			WHERE namespace = ? AND name = ? AND active_task = ?
 			  AND active_task_uid = ?`,
 			now, event.Namespace, event.SessionName, event.TaskName, event.TaskUID); err != nil {
-			return false, err
+			return err
 		}
 	}
-	return true, nil
+	return nil
 }
 
 // ProjectGatewayTerminal atomically appends one terminal message, creates one outbox row,
@@ -1097,18 +1178,38 @@ func (s *Store) ClaimNextGatewayDelivery(ctx context.Context, namespace, owner s
 		return nil, err
 	}
 	row := tx.QueryRowContext(ctx, `SELECT `+prefixedColumns("delivery", gatewayDeliveryColumns)+` FROM gateway_deliveries delivery
+		LEFT JOIN gateway_events delivery_event
+		  ON delivery_event.namespace = delivery.namespace AND delivery_event.id = delivery.event_id
 		WHERE (? = '' OR delivery.namespace = ?) AND delivery.expires_at > ? AND delivery.next_attempt_at <= ?
 		  AND delivery.attempt_count < delivery.max_attempts
 		  AND (delivery.state IN (?, ?) OR (delivery.state = ? AND (delivery.claim_until IS NULL OR delivery.claim_until <= ?)))
 		  AND (delivery.session_name = '' OR NOT EXISTS (
 			SELECT 1 FROM gateway_deliveries earlier
+			LEFT JOIN gateway_events earlier_event
+			  ON earlier_event.namespace = earlier.namespace AND earlier_event.id = earlier.event_id
 			WHERE earlier.namespace = delivery.namespace AND earlier.session_name = delivery.session_name
-			  AND (earlier.created_at < delivery.created_at OR (earlier.created_at = delivery.created_at AND earlier.id < delivery.id))
+			  AND (
+			    (COALESCE(earlier_event.transcript_order, 0) > 0 AND COALESCE(delivery_event.transcript_order, 0) > 0 AND
+			      (earlier_event.transcript_order < delivery_event.transcript_order OR
+			       (earlier_event.transcript_order = delivery_event.transcript_order AND
+			        (earlier.created_at < delivery.created_at OR (earlier.created_at = delivery.created_at AND earlier.id < delivery.id)))))
+			    OR
+			    ((COALESCE(earlier_event.transcript_order, 0) <= 0 OR COALESCE(delivery_event.transcript_order, 0) <= 0) AND
+			      (earlier.created_at < delivery.created_at OR (earlier.created_at = delivery.created_at AND earlier.id < delivery.id)))
+			  )
 			  AND earlier.state IN (?, ?, ?)
+		  ))
+		  AND (delivery.session_name = '' OR NOT EXISTS (
+			SELECT 1 FROM gateway_events missing
+			WHERE missing.namespace = delivery.namespace AND missing.session_name = delivery.session_name
+			  AND missing.state = ? AND missing.delivery_id = ''
+			  AND missing.transcript_order > 0
+			  AND (COALESCE(delivery_event.transcript_order, 0) <= 0 OR missing.transcript_order < delivery_event.transcript_order)
 		  ))
 		ORDER BY delivery.created_at ASC, delivery.id ASC LIMIT 1`,
 		namespace, namespace, now, now, store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending, now,
 		store.GatewayDeliveryPending, store.GatewayDeliveryRetryScheduled, store.GatewayDeliverySending,
+		store.GatewayEventExpired,
 	)
 	delivery, err := scanGatewayDelivery(row)
 	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrNotFound) {
@@ -1359,8 +1460,9 @@ func (s *Store) GetGatewayQueueStats(ctx context.Context, namespace string) (sto
 	return stats, nil
 }
 
-// MaintainGatewayRecords expires pending work, compacts terminal event identities into bounded
-// tombstones, prunes their transcript messages, and removes empty gateway Sessions.
+// MaintainGatewayRecords expires pending deliveries, compacts terminal event identities into
+// bounded tombstones, prunes their transcript messages, and removes empty gateway Sessions.
+// Event expiry stays in the gateway service so it can atomically create a visible error delivery.
 func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, now, terminalCutoff time.Time) (store.GatewayMaintenanceResult, error) {
 	var result store.GatewayMaintenanceResult
 	now = now.UTC()
@@ -1378,25 +1480,6 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 	}
 	if count, rowsErr := tombstoneDelete.RowsAffected(); rowsErr == nil {
 		result.DeletedTombstones = int(count)
-	}
-
-	expiredEvents, err := listGatewayEventsForExpiry(ctx, tx, namespace, now)
-	if err != nil {
-		return result, err
-	}
-	for i := range expiredEvents {
-		expired, expireErr := expireGatewayEventTx(
-			ctx, tx, &expiredEvents[i], "", "The message expired before delivery completed.", now, true,
-		)
-		if errors.Is(expireErr, store.ErrConflict) {
-			continue
-		}
-		if expireErr != nil {
-			return result, expireErr
-		}
-		if expired {
-			result.ExpiredEvents++
-		}
 	}
 
 	deliveryExpiry, err := tx.ExecContext(ctx, `UPDATE gateway_deliveries SET state = ?, last_error = 'delivery expired',
@@ -1468,9 +1551,11 @@ func (s *Store) MaintainGatewayRecords(ctx context.Context, namespace string, no
 	eventDelete, err := tx.ExecContext(ctx, `DELETE FROM gateway_events AS event WHERE (? = '' OR event.namespace = ?)
 		AND event.updated_at < ?
 		AND event.state IN (?, ?, ?, ?)
+		AND (event.state <> ? OR event.delivery_id <> '')
 		AND NOT EXISTS (SELECT 1 FROM gateway_deliveries delivery
 			WHERE delivery.namespace = event.namespace AND delivery.event_id = event.id)`, namespace, namespace, terminalCutoff,
-		store.GatewayEventCompleted, store.GatewayEventRejected, store.GatewayEventDeadLettered, store.GatewayEventExpired)
+		store.GatewayEventCompleted, store.GatewayEventRejected, store.GatewayEventDeadLettered, store.GatewayEventExpired,
+		store.GatewayEventExpired)
 	if err != nil {
 		return result, err
 	}
@@ -1527,41 +1612,18 @@ type gatewaySessionKey struct {
 	Name      string
 }
 
-func listGatewayEventsForExpiry(
-	ctx context.Context, tx *sql.Tx, namespace string, now time.Time,
-) ([]store.GatewayEvent, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events
-		WHERE (? = '' OR namespace = ?) AND expires_at <= ?
-		  AND (state IN (?, ?) OR (state = ? AND (claim_until IS NULL OR claim_until <= ?)))
-		ORDER BY expires_at, received_at, id`,
-		namespace, namespace, now,
-		store.GatewayEventAccepted, store.GatewayEventQueued, store.GatewayEventDispatching, now,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close() //nolint:errcheck
-	var events []store.GatewayEvent
-	for rows.Next() {
-		event, err := scanGatewayEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, *event)
-	}
-	return events, rows.Err()
-}
-
 func listGatewayEventsForMaintenance(
 	ctx context.Context, tx *sql.Tx, namespace string, terminalCutoff time.Time,
 ) ([]store.GatewayEvent, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT `+gatewayEventColumns+` FROM gateway_events AS event
 		WHERE (? = '' OR event.namespace = ?) AND event.updated_at < ?
 		  AND event.state IN (?, ?, ?, ?)
+		  AND (event.state <> ? OR event.delivery_id <> '')
 		  AND NOT EXISTS (SELECT 1 FROM gateway_deliveries delivery
 			WHERE delivery.namespace = event.namespace AND delivery.event_id = event.id)
 		ORDER BY event.updated_at, event.id`, namespace, namespace, terminalCutoff,
-		store.GatewayEventCompleted, store.GatewayEventRejected, store.GatewayEventDeadLettered, store.GatewayEventExpired)
+		store.GatewayEventCompleted, store.GatewayEventRejected, store.GatewayEventDeadLettered, store.GatewayEventExpired,
+		store.GatewayEventExpired)
 	if err != nil {
 		return nil, err
 	}

@@ -509,6 +509,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		if !hasFrames {
+			if r.ResultStore != nil {
+				if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+			}
 			if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
 				if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
 					if shouldWait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {

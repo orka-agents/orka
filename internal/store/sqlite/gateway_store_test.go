@@ -47,6 +47,28 @@ func testGatewayEvent(now time.Time, suffix string) store.GatewayEvent {
 	}
 }
 
+func attachDeliveredExpiryDelivery(
+	t *testing.T, s *Store, ctx context.Context, event store.GatewayEvent, completedAt time.Time,
+) {
+	t.Helper()
+	deliveredAt := completedAt
+	deliveryID := "gdl-" + event.ID
+	if _, _, err := s.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: event.ID, Reason: "expired", CompletedAt: completedAt,
+		Delivery: store.GatewayDelivery{
+			ID: deliveryID, IdempotencyID: deliveryID, Namespace: event.Namespace,
+			NamespaceUID: event.NamespaceUID, GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+			GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
+			SessionName: event.SessionName, Kind: "error", State: store.GatewayDeliveryDelivered,
+			AccountID: event.AccountID, ContextID: event.ContextID, ReplyTarget: event.ReplyTarget,
+			Text: "expired", MaxAttempts: 10, NextAttemptAt: completedAt, ExpiresAt: completedAt.Add(time.Hour),
+			ProviderMessageID: "provider-" + event.ID, CreatedAt: completedAt, UpdatedAt: completedAt, DeliveredAt: &deliveredAt,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGatewayEventAdmissionDeduplicatesTranscript(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -158,12 +180,12 @@ func TestGatewayBackgroundClaimsAndMaintenanceRespectNamespace(t *testing.T) {
 		}
 	}
 	result, err := s.MaintainGatewayRecords(ctx, "team-a", now, now.Add(-time.Hour))
-	if err != nil || result.ExpiredEvents != 1 || result.ExpiredDeliveries != 1 {
+	if err != nil || result.ExpiredEvents != 0 || result.ExpiredDeliveries != 1 {
 		t.Fatalf("scoped maintenance = (%+v, %v)", result, err)
 	}
 	storedEventA, err := s.GetGatewayEvent(ctx, "team-a", expiredEventA.ID)
-	if err != nil || storedEventA.State != store.GatewayEventExpired {
-		t.Fatalf("team-a expired event = (%+v, %v)", storedEventA, err)
+	if err != nil || storedEventA.State != store.GatewayEventQueued {
+		t.Fatalf("team-a active event was mutated by maintenance = (%+v, %v)", storedEventA, err)
 	}
 	storedEventB, err := s.GetGatewayEvent(ctx, teamB, expiredEventB.ID)
 	if err != nil || storedEventB.State != store.GatewayEventQueued {
@@ -339,6 +361,84 @@ func TestGatewayMaintenanceExpiresAndCleans(t *testing.T) {
 	}
 }
 
+func TestExpiryProjectionRepairsLegacyExpiredEventWithoutDelivery(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	event := testGatewayEvent(now, "repair-expired")
+	if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+		Event: event, AppendUserMessage: true, PendingLimit: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const reason = "The message expired before execution could start."
+	if err := s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", reason, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	delivery := store.GatewayDelivery{
+		ID: "gdl-repair-expired", IdempotencyID: "gdl-repair-expired",
+		Namespace: event.Namespace, NamespaceUID: event.NamespaceUID,
+		GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+		GatewayName: event.GatewayName, BindingName: event.BindingName,
+		EventID: event.ID, TaskName: event.TaskName, SessionName: event.SessionName,
+		Kind: "error", State: store.GatewayDeliveryPending,
+		AccountID: event.AccountID, ContextID: event.ContextID, ReplyTarget: event.ReplyTarget,
+		Text: reason, MaxAttempts: 10, NextAttemptAt: now.Add(time.Second),
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+	}
+	stored, created, err := s.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: event.ID, Reason: reason, Delivery: delivery, CompletedAt: now.Add(time.Second),
+	})
+	if err != nil || !created || stored.ID != delivery.ID {
+		t.Fatalf("ExpireGatewayEventWithDelivery() = (%+v, %v, %v)", stored, created, err)
+	}
+	storedEvent, err := s.GetGatewayEvent(ctx, event.Namespace, event.ID)
+	if err != nil || storedEvent.State != store.GatewayEventExpired || storedEvent.DeliveryID != delivery.ID {
+		t.Fatalf("repaired event = (%+v, %v)", storedEvent, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET delivery_id = '' WHERE namespace = ? AND id = ?`, event.Namespace, event.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, created, err = s.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: event.ID, Reason: reason, Delivery: delivery, CompletedAt: now.Add(2 * time.Second),
+	})
+	if err != nil || created || stored.ID != delivery.ID {
+		t.Fatalf("existing delivery repair = (%+v, %v, %v)", stored, created, err)
+	}
+	storedEvent, err = s.GetGatewayEvent(ctx, event.Namespace, event.ID)
+	if err != nil || storedEvent.DeliveryID != delivery.ID {
+		t.Fatalf("relinked event = (%+v, %v)", storedEvent, err)
+	}
+}
+
+func TestMaintenancePreservesExpiredEventUntilDeliveryRepair(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	completedAt := now.Add(-31 * 24 * time.Hour)
+	event := testGatewayEvent(completedAt.Add(-time.Hour), "preserve-unrepaired")
+	event.ExpiresAt = completedAt
+	if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+		Event: event, AppendUserMessage: true, PendingLimit: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", completedAt); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.MaintainGatewayRecords(ctx, event.Namespace, now, now.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeletedEvents != 0 || result.UpsertedTombstones != 0 {
+		t.Fatalf("maintenance removed unrepaired event: %+v", result)
+	}
+	stored, err := s.GetGatewayEvent(ctx, event.Namespace, event.ID)
+	if err != nil || stored.State != store.GatewayEventExpired || stored.DeliveryID != "" {
+		t.Fatalf("preserved event = (%+v, %v)", stored, err)
+	}
+}
+
 func TestGatewayMaintenanceCompactsSessionHistoryIntoBoundedTombstone(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -352,6 +452,21 @@ func TestGatewayMaintenanceCompactsSessionHistoryIntoBoundedTombstone(t *testing
 		t.Fatal(err)
 	}
 	if err := s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", completedAt); err != nil {
+		t.Fatal(err)
+	}
+	deliveredAt := completedAt
+	if _, _, err := s.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: event.ID, Reason: "expired", CompletedAt: completedAt,
+		Delivery: store.GatewayDelivery{
+			ID: "gdl-compacted", IdempotencyID: "gdl-compacted", Namespace: event.Namespace,
+			NamespaceUID: event.NamespaceUID, GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+			GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
+			SessionName: event.SessionName, Kind: "error", State: store.GatewayDeliveryDelivered,
+			AccountID: event.AccountID, ContextID: event.ContextID, ReplyTarget: event.ReplyTarget,
+			Text: "expired", MaxAttempts: 10, NextAttemptAt: completedAt, ExpiresAt: completedAt.Add(time.Hour),
+			ProviderMessageID: "provider-compacted", CreatedAt: completedAt, UpdatedAt: completedAt, DeliveredAt: &deliveredAt,
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -937,6 +1052,125 @@ func TestGatewayProjectionRotationDoesNotStarveLaterCandidates(t *testing.T) {
 	}
 }
 
+func TestGatewayDeliveryClaimUsesTranscriptOrderWithinSession(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	first := testGatewayEvent(now, "delivery-order-first")
+	second := testGatewayEvent(now.Add(time.Second), "delivery-order-second")
+	second.SessionName = first.SessionName
+	for _, event := range []store.GatewayEvent{first, second} {
+		if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+			Event: event, AppendUserMessage: true, PendingLimit: 100,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeDelivery := func(event store.GatewayEvent, id string, createdAt time.Time) *store.GatewayDelivery {
+		return &store.GatewayDelivery{
+			ID: id, IdempotencyID: id, Namespace: event.Namespace, NamespaceUID: event.NamespaceUID,
+			GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+			GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
+			SessionName: event.SessionName, Kind: "error", State: store.GatewayDeliveryPending,
+			AccountID: event.AccountID, ContextID: event.ContextID, ReplyTarget: event.ReplyTarget,
+			Text: "expired", MaxAttempts: 10, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour),
+			CreatedAt: createdAt, UpdatedAt: createdAt,
+		}
+	}
+	firstDelivery := makeDelivery(first, "gdl-delivery-order-first", now.Add(2*time.Second))
+	secondDelivery := makeDelivery(second, "gdl-delivery-order-second", now.Add(time.Second))
+	for _, delivery := range []*store.GatewayDelivery{secondDelivery, firstDelivery} {
+		if _, _, err := s.CreateGatewayDelivery(ctx, delivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claimed, err := s.ClaimNextGatewayDelivery(ctx, "default", "worker", now.Add(3*time.Second), time.Minute)
+	if err != nil || claimed.ID != firstDelivery.ID {
+		t.Fatalf("first delivery claim = (%+v, %v), want %s", claimed, err, firstDelivery.ID)
+	}
+}
+
+func TestGatewayDeliveryClaimWaitsForEarlierExpiredDeliveryRepair(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	first := testGatewayEvent(now, "missing-delivery-first")
+	second := testGatewayEvent(now.Add(time.Second), "missing-delivery-second")
+	second.SessionName = first.SessionName
+	for _, event := range []store.GatewayEvent{first, second} {
+		if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+			Event: event, AppendUserMessage: true, PendingLimit: 100,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.ExpireGatewayEvent(ctx, first.Namespace, first.ID, "", "legacy expiry", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	secondDelivery := &store.GatewayDelivery{
+		ID: "gdl-missing-delivery-second", IdempotencyID: "gdl-missing-delivery-second",
+		Namespace: second.Namespace, NamespaceUID: second.NamespaceUID,
+		GatewayUID: second.GatewayUID, GatewayGeneration: second.GatewayGeneration,
+		GatewayName: second.GatewayName, BindingName: second.BindingName, EventID: second.ID,
+		SessionName: second.SessionName, Kind: "final", State: store.GatewayDeliveryPending,
+		AccountID: second.AccountID, ContextID: second.ContextID, ReplyTarget: second.ReplyTarget,
+		Text: "later", MaxAttempts: 10, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour),
+		CreatedAt: now.Add(3 * time.Second), UpdatedAt: now.Add(3 * time.Second),
+	}
+	if _, _, err := s.CreateGatewayDelivery(ctx, secondDelivery); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimNextGatewayDelivery(ctx, "default", "worker", now.Add(4*time.Second), time.Minute); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("later delivery bypassed missing predecessor: %v", err)
+	}
+	firstDelivery := *secondDelivery
+	firstDelivery.ID = "gdl-missing-delivery-first"
+	firstDelivery.IdempotencyID = firstDelivery.ID
+	firstDelivery.EventID = first.ID
+	firstDelivery.Text = "earlier expiry"
+	firstDelivery.CreatedAt = now.Add(2 * time.Second)
+	firstDelivery.UpdatedAt = firstDelivery.CreatedAt
+	if _, _, err := s.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: first.ID, Reason: "legacy expiry", Delivery: firstDelivery, CompletedAt: now.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimNextGatewayDelivery(ctx, "default", "worker", now.Add(4*time.Second), time.Minute)
+	if err != nil || claimed.ID != firstDelivery.ID {
+		t.Fatalf("first claim after repair = (%+v, %v)", claimed, err)
+	}
+}
+
+func TestGatewayExpiryListingProcessesOldestDeadlineFirst(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	oldest := testGatewayEvent(now, "expiry-oldest")
+	oldest.SessionName = "expiry-session-oldest"
+	oldest.ExpiresAt = now.Add(time.Minute)
+	middle := testGatewayEvent(now.Add(time.Second), "expiry-middle")
+	middle.SessionName = "expiry-session-middle"
+	middle.ExpiresAt = now.Add(2 * time.Minute)
+	newest := testGatewayEvent(now.Add(2*time.Second), "expiry-newest")
+	newest.SessionName = "expiry-session-newest"
+	newest.ExpiresAt = now.Add(3 * time.Minute)
+	for _, event := range []store.GatewayEvent{newest, oldest, middle} {
+		if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+			Event: event, AppendUserMessage: true, PendingLimit: 100,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cutoff := now.Add(4 * time.Minute)
+	listed, err := s.ListGatewayEvents(ctx, store.GatewayEventFilter{
+		States: []store.GatewayEventState{store.GatewayEventQueued}, ExpiresBefore: &cutoff,
+		OrderByExpiry: true, Limit: 2,
+	})
+	if err != nil || len(listed) != 2 || listed[0].ID != oldest.ID || listed[1].ID != middle.ID {
+		t.Fatalf("expiry order = (%#v, %v)", listed, err)
+	}
+}
+
 func TestGatewayDispatchUsesCommittedTranscriptOrder(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -1289,6 +1523,7 @@ func TestGatewayTombstoneDuplicateBypassesCapacityLimit(t *testing.T) {
 	if err := s.ExpireGatewayEvent(ctx, original.Namespace, original.ID, "", "expired", completedAt); err != nil {
 		t.Fatal(err)
 	}
+	attachDeliveredExpiryDelivery(t, s, ctx, original, completedAt)
 	result, err := s.MaintainGatewayRecords(ctx, original.Namespace, now, now.Add(-30*24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -1410,7 +1645,7 @@ func TestProjectGatewayTerminalRejectsMismatchedDeliveryIdentity(t *testing.T) {
 	}
 }
 
-func TestGatewayMaintenanceExpiresStaleIngressAndReleasesSessionReservations(t *testing.T) {
+func TestGatewayMaintenanceLeavesActiveEventsForServiceProjection(t *testing.T) {
 	states := []struct {
 		name        string
 		taskCreated bool
@@ -1473,16 +1708,18 @@ func TestGatewayMaintenanceExpiresStaleIngressAndReleasesSessionReservations(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantExpired := 1
-			wantState := store.GatewayEventExpired
+			wantState := store.GatewayEventQueued
 			wantActiveTask := ""
+			if tc.name == "dispatching" {
+				wantState = store.GatewayEventDispatching
+				wantActiveTask = stale.TaskName
+			}
 			if tc.taskCreated {
-				wantExpired = 0
 				wantState = store.GatewayEventTaskCreated
 				wantActiveTask = stale.TaskName
 			}
-			if result.ExpiredEvents != wantExpired {
-				t.Fatalf("ExpiredEvents = %d, want %d", result.ExpiredEvents, wantExpired)
+			if result.ExpiredEvents != 0 {
+				t.Fatalf("ExpiredEvents = %d, want 0", result.ExpiredEvents)
 			}
 			stored, err := s.GetGatewayEvent(ctx, stale.Namespace, stale.ID)
 			if err != nil || stored.State != wantState {
@@ -1495,14 +1732,7 @@ func TestGatewayMaintenanceExpiresStaleIngressAndReleasesSessionReservations(t *
 			if session.ActiveTask != wantActiveTask {
 				t.Fatalf("active task after maintenance = %q, want %q", session.ActiveTask, wantActiveTask)
 			}
-			claimed, err := s.ClaimNextGatewayEvent(ctx, stale.Namespace, "next-dispatcher", now, time.Minute)
-			if tc.taskCreated {
-				if !errors.Is(err, store.ErrNotFound) {
-					t.Fatalf("next claim = (%+v, %v), want retained TaskCreated reservation", claimed, err)
-				}
-			} else if err != nil || claimed.ID != later.ID {
-				t.Fatalf("next claim = (%+v, %v), want %s", claimed, err, later.ID)
-			}
+			_ = later
 		})
 	}
 }
@@ -1888,6 +2118,7 @@ func TestGatewayRetentionDeletesOnlyExactCanonicalMessages(t *testing.T) {
 	if err := s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", terminalAt); err != nil {
 		t.Fatal(err)
 	}
+	attachDeliveredExpiryDelivery(t, s, ctx, event, terminalAt)
 
 	prefixNeighbor := "gateway:" + event.ID + ":error-neighbor"
 	likeNeighbor := "gateway:gev-retention-XX:user"

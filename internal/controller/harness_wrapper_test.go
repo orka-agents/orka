@@ -73,6 +73,29 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperStartClearsStaleResult(t *testing.T) {
+	cfg := cliwrapper.DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task, agent := harnessWrapperTaskAndAgent()
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	if err := r.ResultStore.SaveResult(context.Background(), task.Namespace, task.Name, []byte("stale")); err != nil {
+		t.Fatal(err)
+	}
+	_ = runHarnessWrapperTaskToRunning(t, r, task)
+	if _, err := r.ResultStore.GetResult(context.Background(), task.Namespace, task.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetResult() after new turn start = %v, want ErrNotFound", err)
+	}
+}
+
 func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
 	t.Setenv(harnessWrapperAuthValueEnv, "x")
 	cfg := cliwrapper.DefaultConfig()

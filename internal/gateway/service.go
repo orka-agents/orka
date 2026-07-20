@@ -64,9 +64,15 @@ const (
 	defaultGatewayTaskTimeout     = 30 * time.Minute
 	minimumGatewayExecutionWindow = time.Second
 	gatewayTaskCleanupGrace       = 2 * time.Minute
+	gatewayResultProjectionGrace  = 30 * time.Second
+	minimumGatewayDeliveryWindow  = time.Minute
 )
 
-var gatewayTracer = otel.Tracer("github.com/orka-agents/orka/internal/gateway")
+var (
+	gatewayTracer             = otel.Tracer("github.com/orka-agents/orka/internal/gateway")
+	errGatewayBindingNotReady = errors.New("matching gateway binding is not ready")
+	errGatewayResultNotReady  = errors.New("gateway task result is not ready")
+)
 
 // Config controls bounded gateway processing behavior.
 type Config struct {
@@ -297,6 +303,9 @@ func (s *Service) processDeliveryBatch(ctx context.Context) error {
 
 func (s *Service) processCoreOnce(ctx context.Context) error {
 	var errs []error
+	if err := s.RepairExpiredEvents(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	if err := s.ExpireQueuedEvents(ctx); err != nil {
 		errs = append(errs, err)
 	}
@@ -317,21 +326,48 @@ func (s *Service) processCoreOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// ExpireQueuedEvents appends visible expiry errors for admitted work that never reached Task creation.
-func (s *Service) ExpireQueuedEvents(ctx context.Context) error {
+// RepairExpiredEvents creates missing outbox rows for records expired by older
+// versions or interrupted migrations before maintenance can compact them.
+func (s *Service) RepairExpiredEvents(ctx context.Context) error {
 	now := time.Now().UTC()
 	events, err := s.EventStore.ListGatewayEvents(ctx, store.GatewayEventFilter{
-		Namespace:     s.Config.Namespace,
-		States:        []store.GatewayEventState{store.GatewayEventAccepted, store.GatewayEventQueued},
-		ExpiresBefore: &now, Limit: s.Config.BatchSize,
+		Namespace: s.Config.Namespace, States: []store.GatewayEventState{store.GatewayEventExpired},
+		MissingDelivery: true, OrderByExpiry: true, SessionHeadOnly: true, Limit: s.Config.BatchSize,
 	})
 	if err != nil {
 		return err
 	}
 	var errs []error
 	for i := range events {
-		if err := s.EventStore.ExpireGatewayEvent(
-			ctx, events[i].Namespace, events[i].ID, "", "The message expired before execution could start.", now,
+		reason := strings.TrimSpace(events[i].StateMessage)
+		if reason == "" {
+			reason = "The task could not be completed."
+		}
+		projectionAt := now.Add(time.Duration(i) * time.Nanosecond)
+		if err := s.expireGatewayEvent(ctx, &events[i], "", reason, projectionAt, false); err != nil &&
+			!errors.Is(err, store.ErrConflict) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// ExpireQueuedEvents appends visible expiry errors for admitted work that never reached Task creation.
+func (s *Service) ExpireQueuedEvents(ctx context.Context) error {
+	now := time.Now().UTC()
+	events, err := s.EventStore.ListGatewayEvents(ctx, store.GatewayEventFilter{
+		Namespace:     s.Config.Namespace,
+		States:        []store.GatewayEventState{store.GatewayEventAccepted, store.GatewayEventQueued},
+		ExpiresBefore: &now, OrderByExpiry: true, SessionHeadOnly: true, Limit: s.Config.BatchSize,
+	})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for i := range events {
+		projectionAt := now.Add(time.Duration(i) * time.Nanosecond)
+		if err := s.expireGatewayEvent(
+			ctx, &events[i], "", "The message expired before execution could start.", projectionAt, false,
 		); err != nil && !errors.Is(err, store.ErrConflict) {
 			errs = append(errs, err)
 		}
@@ -435,6 +471,9 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 	}
 
 	binding, rejection, err := s.resolveBinding(ctx, namespace, object.Name, eventEnvelope)
+	if errors.Is(err, errGatewayBindingNotReady) {
+		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway binding is not ready"}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve GatewayBinding: %w", err)
 	}
@@ -603,8 +642,8 @@ func (s *Service) DispatchOnce(ctx context.Context) error {
 		return err
 	}
 	if event.ExpiresAt.Sub(freshNow) < minimumGatewayExecutionWindow {
-		if err := s.EventStore.ExpireGatewayEvent(
-			ctx, event.Namespace, event.ID, s.Owner, "The message expired before execution could start.", freshNow,
+		if err := s.expireGatewayEvent(
+			ctx, event, s.Owner, "The message expired before execution could start.", freshNow, false,
 		); err != nil && !errors.Is(err, store.ErrConflict) {
 			return err
 		}
@@ -736,9 +775,7 @@ func (s *Service) handleExpiredDispatchClaim(
 	err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, existing)
 	switch {
 	case apierrors.IsNotFound(err):
-		err = s.EventStore.ExpireGatewayEvent(
-			ctx, event.Namespace, event.ID, s.Owner, "The message expired before execution could start.", now,
-		)
+		err = s.expireGatewayEvent(ctx, event, s.Owner, "The message expired before execution could start.", now, false)
 		if err == nil {
 			gatewayDeadLettersTotal.WithLabelValues("event").Inc()
 		}
@@ -754,9 +791,7 @@ func (s *Service) handleExpiredDispatchClaim(
 			)
 		}
 	}
-	err = s.EventStore.ExpireGatewayEvent(
-		ctx, event.Namespace, event.ID, s.Owner, "The message expired after a Task identity conflict.", now,
-	)
+	err = s.expireGatewayEvent(ctx, event, s.Owner, "The message expired after a Task identity conflict.", now, false)
 	if err == nil {
 		gatewayDeadLettersTotal.WithLabelValues("event").Inc()
 	}
@@ -828,10 +863,59 @@ func (s *Service) expireDispatchEvent(ctx context.Context, event *store.GatewayE
 	if err := s.deleteUnlinkedGatewayTask(ctx, event); err != nil {
 		return err
 	}
-	err := s.EventStore.ExpireGatewayEvent(ctx, event.Namespace, event.ID, s.Owner, reason, time.Now().UTC())
+	err := s.expireGatewayEvent(ctx, event, s.Owner, reason, time.Now().UTC(), false)
 	if err == nil {
 		gatewayDeadLettersTotal.WithLabelValues("event").Inc()
 	}
+	return err
+}
+
+func (s *Service) expireGatewayEvent(
+	ctx context.Context,
+	event *store.GatewayEvent,
+	owner, reason string,
+	now time.Time,
+	taskIdentityVerified bool,
+) error {
+	if event == nil {
+		return store.ValidationErrorf("gateway event is required")
+	}
+	replyTarget := strings.TrimSpace(event.ReplyTarget)
+	if replyTarget == "" {
+		replyTarget = strings.TrimSpace(event.ContextID)
+	}
+	if replyTarget == "" {
+		return s.EventStore.ExpireGatewayEvent(ctx, event.Namespace, event.ID, owner, reason, now)
+	}
+	expiresAt := gatewayDeliveryExpiresAt(event.ExpiresAt, now, s.Config)
+	deliveryID := gatewayDeliveryID(event, "expiry")
+	createdAt := now
+	if event.State == store.GatewayEventExpired && event.CompletedAt != nil {
+		createdAt = event.CompletedAt.Add(time.Duration(event.TranscriptOrder) * time.Nanosecond)
+	}
+	taskName := ""
+	metadata := map[string]string{"eventId": event.ID}
+	if taskIdentityVerified && event.TaskUID != "" {
+		taskName = event.TaskName
+		metadata["taskName"] = event.TaskName
+	}
+	_, _, err := s.EventStore.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: event.ID,
+		Owner:   owner,
+		Reason:  reason,
+		Delivery: store.GatewayDelivery{
+			ID: deliveryID, IdempotencyID: deliveryID, Namespace: event.Namespace, NamespaceUID: event.NamespaceUID,
+			GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+			GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
+			TaskName: taskName, SessionName: event.SessionName, Kind: protocol.DeliveryKindError,
+			State: store.GatewayDeliveryPending, AccountID: event.AccountID, ContextID: event.ContextID,
+			ThreadID: event.ThreadID, ReplyTarget: replyTarget, Text: reason,
+			Metadata:    metadata,
+			MaxAttempts: s.Config.DeliveryMaxAttempts, NextAttemptAt: now, ExpiresAt: expiresAt,
+			TraceParent: event.TraceParent, TraceState: event.TraceState, CreatedAt: createdAt, UpdatedAt: now,
+		},
+		CompletedAt: now,
+	})
 	return err
 }
 
@@ -848,6 +932,9 @@ func (s *Service) deleteUnlinkedGatewayTask(ctx context.Context, event *store.Ga
 		return fmt.Errorf("read unlinked gateway Task before expiry: %w", err)
 	}
 	if !gatewayTaskCorrelatesWithEvent(task, event) {
+		return nil
+	}
+	if !task.DeletionTimestamp.IsZero() && time.Since(task.DeletionTimestamp.Time) >= gatewayTaskCleanupGrace {
 		return nil
 	}
 	if task.DeletionTimestamp.IsZero() {
@@ -899,12 +986,8 @@ func (s *Service) createOrFindGatewayTask(
 			event.State = store.GatewayEventExpired
 			event.StateMessage = reason
 		}
-		denialErr := error(nil)
-		if expireErr == nil {
-			denialErr = s.ensureDenialDelivery(ctx, event, reason)
-		}
 		gatewayDispatchTotal.WithLabelValues("create_rejected").Inc()
-		return nil, false, false, errors.Join(expireErr, denialErr)
+		return nil, false, false, expireErr
 	}
 	// Unknown transport/server errors may be returned after the API server commits.
 	// Keep the Dispatching claim intact so lease recovery reconciles before requeue.
@@ -986,9 +1069,7 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 		task := &corev1alpha1.Task{}
 		if err := s.freshReader().Get(ctx, client.ObjectKey{Namespace: event.Namespace, Name: event.TaskName}, task); err != nil {
 			if apierrors.IsNotFound(err) {
-				expireErr := s.EventStore.ExpireGatewayEvent(
-					ctx, event.Namespace, event.ID, "", "The linked task was deleted before a response could be delivered.", now,
-				)
+				expireErr := s.expireGatewayEvent(ctx, event, "", "The linked task was deleted before a response could be delivered.", now, false)
 				if expireErr != nil && !errors.Is(expireErr, store.ErrConflict) {
 					errs = append(errs, expireErr)
 				} else if expireErr == nil {
@@ -1002,8 +1083,8 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 		}
 		if event.TaskUID == "" || string(task.UID) != event.TaskUID || !gatewayTaskCorrelatesWithEvent(task, event) {
 			if !now.Before(event.ExpiresAt) {
-				if expireErr := s.EventStore.ExpireGatewayEvent(
-					ctx, event.Namespace, event.ID, "", "The task identity changed before a response could be delivered.", now,
+				if expireErr := s.expireGatewayEvent(
+					ctx, event, "", "The task identity changed before a response could be delivered.", now, false,
 				); expireErr != nil && !errors.Is(expireErr, store.ErrConflict) {
 					errs = append(errs, expireErr)
 				}
@@ -1015,6 +1096,10 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 		}
 		if isTerminalTaskPhase(task.Status.Phase) {
 			projected, err := s.projectTerminal(ctx, event, task)
+			if errors.Is(err, errGatewayResultNotReady) {
+				s.deferProjection(ctx, event, now)
+				continue
+			}
 			if err != nil {
 				errs = append(errs, err)
 				s.deferProjection(ctx, event, now)
@@ -1030,8 +1115,8 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 					errs = append(errs, err)
 				}
 			} else if now.Sub(task.DeletionTimestamp.Time) >= gatewayTaskCleanupGrace {
-				if err := s.EventStore.ExpireGatewayEvent(
-					ctx, event.Namespace, event.ID, "", "The task cleanup deadline was exceeded.", now,
+				if err := s.expireGatewayEvent(
+					ctx, event, "", "The task cleanup deadline was exceeded.", now, true,
 				); err != nil && !errors.Is(err, store.ErrConflict) {
 					errs = append(errs, err)
 				}
@@ -1067,22 +1152,27 @@ func (s *Service) projectTerminal(
 	messageID := "gateway:" + event.ID + ":error"
 	text := terminalErrorText(task.Status.Phase, task.Status.Message)
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		if s.ResultStore == nil || task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
-			return false, nil
+		resultReady := false
+		if s.ResultStore != nil {
+			result, err := s.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+			if err == nil {
+				resultReady = true
+				text = boundedText(string(result))
+				if strings.TrimSpace(text) == "" {
+					text = "The task completed without a text response."
+				}
+				kind = protocol.DeliveryKindFinal
+				messageID = "gateway:" + event.ID + ":assistant"
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return false, err
+			}
 		}
-		result, err := s.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-		if errors.Is(err, store.ErrNotFound) {
-			return false, nil
+		if !resultReady {
+			if task.Status.CompletionTime != nil && now.Before(task.Status.CompletionTime.Add(gatewayResultProjectionGrace)) {
+				return false, errGatewayResultNotReady
+			}
+			text = "The task completed, but its response could not be retrieved. Please try again."
 		}
-		if err != nil {
-			return false, err
-		}
-		text = boundedText(string(result))
-		if strings.TrimSpace(text) == "" {
-			text = "The task completed without a text response."
-		}
-		kind = protocol.DeliveryKindFinal
-		messageID = "gateway:" + event.ID + ":assistant"
 	}
 	deliveryID := gatewayDeliveryID(event, kind)
 	replyTarget := strings.TrimSpace(event.ReplyTarget)
@@ -1094,6 +1184,7 @@ func (s *Service) projectTerminal(
 		"eventId": event.ID, "taskName": task.Name, "deliveryId": deliveryID,
 	}
 	deliveryTrace := orkatracing.InjectContext(ctx)
+	deliveryExpiresAt := gatewayDeliveryExpiresAt(event.ExpiresAt, now, s.Config)
 	delivery := store.GatewayDelivery{
 		ID: deliveryID, IdempotencyID: deliveryID, Namespace: event.Namespace, NamespaceUID: event.NamespaceUID,
 		GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
@@ -1104,7 +1195,7 @@ func (s *Service) projectTerminal(
 		TraceParent: boundedTraceValue(deliveryTrace.Get("traceparent"), 256),
 		TraceState:  boundedTraceValue(deliveryTrace.Get("tracestate"), 1024),
 		State:       store.GatewayDeliveryPending, MaxAttempts: s.Config.DeliveryMaxAttempts,
-		NextAttemptAt: now, ExpiresAt: event.ExpiresAt, CreatedAt: now, UpdatedAt: now,
+		NextAttemptAt: now, ExpiresAt: deliveryExpiresAt, CreatedAt: now, UpdatedAt: now,
 	}
 	_, _, err := s.EventStore.ProjectGatewayTerminal(ctx, store.GatewayTerminalProjection{
 		EventID: event.ID,
@@ -1316,10 +1407,11 @@ func (s *Service) resolveBinding(ctx context.Context, namespace, gatewayName str
 		return nil, "", err
 	}
 	contextMatches := make([]*gatewayv1alpha1.GatewayBinding, 0)
-	authorized := make([]*gatewayv1alpha1.GatewayBinding, 0)
+	authorizedReady := make([]*gatewayv1alpha1.GatewayBinding, 0)
+	authorizedUnready := make([]*gatewayv1alpha1.GatewayBinding, 0)
 	for i := range list.Items {
 		binding := &list.Items[i]
-		if !binding.Status.Ready || binding.Status.ObservedGeneration != binding.Generation || binding.Spec.GatewayRef.Name != gatewayName {
+		if binding.Spec.GatewayRef.Name != gatewayName {
 			continue
 		}
 		match := binding.Spec.Match
@@ -1331,23 +1423,30 @@ func (s *Service) resolveBinding(ctx context.Context, namespace, gatewayName str
 		}
 		contextMatches = append(contextMatches, binding)
 		if senderAllowed(binding, event.Sender.ID) {
-			authorized = append(authorized, binding)
+			if binding.Status.Ready && binding.Status.ObservedGeneration == binding.Generation {
+				authorizedReady = append(authorizedReady, binding)
+			} else {
+				authorizedUnready = append(authorizedUnready, binding)
+			}
 		}
 	}
 	if len(contextMatches) == 0 {
 		return nil, "no ready binding matches this context", nil
 	}
-	if len(authorized) == 0 {
+	if len(authorizedReady) == 0 && len(authorizedUnready) == 0 {
 		return nil, "sender is not authorized for this context", nil
 	}
-	highest := authorized[0].Spec.Priority
-	for _, binding := range authorized[1:] {
+	if len(authorizedReady) == 0 {
+		return nil, "", errGatewayBindingNotReady
+	}
+	highest := authorizedReady[0].Spec.Priority
+	for _, binding := range authorizedReady[1:] {
 		if binding.Spec.Priority > highest {
 			highest = binding.Spec.Priority
 		}
 	}
 	winners := make([]*gatewayv1alpha1.GatewayBinding, 0, 1)
-	for _, binding := range authorized {
+	for _, binding := range authorizedReady {
 		if binding.Spec.Priority == highest {
 			winners = append(winners, binding)
 		}
@@ -1878,6 +1977,15 @@ func gatewayTaskTimeout(event *store.GatewayEvent, configured *metav1.Duration, 
 		duration = remaining
 	}
 	return &metav1.Duration{Duration: duration}
+}
+
+func gatewayDeliveryExpiresAt(eventExpiresAt, now time.Time, config Config) time.Time {
+	extension := max(config.EventExpiry, 2*config.ClaimLease, minimumGatewayDeliveryWindow)
+	minimum := now.Add(extension)
+	if eventExpiresAt.After(minimum) {
+		return eventExpiresAt
+	}
+	return minimum
 }
 
 func boundedText(value string) string {

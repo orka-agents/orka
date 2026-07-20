@@ -24,10 +24,11 @@ import (
 type Server struct {
 	authValue string
 
-	mu         sync.Mutex
-	deliveries map[string]protocol.DeliveryRequest
-	responses  map[string]protocol.DeliveryResponse
-	attempts   map[string]int
+	mu            sync.Mutex
+	deliveries    map[string]protocol.DeliveryRequest
+	deliveryOrder []string
+	responses     map[string]protocol.DeliveryResponse
+	attempts      map[string]int
 }
 
 // New creates a reference adapter protected by one outbound bearer token.
@@ -53,9 +54,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Deliveries() []protocol.DeliveryRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := make([]protocol.DeliveryRequest, 0, len(s.deliveries))
-	for _, delivery := range s.deliveries {
-		result = append(result, delivery)
+	result := make([]protocol.DeliveryRequest, 0, len(s.deliveryOrder))
+	for _, id := range s.deliveryOrder {
+		result = append(result, s.deliveries[id])
 	}
 	return result
 }
@@ -150,6 +151,7 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		response = existing
 	} else {
 		s.deliveries[delivery.DeliveryID] = delivery
+		s.deliveryOrder = append(s.deliveryOrder, delivery.DeliveryID)
 		s.responses[delivery.DeliveryID] = response
 	}
 	s.mu.Unlock()

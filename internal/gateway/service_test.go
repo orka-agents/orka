@@ -163,6 +163,29 @@ func gatewayEnvelopeBody(t *testing.T, event protocol.EventEnvelope) []byte {
 	return body
 }
 
+func attachDeliveredExpiryDelivery(
+	t *testing.T, s *sqlite.Store, ctx context.Context, event store.GatewayEvent, completedAt time.Time,
+) {
+	t.Helper()
+	deliveredAt := completedAt
+	deliveryID := "gdl-" + event.ID
+	if _, _, err := s.ExpireGatewayEventWithDelivery(ctx, store.GatewayExpiryProjection{
+		EventID: event.ID, Reason: "expired", CompletedAt: completedAt,
+		Delivery: store.GatewayDelivery{
+			ID: deliveryID, IdempotencyID: deliveryID, Namespace: event.Namespace,
+			NamespaceUID: event.NamespaceUID, GatewayUID: event.GatewayUID, GatewayGeneration: event.GatewayGeneration,
+			GatewayName: event.GatewayName, BindingName: event.BindingName, EventID: event.ID,
+			TaskName: event.TaskName, SessionName: event.SessionName, Kind: protocol.DeliveryKindError,
+			State: store.GatewayDeliveryDelivered, AccountID: event.AccountID, ContextID: event.ContextID,
+			ReplyTarget: event.ReplyTarget, Text: "expired", MaxAttempts: 10,
+			NextAttemptAt: completedAt, ExpiresAt: completedAt.Add(time.Hour),
+			ProviderMessageID: "provider-" + event.ID, CreatedAt: completedAt, UpdatedAt: completedAt, DeliveredAt: &deliveredAt,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServiceEndToEndAndDuplicateSafety(t *testing.T) {
 	service, sqliteStore, adapter := newGatewayServiceFixture(t)
 	ctx := context.Background()
@@ -701,7 +724,7 @@ func TestRetryDeliveryRejectsWhenProcessingDisabled(t *testing.T) {
 }
 
 func TestMissingLinkedTaskTerminalizesWithoutReexecution(t *testing.T) {
-	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
 	ctx := context.Background()
 	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "missing-task", "user-1"))
 	if err != nil {
@@ -731,6 +754,14 @@ func TestMissingLinkedTaskTerminalizesWithoutReexecution(t *testing.T) {
 	}
 	if err := service.DispatchOnce(ctx); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("DispatchOnce() error = %v, want no re-execution", err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatalf("DeliverOnce() error = %v", err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError {
+		t.Fatalf("missing-task deliveries = %#v", deliveries)
+	} else if deliveries[0].TaskRef != nil {
+		t.Fatalf("missing-task expiry leaked taskRef: %+v", deliveries[0].TaskRef)
 	}
 	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, &corev1alpha1.Task{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("deleted Task was recreated: %v", err)
@@ -907,6 +938,7 @@ func TestCleanupRetainedGatewayTasksDeletesOnlyOrphansPastCutoff(t *testing.T) {
 	if err := sqliteStore.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", cutoff.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	attachDeliveredExpiryDelivery(t, sqliteStore, ctx, event, cutoff.Add(-time.Hour))
 	if _, err := sqliteStore.MaintainGatewayRecords(ctx, "", now, cutoff); err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +1017,7 @@ func TestDeterministicTaskCollisionRequiresFullExpectedTask(t *testing.T) {
 }
 
 func TestQueuedEventDoesNotCrossBindingGeneration(t *testing.T) {
-	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
 	ctx := context.Background()
 	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "binding-change", "user-1"))
 	if err != nil {
@@ -1014,6 +1046,14 @@ func TestQueuedEventDoesNotCrossBindingGeneration(t *testing.T) {
 	}
 	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, &corev1alpha1.Task{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("unexpected Task after binding change: %v", err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatalf("DeliverOnce() error = %v", err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError {
+		t.Fatalf("binding-change deliveries = %#v", deliveries)
+	} else if deliveries[0].TaskRef != nil {
+		t.Fatalf("pre-creation expiry leaked taskRef: %+v", deliveries[0].TaskRef)
 	}
 }
 
@@ -1166,7 +1206,7 @@ func TestDeliveryDoesNotCrossGatewayGeneration(t *testing.T) {
 }
 
 func TestExpiredLinkedTaskReleasesSessionWithVisibleError(t *testing.T) {
-	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
 	service.Config.EventExpiry = 25 * time.Millisecond
 	service.Config.PollInterval = time.Millisecond
 	ctx := context.Background()
@@ -1193,6 +1233,61 @@ func TestExpiredLinkedTaskReleasesSessionWithVisibleError(t *testing.T) {
 	if err != nil || session.ActiveTask != "" || len(session.Messages) != 2 || session.Messages[1].Role != "assistant" {
 		t.Fatalf("Session after expiry = (%+v, %v)", session, err)
 	}
+	projected, err := sqliteStore.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{Namespace: "default", EventID: event.ID})
+	if err != nil || len(projected) != 1 {
+		t.Fatalf("expired-task outbox = (%#v, %v)", projected, err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatalf("DeliverOnce() error = %v", err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError {
+		t.Fatalf("expired-task deliveries = %#v", deliveries)
+	}
+}
+
+func TestDeleteUnlinkedGatewayTaskStopsWaitingAfterCleanupGrace(t *testing.T) {
+	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "stuck-unlinked-task", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := sqliteStore.ClaimNextGatewayEvent(ctx, "default", "stale-owner", time.Now().UTC(), time.Minute)
+	if err != nil || claimed.ID != accepted.EventID {
+		t.Fatalf("claimed event = (%+v, %v)", claimed, err)
+	}
+	binding := &gatewayv1alpha1.GatewayBinding{}
+	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: claimed.BindingName}, binding); err != nil {
+		t.Fatal(err)
+	}
+	task := taskForGatewayEvent(claimed, binding, time.Now().UTC())
+	task.Finalizers = []string{"test.invalid/stuck"}
+	if err := service.Client.Create(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	deletedAt := metav1.NewTime(time.Now().Add(-gatewayTaskCleanupGrace - time.Second))
+	service.Client = &staleDeletingTaskClient{Client: service.Client, taskName: task.Name, deletedAt: deletedAt}
+	if err := service.deleteUnlinkedGatewayTask(ctx, claimed); err != nil {
+		t.Fatalf("deleteUnlinkedGatewayTask() after grace = %v", err)
+	}
+}
+
+type staleDeletingTaskClient struct {
+	client.Client
+	taskName  string
+	deletedAt metav1.Time
+}
+
+func (c *staleDeletingTaskClient) Get(
+	ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption,
+) error {
+	if err := c.Client.Get(ctx, key, object, opts...); err != nil {
+		return err
+	}
+	if task, ok := object.(*corev1alpha1.Task); ok && task.Name == c.taskName {
+		task.DeletionTimestamp = c.deletedAt.DeepCopy()
+	}
+	return nil
 }
 
 func TestGatewayTaskTimeoutUsesRemainingEventLifetime(t *testing.T) {
@@ -1451,7 +1546,7 @@ func TestExpiredDispatchClaimUsesTimeAfterDependencyResolution(t *testing.T) {
 }
 
 func TestTerminalResultIsProjectedAfterEventDeadline(t *testing.T) {
-	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
 	service.Config.EventExpiry = 1100 * time.Millisecond
 	ctx := context.Background()
 	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "late-projection", "user-1"))
@@ -1490,6 +1585,326 @@ func TestTerminalResultIsProjectedAfterEventDeadline(t *testing.T) {
 	session, err := sqliteStore.GetSession(ctx, "default", event.SessionName)
 	if err != nil || len(session.Messages) != 2 || session.Messages[1].Content != "completed before deadline" {
 		t.Fatalf("late-projected Session = (%+v, %v)", session, err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatalf("DeliverOnce() after late projection = %v", err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Text != "completed before deadline" {
+		t.Fatalf("late-projected adapter deliveries = %#v", deliveries)
+	}
+}
+
+func TestSucceededTaskWithoutResultDoesNotBlockSession(t *testing.T) {
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	first, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "missing-result-first", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "missing-result-second", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	firstEvent, err := sqliteStore.GetGatewayEvent(ctx, "default", first.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTask := &corev1alpha1.Task{}
+	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: firstEvent.TaskName}, firstTask); err != nil {
+		t.Fatal(err)
+	}
+	completed := metav1.NewTime(time.Now().Add(-gatewayResultProjectionGrace - time.Second))
+	firstTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	firstTask.Status.CompletionTime = &completed
+	if err := service.Client.Status().Update(ctx, firstTask); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ProjectTerminals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError {
+		t.Fatalf("missing-result deliveries = %#v", deliveries)
+	}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	secondEvent, err := sqliteStore.GetGatewayEvent(ctx, "default", second.EventID)
+	if err != nil || secondEvent.State != store.GatewayEventTaskCreated {
+		t.Fatalf("second event after missing result = (%+v, %v)", secondEvent, err)
+	}
+}
+
+func TestSucceededTaskWithoutResultRefUsesPersistedResult(t *testing.T) {
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "result-without-ref", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqliteStore.SaveResult(ctx, "default", event.TaskName, []byte("persisted despite missing ref")); err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{}
+	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
+		t.Fatal(err)
+	}
+	completed := metav1.NewTime(time.Now().Add(-gatewayResultProjectionGrace - time.Second))
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.CompletionTime = &completed
+	task.Status.ResultRef = nil
+	if err := service.Client.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ProjectTerminals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindFinal || deliveries[0].Text != "persisted despite missing ref" {
+		t.Fatalf("persisted-result deliveries = %#v", deliveries)
+	}
+}
+
+func TestExpiredQueuedEventsDeliverInAdmissionOrder(t *testing.T) {
+	service, _, adapter := newGatewayServiceFixture(t)
+	service.Config.EventExpiry = 25 * time.Millisecond
+	service.Config.BatchSize = 2
+	ctx := context.Background()
+	first, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "expiry-order-first", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	second, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "expiry-order-second", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if err := service.ExpireQueuedEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExpireQueuedEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deliveries := adapter.Deliveries()
+	if len(deliveries) != 2 || deliveries[0].OriginatingEvent != first.EventID || deliveries[1].OriginatingEvent != second.EventID {
+		t.Fatalf("expiry delivery order = %#v", deliveries)
+	}
+}
+
+func TestRepairExpiredEventsCreatesVisibleDelivery(t *testing.T) {
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "repair-expired", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reason = "The message expired before execution could start."
+	if err := sqliteStore.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", reason, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RepairExpiredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError || deliveries[0].Text != reason {
+		t.Fatalf("repaired deliveries = %#v", deliveries)
+	}
+}
+
+func TestExpiredMissingDeliveryBlocksLaterSessionExpiryUntilRepaired(t *testing.T) {
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
+	service.Config.EventExpiry = 25 * time.Millisecond
+	service.Config.BatchSize = 2
+	ctx := context.Background()
+	first, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "repair-order-first", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	second, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "repair-order-second", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEvent, err := sqliteStore.GetGatewayEvent(ctx, "default", first.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqliteStore.ExpireGatewayEvent(ctx, firstEvent.Namespace, firstEvent.ID, "", "legacy expiry", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if err := service.ExpireQueuedEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	secondEvent, err := sqliteStore.GetGatewayEvent(ctx, "default", second.EventID)
+	if err != nil || secondEvent.State != store.GatewayEventQueued {
+		t.Fatalf("later event before repair = (%+v, %v), want Queued", secondEvent, err)
+	}
+	if err := service.RepairExpiredEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExpireQueuedEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deliveries := adapter.Deliveries()
+	if len(deliveries) != 2 || deliveries[0].OriginatingEvent != first.EventID || deliveries[1].OriginatingEvent != second.EventID {
+		t.Fatalf("repair delivery order = %#v", deliveries)
+	}
+}
+
+func TestGatewayDeliveryExpiryIncludesStaleClaimRecoveryWindow(t *testing.T) {
+	now := time.Now().UTC()
+	got := gatewayDeliveryExpiresAt(now.Add(time.Second), now, Config{
+		EventExpiry: time.Second,
+		ClaimLease:  time.Minute,
+	})
+	if got.Sub(now) < 2*time.Minute {
+		t.Fatalf("delivery window = %s, want at least %s", got.Sub(now), 2*time.Minute)
+	}
+}
+
+func TestSucceededTaskResultGraceSurvivesEventDeadline(t *testing.T) {
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
+	service.Config.EventExpiry = 1100 * time.Millisecond
+	ctx := context.Background()
+	accepted, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "result-grace", "user-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event, err := sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{}
+	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
+		t.Fatal(err)
+	}
+	completed := metav1.Now()
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	task.Status.CompletionTime = &completed
+	if err := service.Client.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if err := service.ProjectTerminals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event, err = sqliteStore.GetGatewayEvent(ctx, "default", accepted.EventID)
+	if err != nil || event.State != store.GatewayEventTaskCreated {
+		t.Fatalf("event during result grace = (%+v, %v)", event, err)
+	}
+	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
+		t.Fatalf("Task was removed during result grace: %v", err)
+	}
+	completed = metav1.NewTime(time.Now().Add(-gatewayResultProjectionGrace - time.Second))
+	task.Status.CompletionTime = &completed
+	if err := service.Client.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ProjectTerminals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError {
+		t.Fatalf("result-grace deliveries = %#v", deliveries)
+	}
+}
+
+func TestMatchingUnreadyBindingIsRetryableNotDurablyRejected(t *testing.T) {
+	service, _, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	binding := &gatewayv1alpha1.GatewayBinding{}
+	key := client.ObjectKey{Namespace: "default", Name: "room"}
+	if err := service.Client.Get(ctx, key, binding); err != nil {
+		t.Fatal(err)
+	}
+	binding.Status.Ready = false
+	if err := service.Client.Status().Update(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	body := gatewayEventBody(t, "temporarily-unready", "user-1")
+	if _, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", body); err == nil {
+		t.Fatal("AdmitEvent() unexpectedly accepted an unready binding")
+	} else {
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) || httpErr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("AdmitEvent() error = %v, want HTTP 503", err)
+		}
+	}
+	if err := service.Client.Get(ctx, key, binding); err != nil {
+		t.Fatal(err)
+	}
+	binding.Status.Ready = true
+	binding.Status.ObservedGeneration = binding.Generation
+	if err := service.Client.Status().Update(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", body)
+	if err != nil || response.Status != ingressStatusAccepted {
+		t.Fatalf("AdmitEvent() after readiness = (%+v, %v)", response, err)
+	}
+}
+
+func TestReadyBindingWinsOverHigherPriorityUnreadyBinding(t *testing.T) {
+	service, _, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	unready := &gatewayv1alpha1.GatewayBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "future-room", Namespace: "default", UID: "future-binding", Generation: 1},
+		Spec: gatewayv1alpha1.GatewayBindingSpec{
+			GatewayRef: gatewayv1alpha1.GatewayBindingReference{Name: "chat"},
+			AgentRef:   gatewayv1alpha1.GatewayBindingReference{Name: "assistant"},
+			Match:      gatewayv1alpha1.GatewayBindingMatch{AccountID: "acct", ContextID: "room"},
+			SenderPolicy: gatewayv1alpha1.GatewaySenderPolicy{
+				Mode: gatewayv1alpha1.GatewaySenderPolicyAllowlist, AllowedSenderIDs: []string{"user-1"},
+			},
+			Priority: 500,
+		},
+		Status: gatewayv1alpha1.GatewayBindingStatus{Ready: false, ObservedGeneration: 1},
+	}
+	if err := service.Client.Create(ctx, unready); err != nil {
+		t.Fatal(err)
+	}
+	response, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "ready-wins", "user-1"))
+	if err != nil || response.Status != ingressStatusAccepted {
+		t.Fatalf("AdmitEvent() = (%+v, %v), want ready binding acceptance", response, err)
 	}
 }
 
@@ -1930,7 +2345,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
 func TestDefinitiveTaskCreateFailureExpiresEventAndUnblocksSession(t *testing.T) {
-	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	service, sqliteStore, adapter := newGatewayServiceFixture(t)
 	service.APIReader = service.Client
 	service.Client = &invalidTaskCreateOnceClient{Client: service.Client}
 	ctx := context.Background()
@@ -1949,6 +2364,16 @@ func TestDefinitiveTaskCreateFailureExpiresEventAndUnblocksSession(t *testing.T)
 	firstEvent, err := sqliteStore.GetGatewayEvent(ctx, "default", first.EventID)
 	if err != nil || firstEvent.State != store.GatewayEventExpired || !strings.Contains(firstEvent.StateMessage, "configured task is invalid") {
 		t.Fatalf("first event = (%+v, %v), want terminal invalid-task expiry", firstEvent, err)
+	}
+	projected, err := sqliteStore.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{Namespace: "default", EventID: firstEvent.ID})
+	if err != nil || len(projected) != 1 {
+		t.Fatalf("invalid-task deliveries = (%#v, %v), want one", projected, err)
+	}
+	if err := service.DeliverOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries := adapter.Deliveries(); len(deliveries) != 1 || deliveries[0].Kind != protocol.DeliveryKindError {
+		t.Fatalf("invalid-task adapter deliveries = %#v", deliveries)
 	}
 	if err := service.DispatchOnce(ctx); err != nil {
 		t.Fatalf("second DispatchOnce() error = %v", err)

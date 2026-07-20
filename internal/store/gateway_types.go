@@ -165,6 +165,9 @@ type GatewayEventFilter struct {
 	DueBefore          *time.Time
 	ExpiresBefore      *time.Time
 	OrderByNextAttempt bool
+	OrderByExpiry      bool
+	SessionHeadOnly    bool
+	MissingDelivery    bool
 	BeforeCreatedAt    *time.Time
 	BeforeID           string
 	Limit              int
@@ -174,6 +177,16 @@ type GatewayEventFilter struct {
 type GatewayTerminalProjection struct {
 	EventID     string
 	Message     SessionMessage
+	Delivery    GatewayDelivery
+	CompletedAt time.Time
+}
+
+// GatewayExpiryProjection atomically expires one event and creates its visible
+// error delivery so a crash cannot leave external users without a response.
+type GatewayExpiryProjection struct {
+	EventID     string
+	Owner       string
+	Reason      string
 	Delivery    GatewayDelivery
 	CompletedAt time.Time
 }

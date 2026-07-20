@@ -3049,16 +3049,13 @@ func TestHandleDeletion_NoFinalizer(t *testing.T) {
 	}
 }
 
-func TestHandleDeletion_WithResultRef(t *testing.T) {
+func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-result",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
-		},
-		Status: corev1alpha1.TaskStatus{
-			ResultRef: &corev1alpha1.ResultReference{Available: true},
 		},
 	}
 	r := newUnitReconciler(scheme, task)

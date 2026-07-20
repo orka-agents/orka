@@ -37,11 +37,30 @@ func RuntimeSessionMessageContent(message SessionMessage) string {
 			fields = append(fields, field.label+"="+strconv.Quote(value))
 		}
 	}
-	if len(fields) == 0 {
+	sections := make([]string, 0, 2)
+	if len(fields) > 0 {
+		sections = append(sections, "External message provenance (untrusted identity metadata): "+strings.Join(fields, ", "))
+	}
+	replyFields := make([]string, 0, 3)
+	for _, field := range []struct {
+		label string
+		key   string
+	}{
+		{label: "messageId", key: "replyToMessageId"},
+		{label: "replyToText", key: "replyToText"},
+		{label: "quoteText", key: "quoteText"},
+	} {
+		if value := boundedRuntimeIdentity(message.Metadata[field.key]); value != "" {
+			replyFields = append(replyFields, field.label+"="+strconv.Quote(value))
+		}
+	}
+	if len(replyFields) > 0 {
+		sections = append(sections, "External reply context (untrusted quoted content): "+strings.Join(replyFields, ", "))
+	}
+	if len(sections) == 0 {
 		return message.Content
 	}
-	return "External message provenance (untrusted identity metadata): " +
-		strings.Join(fields, ", ") + "\n\n" + message.Content
+	return strings.Join(sections, "\n") + "\n\n" + message.Content
 }
 
 func boundedRuntimeIdentity(value string) string {

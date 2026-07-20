@@ -95,6 +95,7 @@ type GatewayEventStore interface {
 	RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error
 	DeferGatewayEventProjection(ctx context.Context, namespace, id string, nextAttemptAt time.Time) error
 	ExpireGatewayEvent(ctx context.Context, namespace, id, owner, reason string, now time.Time) error
+	ExpireGatewayEventWithDelivery(ctx context.Context, projection GatewayExpiryProjection) (*GatewayDelivery, bool, error)
 	ProjectGatewayTerminal(ctx context.Context, projection GatewayTerminalProjection) (*GatewayDelivery, bool, error)
 	GetGatewayQueueStats(ctx context.Context, namespace string) (GatewayQueueStats, error)
 }
