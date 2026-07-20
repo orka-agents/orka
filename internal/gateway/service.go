@@ -339,6 +339,17 @@ func (s *Service) RepairExpiredEvents(ctx context.Context) error {
 	}
 	var errs []error
 	for i := range events {
+		if events[i].NamespaceUID == "" || events[i].GatewayUID == "" || events[i].GatewayGeneration <= 0 {
+			if err := s.EventStore.MarkExpiredGatewayEventDeadLettered(
+				ctx, events[i].Namespace, events[i].ID,
+				"The expired legacy event cannot be safely delivered because immutable identity is unavailable.", now,
+			); err != nil && !errors.Is(err, store.ErrConflict) {
+				errs = append(errs, err)
+			} else if err == nil {
+				gatewayDeadLettersTotal.WithLabelValues("event").Inc()
+			}
+			continue
+		}
 		reason := strings.TrimSpace(events[i].StateMessage)
 		if reason == "" {
 			reason = "The task could not be completed."

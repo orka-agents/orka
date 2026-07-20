@@ -439,6 +439,28 @@ func TestMaintenancePreservesExpiredEventUntilDeliveryRepair(t *testing.T) {
 	}
 }
 
+func TestUnrepairableExpiredEventCanBeDeadLettered(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	event := testGatewayEvent(now, "unrepairable-expired")
+	if _, _, err := s.AdmitGatewayEvent(ctx, store.GatewayEventAdmission{
+		Event: event, AppendUserMessage: true, PendingLimit: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExpireGatewayEvent(ctx, event.Namespace, event.ID, "", "expired", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkExpiredGatewayEventDeadLettered(ctx, event.Namespace, event.ID, "identity unavailable", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.GetGatewayEvent(ctx, event.Namespace, event.ID)
+	if err != nil || stored.State != store.GatewayEventDeadLettered || stored.DeliveryID != "" {
+		t.Fatalf("dead-lettered legacy event = (%+v, %v)", stored, err)
+	}
+}
+
 func TestGatewayMaintenanceCompactsSessionHistoryIntoBoundedTombstone(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

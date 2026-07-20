@@ -877,6 +877,28 @@ func (s *Store) ExpireGatewayEventWithDelivery(
 	return delivery, created, nil
 }
 
+// MarkExpiredGatewayEventDeadLettered releases an unrecoverable legacy expiry
+// from repair ordering without fabricating immutable delivery identity.
+func (s *Store) MarkExpiredGatewayEventDeadLettered(
+	ctx context.Context, namespace, id, reason string, now time.Time,
+) error {
+	reason = sanitizeGatewayStoreText(reason, 1024)
+	result, err := s.db.ExecContext(ctx, `UPDATE gateway_events SET state = ?, state_message = ?, updated_at = ?
+		WHERE namespace = ? AND id = ? AND state = ? AND delivery_id = ''`,
+		store.GatewayEventDeadLettered, reason, now.UTC(), namespace, id, store.GatewayEventExpired)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return store.ErrConflict
+	}
+	return nil
+}
+
 func expireGatewayEventTx(
 	ctx context.Context,
 	tx *sql.Tx,
