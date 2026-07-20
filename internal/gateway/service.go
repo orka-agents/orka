@@ -1065,7 +1065,7 @@ func (s *Service) projectTerminal(
 	kind := protocol.DeliveryKindError
 	role := "assistant"
 	messageID := "gateway:" + event.ID + ":error"
-	text := terminalErrorText(task.Status.Phase)
+	text := terminalErrorText(task.Status.Phase, task.Status.Message)
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 		if s.ResultStore == nil || task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 			return false, nil
@@ -1898,9 +1898,38 @@ func boundedText(value string) string {
 	return value + suffix
 }
 
-func terminalErrorText(phase corev1alpha1.TaskPhase) string {
+func terminalErrorText(phase corev1alpha1.TaskPhase, statusMessage string) string {
 	if phase == corev1alpha1.TaskPhaseCancelled {
 		return "The task was cancelled before a response was produced."
+	}
+	normalized := strings.ToLower(strings.TrimSpace(statusMessage))
+	switch {
+	case strings.Contains(normalized, "requires orka_allow_bash=true"),
+		strings.Contains(normalized, "runtime configuration is invalid"):
+		return "The AI agent is temporarily misconfigured. An operator needs to correct it."
+	case strings.Contains(normalized, "insufficient_quota"),
+		strings.Contains(normalized, "current quota"),
+		strings.Contains(normalized, "quota exhausted"),
+		strings.Contains(normalized, "billing"),
+		strings.Contains(normalized, "monthly spend"),
+		strings.Contains(normalized, "spending limit"):
+		return "The AI service quota is unavailable. An operator needs to restore capacity."
+	case strings.Contains(normalized, "timed out"),
+		strings.Contains(normalized, "timeout"),
+		strings.Contains(normalized, "deadline exceeded"):
+		return "The task timed out before a response was produced. Please try again."
+	case strings.Contains(normalized, "rate limit"),
+		strings.Contains(normalized, "rate_limit_exceeded"),
+		strings.Contains(normalized, "requests per minute"),
+		strings.Contains(normalized, "tokens per minute"),
+		strings.Contains(normalized, "retry-after"):
+		return "The AI service is temporarily rate-limited. Please try again shortly."
+	case strings.Contains(normalized, "context length"),
+		strings.Contains(normalized, "context window"),
+		strings.Contains(normalized, "maximum context"),
+		strings.Contains(normalized, "context overflow"),
+		strings.Contains(normalized, "token limit"):
+		return "The conversation is too long for the configured model. Please shorten the request and try again."
 	}
 	return "The task could not be completed."
 }

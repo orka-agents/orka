@@ -223,6 +223,126 @@ func TestServiceEndToEndAndDuplicateSafety(t *testing.T) {
 	}
 }
 
+func TestFailedGatewayTaskProjectsSafeActionableError(t *testing.T) {
+	service, sqliteStore, _ := newGatewayServiceFixture(t)
+	ctx := context.Background()
+	response, err := service.AdmitEvent(
+		ctx,
+		"default",
+		"chat",
+		"Bearer inbound-token",
+		gatewayEventBody(t, "failed-runtime-config", "user-1"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	event, err := sqliteStore.GetGatewayEvent(ctx, "default", response.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &corev1alpha1.Task{}
+	if err := service.Client.Get(ctx, client.ObjectKey{Namespace: "default", Name: event.TaskName}, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	task.Status.Message = "codex runtime requires ORKA_ALLOW_BASH=true because the Codex CLI cannot disable shell execution"
+	if err := service.Client.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ProjectTerminals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := sqliteStore.ListGatewayDeliveries(ctx, store.GatewayDeliveryFilter{
+		Namespace: "default",
+		EventID:   event.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("projected deliveries = %#v, want one", deliveries)
+	}
+	if got, want := deliveries[0].Text, "The AI agent is temporarily misconfigured. An operator needs to correct it."; got != want {
+		t.Fatalf("delivery text = %q, want %q", got, want)
+	}
+	if strings.Contains(deliveries[0].Text, "ORKA_ALLOW_BASH") {
+		t.Fatalf("delivery leaked internal runtime details: %q", deliveries[0].Text)
+	}
+}
+
+func TestTerminalErrorTextUsesSafeFailureCategories(t *testing.T) {
+	tests := []struct {
+		name    string
+		phase   corev1alpha1.TaskPhase
+		message string
+		want    string
+	}{
+		{
+			name:  "cancelled",
+			phase: corev1alpha1.TaskPhaseCancelled,
+			want:  "The task was cancelled before a response was produced.",
+		},
+		{
+			name:    "timeout",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "task timed out",
+			want:    "The task timed out before a response was produced. Please try again.",
+		},
+		{
+			name:    "rate limit",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "provider returned HTTP 429: rate limit exceeded",
+			want:    "The AI service is temporarily rate-limited. Please try again shortly.",
+		},
+		{
+			name:    "exhausted quota",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "provider returned HTTP 429: You exceeded your current quota",
+			want:    "The AI service quota is unavailable. An operator needs to restore capacity.",
+		},
+		{
+			name:    "status-only 429 remains generic",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "provider returned HTTP 429",
+			want:    "The task could not be completed.",
+		},
+		{
+			name:    "context length",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "maximum context length exceeded",
+			want:    "The conversation is too long for the configured model. Please shorten the request and try again.",
+		},
+		{
+			name:    "runtime configuration",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "codex runtime requires ORKA_ALLOW_BASH=true",
+			want:    "The AI agent is temporarily misconfigured. An operator needs to correct it.",
+		},
+		{
+			name:    "runtime configuration wins over context keyword",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "runtime configuration is invalid: context window must be positive",
+			want:    "The AI agent is temporarily misconfigured. An operator needs to correct it.",
+		},
+		{
+			name:    "unknown",
+			phase:   corev1alpha1.TaskPhaseFailed,
+			message: "opaque provider failure containing internal details",
+			want:    "The task could not be completed.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := terminalErrorText(tt.phase, tt.message); got != tt.want {
+				t.Fatalf("terminalErrorText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 //nolint:gocyclo // this test deliberately verifies the complete durable correlation chain in one flow
 func TestServicePreservesTraceAndDeliveryCorrelation(t *testing.T) {
 	service, sqliteStore, _ := newGatewayServiceFixture(t)
