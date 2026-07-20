@@ -49,13 +49,46 @@ func TestCompleteViaStreamPreservesOpenErrorChain(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(err, errStreamOpen) {
-		t.Fatalf("error = %v, want stream-open sentinel", err)
+	if !errors.Is(err, errStreamUnavailable) {
+		t.Fatalf("error = %v, want stream-unavailable sentinel", err)
 	}
 	if !llm.IsContextTooLongErr(err) {
 		t.Fatalf("error = %v, want context-too-long provider cause", err)
 	}
 }
+
+func TestCompleteViaStreamMarksInitialChunkErrorFallbackEligible(t *testing.T) {
+	providerErr := &llm.ProviderError{StatusCode: 503, Message: "stream unavailable"}
+	_, err := completeViaStream(context.Background(), streamChunksProvider{
+		chunks: []llm.StreamChunk{{Error: providerErr, Done: true}},
+	}, &llm.CompletionRequest{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, errStreamUnavailable) {
+		t.Fatalf("error = %v, want stream-unavailable sentinel", err)
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("error = %v, want provider cause", err)
+	}
+}
+
+func TestCompleteViaStreamRejectsChunkErrorAfterOutput(t *testing.T) {
+	providerErr := &llm.ProviderError{StatusCode: 503, Message: "stream interrupted"}
+	_, err := completeViaStream(context.Background(), streamChunksProvider{
+		chunks: []llm.StreamChunk{{Content: "partial"}, {Error: providerErr, Done: true}},
+	}, &llm.CompletionRequest{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, errStreamUnavailable) {
+		t.Fatalf("error = %v, must not allow fallback after partial output", err)
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("error = %v, want provider cause", err)
+	}
+}
+
 func (streamUsageProvider) Stream(context.Context, *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
 	ch := make(chan llm.StreamChunk, 3)
 	ch <- llm.StreamChunk{Content: "hello", Model: "stream-model", Provider: "anthropic"}

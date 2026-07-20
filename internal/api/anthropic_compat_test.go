@@ -1087,6 +1087,41 @@ func TestHandleStreamingMessages_ForwardsTerminalUsage(t *testing.T) {
 	}
 }
 
+func TestHandleStreamingMessages_FallsBackAfterInitialChunkError(t *testing.T) {
+	mock := &mockAnthropicProvider{
+		streamChunks: []llm.StreamChunk{{Error: fmt.Errorf("stream unavailable"), Done: true}},
+		responses: []*llm.CompletionResponse{{
+			Content:    goalStateSentinel + "fallback response",
+			StopReason: oaiStopReasonEndTurn,
+		}},
+	}
+
+	handler, app := setupTestAnthropicHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingMessages(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "claude-sonnet-4-20250514"},
+			"claude-sonnet-4-20250514", nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "event: error") {
+		t.Fatalf("initial stream error prevented fallback: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "fallback response") || !strings.Contains(bodyStr, "message_stop") {
+		t.Fatalf("expected completed fallback response, got: %s", bodyStr)
+	}
+	if mock.callIdx != 1 {
+		t.Fatalf("Complete calls = %d, want 1", mock.callIdx)
+	}
+}
+
 func TestHandleStreamingMessages_RejectsInvalidProviderOutcome(t *testing.T) {
 	tests := []struct {
 		name string

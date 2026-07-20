@@ -96,7 +96,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			resp, streamErr := completeViaStream(streamCtx, capturedProvider, compReq)
 			usedStream := streamErr == nil
 			if streamErr != nil {
-				if !errors.Is(streamErr, errStreamOpen) {
+				if !errors.Is(streamErr, errStreamUnavailable) {
 					anthropicLog.Error(streamErr, "invalid provider stream in tool loop")
 					_ = writeAnthropicStreamError(w, "provider_error")
 					return

@@ -29,7 +29,7 @@ import (
 // and skips validation/review/PR.
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 
-var errStreamOpen = errors.New("stream open")
+var errStreamUnavailable = errors.New("stream unavailable before output")
 
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
@@ -70,13 +70,16 @@ func isStreamingRequiredErr(err error) bool {
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errStreamOpen, err)
+		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
 	resp := &llm.CompletionResponse{}
 	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
+			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
+			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
 		}
 		if chunk.Content != "" {
