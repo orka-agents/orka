@@ -203,3 +203,14 @@ func TestTimelineToolEnablesLegacyTransientCritique(t *testing.T) {
 		t.Fatalf("transient analysis was not re-prompted: %+v", decision)
 	}
 }
+
+func TestSkippedApprovedTimelineDoesNotVerify(t *testing.T) {
+	guard := newAnalysisLoopGuard([]llm.Tool{{Name: "verify_timeline"}}, nil)
+	inspection := guard.inspectTool("verify_timeline", nil, "already executed", nil, false)
+	if inspection.execErr != nil {
+		t.Fatal(inspection.execErr)
+	}
+	if guard.timelineVerified {
+		t.Fatal("idempotency-skipped timeline call counted as verified")
+	}
+}

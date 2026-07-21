@@ -328,9 +328,10 @@ func (g *analysisLoopGuard) inspectTool(
 	args json.RawMessage,
 	result string,
 	execErr error,
+	completed bool,
 ) validationInspection {
 	inspection := validationInspection{execErr: execErr}
-	if inspection.execErr == nil {
+	if inspection.execErr == nil && completed {
 		if g.isTimelineTool(toolName) {
 			g.timelineVerified = true
 		}

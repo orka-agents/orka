@@ -1112,7 +1112,7 @@ func executeAgentLoopWithEvents(
 				})),
 			)
 
-			result, execErr, cached := executeGuardedLoopTool(
+			result, cached, completed, execErr := executeGuardedLoopTool(
 				stepCtx,
 				tc,
 				toolName,
@@ -1124,7 +1124,7 @@ func executeAgentLoopWithEvents(
 				guard,
 			)
 
-			inspection := guard.inspectTool(toolName, tc.Arguments, result, execErr)
+			inspection := guard.inspectTool(toolName, tc.Arguments, result, execErr, completed)
 			execErr = inspection.execErr
 			if inspection.final != "" {
 				validatedFinal = inspection.final

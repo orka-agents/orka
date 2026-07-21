@@ -20,7 +20,7 @@ func executeLoopTool(
 	executor *worker.ToolExecutor,
 	gate *approvalGate,
 	baseToolCtx *tools.ToolContext,
-) (string, error) {
+) (string, error, bool) {
 	var execArgs json.RawMessage
 	approvalKey := ""
 	alreadyFired := false
@@ -42,10 +42,14 @@ func executeLoopTool(
 		)
 	}
 	if err != nil {
-		return "", err
+		return "", err, false
 	}
 	if alreadyFired {
-		return fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey), nil
+		result := fmt.Sprintf(
+			"already executed approved action for idempotency key %s; skipping duplicate",
+			approvalKey,
+		)
+		return result, nil, false
 	}
 	if customTool != nil {
 		execCtx := worker.WithToolCallID(ctx, call.ID)
@@ -56,12 +60,12 @@ func executeLoopTool(
 		if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
 			gate.markFired(approvalKey)
 		}
-		return result, execErr
+		return result, execErr, execErr == nil
 	}
 	if approvalKey != "" {
 		execArgs, err = injectIdempotencyKey(execArgs, approvalKey)
 		if err != nil {
-			return "", err
+			return "", err, false
 		}
 	}
 	execCtx := ctx
@@ -74,7 +78,8 @@ func executeLoopTool(
 		execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 	}
 	gate.markFired(approvalKey)
-	return tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+	result, execErr := tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+	return result, execErr, execErr == nil
 }
 
 func executeGuardedLoopTool(
@@ -87,21 +92,21 @@ func executeGuardedLoopTool(
 	gate *approvalGate,
 	baseToolCtx *tools.ToolContext,
 	guard *analysisLoopGuard,
-) (result string, execErr error, cached bool) {
+) (result string, cached, completed bool, execErr error) {
 	if _, ok := allowed[toolName]; !ok {
-		result, execErr = executeLoopTool(
+		result, execErr, completed = executeLoopTool(
 			ctx, call, toolName, allowed, customTools, executor, gate, baseToolCtx,
 		)
-		return result, execErr, false
+		return result, false, completed, execErr
 	}
 	if err := guard.beginToolCall(toolName); err != nil {
-		return "", err, false
+		return "", false, false, err
 	}
 	customTool := customTools[toolName]
 	if result, cached = guard.cachedToolResult(toolName, call.Arguments, customTool); cached {
-		return result, nil, true
+		return result, true, true, nil
 	}
-	result, execErr = executeLoopTool(
+	result, execErr, completed = executeLoopTool(
 		ctx,
 		call,
 		toolName,
@@ -111,5 +116,5 @@ func executeGuardedLoopTool(
 		gate,
 		baseToolCtx,
 	)
-	return result, execErr, false
+	return result, false, completed, execErr
 }

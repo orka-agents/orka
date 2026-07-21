@@ -111,7 +111,7 @@ func TestCachedToolResultDoesNotBypassRequestAllowlist(t *testing.T) {
 	}}
 	args := json.RawMessage(`{"path":"build-log.txt"}`)
 	guard.rememberToolResult("read_artifact", args, "cached", tool)
-	_, err, cached := executeGuardedLoopTool(
+	_, cached, _, err := executeGuardedLoopTool(
 		context.Background(),
 		llm.ToolCall{Name: "read_artifact", Arguments: args},
 		"read_artifact",
