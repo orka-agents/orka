@@ -929,9 +929,13 @@ func executeAgentLoopWithEvents(
 	}
 
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
+	guard := newAnalysisLoopGuard(llmTools)
 	maxIterations := 10
 	if coordinationEnv.Enabled {
 		maxIterations = 50
+	}
+	if guard.validationRequired {
+		maxIterations = analysisLoopMaxIterations
 	}
 	if coordinationEnv.AutonomousMode {
 		maxIterations = 100
@@ -955,6 +959,8 @@ func executeAgentLoopWithEvents(
 			MaxTokens:    4096,
 			Tools:        llmTools,
 		}
+		guard.prepareRequest(req, messages, iteration, maxIterations)
+		requestToolCalls := advertisedToolNames(req.Tools)
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
 			common.WithEventContent(eventContent(map[string]any{
@@ -962,7 +968,7 @@ func executeAgentLoopWithEvents(
 				"model":        model,
 				"provider":     llm.ProviderTelemetryName(provider),
 				"messageCount": len(messages),
-				"toolCount":    len(llmTools),
+				"toolCount":    len(req.Tools),
 			})),
 		)
 
@@ -1026,10 +1032,17 @@ func executeAgentLoopWithEvents(
 			common.WithEventContentText(resp.Content),
 		)
 
-		// If no tool calls, we're done
 		if len(resp.ToolCalls) == 0 {
+			decision := guard.handleFinalResponse(resp.Content, iteration, maxIterations, messages)
 			stepSpan.End()
-			return resp.Content, nil
+			if decision.err != nil {
+				return "", decision.err
+			}
+			if decision.retry {
+				messages = decision.messages
+				continue
+			}
+			return decision.result, nil
 		}
 
 		// Add assistant message with tool calls
@@ -1048,7 +1061,7 @@ func executeAgentLoopWithEvents(
 			messages,
 			resp.ToolCalls,
 			approvalGate,
-			allowedToolCalls,
+			requestToolCalls,
 			customTools,
 			eventRecorder,
 			baseToolCtx,
@@ -1069,7 +1082,10 @@ func executeAgentLoopWithEvents(
 			continue
 		}
 
-		// Execute tool calls
+		// Execute tool calls.
+		validatedFinal := ""
+		validationRepair := ""
+		var repeatedValidationErr error
 		for _, tc := range resp.ToolCalls {
 			fmt.Printf("Executing tool: %s\n", tc.Name)
 
@@ -1087,53 +1103,27 @@ func executeAgentLoopWithEvents(
 				})),
 			)
 
-			var execArgs json.RawMessage
-			approvalKey := ""
-			alreadyFired := false
-			customToolForCall := customTools[toolName]
-			if _, ok := allowedToolCalls[toolName]; !ok {
-				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
-			} else {
-				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
-					stepCtx,
-					toolName,
-					tc.Arguments,
-					customToolForCall,
-				)
+			result, execErr = executeLoopTool(
+				stepCtx,
+				tc,
+				toolName,
+				requestToolCalls,
+				customTools,
+				toolExecutor,
+				approvalGate,
+				baseToolCtx,
+			)
+
+			inspection := guard.inspectTool(toolName, tc.Arguments, result, execErr)
+			execErr = inspection.execErr
+			if inspection.final != "" {
+				validatedFinal = inspection.final
 			}
-			if execErr != nil {
-				// execErr is handled by the common error path below.
-			} else if alreadyFired {
-				result = fmt.Sprintf("already executed approved action for idempotency key %s; skipping duplicate", approvalKey)
-			} else if customToolForCall != nil {
-				customTool := customToolForCall
-				execCtx := worker.WithToolCallID(stepCtx, tc.ID)
-				if approvalKey != "" {
-					execCtx = worker.WithToolIdempotencyKey(execCtx, approvalKey)
-				}
-				result, execErr = toolExecutor.Execute(execCtx, customTool, execArgs)
-				if execErr == nil || worker.ToolRequestWasAttempted(execErr) {
-					approvalGate.markFired(approvalKey)
-				}
-			} else {
-				// Fall back to built-in tools
-				if approvalKey != "" {
-					execArgs, execErr = injectIdempotencyKey(execArgs, approvalKey)
-				}
-				execCtx := stepCtx
-				if baseToolCtx != nil {
-					toolCtxCopy := *baseToolCtx
-					toolCtxCopy.ToolCallID = tc.ID
-					if toolCtxCopy.Tenant == "" {
-						toolCtxCopy.Tenant = toolCtxCopy.Namespace
-					}
-					execCtx = tools.WithToolContext(stepCtx, &toolCtxCopy)
-				}
-				if execErr == nil {
-					approvalGate.markFired(approvalKey)
-					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
-				}
+			if inspection.repair != "" {
+				validationRepair = inspection.repair
+			}
+			if inspection.fatal != nil {
+				repeatedValidationErr = inspection.fatal
 			}
 
 			if execErr != nil {
@@ -1165,10 +1155,29 @@ func executeAgentLoopWithEvents(
 				Name:       tc.Name,
 			})
 		}
+		validatedFinal, validationRepair = guard.finishValidatedResult(validatedFinal, validationRepair)
+		if validatedFinal != "" {
+			stepSpan.End()
+			return validatedFinal, nil
+		}
+		if repeatedValidationErr != nil {
+			stepSpan.End()
+			return "", repeatedValidationErr
+		}
+		if validationRepair != "" {
+			messages = append(messages, llm.Message{Role: "user", Content: validationRepair})
+		}
 		stepSpan.End()
 	}
 
 	return "", fmt.Errorf("max iterations reached without completion")
+}
+
+// transientWithoutTimeline reports whether a parsed final answer claims a
+// transient verdict without a successful timeline verification.
+func transientWithoutTimeline(content string, timelineVerified bool) bool {
+	transient, _, err := analysisTransientState(content)
+	return err == nil && transient && !timelineVerified
 }
 
 func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {

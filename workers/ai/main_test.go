@@ -1136,3 +1136,25 @@ func TestExecuteAgentLoopTracingStepParentsModelAndToolSiblings(t *testing.T) {
 		t.Fatalf("step %s = %q", tracing.AttrTaskID, got)
 	}
 }
+
+func TestTransientWithoutTimeline(t *testing.T) {
+	tests := []struct {
+		name             string
+		content          string
+		timelineVerified bool
+		want             bool
+	}{
+		{name: "non-transient", content: `{"is_transient":false}`},
+		{name: "missing timeline", content: `{"is_transient":true}`, want: true},
+		{name: "carriage return whitespace", content: "{\"is_transient\":\r\n true}", want: true},
+		{name: "escaped property", content: `{"\u0069s_transient":true}`, want: true},
+		{name: "verified timeline", content: `{"is_transient":true}`, timelineVerified: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := transientWithoutTimeline(tt.content, tt.timelineVerified); got != tt.want {
+				t.Fatalf("transientWithoutTimeline() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
