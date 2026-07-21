@@ -13,6 +13,7 @@ function statusToken(status?: string): { className: string; live: boolean; label
     case 'failed':
       return { className: 'text-status-failed', live: false, label: status ?? 'failed' }
     case 'cancelled':
+    case 'skipped':
       return { className: 'text-muted-foreground', live: false, label: status ?? 'cancelled' }
     default:
       return { className: 'text-muted-foreground', live: false, label: status || 'unknown' }

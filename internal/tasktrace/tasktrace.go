@@ -16,6 +16,7 @@ const (
 	StatusRunning   = "running"
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
+	StatusSkipped   = "skipped"
 )
 
 // TaskMetadata supplies task summary state that is not part of the event stream.
@@ -261,6 +262,17 @@ func BuildTaskTrace(meta TaskMetadata, input []store.ExecutionEvent, generatedAt
 			} else {
 				trace.ModelRequests[idx].Status = StatusCompleted
 			}
+		case events.ExecutionEventTypeToolCallSkipped:
+			id := toolCallID(event)
+			if id == "" {
+				id = fmt.Sprintf("tool-call-%d", event.Seq)
+			}
+			createdAt := event.CreatedAt
+			trace.ToolCalls = append(trace.ToolCalls, ToolCallTrace{
+				ID: id, Name: event.ToolName, Status: StatusSkipped,
+				StartSeq: event.Seq, EndSeq: event.Seq,
+				StartedAt: &createdAt, EndedAt: &createdAt, Summary: event.Summary,
+			})
 		case events.ExecutionEventTypeToolCallStarted:
 			id := toolCallID(event)
 			if id == "" {

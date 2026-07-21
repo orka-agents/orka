@@ -85,3 +85,20 @@ func TestBuildTaskTraceExplicitModelCompletionDequeuesOpenRequest(t *testing.T) 
 		t.Fatalf("warnings = %#v, want none", trace.Warnings)
 	}
 }
+
+func TestBuildTaskTraceIncludesSkippedToolCall(t *testing.T) {
+	now := time.Now().UTC()
+	trace := BuildTaskTrace(TaskMetadata{Name: "task"}, []store.ExecutionEvent{{
+		Seq: 1, Type: events.ExecutionEventTypeToolCallSkipped,
+		ToolName: "read_artifact", ToolCallID: "call-1",
+		Summary: "parallel tool call skipped", CreatedAt: now,
+	}}, now)
+	if len(trace.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v", trace.ToolCalls)
+	}
+	got := trace.ToolCalls[0]
+	if got.Status != StatusSkipped || got.StartSeq != 1 || got.EndSeq != 1 ||
+		got.StartedAt == nil || got.EndedAt == nil {
+		t.Fatalf("skipped tool trace = %#v", got)
+	}
+}
