@@ -181,3 +181,25 @@ func TestValidatedAnalysisCapsAutonomousIterations(t *testing.T) {
 		t.Fatalf("ordinary autonomous iterations = %d", got)
 	}
 }
+
+func TestOrdinaryTaskFinalizationPreservesRequestedFormat(t *testing.T) {
+	guard := newAnalysisLoopGuard(nil, nil)
+	req := &llm.CompletionRequest{}
+	guard.prepareRequest(req, nil, 9, 10)
+	if len(req.Messages) != 1 || strings.Contains(req.Messages[0].Content, "JSON") ||
+		!strings.Contains(req.Messages[0].Content, "format requested by the Task") {
+		t.Fatalf("ordinary finalization prompt = %+v", req.Messages)
+	}
+	decision := guard.handleFinalResponse("is_transient is discussed in prose", 1, 10, nil)
+	if decision.err != nil || decision.retry || decision.result == "" {
+		t.Fatalf("ordinary prose decision = %+v", decision)
+	}
+}
+
+func TestTimelineToolEnablesLegacyTransientCritique(t *testing.T) {
+	guard := newAnalysisLoopGuard([]llm.Tool{{Name: "verify_timeline"}}, nil)
+	decision := guard.handleFinalResponse(`{"is_transient":true}`, 1, 10, nil)
+	if !decision.retry {
+		t.Fatalf("transient analysis was not re-prompted: %+v", decision)
+	}
+}

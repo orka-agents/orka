@@ -148,12 +148,10 @@ const (
 	validationFocusPrompt = "You have reached the investigation budget. Stop reading artifacts. " +
 		"If is_transient is true, call verify_timeline first unless it already succeeded. " +
 		"Then call validate_analysis exactly once with the complete final analysis and all supporting evidence tokens."
-	toolsFreeFinalPrompt = "You have reached your investigation budget. Do NOT call any more tools. " +
-		"Using ONLY the evidence you have already gathered, output your FINAL answer now as the required JSON object " +
-		"and nothing else."
+	toolsFreeFinalPrompt = "You have reached your tool-use budget. Do NOT call any more tools. " +
+		"Using the information already gathered, provide the final answer in the format requested by the Task."
 	emptyFinalPrompt = "Your last response was empty. Do NOT call any tools. " +
-		"Output your FINAL answer now as the required JSON object and nothing else, " +
-		"using the evidence you have already gathered."
+		"Provide the final answer now in the format requested by the Task, using the information already gathered."
 	transientCritiquePrompt = "You set is_transient=true but never called verify_timeline " +
 		"to confirm the failing operation. " +
 		"A bare context deadline or transient-signature match is not proof. Call verify_timeline now. " +
@@ -176,6 +174,7 @@ type analysisLoopGuard struct {
 	validationFinalRetries   int
 	transientCritiqueRetries int
 	timelineVerified         bool
+	transientCritiqueEnabled bool
 	investigationToolCalls   int
 	toolResults              map[string]string
 }
@@ -221,14 +220,15 @@ func newAnalysisLoopGuard(
 		}
 	}
 	return &analysisLoopGuard{
-		validationRequired:  len(validation) > 0,
-		validationToolNames: validation,
-		timelineToolNames:   timeline,
-		finalizationTools:   finalization,
-		customTools:         customTools,
-		submissionToolName:  submissionToolName,
-		validationFailures:  map[string]int{},
-		toolResults:         map[string]string{},
+		validationRequired:       len(validation) > 0,
+		validationToolNames:      validation,
+		timelineToolNames:        timeline,
+		transientCritiqueEnabled: len(timeline) > 0,
+		finalizationTools:        finalization,
+		customTools:              customTools,
+		submissionToolName:       submissionToolName,
+		validationFailures:       map[string]int{},
+		toolResults:              map[string]string{},
 	}
 }
 
@@ -291,6 +291,9 @@ func (g *analysisLoopGuard) handleFinalResponse(
 			),
 			retry: true,
 		}
+	}
+	if !g.transientCritiqueEnabled {
+		return finalResponseDecision{result: content}
 	}
 	transient, analysisLike, parseErr := analysisTransientState(content)
 	if analysisLike && parseErr != nil {

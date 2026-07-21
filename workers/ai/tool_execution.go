@@ -88,6 +88,12 @@ func executeGuardedLoopTool(
 	baseToolCtx *tools.ToolContext,
 	guard *analysisLoopGuard,
 ) (result string, execErr error, cached bool) {
+	if _, ok := allowed[toolName]; !ok {
+		result, execErr = executeLoopTool(
+			ctx, call, toolName, allowed, customTools, executor, gate, baseToolCtx,
+		)
+		return result, execErr, false
+	}
 	if err := guard.beginToolCall(toolName); err != nil {
 		return "", err, false
 	}

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/worker"
 )
 
 func TestAnalysisLoopGuardSelectsOneToolCall(t *testing.T) {
@@ -98,5 +101,28 @@ func TestToolCallFingerprintDoesNotCanonicalizeTrailingData(t *testing.T) {
 	malformed := toolCallFingerprint("read_artifact", json.RawMessage(`{"path":"x"}junk`))
 	if valid == malformed {
 		t.Fatal("malformed arguments reused the valid JSON fingerprint")
+	}
+}
+
+func TestCachedToolResultDoesNotBypassRequestAllowlist(t *testing.T) {
+	guard := newAnalysisLoopGuard([]llm.Tool{{Name: "submit_analysis"}}, nil)
+	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{
+		Annotations: map[string]string{toolCacheIdenticalCallsAnnotation: "true"},
+	}}
+	args := json.RawMessage(`{"path":"build-log.txt"}`)
+	guard.rememberToolResult("read_artifact", args, "cached", tool)
+	_, err, cached := executeGuardedLoopTool(
+		context.Background(),
+		llm.ToolCall{Name: "read_artifact", Arguments: args},
+		"read_artifact",
+		map[string]struct{}{"submit_analysis": {}},
+		map[string]*corev1alpha1.Tool{"read_artifact": tool},
+		worker.NewToolExecutor(),
+		&approvalGate{firedKeys: map[string]bool{}},
+		nil,
+		guard,
+	)
+	if cached || err == nil || !strings.Contains(err.Error(), "not enabled") {
+		t.Fatalf("cached=%t error=%v", cached, err)
 	}
 }
