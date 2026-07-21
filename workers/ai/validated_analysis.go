@@ -240,11 +240,11 @@ func newAnalysisLoopGuard(
 }
 
 func (g *analysisLoopGuard) isValidationTool(name string) bool {
-	return g.validationToolNames[name]
+	return g.validationToolNames[strings.TrimSpace(name)]
 }
 
 func (g *analysisLoopGuard) isTimelineTool(name string) bool {
-	return g.timelineToolNames[name]
+	return g.timelineToolNames[strings.TrimSpace(name)]
 }
 
 func (g *analysisLoopGuard) isFinalizationTool(name string) bool {
