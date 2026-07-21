@@ -214,3 +214,15 @@ func TestSkippedApprovedTimelineDoesNotVerify(t *testing.T) {
 		t.Fatal("idempotency-skipped timeline call counted as verified")
 	}
 }
+
+func TestValidationPromptCanBeReappliedAfterCompaction(t *testing.T) {
+	guard := newAnalysisLoopGuard([]llm.Tool{{Name: testValidationToolName}}, nil)
+	guard.investigationToolCalls = analysisMaxInvestigationToolCalls
+	req := &llm.CompletionRequest{Tools: []llm.Tool{{Name: testValidationToolName}}}
+	guard.prepareRequest(req, []llm.Message{{Role: "user", Content: "before"}}, 1, analysisLoopMaxIterations)
+	req.Messages = []llm.Message{{Role: "user", Content: "compacted"}}
+	guard.prepareRequest(req, req.Messages, 1, analysisLoopMaxIterations)
+	if len(req.Messages) != 2 || !strings.Contains(req.Messages[1].Content, testValidationToolName) {
+		t.Fatalf("reapplied prompt = %+v", req.Messages)
+	}
+}

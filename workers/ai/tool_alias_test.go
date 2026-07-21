@@ -10,6 +10,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -173,4 +174,78 @@ func TestVerifiedTimelineCallIsSkipped(t *testing.T) {
 	if !skip || !strings.Contains(result, "finish") {
 		t.Fatalf("completedToolCallResult() = %q, %t", result, skip)
 	}
+}
+
+func TestRequestApprovalCanonicalizesAliasedTarget(t *testing.T) {
+	tool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "scoped-sensitive-tool"}}
+	call := llm.ToolCall{Arguments: json.RawMessage(`{
+		"action":"run",
+		"riskSummary":"risk",
+		"severity":"warning",
+		"targetTool":"sensitive_tool",
+		"targetArguments":{}
+	}`)}
+	canonical, err := canonicalizeRequestApprovalCall(
+		call,
+		map[string]*corev1alpha1.Tool{"sensitive_tool": tool},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args requestApprovalCallArgs
+	if err := json.Unmarshal(canonical.Arguments, &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.TargetTool != tool.Name {
+		t.Fatalf("targetTool = %q, want %q", args.TargetTool, tool.Name)
+	}
+}
+
+func TestExplicitApprovalTargetCanonicalizesAlias(t *testing.T) {
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "scoped-sensitive-tool"},
+		Spec: corev1alpha1.ToolSpec{
+			Description: "sensitive",
+			HTTP:        &corev1alpha1.HTTPExecution{URL: "http://example.invalid", Method: "POST"},
+		},
+	}
+	call := llm.ToolCall{Arguments: json.RawMessage(`{
+		"action":"run",
+		"riskSummary":"risk",
+		"severity":"warning",
+		"targetTool":"sensitive_tool",
+		"targetArguments":{}
+	}`)}
+	target, err := explicitApprovalTargetForCall(
+		context.Background(),
+		call,
+		map[string]*corev1alpha1.Tool{"sensitive_tool": tool},
+		&toolspkg.ToolContext{Namespace: "default", TaskID: "task", TaskUID: "uid"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.TargetTool != tool.Name {
+		t.Fatalf("target tool = %q, want %q", target.TargetTool, tool.Name)
+	}
+}
+
+func TestMalformedAliasedApprovalRecordsFailure(t *testing.T) {
+	recorder := common.NewFakeEventRecorder()
+	_, err := executeRequestApprovalToolCall(
+		context.Background(),
+		llm.ToolCall{ID: "call", Name: "request_approval", Arguments: json.RawMessage(`{`)},
+		nil,
+		recorder,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("malformed approval call succeeded")
+	}
+	for _, event := range recorder.Events() {
+		if event.Type == "ToolCallFailed" && event.ToolCallID == "call" {
+			return
+		}
+	}
+	t.Fatalf("failure event missing: %+v", recorder.Events())
 }

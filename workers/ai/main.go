@@ -975,6 +975,7 @@ func executeAgentLoopWithEvents(
 			beforeCount := len(messages)
 			messages = llm.TruncateMessages(messages, tokenEstimate/2)
 			req.Messages = messages
+			guard.prepareRequest(req, messages, iteration, maxIterations)
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeContextTruncated, modelLoopEventTimeout,
 				common.WithEventSeverity(events.ExecutionEventSeverityWarning),
 				common.WithEventSummary("model context truncated after provider context limit error"),

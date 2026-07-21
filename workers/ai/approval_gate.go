@@ -268,6 +268,11 @@ func approvalToolIdentity(
 	if customTool != nil {
 		return customTool.Name, customTool
 	}
+	for _, candidate := range customTools {
+		if candidate != nil && candidate.Name == modelToolName {
+			return candidate.Name, candidate
+		}
+	}
 	return modelToolName, nil
 }
 
@@ -643,8 +648,7 @@ func approvalTargetSpecDigestFromCustomTools(
 	refresh ...func(context.Context, string, *corev1alpha1.Tool),
 ) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, targetTool string) (string, error) {
-		targetTool = strings.TrimSpace(targetTool)
-		customTool := customTools[targetTool]
+		targetTool, customTool := approvalToolIdentity(strings.TrimSpace(targetTool), customTools)
 		if customTool == nil {
 			return "", fmt.Errorf("targetTool %q is not an enabled custom tool", targetTool)
 		}
@@ -659,7 +663,8 @@ func approvalTargetArgumentsFromCustomTools(
 	customTools map[string]*corev1alpha1.Tool,
 ) func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 	return func(_ context.Context, targetTool string, args json.RawMessage) (json.RawMessage, error) {
-		return approvalTargetArguments(args, customTools[strings.TrimSpace(targetTool)])
+		_, customTool := approvalToolIdentity(strings.TrimSpace(targetTool), customTools)
+		return approvalTargetArguments(args, customTool)
 	}
 }
 
@@ -1075,7 +1080,7 @@ func explicitApprovalTargetForCall(
 	if baseToolCtx == nil {
 		return approvals.ApprovalTarget{}, fmt.Errorf("tool context is not configured")
 	}
-	targetTool := strings.TrimSpace(req.TargetTool)
+	targetTool, _ := approvalToolIdentity(strings.TrimSpace(req.TargetTool), customTools)
 	targetSpecDigest, err := approvalTargetSpecDigestFromCustomTools(
 		customTools,
 		baseToolCtx.ApprovalTargetRefresh,
@@ -1123,6 +1128,23 @@ func terminalApprovalBatchToolResults(
 	return results
 }
 
+func canonicalizeRequestApprovalCall(
+	call llm.ToolCall,
+	customTools map[string]*corev1alpha1.Tool,
+) (llm.ToolCall, error) {
+	var args requestApprovalCallArgs
+	if err := json.Unmarshal(call.Arguments, &args); err != nil {
+		return call, err
+	}
+	args.TargetTool, _ = approvalToolIdentity(strings.TrimSpace(args.TargetTool), customTools)
+	canonical, err := json.Marshal(args)
+	if err != nil {
+		return call, err
+	}
+	call.Arguments = canonical
+	return call, nil
+}
+
 func executeRequestApprovalToolCall(
 	ctx context.Context,
 	call llm.ToolCall,
@@ -1161,7 +1183,20 @@ func executeRequestApprovalToolCall(
 		}
 		execCtx = tools.WithToolContext(ctx, &toolCtxCopy)
 	}
-	result, err := tools.DefaultRegistry.Execute(execCtx, toolName, call.Arguments)
+	canonicalCall, err := canonicalizeRequestApprovalCall(call, customTools)
+	if err != nil {
+		common.RecordEventWithTimeout(
+			eventRecorder,
+			events.ExecutionEventTypeToolCallFailed,
+			modelLoopEventTimeout,
+			common.WithEventSeverity(events.ExecutionEventSeverityError),
+			common.WithEventToolName(toolName),
+			common.WithEventToolCallID(call.ID),
+			common.WithEventSummary(err.Error()),
+		)
+		return "", err
+	}
+	result, err := tools.DefaultRegistry.Execute(execCtx, toolName, canonicalCall.Arguments)
 	if err != nil {
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
 			common.WithEventSeverity(events.ExecutionEventSeverityError),
