@@ -67,7 +67,7 @@ func TestToolAliasPreservesApprovalPolicy(t *testing.T) {
 		namespace: "default", taskName: "task", taskUID: "uid",
 		required: map[string]struct{}{tool.Name: {}}, firedKeys: map[string]bool{},
 	}
-	_, err := executeLoopTool(
+	_, err, _ := executeLoopTool(
 		context.Background(),
 		llm.ToolCall{Name: "sensitive_tool", Arguments: json.RawMessage(`{}`)},
 		"sensitive_tool",
