@@ -378,6 +378,13 @@ func (g *analysisLoopGuard) withoutTimelineTools(tools []llm.Tool) []llm.Tool {
 	return out
 }
 
+func (g *analysisLoopGuard) completedToolCallResult(name string) (string, bool) {
+	if g.timelineVerified && g.isTimelineTool(name) {
+		return "timeline verification already completed; call " + g.submissionToolName + " now", true
+	}
+	return "", false
+}
+
 func (g *analysisLoopGuard) activeFinalizationTools() []llm.Tool {
 	if !g.timelineVerified {
 		return g.finalizationTools

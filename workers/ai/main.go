@@ -1087,11 +1087,20 @@ func executeAgentLoopWithEvents(
 		validationRepair := ""
 		var repeatedValidationErr error
 		for _, tc := range resp.ToolCalls {
+			toolName := strings.TrimSpace(tc.Name)
+			if result, skip := guard.completedToolCallResult(toolName); skip {
+				recordSkippedAnalysisToolCall(
+					eventRecorder, tc, "analysis finalization tool already completed",
+				)
+				messages = append(messages, llm.Message{
+					Role: "tool", Content: result, ToolCallID: tc.ID, Name: tc.Name,
+				})
+				continue
+			}
 			fmt.Printf("Executing tool: %s\n", tc.Name)
 
 			var result string
 			var execErr error
-			toolName := strings.TrimSpace(tc.Name)
 			common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallStarted, modelLoopEventTimeout,
 				common.WithEventToolName(toolName),
 				common.WithEventToolCallID(tc.ID),

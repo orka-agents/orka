@@ -94,14 +94,22 @@ func recordSkippedAnalysisToolCalls(
 		if selectedIDs[call.ID] {
 			continue
 		}
-		common.RecordEventWithTimeout(
-			recorder,
-			events.ExecutionEventTypeToolCallSkipped,
-			modelLoopEventTimeout,
-			common.WithEventSeverity(events.ExecutionEventSeverityWarning),
-			common.WithEventToolName(call.Name),
-			common.WithEventToolCallID(call.ID),
-			common.WithEventSummary("parallel tool call skipped by analysis policy"),
-		)
+		recordSkippedAnalysisToolCall(recorder, call, "parallel tool call skipped by analysis policy")
 	}
+}
+
+func recordSkippedAnalysisToolCall(
+	recorder common.EventRecorder,
+	call llm.ToolCall,
+	summary string,
+) {
+	common.RecordEventWithTimeout(
+		recorder,
+		events.ExecutionEventTypeToolCallSkipped,
+		modelLoopEventTimeout,
+		common.WithEventSeverity(events.ExecutionEventSeverityWarning),
+		common.WithEventToolName(call.Name),
+		common.WithEventToolCallID(call.ID),
+		common.WithEventSummary(summary),
+	)
 }

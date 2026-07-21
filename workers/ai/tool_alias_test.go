@@ -160,3 +160,17 @@ func TestToolAliasUsesModelFacingSubmissionName(t *testing.T) {
 		t.Fatalf("tools after timeline verification = %+v", req.Tools)
 	}
 }
+
+func TestVerifiedTimelineCallIsSkipped(t *testing.T) {
+	timeline := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "verify-timeline-build"}}
+	submit := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "submit-analysis-task"}}
+	guard := newAnalysisLoopGuard(
+		[]llm.Tool{{Name: "confirm"}, {Name: "finish"}},
+		map[string]*corev1alpha1.Tool{"confirm": timeline, "finish": submit},
+	)
+	guard.timelineVerified = true
+	result, skip := guard.completedToolCallResult("confirm")
+	if !skip || !strings.Contains(result, "finish") {
+		t.Fatalf("completedToolCallResult() = %q, %t", result, skip)
+	}
+}
