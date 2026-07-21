@@ -140,3 +140,22 @@ func TestToolAliasRejectsConditionallyRegisteredBuiltIn(t *testing.T) {
 		t.Fatalf("reserved alias was advertised: %+v", llmTools)
 	}
 }
+
+func TestToolAliasUsesModelFacingSubmissionName(t *testing.T) {
+	submit := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "submit-analysis-task"}}
+	timeline := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "verify-timeline-build"}}
+	customTools := map[string]*corev1alpha1.Tool{"finish": submit, "confirm": timeline}
+	guard := newAnalysisLoopGuard([]llm.Tool{{Name: "finish"}, {Name: "confirm"}}, customTools)
+	req := &llm.CompletionRequest{Tools: []llm.Tool{{Name: "finish"}, {Name: "confirm"}}}
+	guard.investigationToolCalls = analysisMaxInvestigationToolCalls
+	guard.prepareRequest(req, nil, 1, analysisLoopMaxIterations)
+	if len(req.Messages) != 1 || !strings.Contains(req.Messages[0].Content, "finish") ||
+		strings.Contains(req.Messages[0].Content, "validate_analysis") {
+		t.Fatalf("validation prompt = %+v", req.Messages)
+	}
+	guard.timelineVerified = true
+	guard.prepareRequest(req, nil, 2, analysisLoopMaxIterations)
+	if len(req.Tools) != 1 || req.Tools[0].Name != "finish" {
+		t.Fatalf("tools after timeline verification = %+v", req.Tools)
+	}
+}

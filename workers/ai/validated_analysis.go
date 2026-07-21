@@ -170,6 +170,7 @@ type analysisLoopGuard struct {
 	timelineToolNames        map[string]bool
 	finalizationTools        []llm.Tool
 	customTools              map[string]*corev1alpha1.Tool
+	submissionToolName       string
 	validationFailures       map[string]int
 	validationFinalRetries   int
 	transientCritiqueRetries int
@@ -197,12 +198,20 @@ func newAnalysisLoopGuard(
 	customTools map[string]*corev1alpha1.Tool,
 ) *analysisLoopGuard {
 	validation, timeline, finalization := analysisToolNames(tools, customTools)
+	submissionToolName := "validate_analysis"
+	for _, tool := range tools {
+		if validation[tool.Name] {
+			submissionToolName = tool.Name
+			break
+		}
+	}
 	return &analysisLoopGuard{
 		validationRequired:  len(validation) > 0,
 		validationToolNames: validation,
 		timelineToolNames:   timeline,
 		finalizationTools:   finalization,
 		customTools:         customTools,
+		submissionToolName:  submissionToolName,
 		validationFailures:  map[string]int{},
 		toolResults:         map[string]string{},
 	}
@@ -228,8 +237,8 @@ func (g *analysisLoopGuard) prepareRequest(
 	budgetReached := iteration >= maxIterations-analysisValidationFocusRounds ||
 		g.investigationToolCalls >= analysisMaxInvestigationToolCalls
 	if g.validationRequired && budgetReached {
-		req.Tools = g.finalizationTools
-		req.Messages = appendPrompt(messages, validationFocusPrompt)
+		req.Tools = g.activeFinalizationTools()
+		req.Messages = appendPrompt(messages, g.modelPrompt(validationFocusPrompt))
 		return
 	}
 	if !g.validationRequired && iteration >= maxIterations-2 {
@@ -251,7 +260,7 @@ func (g *analysisLoopGuard) handleFinalResponse(
 		return finalResponseDecision{
 			messages: append(messages,
 				llm.Message{Role: "assistant", Content: content},
-				llm.Message{Role: "user", Content: validationRequiredPrompt},
+				llm.Message{Role: "user", Content: g.modelPrompt(validationRequiredPrompt)},
 			),
 			retry: true,
 		}
@@ -316,7 +325,7 @@ func (g *analysisLoopGuard) inspectTool(
 	}
 	failure := normalizedValidationFailure(inspection.execErr)
 	g.validationFailures[failure]++
-	inspection.repair = "validate_analysis failed: " + failure +
+	inspection.repair = toolName + " failed: " + failure +
 		". Correct the exact missing or invalid field and retry with changed arguments. Do not repeat the same call."
 	if g.validationFailures[failure] >= maxValidationFailures {
 		inspection.fatal = fmt.Errorf(
@@ -333,9 +342,26 @@ func (g *analysisLoopGuard) finishValidatedResult(final, repair string) (string,
 		return "", repair
 	}
 	if validatedAnalysisIsTransient(final) && !g.timelineVerified {
-		return "", transientValidationPrompt
+		return "", g.modelPrompt(transientValidationPrompt)
 	}
 	return final, repair
+}
+
+func (g *analysisLoopGuard) activeFinalizationTools() []llm.Tool {
+	if !g.timelineVerified {
+		return g.finalizationTools
+	}
+	out := make([]llm.Tool, 0, len(g.finalizationTools))
+	for _, tool := range g.finalizationTools {
+		if !g.isTimelineTool(tool.Name) {
+			out = append(out, tool)
+		}
+	}
+	return out
+}
+
+func (g *analysisLoopGuard) modelPrompt(prompt string) string {
+	return strings.ReplaceAll(prompt, "validate_analysis", g.submissionToolName)
 }
 
 func appendPrompt(messages []llm.Message, prompt string) []llm.Message {
