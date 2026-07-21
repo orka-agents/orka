@@ -14,6 +14,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/worker"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const testValidationToolName = "validate-analysis-task"
@@ -168,5 +169,15 @@ func TestAnalysisLoopGuardNarrowsFinalizationTools(t *testing.T) {
 	}
 	if _, ok := allowed[testValidationToolName]; !ok {
 		t.Fatal("finalization request omitted validate_analysis")
+	}
+}
+
+func TestValidatedAnalysisCapsAutonomousIterations(t *testing.T) {
+	coordination := workerenv.CoordinationEnv{Enabled: true, AutonomousMode: true}
+	if got := agentLoopMaxIterations(coordination, true); got != analysisLoopMaxIterations {
+		t.Fatalf("validated autonomous iterations = %d", got)
+	}
+	if got := agentLoopMaxIterations(coordination, false); got != 100 {
+		t.Fatalf("ordinary autonomous iterations = %d", got)
 	}
 }

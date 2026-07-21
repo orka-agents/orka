@@ -933,16 +933,7 @@ func executeAgentLoopWithEvents(
 
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	guard := newAnalysisLoopGuard(llmTools, customTools)
-	maxIterations := 10
-	if coordinationEnv.Enabled {
-		maxIterations = 50
-	}
-	if guard.validationRequired {
-		maxIterations = analysisLoopMaxIterations
-	}
-	if coordinationEnv.AutonomousMode {
-		maxIterations = 100
-	}
+	maxIterations := agentLoopMaxIterations(coordinationEnv, guard.validationRequired)
 	allowedToolCalls := advertisedToolNames(llmTools)
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")

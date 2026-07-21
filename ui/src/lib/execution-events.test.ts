@@ -164,6 +164,7 @@ describe('executionEventCategory', () => {
     expect(executionEventCategory('TaskStarted')).toBe('lifecycle')
     expect(executionEventCategory('ModelRequestStarted')).toBe('model')
     expect(executionEventCategory('ToolCallFailed')).toBe('tools')
+    expect(executionEventCategory('ToolCallSkipped')).toBe('tools')
     expect(executionEventCategory('WorkspacePreparationStarted')).toBe('workspace')
     expect(executionEventCategory('ArtifactUploadCompleted')).toBe('artifacts')
     expect(executionEventCategory('ApprovalRequested')).toBe('approvals')

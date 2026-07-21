@@ -73,6 +73,7 @@ const CATEGORY_BY_TYPE: Record<string, ExecutionEventCategory> = {
   ToolCallStarted: 'tools',
   ToolCallCompleted: 'tools',
   ToolCallFailed: 'tools',
+  ToolCallSkipped: 'tools',
   WorkspacePreparationStarted: 'workspace',
   WorkspacePreparationCompleted: 'workspace',
   WorkspacePreparationFailed: 'workspace',

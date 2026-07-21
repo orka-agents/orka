@@ -154,6 +154,7 @@ func TestToolAliasUsesModelFacingSubmissionName(t *testing.T) {
 		t.Fatalf("validation prompt = %+v", req.Messages)
 	}
 	guard.timelineVerified = true
+	guard.investigationToolCalls = 0
 	guard.prepareRequest(req, nil, 2, analysisLoopMaxIterations)
 	if len(req.Tools) != 1 || req.Tools[0].Name != "finish" {
 		t.Fatalf("tools after timeline verification = %+v", req.Tools)

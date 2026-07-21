@@ -7,6 +7,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 type validatedAnalysisCall struct {
@@ -193,6 +194,20 @@ type validationInspection struct {
 	fatal   error
 }
 
+func agentLoopMaxIterations(coordination workerenv.CoordinationEnv, validationRequired bool) int {
+	maxIterations := 10
+	if coordination.Enabled {
+		maxIterations = 50
+	}
+	if coordination.AutonomousMode {
+		maxIterations = 100
+	}
+	if validationRequired {
+		maxIterations = analysisLoopMaxIterations
+	}
+	return maxIterations
+}
+
 func newAnalysisLoopGuard(
 	tools []llm.Tool,
 	customTools map[string]*corev1alpha1.Tool,
@@ -234,6 +249,9 @@ func (g *analysisLoopGuard) prepareRequest(
 	messages []llm.Message,
 	iteration, maxIterations int,
 ) {
+	if g.timelineVerified {
+		req.Tools = g.withoutTimelineTools(req.Tools)
+	}
 	budgetReached := iteration >= maxIterations-analysisValidationFocusRounds ||
 		g.investigationToolCalls >= analysisMaxInvestigationToolCalls
 	if g.validationRequired && budgetReached {
@@ -345,6 +363,16 @@ func (g *analysisLoopGuard) finishValidatedResult(final, repair string) (string,
 		return "", g.modelPrompt(transientValidationPrompt)
 	}
 	return final, repair
+}
+
+func (g *analysisLoopGuard) withoutTimelineTools(tools []llm.Tool) []llm.Tool {
+	out := make([]llm.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if !g.isTimelineTool(tool.Name) {
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 func (g *analysisLoopGuard) activeFinalizationTools() []llm.Tool {
