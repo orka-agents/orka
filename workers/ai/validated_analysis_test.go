@@ -242,3 +242,10 @@ func TestValidatedTransientWithoutTimelineToolCanFinish(t *testing.T) {
 		t.Fatalf("final=%q repair=%q", final, repair)
 	}
 }
+
+func TestAnalysisTransientStateRejectsNull(t *testing.T) {
+	_, analysisLike, err := analysisTransientState(`{"is_transient":null}`)
+	if !analysisLike || err == nil {
+		t.Fatalf("analysisTransientState() = analysisLike %t, error %v", analysisLike, err)
+	}
+}

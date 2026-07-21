@@ -433,10 +433,14 @@ func analysisTransientState(content string) (transient, analysisLike bool, err e
 	if !ok {
 		return false, false, nil
 	}
-	if err := json.Unmarshal(raw, &transient); err != nil {
+	var transientValue *bool
+	if err := json.Unmarshal(raw, &transientValue); err != nil {
 		return false, true, fmt.Errorf("parse final analysis is_transient: %w", err)
 	}
-	return transient, true, nil
+	if transientValue == nil {
+		return false, true, fmt.Errorf("final analysis is_transient must be a boolean")
+	}
+	return *transientValue, true, nil
 }
 
 func lastJSONObject(content string) ([]byte, bool) {
