@@ -25,6 +25,10 @@ func executeLoopTool(
 	approvalKey := ""
 	alreadyFired := false
 	customTool := customTools[toolName]
+	policyToolName := toolName
+	if customTool != nil {
+		policyToolName = customTool.Name
+	}
 	var err error
 	if _, ok := allowed[toolName]; !ok {
 		err = fmt.Errorf("tool %q was not enabled for this task", call.Name)
@@ -32,7 +36,7 @@ func executeLoopTool(
 	} else {
 		execArgs, approvalKey, alreadyFired, err = gate.prepareApprovedCall(
 			ctx,
-			toolName,
+			policyToolName,
 			call.Arguments,
 			customTool,
 		)
@@ -71,4 +75,35 @@ func executeLoopTool(
 	}
 	gate.markFired(approvalKey)
 	return tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+}
+
+func executeGuardedLoopTool(
+	ctx context.Context,
+	call llm.ToolCall,
+	toolName string,
+	allowed map[string]struct{},
+	customTools map[string]*corev1alpha1.Tool,
+	executor *worker.ToolExecutor,
+	gate *approvalGate,
+	baseToolCtx *tools.ToolContext,
+	guard *analysisLoopGuard,
+) (result string, execErr error, cached bool) {
+	if err := guard.beginToolCall(toolName); err != nil {
+		return "", err, false
+	}
+	customTool := customTools[toolName]
+	if result, cached = guard.cachedToolResult(toolName, call.Arguments, customTool); cached {
+		return result, nil, true
+	}
+	result, execErr = executeLoopTool(
+		ctx,
+		call,
+		toolName,
+		allowed,
+		customTools,
+		executor,
+		gate,
+		baseToolCtx,
+	)
+	return result, execErr, false
 }

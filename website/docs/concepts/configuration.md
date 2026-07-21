@@ -616,6 +616,32 @@ actor resume. `spec.http` may be omitted unless the resolved actor endpoint
 needs transport auth settings; when `spec.http` is present for MCP auth only,
 omit `http.url`.
 
+#### Model-facing aliases and duplicate reads
+
+AI workers can advertise a shorter model-facing name for a scoped custom Tool by
+setting the `orka.ai/tool-alias` annotation. The Task continues to reference the
+Tool resource name, and approval policy remains bound to that resource name.
+Aliases must be unique, use only letters, numbers, underscores, or hyphens, and
+be at most 64 characters.
+
+```yaml
+metadata:
+  name: read-artifact-build-7d8f
+  annotations:
+    orka.ai/tool-alias: read_artifact
+```
+
+Immutable read Tools may also opt into exact duplicate-call reuse. This avoids
+repeating the downstream request when the model calls the same Tool with
+semantically identical JSON arguments. Do not set this on mutable reads, polling
+Tools, write actions, or final submission Tools.
+
+```yaml
+metadata:
+  annotations:
+    orka.ai/cache-identical-calls: "true"
+```
+
 #### URL Path Interpolation
 
 Tool CRD URLs can contain `{{paramName}}` placeholders that are replaced with parameter values at runtime. Interpolated values are URL path-escaped, and the matching parameters are removed from the request body. This is useful for REST APIs that require path parameters.

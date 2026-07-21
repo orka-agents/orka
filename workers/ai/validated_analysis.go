@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 )
 
@@ -30,7 +31,13 @@ type validationToolResult struct {
 
 func isAnalysisValidationTool(name string) bool {
 	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
-	return normalized == "validate-analysis" || strings.HasPrefix(normalized, "validate-analysis-")
+	return normalized == "validate-analysis" || strings.HasPrefix(normalized, "validate-analysis-") ||
+		normalized == "submit-analysis" || strings.HasPrefix(normalized, "submit-analysis-")
+}
+
+func isFlatAnalysisSubmissionTool(name string) bool {
+	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
+	return normalized == "submit-analysis" || strings.HasPrefix(normalized, "submit-analysis-")
 }
 
 func isTimelineVerificationTool(name string) bool {
@@ -43,7 +50,11 @@ func validatedAnalysisResult(toolName string, args json.RawMessage, result strin
 		return "", false, nil
 	}
 	var call validatedAnalysisCall
-	if err := json.Unmarshal(args, &call); err != nil {
+	if isFlatAnalysisSubmissionTool(toolName) {
+		if err := json.Unmarshal(args, &call.Analysis); err != nil {
+			return "", true, fmt.Errorf("parse submit_analysis arguments: %w", err)
+		}
+	} else if err := json.Unmarshal(args, &call); err != nil {
 		return "", true, fmt.Errorf("parse validate_analysis arguments: %w", err)
 	}
 	if err := validateAnalysisShape(call.Analysis); err != nil {
@@ -92,23 +103,24 @@ func validateAnalysisShape(a validatedAnalysis) error {
 	return nil
 }
 
-func analysisFinalizationTools(tools []llm.Tool) []llm.Tool {
-	out := make([]llm.Tool, 0, 2)
+func analysisToolNames(
+	tools []llm.Tool,
+	customTools map[string]*corev1alpha1.Tool,
+) (validation, timeline map[string]bool, finalization []llm.Tool) {
+	validation = map[string]bool{}
+	timeline = map[string]bool{}
 	for _, tool := range tools {
-		if isAnalysisValidationTool(tool.Name) || isTimelineVerificationTool(tool.Name) {
-			out = append(out, tool)
+		actual := resolvedCustomToolName(tool.Name, customTools)
+		switch {
+		case isAnalysisValidationTool(actual):
+			validation[tool.Name] = true
+			finalization = append(finalization, tool)
+		case isTimelineVerificationTool(actual):
+			timeline[tool.Name] = true
+			finalization = append(finalization, tool)
 		}
 	}
-	return out
-}
-
-func hasAnalysisValidationTool(tools []llm.Tool) bool {
-	for _, tool := range tools {
-		if isAnalysisValidationTool(tool.Name) {
-			return true
-		}
-	}
-	return false
+	return validation, timeline, finalization
 }
 
 func normalizedValidationFailure(err error) string {
@@ -154,11 +166,16 @@ const (
 
 type analysisLoopGuard struct {
 	validationRequired       bool
+	validationToolNames      map[string]bool
+	timelineToolNames        map[string]bool
 	finalizationTools        []llm.Tool
+	customTools              map[string]*corev1alpha1.Tool
 	validationFailures       map[string]int
 	validationFinalRetries   int
 	transientCritiqueRetries int
 	timelineVerified         bool
+	investigationToolCalls   int
+	toolResults              map[string]string
 }
 
 type finalResponseDecision struct {
@@ -175,12 +192,32 @@ type validationInspection struct {
 	fatal   error
 }
 
-func newAnalysisLoopGuard(tools []llm.Tool) *analysisLoopGuard {
+func newAnalysisLoopGuard(
+	tools []llm.Tool,
+	customTools map[string]*corev1alpha1.Tool,
+) *analysisLoopGuard {
+	validation, timeline, finalization := analysisToolNames(tools, customTools)
 	return &analysisLoopGuard{
-		validationRequired: hasAnalysisValidationTool(tools),
-		finalizationTools:  analysisFinalizationTools(tools),
-		validationFailures: map[string]int{},
+		validationRequired:  len(validation) > 0,
+		validationToolNames: validation,
+		timelineToolNames:   timeline,
+		finalizationTools:   finalization,
+		customTools:         customTools,
+		validationFailures:  map[string]int{},
+		toolResults:         map[string]string{},
 	}
+}
+
+func (g *analysisLoopGuard) isValidationTool(name string) bool {
+	return g.validationToolNames[name]
+}
+
+func (g *analysisLoopGuard) isTimelineTool(name string) bool {
+	return g.timelineToolNames[name]
+}
+
+func (g *analysisLoopGuard) isFinalizationTool(name string) bool {
+	return g.isValidationTool(name) || g.isTimelineTool(name)
 }
 
 func (g *analysisLoopGuard) prepareRequest(
@@ -188,7 +225,9 @@ func (g *analysisLoopGuard) prepareRequest(
 	messages []llm.Message,
 	iteration, maxIterations int,
 ) {
-	if g.validationRequired && iteration >= maxIterations-analysisValidationFocusRounds {
+	budgetReached := iteration >= maxIterations-analysisValidationFocusRounds ||
+		g.investigationToolCalls >= analysisMaxInvestigationToolCalls
+	if g.validationRequired && budgetReached {
 		req.Tools = g.finalizationTools
 		req.Messages = appendPrompt(messages, validationFocusPrompt)
 		return
@@ -262,16 +301,17 @@ func (g *analysisLoopGuard) inspectTool(
 ) validationInspection {
 	inspection := validationInspection{execErr: execErr}
 	if inspection.execErr == nil {
-		if isTimelineVerificationTool(toolName) {
+		if g.isTimelineTool(toolName) {
 			g.timelineVerified = true
 		}
-		final, validationCall, validationErr := validatedAnalysisResult(toolName, args, result)
+		actualToolName := resolvedCustomToolName(toolName, g.customTools)
+		final, validationCall, validationErr := validatedAnalysisResult(actualToolName, args, result)
 		if validationCall {
 			inspection.execErr = validationErr
 			inspection.final = final
 		}
 	}
-	if inspection.execErr == nil || !isAnalysisValidationTool(toolName) {
+	if inspection.execErr == nil || !g.isValidationTool(toolName) {
 		return inspection
 	}
 	failure := normalizedValidationFailure(inspection.execErr)

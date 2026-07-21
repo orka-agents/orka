@@ -155,7 +155,7 @@ func TestAnalysisLoopGuardNarrowsFinalizationTools(t *testing.T) {
 		{Name: "read-artifact-build"},
 		{Name: "verify-timeline-build"},
 		{Name: testValidationToolName},
-	})
+	}, nil)
 	req := &llm.CompletionRequest{Tools: []llm.Tool{
 		{Name: "read-artifact-build"},
 		{Name: "verify-timeline-build"},

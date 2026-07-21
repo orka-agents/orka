@@ -385,6 +385,7 @@ func loadCustomTools(
 	toolNames []string,
 ) map[string]*corev1alpha1.Tool {
 	customTools := make(map[string]*corev1alpha1.Tool)
+	loaded := make([]*corev1alpha1.Tool, 0, len(toolNames))
 
 	for _, name := range toolNames {
 		// Skip built-in tools
@@ -401,7 +402,9 @@ func loadCustomTools(
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
 
 		customTools[name] = tool
+		loaded = append(loaded, tool)
 	}
+	registerToolAliases(customTools, loaded)
 
 	return customTools
 }
@@ -475,7 +478,7 @@ func buildLLMTools(enabledTools []string, customTools map[string]*corev1alpha1.T
 			}
 
 			llmTools = append(llmTools, llm.Tool{
-				Name:        tool.Name,
+				Name:        advertisedCustomToolName(tool, customTools),
 				Description: tool.Spec.Description,
 				Parameters:  params,
 			})
@@ -929,7 +932,7 @@ func executeAgentLoopWithEvents(
 	}
 
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
-	guard := newAnalysisLoopGuard(llmTools)
+	guard := newAnalysisLoopGuard(llmTools, customTools)
 	maxIterations := 10
 	if coordinationEnv.Enabled {
 		maxIterations = 50
@@ -1008,29 +1011,35 @@ func executeAgentLoopWithEvents(
 			stepSpan.End()
 			return "", fmt.Errorf("completion failed: %w", err)
 		}
-		stepSpan.SetAttributes(attribute.Int("agent.step.tool_call_count", len(resp.ToolCalls)))
+		originalToolCalls := resp.ToolCalls
+		selectedToolCalls := guard.selectToolCalls(originalToolCalls)
+		stepSpan.SetAttributes(attribute.Int("agent.step.tool_call_count", len(originalToolCalls)))
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestCompleted, modelLoopEventTimeout,
 			common.WithEventSummary("model request completed"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"model":        firstNonBlankOriginal(resp.Model, model),
-				"provider":     firstNonBlankOriginal(resp.Provider, llm.ProviderTelemetryName(provider)),
-				"inputTokens":  resp.InputTokens,
-				"outputTokens": resp.OutputTokens,
-				"stopReason":   resp.StopReason,
-				"toolCalls":    len(resp.ToolCalls),
+				"iteration":         iteration + 1,
+				"model":             firstNonBlankOriginal(resp.Model, model),
+				"provider":          firstNonBlankOriginal(resp.Provider, llm.ProviderTelemetryName(provider)),
+				"inputTokens":       resp.InputTokens,
+				"outputTokens":      resp.OutputTokens,
+				"stopReason":        resp.StopReason,
+				"toolCalls":         len(originalToolCalls),
+				"selectedToolCalls": len(selectedToolCalls),
 			})),
 		)
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelMessage, modelLoopEventTimeout,
 			common.WithEventSummary("model returned message"),
 			common.WithEventContent(eventContent(map[string]any{
-				"iteration":    iteration + 1,
-				"contentChars": len([]rune(resp.Content)),
-				"toolCalls":    len(resp.ToolCalls),
-				"stopReason":   resp.StopReason,
+				"iteration":         iteration + 1,
+				"contentChars":      len([]rune(resp.Content)),
+				"toolCalls":         len(originalToolCalls),
+				"selectedToolCalls": len(selectedToolCalls),
+				"stopReason":        resp.StopReason,
 			})),
 			common.WithEventContentText(resp.Content),
 		)
+		recordSkippedAnalysisToolCalls(eventRecorder, originalToolCalls, selectedToolCalls)
+		resp.ToolCalls = selectedToolCalls
 
 		if len(resp.ToolCalls) == 0 {
 			decision := guard.handleFinalResponse(resp.Content, iteration, maxIterations, messages)
@@ -1103,7 +1112,7 @@ func executeAgentLoopWithEvents(
 				})),
 			)
 
-			result, execErr = executeLoopTool(
+			result, execErr, cached := executeGuardedLoopTool(
 				stepCtx,
 				tc,
 				toolName,
@@ -1112,6 +1121,7 @@ func executeAgentLoopWithEvents(
 				toolExecutor,
 				approvalGate,
 				baseToolCtx,
+				guard,
 			)
 
 			inspection := guard.inspectTool(toolName, tc.Arguments, result, execErr)
@@ -1126,6 +1136,10 @@ func executeAgentLoopWithEvents(
 				repeatedValidationErr = inspection.fatal
 			}
 
+			if execErr == nil && !cached {
+				guard.rememberToolResult(toolName, tc.Arguments, result, customTools[toolName])
+			}
+
 			if execErr != nil {
 				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
 					common.WithEventSeverity(events.ExecutionEventSeverityError),
@@ -1135,14 +1149,19 @@ func executeAgentLoopWithEvents(
 				)
 				result = fmt.Sprintf("Error executing tool: %v", execErr)
 			} else {
+				summary := "tool call completed"
+				if cached {
+					summary = "duplicate tool call reused"
+				}
 				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallCompleted, modelLoopEventTimeout,
 					common.WithEventToolName(toolName),
 					common.WithEventToolCallID(tc.ID),
-					common.WithEventSummary("tool call completed"),
+					common.WithEventSummary(summary),
 					common.WithEventContent(eventContent(map[string]any{
 						"toolName":     toolName,
 						"toolCallID":   tc.ID,
 						"resultLength": len(result),
+						"cached":       cached,
 					})),
 				)
 			}

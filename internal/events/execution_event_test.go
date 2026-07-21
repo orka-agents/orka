@@ -26,6 +26,7 @@ func TestExecutionEventTypeConstantsCoverP0Taxonomy(t *testing.T) {
 		ExecutionEventTypeToolCallStarted,
 		ExecutionEventTypeToolCallCompleted,
 		ExecutionEventTypeToolCallFailed,
+		ExecutionEventTypeToolCallSkipped,
 		ExecutionEventTypeWorkspacePreparationStarted,
 		ExecutionEventTypeWorkspacePreparationCompleted,
 		ExecutionEventTypeWorkspacePreparationFailed,

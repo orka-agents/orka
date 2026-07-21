@@ -184,10 +184,11 @@ func (g *approvalGate) preScan(
 		return nil, nil
 	}
 	for _, call := range calls {
-		toolName := strings.TrimSpace(call.Name)
+		modelToolName := strings.TrimSpace(call.Name)
+		toolName, customTool := approvalToolIdentity(modelToolName, customTools)
 		requiresApproval := g.requiresApproval(toolName)
 		if requiresApproval {
-			if _, ok := allowedToolCalls[toolName]; !ok {
+			if _, ok := allowedToolCalls[modelToolName]; !ok {
 				return &approvalBatchDecision{
 					continueLLM: true,
 					toolResults: approvalValidationBatchToolResults(
@@ -198,16 +199,16 @@ func (g *approvalGate) preScan(
 				}, nil
 			}
 		}
-		target, err := g.targetForCall(ctx, toolName, call.Arguments, customTools[toolName])
+		target, err := g.targetForCall(ctx, toolName, call.Arguments, customTool)
 		if err != nil {
 			if !requiresApproval {
-				if g.blockingOverflow && customTools[toolName] != nil {
+				if g.blockingOverflow && customTool != nil {
 					return &approvalBatchDecision{
 						continueLLM: true,
 						toolResults: blockingApprovalOverflowBatchToolResults(calls, call.ID, toolName),
 					}, nil
 				}
-				if g.hasResolvedHistoryForTool(toolName) && customTools[toolName] != nil {
+				if g.hasResolvedHistoryForTool(toolName) && customTool != nil {
 					return &approvalBatchDecision{
 						continueLLM: true,
 						toolResults: approvalValidationBatchToolResults(calls, call.ID, err),
@@ -234,7 +235,7 @@ func (g *approvalGate) preScan(
 					toolResults: staleApprovalBatchToolResults(calls, call.ID, staleDecision),
 				}, nil
 			}
-			if g.blockingOverflow && customTools[toolName] != nil {
+			if g.blockingOverflow && customTool != nil {
 				return &approvalBatchDecision{
 					continueLLM: true,
 					toolResults: blockingApprovalOverflowBatchToolResults(calls, call.ID, toolName),
@@ -257,6 +258,17 @@ func (g *approvalGate) preScan(
 		}, nil
 	}
 	return nil, nil
+}
+
+func approvalToolIdentity(
+	modelToolName string,
+	customTools map[string]*corev1alpha1.Tool,
+) (string, *corev1alpha1.Tool) {
+	customTool := customTools[modelToolName]
+	if customTool != nil {
+		return customTool.Name, customTool
+	}
+	return modelToolName, nil
 }
 
 func (g *approvalGate) targetForCall(

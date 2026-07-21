@@ -21,6 +21,7 @@ const (
 	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
 	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
 	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
+	ExecutionEventTypeToolCallSkipped               = "ToolCallSkipped"
 	ExecutionEventTypeWorkspacePreparationStarted   = "WorkspacePreparationStarted"
 	ExecutionEventTypeWorkspacePreparationCompleted = "WorkspacePreparationCompleted"
 	ExecutionEventTypeWorkspacePreparationFailed    = "WorkspacePreparationFailed"
@@ -74,6 +75,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeToolCallStarted,
 	ExecutionEventTypeToolCallCompleted,
 	ExecutionEventTypeToolCallFailed,
+	ExecutionEventTypeToolCallSkipped,
 	ExecutionEventTypeWorkspacePreparationStarted,
 	ExecutionEventTypeWorkspacePreparationCompleted,
 	ExecutionEventTypeWorkspacePreparationFailed,
