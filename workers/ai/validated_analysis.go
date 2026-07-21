@@ -142,6 +142,8 @@ const (
 	maxValidationFailures         = 3
 	maxValidationFinalRetries     = 2
 	maxTransientCritiqueRetries   = 2
+	defaultSubmissionToolName     = "validate_analysis"
+	defaultTimelineToolName       = "verify_timeline"
 	validationRequiredPrompt      = "The final answer cannot be accepted until validate_analysis succeeds. " +
 		"Call validate_analysis now with the complete final analysis and every supporting evidence token. " +
 		"Do not return prose or final JSON before validation succeeds."
@@ -170,6 +172,7 @@ type analysisLoopGuard struct {
 	finalizationTools        []llm.Tool
 	customTools              map[string]*corev1alpha1.Tool
 	submissionToolName       string
+	timelineToolName         string
 	validationFailures       map[string]int
 	validationFinalRetries   int
 	transientCritiqueRetries int
@@ -212,11 +215,14 @@ func newAnalysisLoopGuard(
 	customTools map[string]*corev1alpha1.Tool,
 ) *analysisLoopGuard {
 	validation, timeline, finalization := analysisToolNames(tools, customTools)
-	submissionToolName := "validate_analysis"
+	submissionToolName := defaultSubmissionToolName
+	timelineToolName := defaultTimelineToolName
 	for _, tool := range tools {
-		if validation[tool.Name] {
+		if validation[tool.Name] && submissionToolName == defaultSubmissionToolName {
 			submissionToolName = tool.Name
-			break
+		}
+		if timeline[tool.Name] && timelineToolName == defaultTimelineToolName {
+			timelineToolName = tool.Name
 		}
 	}
 	return &analysisLoopGuard{
@@ -227,6 +233,7 @@ func newAnalysisLoopGuard(
 		finalizationTools:        finalization,
 		customTools:              customTools,
 		submissionToolName:       submissionToolName,
+		timelineToolName:         timelineToolName,
 		validationFailures:       map[string]int{},
 		toolResults:              map[string]string{},
 	}
@@ -315,7 +322,7 @@ func (g *analysisLoopGuard) handleFinalResponse(
 		return finalResponseDecision{
 			messages: append(messages,
 				llm.Message{Role: "assistant", Content: content},
-				llm.Message{Role: "user", Content: transientCritiquePrompt},
+				llm.Message{Role: "user", Content: g.modelPrompt(transientCritiquePrompt)},
 			),
 			retry: true,
 		}
@@ -363,7 +370,7 @@ func (g *analysisLoopGuard) finishValidatedResult(final, repair string) (string,
 	if final == "" {
 		return "", repair
 	}
-	if validatedAnalysisIsTransient(final) && !g.timelineVerified {
+	if validatedAnalysisIsTransient(final) && len(g.timelineToolNames) > 0 && !g.timelineVerified {
 		return "", g.modelPrompt(transientValidationPrompt)
 	}
 	return final, repair
@@ -400,7 +407,10 @@ func (g *analysisLoopGuard) activeFinalizationTools() []llm.Tool {
 }
 
 func (g *analysisLoopGuard) modelPrompt(prompt string) string {
-	return strings.ReplaceAll(prompt, "validate_analysis", g.submissionToolName)
+	return strings.NewReplacer(
+		"validate_analysis", g.submissionToolName,
+		"verify_timeline", g.timelineToolName,
+	).Replace(prompt)
 }
 
 func appendPrompt(messages []llm.Message, prompt string) []llm.Message {

@@ -151,7 +151,9 @@ func TestToolAliasUsesModelFacingSubmissionName(t *testing.T) {
 	guard.investigationToolCalls = analysisMaxInvestigationToolCalls
 	guard.prepareRequest(req, nil, 1, analysisLoopMaxIterations)
 	if len(req.Messages) != 1 || !strings.Contains(req.Messages[0].Content, "finish") ||
-		strings.Contains(req.Messages[0].Content, "validate_analysis") {
+		!strings.Contains(req.Messages[0].Content, "confirm") ||
+		strings.Contains(req.Messages[0].Content, "validate_analysis") ||
+		strings.Contains(req.Messages[0].Content, "verify_timeline") {
 		t.Fatalf("validation prompt = %+v", req.Messages)
 	}
 	guard.timelineVerified = true
@@ -248,4 +250,17 @@ func TestMalformedAliasedApprovalRecordsFailure(t *testing.T) {
 		}
 	}
 	t.Fatalf("failure event missing: %+v", recorder.Events())
+}
+
+func TestToolAliasPromptReplacementDoesNotCascade(t *testing.T) {
+	submit := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "submit-analysis-task"}}
+	timeline := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "verify-timeline-build"}}
+	guard := newAnalysisLoopGuard(
+		[]llm.Tool{{Name: "submit_via_verify_timeline"}, {Name: "confirm"}},
+		map[string]*corev1alpha1.Tool{"submit_via_verify_timeline": submit, "confirm": timeline},
+	)
+	got := guard.modelPrompt("call validate_analysis after verify_timeline")
+	if got != "call submit_via_verify_timeline after confirm" {
+		t.Fatalf("modelPrompt() = %q", got)
+	}
 }

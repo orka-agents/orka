@@ -226,3 +226,19 @@ func TestValidationPromptCanBeReappliedAfterCompaction(t *testing.T) {
 		t.Fatalf("reapplied prompt = %+v", req.Messages)
 	}
 }
+
+func TestValidatedTransientWithoutTimelineToolCanFinish(t *testing.T) {
+	guard := newAnalysisLoopGuard([]llm.Tool{{Name: testValidationToolName}}, nil)
+	transient := true
+	result, err := json.Marshal(validatedAnalysis{
+		Summary: "summary", IsTransient: &transient, RootCause: "cause", Severity: "High",
+		SuggestedFix: "fix", RelevantFiles: []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, repair := guard.finishValidatedResult(string(result), "")
+	if final == "" || repair != "" {
+		t.Fatalf("final=%q repair=%q", final, repair)
+	}
+}
