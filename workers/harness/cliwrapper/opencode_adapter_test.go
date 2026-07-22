@@ -88,8 +88,8 @@ func TestOpencodeAdapterBuildCommand(t *testing.T) {
 	if provider.Options.BaseURL != "http://models.example/v1" {
 		t.Fatalf("baseURL = %q, want chat completions path stripped", provider.Options.BaseURL)
 	}
-	if provider.Options.APIKey != "test-key" {
-		t.Fatalf("apiKey = %q, want test-key", provider.Options.APIKey)
+	if provider.Options.APIKey != "{env:"+opencodeEscapedValueEnv+"}" {
+		t.Fatalf("apiKey = %q, want environment reference", provider.Options.APIKey)
 	}
 	limit := provider.Models["kimi-k2"].Limit
 	if limit.Context != opencodeModelContextLimit || limit.Output != opencodeModelOutputLimit {
@@ -115,11 +115,51 @@ func TestOpencodeAdapterBuildCommand(t *testing.T) {
 	if got := string(instructions); got != "follow repository conventions {env:OPENAI_API_KEY}\n" {
 		t.Fatalf("instructions = %q, want literal system prompt", got)
 	}
-	if strings.Contains(string(data), "{env:OPENAI_API_KEY}") {
-		t.Fatal("opencode config contains substitutable system prompt content")
+	if strings.Contains(string(data), "follow repository conventions") {
+		t.Fatal("opencode config contains system prompt content")
 	}
 	if cfg.Share != "disabled" || cfg.AutoUpdate {
 		t.Fatalf("share = %q, autoupdate = %v, want disabled and false", cfg.Share, cfg.AutoUpdate)
+	}
+}
+
+func TestOpencodeAdapterConfigKeepsAPIKeyOutOfFileAndDisablesSnapshots(t *testing.T) {
+	value := "value with \"quotes\", \\slashes, {file:/tmp/example}, and\nnewlines"
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir: t.TempDir(),
+		Metadata: map[string]string{
+			"model": "kimi-k2",
+		},
+		Env: []string{
+			workerenv.OpenAIBaseURL + "=http://models.example/v1",
+			workerenv.OpenAIAPIKey + "=" + value,
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+
+	data, err := os.ReadFile(spec.TempFiles[0])
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	if strings.Contains(string(data), value) {
+		t.Fatal("opencode config contains raw API key")
+	}
+	if !strings.Contains(string(data), `"snapshot": false`) {
+		t.Fatal("opencode config does not disable snapshots")
+	}
+
+	escapedValue := envEntryValue(spec.Env, opencodeEscapedValueEnv)
+	resolvedConfig := strings.ReplaceAll(string(data), "{env:"+opencodeEscapedValueEnv+"}", escapedValue)
+	var resolved opencodeConfig
+	if err := json.Unmarshal([]byte(resolvedConfig), &resolved); err != nil {
+		t.Fatalf("unmarshal config after environment substitution: %v", err)
+	}
+	if got := resolved.Provider[opencodeProviderName].Options.APIKey; got != value {
+		t.Fatalf("resolved apiKey = %q, want %q", got, value)
 	}
 }
 
@@ -375,16 +415,14 @@ func TestOpencodeAdapterParseResult(t *testing.T) {
 	}
 }
 
-func TestOpencodeAdapterParseResultFallsBackToExactStdout(t *testing.T) {
+func TestOpencodeAdapterParseResultRejectsIncompleteJSON(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
-	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{
-		Stdout:     "truncated",
-		FullStdout: "plain opencode output",
-	})
-	if err != nil {
-		t.Fatalf("ParseResult() error = %v", err)
+	stdout := `{"type":"step_start","part":{"type":"step-start"}}` + "\n"
+	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err == nil || !strings.Contains(err.Error(), "completed text event") {
+		t.Fatalf("ParseResult() error = %v, want incomplete JSON error", err)
 	}
-	if result.Result != "plain opencode output" {
-		t.Fatalf("Result = %q, want exact stdout fallback", result.Result)
+	if result.Result != stdout {
+		t.Fatalf("Result = %q, want exact incomplete stdout", result.Result)
 	}
 }

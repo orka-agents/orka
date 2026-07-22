@@ -28,6 +28,7 @@ const (
 	opencodePermissionDeny        = "deny"
 	opencodePermissionWebSearch   = "websearch"
 	opencodeEnvTrue               = "true"
+	opencodeEscapedValueEnv       = "ORKA_OPENCODE_API_KEY_JSON_ESCAPED"
 )
 
 type OpencodeAdapter struct {
@@ -42,6 +43,7 @@ type opencodeConfig struct {
 	Instructions []string                    `json:"instructions,omitempty"`
 	Share        string                      `json:"share"`
 	AutoUpdate   bool                        `json:"autoupdate"`
+	Snapshot     bool                        `json:"snapshot"`
 }
 
 type opencodeAgent struct {
@@ -103,7 +105,7 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 	if baseURL == "" {
 		return nil, fmt.Errorf("%s is required for opencode runtime", workerenv.OpenAIBaseURL)
 	}
-	configPath, scratchDir, err := writeOpencodeConfig(agentCfg, baseURL, envEntryValue(turn.Env, workerenv.OpenAIAPIKey))
+	configPath, scratchDir, err := writeOpencodeConfig(agentCfg, baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +123,8 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 		xdgStateHome,
 		configPath,
 	)
+	escapedValue := opencodeEscapedConfigValue(envEntryValue(turn.Env, workerenv.OpenAIAPIKey))
+	env = setEnv(env, opencodeEscapedValueEnv, escapedValue)
 
 	args := []string{"run", "--dir", dir, "--format", "json", "--model", opencodeProviderName + "/" + model}
 	return &CommandSpec{
@@ -139,7 +143,8 @@ func (a *OpencodeAdapter) ParseResult(_ context.Context, _ TurnContext, run Comm
 	if message := opencodeFinalMessage(stdout); message != "" {
 		return TurnResult{Result: message, Metadata: map[string]string{"adapter": RuntimeOpencode}}, nil
 	}
-	return TurnResult{Result: stdout, Metadata: map[string]string{"adapter": RuntimeOpencode}}, nil
+	return TurnResult{Result: stdout, Metadata: map[string]string{"adapter": RuntimeOpencode}},
+		fmt.Errorf("opencode output did not contain a completed text event")
 }
 
 func buildOpencodeEnv(
@@ -190,7 +195,7 @@ func buildOpencodeEnv(
 	return env, unsetEnv
 }
 
-func writeOpencodeConfig(cfg *agentEnvConfig, baseURL, apiKey string) (string, string, error) {
+func writeOpencodeConfig(cfg *agentEnvConfig, baseURL string) (string, string, error) {
 	scratchDir, err := os.MkdirTemp("", "orka-opencode-*")
 	if err != nil {
 		return "", "", fmt.Errorf("create opencode scratch directory: %w", err)
@@ -246,7 +251,7 @@ func writeOpencodeConfig(cfg *agentEnvConfig, baseURL, apiKey string) (string, s
 				Name: opencodeProviderName,
 				Options: opencodeProviderOptions{
 					BaseURL: baseURL,
-					APIKey:  apiKey,
+					APIKey:  "{env:" + opencodeEscapedValueEnv + "}",
 				},
 				Models: models,
 			},
@@ -258,6 +263,7 @@ func writeOpencodeConfig(cfg *agentEnvConfig, baseURL, apiKey string) (string, s
 		Instructions: instructions,
 		Share:        "disabled",
 		AutoUpdate:   false,
+		Snapshot:     false,
 	}, "", "  ")
 	if err != nil {
 		cleanup()
@@ -361,6 +367,13 @@ func opencodePermissionForTool(tool string) string {
 	default:
 		return ""
 	}
+}
+
+func opencodeEscapedConfigValue(value string) string {
+	encoded, _ := json.Marshal(value)
+	contents := string(encoded[1 : len(encoded)-1])
+	contents = strings.ReplaceAll(contents, "{", `\u007b`)
+	return strings.ReplaceAll(contents, "}", `\u007d`)
 }
 
 func opencodeBaseURL(value string) string {
