@@ -518,6 +518,14 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		"command": path.Base(spec.Path),
 	}))
 	run, runErr := s.runner.Run(ctx, spec)
+	if turnUsesOpencodeRuntime(turnCtx) {
+		// The child can tighten its work directory mode while running. Restore wrapper
+		// group access before parsing results, uploading artifacts, finalizing Git, or cleanup.
+		if err := ensureOpencodeWorkDirAccessible(turnCtx.WorkDir); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
+	}
 	if run.FullStdoutTruncated && strings.TrimSpace(spec.ResultFile) == "" {
 		turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime stdout exceeded harness storage limit", false))
 		return

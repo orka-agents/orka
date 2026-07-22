@@ -321,6 +321,34 @@ func TestServerDropsRetainedInputEnvAfterMaterializingContext(t *testing.T) {
 	}
 }
 
+func TestServerRestoresOpencodeWorkDirAccessAfterRuntimeExit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Runtime = RuntimeOpencode
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, opencodePostRunModeAdapter{})
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Metadata = map[string]string{"model": "test-model"}
+	request.Input.Env = []harness.TurnEnvVar{
+		{Name: workerenv.OpenAIBaseURL, Value: "http://models.example/v1"},
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnCompleted || last.Completed == nil {
+		t.Fatalf("last frame = %#v, want completed", last)
+	}
+	if last.Completed.Result != "done" {
+		t.Fatalf("completed result = %q, want done", last.Completed.Result)
+	}
+}
+
 func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -529,6 +557,34 @@ func (a *envCapturingAdapter) RunTurn(
 		Summary:   "done",
 		Completed: &harness.TurnCompleted{Result: "ok"},
 	})
+}
+
+type opencodePostRunModeAdapter struct{}
+
+func (opencodePostRunModeAdapter) Name() string { return RuntimeOpencode }
+
+func (opencodePostRunModeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
+	return &CommandSpec{
+		Path: "/bin/sh",
+		Args: []string{"-c", "chmod 0700 . && printf done"},
+		Dir:  turn.WorkDir,
+		Env:  turn.Env,
+	}, nil
+}
+
+func (opencodePostRunModeAdapter) ParseResult(
+	_ context.Context,
+	turn TurnContext,
+	run CommandResult,
+) (TurnResult, error) {
+	info, err := os.Stat(turn.WorkDir)
+	if err != nil {
+		return TurnResult{}, err
+	}
+	if got := info.Mode().Perm(); got != 0o770 {
+		return TurnResult{}, fmt.Errorf("post-run workdir mode = %#o, want 0770", got)
+	}
+	return TurnResult{Result: run.ExactStdout()}, nil
 }
 
 type eventingSecretAdapter struct{}
