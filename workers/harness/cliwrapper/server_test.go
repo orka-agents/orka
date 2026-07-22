@@ -349,6 +349,71 @@ func TestServerRestoresOpencodeWorkDirAccessAfterRuntimeExit(t *testing.T) {
 	}
 }
 
+func TestServerRejectsOpencodeWorkDirSymlinkReplacementWithoutChangingTargetMode(t *testing.T) {
+	targetDir := t.TempDir()
+	if err := os.Chmod(targetDir, 0o750); err != nil {
+		t.Fatalf("chmod target directory: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Runtime = RuntimeOpencode
+	adapter := opencodeWorkDirReplacementAdapter{target: targetDir}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnFailed || last.Failed == nil ||
+		!strings.Contains(last.Failed.Message, "replaced by a symlink") {
+		t.Fatalf("last frame = %#v, want workdir replacement failure", last)
+	}
+	info, err := os.Lstat(targetDir)
+	if err != nil {
+		t.Fatalf("lstat replacement target: %v", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("replacement target mode = %v, want real directory", info.Mode())
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("replacement target mode = %#o, want unchanged 0750", got)
+	}
+}
+
+func TestSecurityArtifactFollowUpRestoresOpencodeWorkDirBeforeParseResult(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.Chmod(workDir, 0o770); err != nil {
+		t.Fatalf("chmod workdir: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Runtime = RuntimeOpencode
+	server, err := NewServer(cfg, opencodePostRunModeAdapter{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	request := validWrapperStartTurnRequest()
+	turn := newTurnState(request, time.Now)
+	defer turn.cancel()
+	followUp := server.securityArtifactFollowUp(turn, TurnContext{
+		RuntimeName: RuntimeOpencode,
+		WorkDir:     workDir,
+	})
+	result, err := followUp(context.Background(), "produce security artifact")
+	if err != nil {
+		t.Fatalf("securityArtifactFollowUp() error = %v", err)
+	}
+	if result != "done" {
+		t.Fatalf("securityArtifactFollowUp() result = %q, want done", result)
+	}
+}
+
 func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -570,6 +635,35 @@ func (opencodePostRunModeAdapter) BuildCommand(_ context.Context, turn TurnConte
 		Dir:  turn.WorkDir,
 		Env:  turn.Env,
 	}, nil
+}
+
+type opencodeWorkDirReplacementAdapter struct {
+	target string
+}
+
+func (opencodeWorkDirReplacementAdapter) Name() string { return RuntimeOpencode }
+
+func (a opencodeWorkDirReplacementAdapter) BuildCommand(
+	_ context.Context,
+	turn TurnContext,
+) (*CommandSpec, error) {
+	return &CommandSpec{
+		Path: "/bin/sh",
+		Args: []string{"-c", `workdir=$PWD
+mv "$workdir" "$workdir.replaced"
+ln -s "$REPLACEMENT_TARGET" "$workdir"
+printf done`},
+		Dir: turn.WorkDir,
+		Env: setEnv(turn.Env, "REPLACEMENT_TARGET", a.target),
+	}, nil
+}
+
+func (opencodeWorkDirReplacementAdapter) ParseResult(
+	_ context.Context,
+	_ TurnContext,
+	run CommandResult,
+) (TurnResult, error) {
+	return TurnResult{Result: run.ExactStdout()}, nil
 }
 
 func (opencodePostRunModeAdapter) ParseResult(
