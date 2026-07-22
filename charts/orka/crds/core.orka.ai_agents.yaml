@@ -1213,6 +1213,12 @@ spec:
                   Model defines the LLM model configuration
                   Provider field is optional if providerRef is set
                 properties:
+                  contextWindow:
+                    description: ContextWindow is the model context-window size in
+                      tokens.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   fallbacks:
                     description: |-
                       Fallbacks defines alternative providers to try when the primary fails.
@@ -1235,6 +1241,7 @@ spec:
                   maxTokens:
                     description: MaxTokens limits the response length
                     format: int32
+                    minimum: 1
                     type: integer
                   name:
                     description: |-

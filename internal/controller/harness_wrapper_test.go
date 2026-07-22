@@ -2428,6 +2428,89 @@ func TestHarnessWrapperTurnMetadataCarriesTaskTimeout(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperTurnMetadataCarriesOpencodeModelLimits(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode
+	maxTokens := int32(4096)
+	contextWindow := int32(64000)
+	agent.Spec.Model = &corev1alpha1.ModelConfig{
+		Name:          "kimi-k2",
+		MaxTokens:     &maxTokens,
+		ContextWindow: &contextWindow,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	for key, want := range map[string]string{
+		"model":         "kimi-k2",
+		"maxTokens":     "4096",
+		"contextWindow": "64000",
+	} {
+		if got := request.Metadata[key]; got != want {
+			t.Fatalf("metadata[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestHarnessWrapperTurnMetadataRejectsNonPositiveModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		model *corev1alpha1.ModelConfig
+		want  string
+	}{
+		{
+			name: "max tokens",
+			model: func() *corev1alpha1.ModelConfig {
+				value := int32(0)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", MaxTokens: &value}
+			}(),
+			want: "maxTokens must be positive",
+		},
+		{
+			name: "context window",
+			model: func() *corev1alpha1.ModelConfig {
+				value := int32(-1)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", ContextWindow: &value}
+			}(),
+			want: "contextWindow must be positive",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task, agent := harnessWrapperTaskAndAgent()
+			agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode
+			agent.Spec.Model = tt.model
+			r := newUnitReconciler(newTestScheme(), task, agent)
+			_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestHarnessWrapperTurnMetadataOmitsOpencodeLimitsForOtherRuntimes(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	maxTokens := int32(4096)
+	contextWindow := int32(64000)
+	agent.Spec.Model = &corev1alpha1.ModelConfig{
+		Name:          "gpt-5",
+		MaxTokens:     &maxTokens,
+		ContextWindow: &contextWindow,
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest: %v", err)
+	}
+	for _, key := range []string{"maxTokens", "contextWindow"} {
+		if value, ok := request.Metadata[key]; ok {
+			t.Fatalf("metadata[%s] = %q, want omitted for %s runtime", key, value, agent.Spec.Runtime.Type)
+		}
+	}
+}
+
 func TestHarnessWrapperTurnRequestResolvesTaskValueFromEnv(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Spec.Env = []corev1.EnvVar{
@@ -2736,6 +2819,11 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	}
 	if request.Metadata["maxTurns"] != "50" {
 		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+	for _, key := range []string{"maxTokens", "contextWindow"} {
+		if value, ok := request.Metadata[key]; ok {
+			t.Fatalf("metadata[%s] = %q, want omitted without Agent model override", key, value)
+		}
 	}
 }
 

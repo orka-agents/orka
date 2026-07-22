@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 	},
 	}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Model configuration; model.name is required for OpenCode runtimes", jsonSchemaPropertiesField: map[string]any{
 		"provider": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai)"}, nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name; required endpoint model ID for OpenCode"}, "temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaDescriptionField: "Sampling temperature"},
+		"maxTokens": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, "minimum": 1, jsonSchemaDescriptionField: "Maximum output tokens; used as the OpenCode output limit"}, "contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, "minimum": 1, jsonSchemaDescriptionField: "Model context-window size in tokens; used by OpenCode"},
 	},
 	}, runtimeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{jsonSchemaTypeField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Runtime type: copilot, claude, codex, or opencode"}, "defaultMaxTurns": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Default max agent loop iterations"},
 		"defaultAllowedTools": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Default CLI tools allowed for tasks using this runtime agent"},
@@ -104,6 +106,16 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 					agent.Spec.Model.Temperature = &tempF
 				}
 			}
+			maxTokens, errResult, ok := parsePositiveModelLimitArg(m, "maxTokens")
+			if !ok {
+				return errResult, nil
+			}
+			contextWindow, errResult, ok := parsePositiveModelLimitArg(m, "contextWindow")
+			if !ok {
+				return errResult, nil
+			}
+			agent.Spec.Model.MaxTokens = maxTokens
+			agent.Spec.Model.ContextWindow = contextWindow
 		case string:
 			provider, modelName := splitModelString(m)
 			if provider != "" {
@@ -159,6 +171,44 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	}
 
 	return ChatToolSuccess(map[string]any{nameField: agent.Name, namespaceField: agent.Namespace, messageField: "Agent created"})
+}
+
+func parsePositiveModelLimitArg(model map[string]any, key string) (*int32, string, bool) {
+	raw, ok := model[key]
+	if !ok || raw == nil {
+		return nil, "", true
+	}
+	const maxInt32 = int64(1<<31 - 1)
+	var value int64
+	switch number := raw.(type) {
+	case float64:
+		if math.IsNaN(number) || math.IsInf(number, 0) || number < 1 || number != math.Trunc(number) || number > float64(maxInt32) {
+			return invalidPositiveModelLimitArg(key)
+		}
+		value = int64(number)
+	case int:
+		value = int64(number)
+	case int32:
+		value = int64(number)
+	case int64:
+		value = number
+	default:
+		return invalidPositiveModelLimitArg(key)
+	}
+	if value <= 0 || value > maxInt32 {
+		return invalidPositiveModelLimitArg(key)
+	}
+	parsed := int32(value)
+	return &parsed, "", true
+}
+
+func invalidPositiveModelLimitArg(key string) (*int32, string, bool) {
+	result, _ := ChatToolErrorResult(
+		"invalid_arguments",
+		fmt.Sprintf("model.%s must be a positive integer", key),
+		"Set the model limit to a whole number greater than zero.",
+	)
+	return nil, result, false
 }
 
 func (t *ChatCreateAgentTool) handleInitialPrompt(ctx context.Context, tc *ToolContext, agent *corev1alpha1.Agent, namespace, initialPrompt string) (string, error) {

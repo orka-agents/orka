@@ -1721,8 +1721,24 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 	}
 	if agent != nil {
 		metadata["agentName"] = agent.Name
-		if agent.Spec.Model != nil && strings.TrimSpace(agent.Spec.Model.Name) != "" {
-			metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
+		if agent.Spec.Model != nil {
+			if strings.TrimSpace(agent.Spec.Model.Name) != "" {
+				metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
+			}
+			if runtimeName == string(corev1alpha1.AgentRuntimeOpencode) {
+				if agent.Spec.Model.MaxTokens != nil {
+					if *agent.Spec.Model.MaxTokens <= 0 {
+						return nil, fmt.Errorf("agent model maxTokens must be positive")
+					}
+					metadata["maxTokens"] = strconv.FormatInt(int64(*agent.Spec.Model.MaxTokens), 10)
+				}
+				if agent.Spec.Model.ContextWindow != nil {
+					if *agent.Spec.Model.ContextWindow <= 0 {
+						return nil, fmt.Errorf("agent model contextWindow must be positive")
+					}
+					metadata["contextWindow"] = strconv.FormatInt(int64(*agent.Spec.Model.ContextWindow), 10)
+				}
+			}
 		}
 		if strings.TrimSpace(metadata["model"]) == "" {
 			if model := r.harnessWrapperDefaultProviderModel(ctx, agent.Namespace); model != "" {

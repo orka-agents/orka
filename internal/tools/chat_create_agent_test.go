@@ -22,6 +22,22 @@ import (
 
 const testProviderOpenAI = "openai"
 
+func TestChatCreateAgentToolParametersExposePositiveModelLimits(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal((&ChatCreateAgentTool{}).Parameters(), &schema); err != nil {
+		t.Fatalf("unmarshal parameters: %v", err)
+	}
+	properties := schema[jsonSchemaPropertiesField].(map[string]any)
+	modelSchema := properties[modelField].(map[string]any)
+	modelProperties := modelSchema[jsonSchemaPropertiesField].(map[string]any)
+	for _, key := range []string{"maxTokens", "contextWindow"} {
+		field := modelProperties[key].(map[string]any)
+		if field[jsonSchemaTypeField] != jsonSchemaTypeInteger || field["minimum"] != float64(1) {
+			t.Fatalf("model.%s schema = %#v, want positive integer", key, field)
+		}
+	}
+}
+
 func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -30,7 +46,7 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	})
 
 	tool := &ChatCreateAgentTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-no-provider","model":{"provider":"openai","name":"gpt-4.1-mini"}}`))
+	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-no-provider","model":{"provider":"openai","name":"gpt-4.1-mini","maxTokens":4096,"contextWindow":64000}}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,6 +75,52 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	}
 	if created.Spec.Model.Provider != testProviderOpenAI {
 		t.Fatalf("model.provider = %q, want openai when no providerRef is set", created.Spec.Model.Provider)
+	}
+	if created.Spec.Model.MaxTokens == nil || *created.Spec.Model.MaxTokens != 4096 {
+		t.Fatalf("model.maxTokens = %v, want 4096", created.Spec.Model.MaxTokens)
+	}
+	if created.Spec.Model.ContextWindow == nil || *created.Spec.Model.ContextWindow != 64000 {
+		t.Fatalf("model.contextWindow = %v, want 64000", created.Spec.Model.ContextWindow)
+	}
+}
+
+func TestChatCreateAgentTool_Execute_RejectsInvalidModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "zero max tokens", field: "maxTokens", value: 0},
+		{name: "fractional max tokens", field: "maxTokens", value: 1.5},
+		{name: "negative context window", field: "contextWindow", value: -1},
+		{name: "string context window", field: "contextWindow", value: "64000"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			args, err := json.Marshal(map[string]any{
+				nameField: "invalid-model-limit",
+				modelField: map[string]any{
+					nameField: "gpt-4.1-mini",
+					tt.field:  tt.value,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var toolResult ChatToolResult
+			if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+			if toolResult.Success || toolResult.ErrorType != errTypeInvalidArgs ||
+				!strings.Contains(toolResult.Error, "model."+tt.field+" must be a positive integer") {
+				t.Fatalf("Execute() result = %#v, want invalid %s rejection", toolResult, tt.field)
+			}
+		})
 	}
 }
 

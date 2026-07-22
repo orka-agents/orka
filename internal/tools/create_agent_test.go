@@ -49,6 +49,15 @@ func TestCreateAgentTool_Parameters(t *testing.T) {
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
+	properties := schema[jsonSchemaPropertiesField].(map[string]any)
+	modelSchema := properties[modelField].(map[string]any)
+	modelProperties := modelSchema[jsonSchemaPropertiesField].(map[string]any)
+	for _, key := range []string{"maxTokens", "contextWindow"} {
+		field := modelProperties[key].(map[string]any)
+		if field[jsonSchemaTypeField] != jsonSchemaTypeInteger || field["minimum"] != float64(1) {
+			t.Fatalf("model.%s schema = %#v, want positive integer", key, field)
+		}
+	}
 }
 
 func TestCreateAgentTool_Execute(t *testing.T) {
@@ -264,7 +273,7 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	args := json.RawMessage(`{
 		"role": "coder",
 		"systemPrompt": "You are a Go coder",
-		"model": {"provider": "anthropic", "name": "claude-sonnet-4-20250514"},
+		"model": {"provider": "anthropic", "name": "claude-sonnet-4-20250514", "maxTokens": 4096, "contextWindow": 64000},
 		"providerRef": "my-provider",
 		"tools": ["web_search", "code_exec"],
 		"skills": ["go-coding"],
@@ -294,16 +303,7 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Fatalf("failed to get agent: %v", err)
 	}
 
-	// Verify model
-	if agent.Spec.Model == nil {
-		t.Fatal("agent.Spec.Model is nil")
-	}
-	if agent.Spec.Model.Provider != "" {
-		t.Errorf("model.provider = %q, want empty (cleared to avoid mismatch with providerRef)", agent.Spec.Model.Provider)
-	}
-	if agent.Spec.Model.Name != "claude-sonnet-4-20250514" {
-		t.Errorf("model.name = %q, want %q", agent.Spec.Model.Name, "claude-sonnet-4-20250514")
-	}
+	assertCreateAgentModel(t, agent.Spec.Model)
 
 	// Verify provider ref
 	if agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != "my-provider" {
@@ -369,6 +369,25 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 	}
 	if agent.Annotations[labels.AnnotationParentTaskName] != parentTaskName {
 		t.Errorf("annotation orka.ai/parent-task-name = %q, want %q", agent.Annotations[labels.AnnotationParentTaskName], parentTaskName)
+	}
+}
+
+func assertCreateAgentModel(t *testing.T, model *corev1alpha1.ModelConfig) {
+	t.Helper()
+	if model == nil {
+		t.Fatal("agent.Spec.Model is nil")
+	}
+	if model.Provider != "" {
+		t.Errorf("model.provider = %q, want empty (cleared to avoid mismatch with providerRef)", model.Provider)
+	}
+	if model.Name != "claude-sonnet-4-20250514" {
+		t.Errorf("model.name = %q, want %q", model.Name, "claude-sonnet-4-20250514")
+	}
+	if model.MaxTokens == nil || *model.MaxTokens != 4096 {
+		t.Fatalf("model.maxTokens = %v, want 4096", model.MaxTokens)
+	}
+	if model.ContextWindow == nil || *model.ContextWindow != 64000 {
+		t.Fatalf("model.contextWindow = %v, want 64000", model.ContextWindow)
 	}
 }
 
@@ -674,6 +693,40 @@ func TestCreateAgentTool_Execute_RejectsOpencodeWithoutModel(t *testing.T) {
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil || !strings.Contains(err.Error(), "model.name is required for opencode") {
 		t.Fatalf("Execute() error = %v, want missing OpenCode model rejection", err)
+	}
+}
+
+func TestCreateAgentTool_Execute_RejectsNonPositiveModelLimits(t *testing.T) {
+	t.Setenv(envOrkaTaskName, parentTaskName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+
+	for _, tt := range []struct {
+		name  string
+		field string
+		value int
+	}{
+		{name: "zero max tokens", field: "maxTokens", value: 0},
+		{name: "negative max tokens", field: "maxTokens", value: -1},
+		{name: "zero context window", field: "contextWindow", value: 0},
+		{name: "negative context window", field: "contextWindow", value: -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]any{
+				"role":         "coder",
+				"systemPrompt": "You write code",
+				"model": map[string]any{
+					"name":   "kimi-k2",
+					tt.field: tt.value,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			_, err = NewCreateAgentTool(newFakeClient(parentTask())).Execute(context.Background(), args)
+			if err == nil || !strings.Contains(err.Error(), "model."+tt.field+" must be a positive integer") {
+				t.Fatalf("Execute() error = %v, want invalid %s rejection", err, tt.field)
+			}
+		})
 	}
 }
 

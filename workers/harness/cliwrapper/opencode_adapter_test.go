@@ -100,6 +100,9 @@ func TestOpencodeAdapterBuildCommand(t *testing.T) {
 	if cfg.Permission["edit"] != opencodePermissionAllow || cfg.Permission["bash"] != opencodePermissionAllow {
 		t.Fatalf("permission = %#v, want edit and bash allowed", cfg.Permission)
 	}
+	if cfg.Permission["grep"] != opencodePermissionDeny {
+		t.Fatalf("permission.grep = %q, want deny", cfg.Permission["grep"])
+	}
 	if cfg.Permission["skill"] != opencodePermissionDeny {
 		t.Fatalf("permission.skill = %q, want deny", cfg.Permission["skill"])
 	}
@@ -122,6 +125,66 @@ func TestOpencodeAdapterBuildCommand(t *testing.T) {
 	}
 	if cfg.Share != "disabled" || cfg.AutoUpdate {
 		t.Fatalf("share = %q, autoupdate = %v, want disabled and false", cfg.Share, cfg.AutoUpdate)
+	}
+}
+
+func TestOpencodeAdapterUsesModelLimitOverrides(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir: t.TempDir(),
+		Metadata: map[string]string{
+			"model":         "kimi-k2",
+			"contextWindow": "64000",
+			"maxTokens":     "4096",
+		},
+		Env: []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+
+	data, err := os.ReadFile(spec.TempFiles[0])
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	var cfg opencodeConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal opencode config: %v", err)
+	}
+	limit := cfg.Provider[opencodeProviderName].Models["kimi-k2"].Limit
+	if limit.Context != 64000 || limit.Output != 4096 {
+		t.Fatalf("limit = %#v, want context=64000 output=4096", limit)
+	}
+}
+
+func TestOpencodeAdapterRejectsInvalidModelLimitMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "zero context window", key: "contextWindow", value: "0"},
+		{name: "negative context window", key: "contextWindow", value: "-1"},
+		{name: "fractional context window", key: "contextWindow", value: "1.5"},
+		{name: "zero max tokens", key: "maxTokens", value: "0"},
+		{name: "negative max tokens", key: "maxTokens", value: "-1"},
+		{name: "non-numeric max tokens", key: "maxTokens", value: "many"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+			_, err := adapter.BuildCommand(context.Background(), TurnContext{
+				WorkDir: t.TempDir(),
+				Metadata: map[string]string{
+					"model": "kimi-k2",
+					tt.key:  tt.value,
+				},
+				Env: []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.key) || !strings.Contains(err.Error(), "positive integer") {
+				t.Fatalf("BuildCommand() error = %v, want invalid %s rejection", err, tt.key)
+			}
+		})
 	}
 }
 
@@ -1120,6 +1183,46 @@ func TestOpencodeAdapterRejectsDanglingShadowedInstructionFallbacks(t *testing.T
 	}
 }
 
+func TestOpencodeAdapterRejectsShadowedNestedInstructionFallbackSymlinks(t *testing.T) {
+	for _, fallbackName := range []string{"CLAUDE.md", "CONTEXT.md"} {
+		t.Run(fallbackName, func(t *testing.T) {
+			rootDir := t.TempDir()
+			nestedDir := filepath.Join(rootDir, "nested")
+			workDir := filepath.Join(nestedDir, "work")
+			if err := os.MkdirAll(workDir, 0o755); err != nil {
+				t.Fatalf("mkdir nested workdir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(nestedDir, "AGENTS.md"), []byte("winning rules\n"), 0o600); err != nil {
+				t.Fatalf("write AGENTS.md: %v", err)
+			}
+			if fallbackName == "CONTEXT.md" {
+				claudePath := filepath.Join(nestedDir, "CLAUDE.md")
+				if err := os.WriteFile(claudePath, []byte("earlier fallback rules\n"), 0o600); err != nil {
+					t.Fatalf("write CLAUDE.md: %v", err)
+				}
+			}
+			targetPath := filepath.Join(nestedDir, "notes.txt")
+			if err := os.WriteFile(targetPath, []byte("not repository instructions\n"), 0o600); err != nil {
+				t.Fatalf("write fallback target: %v", err)
+			}
+			if err := os.Symlink("notes.txt", filepath.Join(nestedDir, fallbackName)); err != nil {
+				t.Skipf("create shadowed %s symlink: %v", fallbackName, err)
+			}
+
+			adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+			_, err := adapter.BuildCommand(context.Background(), TurnContext{
+				WorkDir:  workDir,
+				RootDir:  rootDir,
+				Metadata: map[string]string{"model": "kimi-k2"},
+				Env:      []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+			})
+			if err == nil || !strings.Contains(err.Error(), "must target") {
+				t.Fatalf("BuildCommand() error = %v, want shadowed %s target rejection", err, fallbackName)
+			}
+		})
+	}
+}
+
 func TestOpencodeAdapterRejectsSubstitutableModelNames(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
 	for _, model := range []string{
@@ -1399,10 +1502,11 @@ func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
 	}
 
 	assertOpencodeReadPermission(t, permissions["read"])
-	for _, permission := range []string{"glob", "grep"} {
-		if permissions[permission] != opencodePermissionAllow {
-			t.Fatalf("permission %q = %q, want allow", permission, permissions[permission])
-		}
+	if permissions["glob"] != opencodePermissionAllow {
+		t.Fatalf("permission glob = %q, want allow", permissions["glob"])
+	}
+	if permissions["grep"] != opencodePermissionDeny {
+		t.Fatalf("permission grep = %q, want deny even when requested", permissions["grep"])
 	}
 	for _, permission := range []string{"edit", "bash", "webfetch", opencodePermissionWebSearch, "task"} {
 		if permissions[permission] != opencodePermissionDeny {

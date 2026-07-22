@@ -59,7 +59,7 @@ if (typeof HTMLElement !== 'undefined') {
   }
 }
 
-import { render, screen, waitFor } from '@/test/test-utils'
+import { fireEvent, render, screen, waitFor } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
@@ -121,6 +121,23 @@ describe('AgentCreateForm', () => {
     const selects = screen.getAllByRole('combobox')
     await user.click(selects[1])
     expect(screen.getAllByText('OpenCode').length).toBeGreaterThan(0)
+  })
+
+  it('uses restricted OpenCode tool and bash defaults', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    const selects = screen.getAllByRole('combobox')
+    await user.click(selects[1])
+    const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+    expect(opencodeOption).toBeDefined()
+    await user.click(opencodeOption!)
+
+    expect(screen.getByPlaceholderText('Read,Glob,LS')).toHaveValue('Read,Glob,LS')
+    expect(screen.getByRole('switch')).not.toBeChecked()
+    expect(screen.getByText('Max Output Tokens')).toBeInTheDocument()
+    expect(screen.getByText('Context Window')).toBeInTheDocument()
   })
 
   it('secret reference select is shown', () => {
@@ -211,13 +228,21 @@ describe('AgentCreateForm', () => {
     expect(opencodeOption).toBeDefined()
     await user.click(opencodeOption!)
     await user.type(screen.getByPlaceholderText('Endpoint model ID'), 'moonshotai/Kimi-K2-Instruct-0905')
+    await user.type(screen.getByPlaceholderText('8192 (default)'), '4096')
+    await user.type(screen.getByPlaceholderText('128000 (default)'), '64000')
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     await waitFor(() => {
       expect(toast.success).toHaveBeenCalledWith('Agent created')
     })
     expect(submitted.spec.runtime.type).toBe('opencode')
-    expect(submitted.spec.model).toEqual({ name: 'moonshotai/Kimi-K2-Instruct-0905' })
+    expect(submitted.spec.runtime.defaultAllowBash).toBe(false)
+    expect(submitted.spec.runtime.defaultAllowedTools).toEqual(['Read', 'Glob', 'LS'])
+    expect(submitted.spec.model).toEqual({
+      name: 'moonshotai/Kimi-K2-Instruct-0905',
+      maxTokens: 4096,
+      contextWindow: 64000,
+    })
   })
 
   it('rejects a whitespace-only OpenCode model', async () => {
@@ -235,6 +260,25 @@ describe('AgentCreateForm', () => {
     await user.click(screen.getByRole('button', { name: 'Create Agent' }))
 
     expect(toast.error).toHaveBeenCalledWith('OpenCode requires an endpoint model ID')
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-positive OpenCode context window', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    await user.type(screen.getByPlaceholderText('my-agent'), 'opencode-agent')
+    const selects = screen.getAllByRole('combobox')
+    await user.click(selects[1])
+    const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+    expect(opencodeOption).toBeDefined()
+    await user.click(opencodeOption!)
+    await user.type(screen.getByPlaceholderText('Endpoint model ID'), 'kimi-k2')
+    await user.type(screen.getByPlaceholderText('128000 (default)'), '0')
+    fireEvent.submit(screen.getByRole('button', { name: 'Create Agent' }).closest('form')!)
+
+    expect(toast.error).toHaveBeenCalledWith('Context Window must be a positive integer')
     expect(toast.success).not.toHaveBeenCalled()
   })
 

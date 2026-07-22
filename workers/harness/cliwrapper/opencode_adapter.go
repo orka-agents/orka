@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -135,6 +136,10 @@ func (a *OpencodeAdapter) BuildCommand(ctx context.Context, turn TurnContext) (*
 	if err := validateOpencodeConfigLiteral(workerenv.OpenAIAPIKey, apiKey); err != nil {
 		return nil, err
 	}
+	modelLimit, err := opencodeModelLimitFromMetadata(turn.Metadata)
+	if err != nil {
+		return nil, err
+	}
 	trustedArtifactDir := ""
 	if strings.TrimSpace(turn.ArtifactsDir) != "" {
 		trustedArtifactDir = filepath.Join(dir, opencodeWorkspaceArtifactsDir)
@@ -144,6 +149,7 @@ func (a *OpencodeAdapter) BuildCommand(ctx context.Context, turn TurnContext) (*
 		agentCfg,
 		baseURL,
 		apiKey,
+		modelLimit,
 		dir,
 		firstNonEmpty(turn.RootDir, dir),
 		trustedArtifactDir,
@@ -263,7 +269,9 @@ func containsOpencodeConfigSubstitution(value string) bool {
 func writeOpencodeConfig(
 	ctx context.Context,
 	cfg *agentEnvConfig,
-	baseURL, apiKey, workDir, rootDir, artifactDir string,
+	baseURL, apiKey string,
+	modelLimit opencodeModelLimit,
+	workDir, rootDir, artifactDir string,
 ) (string, string, error) {
 	scratchDir, err := os.MkdirTemp("", "orka-opencode-*")
 	if err != nil {
@@ -286,10 +294,7 @@ func writeOpencodeConfig(
 	models := map[string]opencodeModel{}
 	if cfg != nil {
 		if model := strings.TrimSpace(cfg.Model); model != "" {
-			models[model] = opencodeModel{Limit: opencodeModelLimit{
-				Context: opencodeModelContextLimit,
-				Output:  opencodeModelOutputLimit,
-			}}
+			models[model] = opencodeModel{Limit: modelLimit}
 		}
 	}
 	instructions, err := writeOpencodeInstructions(ctx, scratchDir, cfg, workDir, rootDir, artifactDir)
@@ -1057,11 +1062,11 @@ func validateOpencodeWorkspaceSymlink(path, rootDir string) error {
 	if !opencodePathWithin(rootDir, target) {
 		return fmt.Errorf("opencode workspace file symlink %q escapes root %q", path, rootDir)
 	}
-	selected, err := isSelectedOpencodeInstructionSymlink(path)
+	instructionSymlink, err := isOpencodeInstructionSymlink(path)
 	if err != nil {
 		return err
 	}
-	if !selected {
+	if !instructionSymlink {
 		return nil
 	}
 	if err := validateOpencodeInstructionTarget(path, target); err != nil {
@@ -1117,7 +1122,7 @@ func validateOpencodeInstructionTarget(source, target string) error {
 	)
 }
 
-func isSelectedOpencodeInstructionSymlink(path string) (bool, error) {
+func isOpencodeInstructionSymlink(path string) (bool, error) {
 	linkInfo, err := os.Lstat(path)
 	if err != nil {
 		return false, err
@@ -1125,16 +1130,15 @@ func isSelectedOpencodeInstructionSymlink(path string) (bool, error) {
 	dir := filepath.Dir(path)
 	for _, name := range opencodeProjectInstructionFiles {
 		candidate := filepath.Join(dir, name)
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		candidateInfo, err := os.Lstat(candidate)
+		if os.IsNotExist(err) {
 			continue
 		} else if err != nil {
 			return false, fmt.Errorf("inspect opencode repository instructions %q: %w", candidate, err)
 		}
-		candidateInfo, err := os.Lstat(candidate)
-		if err != nil {
-			return false, fmt.Errorf("inspect opencode repository instructions %q: %w", candidate, err)
+		if os.SameFile(linkInfo, candidateInfo) {
+			return true, nil
 		}
-		return os.SameFile(linkInfo, candidateInfo), nil
 	}
 	return false, nil
 }
@@ -1148,6 +1152,7 @@ func opencodePermissions(cfg *agentEnvConfig) (opencodePermissionConfig, error) 
 	permissions := opencodePermissionConfig{
 		"edit":  opencodePermissionAllow,
 		"bash":  opencodePermissionDeny,
+		"grep":  opencodePermissionDeny,
 		"skill": opencodePermissionDeny,
 	}
 	if cfg == nil {
@@ -1181,8 +1186,34 @@ func opencodePermissions(cfg *agentEnvConfig) (opencodePermissionConfig, error) 
 	if !cfg.AllowBash {
 		permissions["bash"] = opencodePermissionDeny
 	}
+	// OpenCode 1.18.2 cannot path-filter grep, so deny it even when requested.
+	permissions["grep"] = opencodePermissionDeny
 	permissions["skill"] = opencodePermissionDeny
 	return permissions, nil
+}
+
+func opencodeModelLimitFromMetadata(metadata map[string]string) (opencodeModelLimit, error) {
+	contextLimit, err := positiveOpencodeMetadataInt(metadata, "contextWindow", opencodeModelContextLimit)
+	if err != nil {
+		return opencodeModelLimit{}, err
+	}
+	outputLimit, err := positiveOpencodeMetadataInt(metadata, "maxTokens", opencodeModelOutputLimit)
+	if err != nil {
+		return opencodeModelLimit{}, err
+	}
+	return opencodeModelLimit{Context: contextLimit, Output: outputLimit}, nil
+}
+
+func positiveOpencodeMetadataInt(metadata map[string]string, key string, fallback int) (int, error) {
+	value := strings.TrimSpace(metadata[key])
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("opencode metadata %s must be a positive integer, got %q", key, value)
+	}
+	return int(parsed), nil
 }
 
 func setOpencodePermission(permissions opencodePermissionConfig, permission, action string) {

@@ -910,6 +910,11 @@ func (in *ModelConfig) DeepCopyInto(out *ModelConfig) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.ContextWindow != nil {
+		in, out := &in.ContextWindow, &out.ContextWindow
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Fallbacks != nil {
 		in, out := &in.Fallbacks, &out.Fallbacks
 		*out = make([]ModelFallback, len(*in))

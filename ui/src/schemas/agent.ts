@@ -5,7 +5,8 @@ export const modelConfigSchema = z.object({
   provider: z.string().optional(),
   name: z.string().optional(),
   temperature: z.number().optional(),
-  maxTokens: z.number().optional(),
+  maxTokens: z.number().int().positive().optional(),
+  contextWindow: z.number().int().positive().optional(),
 })
 
 export const toolRefSchema = z.object({
