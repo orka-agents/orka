@@ -82,6 +82,13 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 	if agent.Spec.Runtime != nil && agent.Spec.ProviderRef != nil {
 		return fmt.Errorf("runtime and providerRef are mutually exclusive")
 	}
+	if agent.Spec.Runtime != nil &&
+		agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
+		agent.Spec.Model != nil {
+		if err := validateHarnessWrapperOpencodeModelLimits(agent.Spec.Model); err != nil {
+			return err
+		}
+	}
 
 	// For non-runtime agents, validate model config
 	if agent.Spec.Runtime == nil {

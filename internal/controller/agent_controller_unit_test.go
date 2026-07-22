@@ -21,7 +21,10 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-const testNS = "test-ns"
+const (
+	testNS                  = "test-ns"
+	agentReadyConditionType = "Ready"
+)
 
 func setupAgentReconciler(objs ...runtime.Object) *AgentReconciler {
 	scheme := runtime.NewScheme()
@@ -101,6 +104,54 @@ func TestValidateAgent_RuntimeOnly(t *testing.T) {
 
 	if err := r.validateAgent(context.Background(), agent); err != nil {
 		t.Errorf("runtime-only agent should be valid, got %v", err)
+	}
+}
+
+func TestValidateAgent_RejectsInvalidOpencodeModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		model *corev1alpha1.ModelConfig
+		want  string
+	}{
+		{
+			name: "output exceeds cap",
+			model: func() *corev1alpha1.ModelConfig {
+				maxTokens := int32(32001)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", MaxTokens: &maxTokens}
+			}(),
+			want: "maxTokens must not exceed 32000",
+		},
+		{
+			name: "context equals effective output",
+			model: func() *corev1alpha1.ModelConfig {
+				contextWindow := int32(8192)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", ContextWindow: &contextWindow}
+			}(),
+			want: "contextWindow must be greater than maxTokens",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := baseAgent("invalid-opencode")
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}
+			agent.Spec.Model = tt.model
+			err := setupAgentReconciler().validateAgent(context.Background(), agent)
+			if err == nil || !strContains(err.Error(), tt.want) {
+				t.Fatalf("validateAgent() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateAgent_PreservesOtherRuntimeModelLimits(t *testing.T) {
+	maxTokens := int32(40000)
+	contextWindow := int32(10000)
+	agent := baseAgent("claude-limits")
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}
+	agent.Spec.Model = &corev1alpha1.ModelConfig{
+		Name: "claude", MaxTokens: &maxTokens, ContextWindow: &contextWindow,
+	}
+	if err := setupAgentReconciler().validateAgent(context.Background(), agent); err != nil {
+		t.Fatalf("validateAgent() error = %v, want non-OpenCode limits preserved", err)
 	}
 }
 
@@ -720,7 +771,7 @@ func TestUpdateStatus(t *testing.T) {
 		if !agent.Status.Ready {
 			t.Error("Ready = false, want true")
 		}
-		cond := findCondition(agent.Status.Conditions, "Ready")
+		cond := findReadyCondition(agent.Status.Conditions)
 		if cond == nil {
 			t.Fatal("Ready condition not found")
 		}
@@ -742,7 +793,7 @@ func TestUpdateStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		cond := findCondition(agent.Status.Conditions, "Ready")
+		cond := findReadyCondition(agent.Status.Conditions)
 		if cond == nil {
 			t.Fatal("Ready condition not found")
 		}
@@ -938,9 +989,64 @@ func TestAgentReconcile_ValidationFailure(t *testing.T) {
 	// Re-fetch agent and check status condition
 	updated := &corev1alpha1.Agent{}
 	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-invalid", Namespace: testNS}, updated)
-	cond := findCondition(updated.Status.Conditions, "Ready")
+	cond := findReadyCondition(updated.Status.Conditions)
 	if cond != nil && cond.Status != metav1.ConditionFalse {
 		t.Errorf("expected Ready=False, got %s", cond.Status)
+	}
+}
+
+func TestAgentReconcile_InvalidOpencodeModelLimitsStayNotReady(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		model *corev1alpha1.ModelConfig
+		want  string
+	}{
+		{
+			name: "output exceeds cap",
+			model: func() *corev1alpha1.ModelConfig {
+				maxTokens := int32(32001)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", MaxTokens: &maxTokens}
+			}(),
+			want: "maxTokens must not exceed 32000",
+		},
+		{
+			name: "context equals effective output",
+			model: func() *corev1alpha1.ModelConfig {
+				contextWindow := int32(8192)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", ContextWindow: &contextWindow}
+			}(),
+			want: "contextWindow must be greater than maxTokens",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+			agent := baseAgent("reconcile-invalid-opencode")
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}
+			agent.Spec.Model = tt.model
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(agent).
+				WithStatusSubresource(agent).Build()
+			r := &AgentReconciler{Client: fc, Scheme: scheme}
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+				Name: agent.Name, Namespace: agent.Namespace,
+			}})
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			updated := &corev1alpha1.Agent{}
+			if err := fc.Get(context.Background(), types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, updated); err != nil {
+				t.Fatalf("get reconciled agent: %v", err)
+			}
+			condition := findReadyCondition(updated.Status.Conditions)
+			if updated.Status.Ready || condition == nil || condition.Status != metav1.ConditionFalse {
+				t.Fatalf("Ready status = %v condition = %#v, want not ready", updated.Status.Ready, condition)
+			}
+			if !strContains(condition.Message, tt.want) {
+				t.Fatalf("Ready message = %q, want %q", condition.Message, tt.want)
+			}
+		})
 	}
 }
 
@@ -1059,9 +1165,9 @@ func strContains(s, substr string) bool {
 	return false
 }
 
-func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+func findReadyCondition(conditions []metav1.Condition) *metav1.Condition {
 	for i := range conditions {
-		if conditions[i].Type == condType {
+		if conditions[i].Type == agentReadyConditionType {
 			return &conditions[i]
 		}
 	}
