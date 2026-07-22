@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -89,6 +90,9 @@ func PrepareTurnContext(
 		return nil, nil
 	}
 	cfg := agentConfigForTurn(*turn)
+	if turnUsesOpencodeRuntime(*turn) {
+		cfg.Prompt = rewriteOpencodeArtifactPrompt(cfg.Prompt, turn.Metadata["workspaceSubPath"])
+	}
 	root := strings.TrimSpace(workspaceRoot)
 	if root == "" {
 		root = strings.TrimSpace(turn.WorkDir)
@@ -107,7 +111,11 @@ func PrepareTurnContext(
 				return cfg, fmt.Errorf("validate PR base repo: %w", err)
 			}
 		}
-		if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
+		if turnUsesOpencodeRuntime(*turn) && strings.TrimSpace(artifactDir) != "" {
+			if err := ensureOpencodeWorkspaceArtifactsDir(root, turn.WorkDir, artifactDir); err != nil {
+				return cfg, err
+			}
+		} else if err := common.EnsureWorkspaceArtifactsLink(root); err != nil {
 			return cfg, err
 		}
 		if err := materializeTurnSkillFiles(skillsRoot, turn.Metadata[turnMetadataSkillsFiles]); err != nil {
@@ -126,12 +134,102 @@ func PrepareTurnContext(
 	turn.Prompt = cfg.Prompt
 	turn.Env = setEnv(turn.Env, workerenv.Prompt, cfg.Prompt)
 	if artifactDir != "" {
+		turn.ArtifactsDir = filepath.Clean(artifactDir)
 		turn.Env = setEnv(turn.Env, "ORKA_ARTIFACTS_DIR", artifactDir)
 	}
 	if skillsRoot != "" {
 		turn.Env = setEnv(turn.Env, workerenv.SkillsDir, skillsRoot)
 	}
 	return cfg, nil
+}
+
+func rewriteOpencodeArtifactPrompt(prompt, workspaceSubPath string) string {
+	artifactPath := security.ArtifactWorkspacePath(workspaceSubPath)
+	if artifactPath == opencodeWorkspaceArtifactsDir {
+		return prompt
+	}
+	const promptArtifactPath = "./" + opencodeWorkspaceArtifactsDir
+	lines := strings.Split(prompt, "\n")
+	for index, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "Write these artifacts under "+artifactPath+"/:"):
+			lines[index] = strings.Replace(line, artifactPath, promptArtifactPath, 1)
+		case strings.HasPrefix(line, "Write them under "+artifactPath+"/."):
+			lines[index] = strings.Replace(line, artifactPath, promptArtifactPath, 1)
+		case strings.HasPrefix(line, "- "+artifactPath+"/"):
+			lines[index] = strings.Replace(line, artifactPath, promptArtifactPath, 1)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ensureOpencodeWorkspaceArtifactsDir(rootDir, workDir, artifactDir string) error {
+	workRoot, err := openOpencodeWorkspaceArtifactsRoot(rootDir, workDir, artifactDir)
+	if err != nil {
+		return err
+	}
+	defer workRoot.Close() //nolint:errcheck
+	info, err := workRoot.Lstat(opencodeWorkspaceArtifactsDir)
+	if os.IsNotExist(err) {
+		if err := workRoot.Mkdir(opencodeWorkspaceArtifactsDir, 0o770); err != nil {
+			return fmt.Errorf("create opencode artifacts directory: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect opencode artifacts directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("opencode artifacts path must be a real directory")
+	}
+	return nil
+}
+
+func prepareOpencodeWorkspaceArtifactsDir(rootDir, workDir, artifactDir string) error {
+	workRoot, err := openOpencodeWorkspaceArtifactsRoot(rootDir, workDir, artifactDir)
+	if err != nil {
+		return err
+	}
+	defer workRoot.Close() //nolint:errcheck
+	if _, err := workRoot.Lstat(opencodeWorkspaceArtifactsDir); err == nil {
+		return fmt.Errorf("opencode workspace artifact path %q already exists", artifactDir)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect opencode workspace artifact path: %w", err)
+	}
+	if err := workRoot.Mkdir(opencodeWorkspaceArtifactsDir, 0o770); err != nil {
+		return fmt.Errorf("create opencode artifacts directory: %w", err)
+	}
+	return nil
+}
+
+func openOpencodeWorkspaceArtifactsRoot(rootDir, workDir, artifactDir string) (*os.Root, error) {
+	var err error
+	rootDir, err = resolveOpencodeDirectory(strings.TrimSpace(rootDir), "workspace root")
+	if err != nil {
+		return nil, err
+	}
+	workDir, err = resolveOpencodeDirectory(firstNonEmpty(workDir, rootDir), "workspace directory")
+	if err != nil {
+		return nil, err
+	}
+	if !opencodePathWithin(rootDir, workDir) {
+		return nil, fmt.Errorf("opencode workspace directory %q is outside root %q", workDir, rootDir)
+	}
+	artifactDir = filepath.Clean(strings.TrimSpace(artifactDir))
+	artifactParent, err := resolveOpencodeDirectory(filepath.Dir(artifactDir), "artifact parent directory")
+	if err != nil {
+		return nil, err
+	}
+	artifactDir = filepath.Join(artifactParent, filepath.Base(artifactDir))
+	expected := filepath.Join(workDir, opencodeWorkspaceArtifactsDir)
+	if artifactDir != expected {
+		return nil, fmt.Errorf("opencode artifacts directory must be %q", expected)
+	}
+	workRoot, err := os.OpenRoot(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("open opencode workspace directory: %w", err)
+	}
+	return workRoot, nil
 }
 
 func turnSkillsRoot(turn *TurnContext, _ string) string {
@@ -183,11 +281,17 @@ func materializeTurnSkillFiles(skillsRoot, raw string) error {
 
 func EnsureTurnRequiredSecurityArtifacts(
 	ctx context.Context,
+	turn TurnContext,
 	cfg *common.AgentConfig,
 	result string,
 	followUp common.SecurityArtifactFollowUp,
 	artifactDir string,
 ) (string, error) {
+	if turnUsesOpencodeRuntime(turn) {
+		if err := ensureOpencodeWorkspaceArtifactsDir(turn.RootDir, turn.WorkDir, artifactDir); err != nil {
+			return result, fmt.Errorf("restore opencode artifacts directory: %w", err)
+		}
+	}
 	if err := prepareArtifactsForWrapper(artifactDir); err != nil {
 		return result, fmt.Errorf("prepare artifacts for wrapper security validation: %w", err)
 	}
@@ -196,6 +300,11 @@ func EnsureTurnRequiredSecurityArtifacts(
 	wrappedFollowUp := followUp
 	if followUp != nil {
 		wrappedFollowUp = func(ctx context.Context, prompt string) (string, error) {
+			if turnUsesOpencodeRuntime(turn) {
+				if err := ensureOpencodeWorkspaceArtifactsDir(turn.RootDir, turn.WorkDir, artifactDir); err != nil {
+					return "", fmt.Errorf("restore opencode artifacts directory for follow-up: %w", err)
+				}
+			}
 			if err := prepareArtifactsForChild(artifactDir); err != nil {
 				return "", fmt.Errorf("prepare artifacts for child follow-up: %w", err)
 			}

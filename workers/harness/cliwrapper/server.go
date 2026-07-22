@@ -418,12 +418,12 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	defer preparedWorkspace.cleanup()
 	turnCtx.WorkDir = preparedWorkspace.workDir
 	turnCtx.RootDir = preparedWorkspace.rootDir
-	turnArtifactsDir := turnArtifactDir(preparedWorkspace)
-	defer ClearTurnArtifacts(turnArtifactsDir)
-	if err := prepareTurnArtifactsDirForWrapper(turnArtifactsDir); err != nil {
+	turnArtifactsDir := turnArtifactDir(preparedWorkspace, turnCtx)
+	if err := prepareTurnArtifactsDirForRuntime(turnCtx, turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
 	}
+	defer ClearTurnArtifacts(turnArtifactsDir)
 	if preparedWorkspace.baseDir != "" {
 		turnCtx.SkillsRoot = filepath.Join(preparedWorkspace.baseDir, "skills")
 	}
@@ -475,7 +475,14 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	}
 	spec, err := s.adapter.BuildCommand(ctx, turnCtx)
 	if err != nil {
-		turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
+		switch {
+		case errors.Is(err, context.Canceled):
+			turn.appendFrame(s.frame(turn, harness.FrameTurnCancelled, "turn cancelled", nil))
+		case errors.Is(err, context.DeadlineExceeded):
+			turn.appendFrame(s.failedFrame(turn, "timeout", "runtime command timed out", true))
+		default:
+			turn.appendFrame(s.failedFrame(turn, "build_command_failed", err.Error(), false))
+		}
 		return
 	}
 	defer removeTempFiles(spec.TempFiles)
@@ -492,6 +499,15 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 	if err := chownTreeForChild(preparedWorkspace.rootDir, turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 		return
+	}
+	if turnUsesOpencodeRuntime(turnCtx) {
+		// The wrapper runs as root without DAC_OVERRIDE. Once the workspace is
+		// child-owned, keep the work directory searchable so wrapper-side artifact
+		// validation and upload can still reach the in-worktree artifact directory.
+		if err := ensureOpencodeWorkDirAccessible(turnCtx.WorkDir); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
 	}
 	if err := prepareArtifactsForChild(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
@@ -572,6 +588,7 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 		}
 		if result, artifactErr := EnsureTurnRequiredSecurityArtifacts(
 			ctx,
+			turnCtx,
 			agentCfg,
 			parsed.Result,
 			s.securityArtifactFollowUp(turn, turnCtx),
@@ -676,6 +693,9 @@ func (s *Server) failedTurnPartialResult(ctx context.Context, turnCtx TurnContex
 func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) common.SecurityArtifactFollowUp {
 	return func(ctx context.Context, prompt string) (string, error) {
 		followTurn := base
+		if turnUsesOpencodeRuntime(followTurn) {
+			prompt = rewriteOpencodeArtifactPrompt(prompt, followTurn.Metadata["workspaceSubPath"])
+		}
 		followTurn.Prompt = prompt
 		followTurn.Env = setEnv(followTurn.Env, workerenv.Prompt, prompt)
 		restoreFollowEnv := setTemporaryEnvEntries(followTurn.Env)
@@ -710,7 +730,14 @@ func (s *Server) securityArtifactFollowUp(turn *turnState, base TurnContext) com
 	}
 }
 
-func turnArtifactDir(workspace preparedWorkspace) string {
+func turnArtifactDir(workspace preparedWorkspace, turn TurnContext) string {
+	if turnUsesOpencodeRuntime(turn) {
+		// Non-eventing turns always pass through prepareTurnWorkspace, which creates
+		// both paths even for prompt-only requests. rootDir is a defensive fallback.
+		if workDir := firstNonEmpty(workspace.workDir, workspace.rootDir); workDir != "" {
+			return filepath.Join(workDir, opencodeWorkspaceArtifactsDir)
+		}
+	}
 	if workspace.baseDir != "" {
 		return filepath.Join(workspace.baseDir, "artifacts")
 	}
@@ -735,6 +762,13 @@ func prepareTurnArtifactsDirForWrapper(artifactDir string) error {
 	return os.Chmod(artifactDir, 0o770)
 }
 
+func prepareTurnArtifactsDirForRuntime(turn TurnContext, artifactDir string) error {
+	if turnUsesOpencodeRuntime(turn) {
+		return prepareOpencodeWorkspaceArtifactsDir(turn.RootDir, turn.WorkDir, artifactDir)
+	}
+	return prepareTurnArtifactsDirForWrapper(artifactDir)
+}
+
 func ensureDirectoryTraversable(dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -747,7 +781,27 @@ func ensureDirectoryTraversable(dir string) error {
 	return os.Chmod(dir, mode|0o111)
 }
 
+func ensureOpencodeWorkDirAccessible(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if uid, _, ok := childCredentialIDs(); ok && os.Geteuid() == 0 {
+		if err := os.Chown(dir, uid, 0); err != nil {
+			return err
+		}
+	}
+	mode := info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	return os.Chmod(dir, mode|0o770)
+}
+
 func ensureWorkspaceArtifactsLinkForTurn(rootDir, workDir, artifactDir string) error {
+	if filepath.Clean(artifactDir) == filepath.Join(filepath.Clean(workDir), opencodeWorkspaceArtifactsDir) {
+		return ensureOpencodeWorkspaceArtifactsDir(rootDir, workDir, artifactDir)
+	}
 	if workDir == "" || rootDir == "" || workDir == rootDir {
 		return nil
 	}

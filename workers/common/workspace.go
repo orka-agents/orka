@@ -371,7 +371,10 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	baseSHA = strings.TrimSpace(baseSHA)
 
 	// Stage any new untracked files so they appear in the diff
-	execGit(workDir, "add", "-A") //nolint:errcheck
+	// Exclude runtime artifacts from wrapper-authored diffs. An explicitly
+	// tool-enabled child can still force-add workspace files; that is governed by
+	// the child tool/push policy rather than this finalizer.
+	execGit(workDir, "add", "-A", "--", ":(top,glob)**", ":(exclude,top,glob)**/.orka-artifacts/**") //nolint:errcheck
 	resetReservedWorkspacePaths(workDir)
 
 	diff, err := execGit(workDir, "diff", "--cached", "--binary", "--full-index")
@@ -459,7 +462,10 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 // pushChanges commits all changes and pushes to the given remote branch.
 func pushChanges(workDir, branch string) error {
 	// Ensure everything is staged
-	if _, err := execGit(workDir, "add", "-A"); err != nil {
+	if _, err := execGit(
+		workDir,
+		"add", "-A", "--", ":(top,glob)**", ":(exclude,top,glob)**/.orka-artifacts/**",
+	); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
 	resetReservedWorkspacePaths(workDir)

@@ -626,6 +626,51 @@ func TestFinalizeResult_IgnoresWorkspaceArtifactsSymlink(t *testing.T) {
 	}
 }
 
+func TestFinalizeResult_IgnoresRealWorkspaceArtifactsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "initial.txt"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	artifactFiles := createRealWorkspaceArtifacts(t, dir)
+	if err := os.WriteFile(
+		filepath.Join(dir, "normal-change.txt"),
+		[]byte("normal workspace change\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := FinalizeResult(dir, "workspace updated")
+	if err != nil {
+		t.Fatalf("FinalizeResult() error = %v", err)
+	}
+
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if !strings.Contains(sr.Diff, "normal-change.txt") {
+		t.Fatalf("diff does not include normal workspace change: %q", sr.Diff)
+	}
+	if strings.Contains(sr.Diff, ".orka-artifacts") {
+		t.Fatalf("diff includes workspace artifacts: %q", sr.Diff)
+	}
+	if len(sr.Files) != 1 || sr.Files[0] != "normal-change.txt" {
+		t.Fatalf("Files = %v, want [normal-change.txt]", sr.Files)
+	}
+	for _, artifactFile := range artifactFiles {
+		if _, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(artifactFile))); err != nil {
+			t.Fatalf("artifact file %q was removed: %v", artifactFile, err)
+		}
+	}
+}
+
 func TestFinalizeResult_IncludesUserSkillsDirectory(t *testing.T) {
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")
@@ -1001,6 +1046,60 @@ func TestPushChanges_WithRemote(t *testing.T) {
 	}
 }
 
+func TestPushChanges_ExcludesRealWorkspaceArtifactsFromRemoteCommit(t *testing.T) {
+	bareDir := t.TempDir()
+	runGitWS(t, bareDir, "init", "--bare")
+
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "checkout", "-b", "main")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "initial.txt"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	runGitWS(t, dir, "remote", "add", gitOriginRemote, bareDir)
+	runGitWS(t, dir, "push", "-u", gitOriginRemote, "main")
+
+	artifactFiles := createRealWorkspaceArtifacts(t, dir)
+	if err := os.WriteFile(
+		filepath.Join(dir, "normal-change.txt"),
+		[]byte("normal workspace change\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pushChanges(dir, workspaceTestFeatureBranch); err != nil {
+		t.Fatalf("pushChanges() error = %v", err)
+	}
+
+	remoteRef := "refs/heads/" + workspaceTestFeatureBranch
+	changedFiles := strings.Fields(runGitOutputWS(
+		t,
+		bareDir,
+		"diff-tree", "--no-commit-id", "--name-only", "-r", remoteRef,
+	))
+	if len(changedFiles) != 1 || changedFiles[0] != "normal-change.txt" {
+		t.Fatalf("remote commit files = %v, want [normal-change.txt]", changedFiles)
+	}
+	remoteContents := runGitOutputWS(t, bareDir, "show", remoteRef+":normal-change.txt")
+	if remoteContents != "normal workspace change\n" {
+		t.Fatalf("remote normal-change.txt = %q, want normal workspace change", remoteContents)
+	}
+	remoteTree := runGitOutputWS(t, bareDir, "ls-tree", "-r", "--name-only", remoteRef)
+	if strings.Contains(remoteTree, ".orka-artifacts") {
+		t.Fatalf("remote tree includes workspace artifacts: %q", remoteTree)
+	}
+	for _, artifactFile := range artifactFiles {
+		if _, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(artifactFile))); err != nil {
+			t.Fatalf("artifact file %q was removed: %v", artifactFile, err)
+		}
+	}
+}
+
 func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
 	// Create a bare remote
 	bareDir := t.TempDir()
@@ -1037,6 +1136,45 @@ func TestPushChanges_WithRemoteBranchVisibilityFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "remote branch "+workspaceTestFeatureBranch+" not visible after push") {
 		t.Fatalf("expected visibility failure, got: %v", err)
 	}
+}
+
+func createRealWorkspaceArtifacts(t *testing.T, workDir string) []string {
+	t.Helper()
+
+	artifactDir := filepath.Join(workDir, ".orka-artifacts")
+	if err := os.MkdirAll(filepath.Join(artifactDir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifactFiles := []string{
+		".orka-artifacts/manifest.json",
+		".orka-artifacts/nested/runtime.log",
+	}
+	for _, artifactFile := range artifactFiles {
+		if err := os.WriteFile(
+			filepath.Join(workDir, filepath.FromSlash(artifactFile)),
+			[]byte("runtime artifact\n"),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Runtime artifacts may be opaque to the worker. Excluding the directory
+	// must not require reading every artifact before ordinary changes are staged.
+	opaqueArtifact := filepath.Join(workDir, filepath.FromSlash(artifactFiles[1]))
+	if err := os.Chmod(opaqueArtifact, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(opaqueArtifact, 0o600) })
+
+	info, err := os.Lstat(artifactDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("%s is not a real directory: mode %v", artifactDir, info.Mode())
+	}
+	return artifactFiles
 }
 
 // runGitWS is a test helper to execute git commands in workspace tests.

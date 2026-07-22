@@ -3,6 +3,7 @@
 package cliwrapper
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,10 +121,26 @@ func prepareArtifactsForChild(path string) error {
 }
 
 func prepareArtifactsForWrapper(path string) error {
-	if strings.TrimSpace(path) == "" || os.Geteuid() != 0 {
+	if strings.TrimSpace(path) == "" {
 		return nil
 	}
 	root := filepath.Clean(path)
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("artifacts directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("artifacts path is not a directory")
+	}
+	if os.Geteuid() != 0 {
+		return nil
+	}
 	return filepath.WalkDir(root, func(p string, entry os.DirEntry, err error) error {
 		if err != nil {
 			if filepath.Clean(p) != root && os.IsPermission(err) {
@@ -132,6 +149,9 @@ func prepareArtifactsForWrapper(path string) error {
 			return err
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
+			if filepath.Clean(p) == root {
+				return fmt.Errorf("artifacts directory must not be a symlink")
+			}
 			return nil
 		}
 		if entry.IsDir() {

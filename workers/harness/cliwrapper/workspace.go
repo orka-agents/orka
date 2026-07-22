@@ -29,6 +29,8 @@ func workspaceGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	baseArgs := []string{
 		"-c", "credential.helper=",
 		"-c", "core.askPass=",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.hooksPath=/dev/null",
 	}
 	cmd := exec.CommandContext(ctx, wrapperGitBinary, append(baseArgs, args...)...)
 	env := []string{
