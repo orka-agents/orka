@@ -282,7 +282,15 @@ func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
 		t.Fatalf("opencodePermissions() error = %v", err)
 	}
 
-	for _, permission := range []string{"read", "glob", "grep"} {
+	read, ok := permissions["read"].(opencodeReadPermission)
+	if !ok {
+		t.Fatalf("permission.read = %#v, want patterned read permission", permissions["read"])
+	}
+	if read.All != opencodePermissionAllow || read.Env != opencodePermissionDeny ||
+		read.EnvFiles != opencodePermissionDeny || read.EnvExample != opencodePermissionAllow {
+		t.Fatalf("permission.read = %#v, want dotenv files denied except examples", read)
+	}
+	for _, permission := range []string{"glob", "grep"} {
 		if permissions[permission] != opencodePermissionAllow {
 			t.Fatalf("permission %q = %q, want allow", permission, permissions[permission])
 		}
@@ -303,8 +311,9 @@ func TestOpencodePermissionsMapListAliasesToRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("opencodePermissions(%q) error = %v", tool, err)
 		}
-		if permissions["read"] != opencodePermissionAllow {
-			t.Fatalf("permission.read = %q, want allow for %s", permissions["read"], tool)
+		read, ok := permissions["read"].(opencodeReadPermission)
+		if !ok || read.All != opencodePermissionAllow || read.Env != opencodePermissionDeny {
+			t.Fatalf("permission.read = %#v, want protected read access for %s", permissions["read"], tool)
 		}
 		if _, ok := permissions["list"]; ok {
 			t.Fatalf("permissions = %#v, want no unsupported list permission", permissions)

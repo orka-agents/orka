@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestNewSystemPromptBuilder(t *testing.T) {
@@ -625,6 +626,9 @@ func TestBuildDynamicContext(t *testing.T) {
 	t.Run("opencode runtime detected from opencode-credentials secret", func(t *testing.T) {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: "default"},
+			Data: map[string][]byte{
+				workerenv.OpenAIBaseURL: []byte("https://models.example.invalid/v1"),
+			},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")
@@ -635,6 +639,25 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 		if !strings.Contains(providers, "opencode") {
 			t.Errorf("providers = %q, expected opencode runtime", providers)
+		}
+	})
+
+	t.Run("incomplete opencode secret is not advertised", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "opencode-api-key", Namespace: "default"},
+			Data: map[string][]byte{
+				workerenv.OpenAIAPIKey: []byte("credential"),
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+		b := NewSystemPromptBuilder(c, "default")
+
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(providers, "opencode") {
+			t.Errorf("providers = %q, did not expect incomplete opencode runtime", providers)
 		}
 	})
 

@@ -61,17 +61,20 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 	}
 
 	if requested != "" {
-		exists, err := secretExists(ctx, k8sClient, namespace, requested)
+		secret, exists, err := getSecret(ctx, k8sClient, namespace, requested)
 		if err != nil {
 			return nil, err
 		}
 		if !exists {
 			return nil, fmt.Errorf("runtime secretRef %q not found in namespace %q", requested, namespace)
 		}
+		if err := validateRuntimeSecret(runtimeType, secret); err != nil {
+			return nil, fmt.Errorf("runtime secretRef %q in namespace %q %w", requested, namespace, err)
+		}
 		return &corev1.LocalObjectReference{Name: requested}, nil
 	}
 
-	name, err := firstExistingSecretName(ctx, k8sClient, namespace, candidates)
+	name, err := firstUsableRuntimeSecretName(ctx, k8sClient, namespace, runtimeType, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +82,52 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 		return nil, fmt.Errorf("no supported %s runtime credentials found in namespace %q; expected one of %s", runtimeType, namespace, strings.Join(candidates, ", "))
 	}
 	return &corev1.LocalObjectReference{Name: name}, nil
+}
+
+func FirstUsableRuntimeSecretName(secrets []corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) string {
+	for _, candidate := range RuntimeSecretCandidates(runtimeType) {
+		for i := range secrets {
+			if secrets[i].Name != candidate {
+				continue
+			}
+			if validateRuntimeSecret(runtimeType, &secrets[i]) == nil {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func firstUsableRuntimeSecretName(ctx context.Context, k8sClient client.Reader, namespace string, runtimeType corev1alpha1.AgentRuntimeType, candidates []string) (string, error) {
+	invalid := make([]string, 0)
+	for _, name := range candidates {
+		secret, exists, err := getSecret(ctx, k8sClient, namespace, name)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			continue
+		}
+		if err := validateRuntimeSecret(runtimeType, secret); err != nil {
+			invalid = append(invalid, fmt.Sprintf("%q %v", name, err))
+			continue
+		}
+		return name, nil
+	}
+	if len(invalid) > 0 {
+		return "", fmt.Errorf("no valid %s runtime credentials found in namespace %q: %s", runtimeType, namespace, strings.Join(invalid, "; "))
+	}
+	return "", nil
+}
+
+func validateRuntimeSecret(runtimeType corev1alpha1.AgentRuntimeType, secret *corev1.Secret) error {
+	if runtimeType != corev1alpha1.AgentRuntimeOpencode {
+		return nil
+	}
+	if secret == nil || strings.TrimSpace(string(secret.Data[workerenv.OpenAIBaseURL])) == "" {
+		return fmt.Errorf("must contain non-empty %s", workerenv.OpenAIBaseURL)
+	}
+	return nil
 }
 
 func resolveWorkspaceGitSecretRef(ctx context.Context, k8sClient client.Reader, namespace string, agent *corev1alpha1.Agent, requested string) (*corev1.LocalObjectReference, error) {
@@ -179,12 +228,17 @@ func firstExistingSecretName(ctx context.Context, k8sClient client.Reader, names
 }
 
 func secretExists(ctx context.Context, k8sClient client.Reader, namespace, name string) (bool, error) {
+	_, exists, err := getSecret(ctx, k8sClient, namespace, name)
+	return exists, err
+}
+
+func getSecret(ctx context.Context, k8sClient client.Reader, namespace, name string) (*corev1.Secret, bool, error) {
 	secret := &corev1.Secret{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return nil, false, nil
 		}
-		return false, fmt.Errorf("failed to get secret %q: %w", name, err)
+		return nil, false, fmt.Errorf("failed to get secret %q: %w", name, err)
 	}
-	return true, nil
+	return secret, true, nil
 }

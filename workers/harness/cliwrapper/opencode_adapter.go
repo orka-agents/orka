@@ -27,6 +27,7 @@ const (
 	opencodePermissionAllow       = "allow"
 	opencodePermissionDeny        = "deny"
 	opencodePermissionWebSearch   = "websearch"
+	opencodePermissionRead        = "read"
 	opencodeEnvTrue               = "true"
 	opencodeEscapedValueEnv       = "ORKA_OPENCODE_API_KEY_JSON_ESCAPED"
 )
@@ -39,7 +40,7 @@ type opencodeConfig struct {
 	Schema       string                      `json:"$schema"`
 	Provider     map[string]opencodeProvider `json:"provider"`
 	Agent        map[string]opencodeAgent    `json:"agent"`
-	Permission   map[string]string           `json:"permission"`
+	Permission   map[string]any              `json:"permission"`
 	Instructions []string                    `json:"instructions,omitempty"`
 	Share        string                      `json:"share"`
 	AutoUpdate   bool                        `json:"autoupdate"`
@@ -48,6 +49,13 @@ type opencodeConfig struct {
 
 type opencodeAgent struct {
 	Steps int `json:"steps"`
+}
+
+type opencodeReadPermission struct {
+	All        string `json:"*"`
+	Env        string `json:"*.env"`
+	EnvFiles   string `json:"*.env.*"`
+	EnvExample string `json:"*.env.example"`
 }
 
 type opencodeProvider struct {
@@ -282,8 +290,8 @@ func writeOpencodeConfig(cfg *agentEnvConfig, baseURL string) (string, string, e
 	return configPath, scratchDir, nil
 }
 
-func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
-	permissions := map[string]string{
+func opencodePermissions(cfg *agentEnvConfig) (map[string]any, error) {
+	permissions := map[string]any{
 		"edit":  opencodePermissionAllow,
 		"bash":  opencodePermissionDeny,
 		"skill": opencodePermissionDeny,
@@ -305,7 +313,7 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
 		}
 		for _, tool := range cfg.AllowedTools {
 			if permission := opencodePermissionForTool(tool); permission != "" {
-				permissions[permission] = opencodePermissionAllow
+				permissions[permission] = opencodeAllowedPermission(permission)
 			}
 		}
 	} else if cfg.AllowBash {
@@ -323,9 +331,23 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
 	return permissions, nil
 }
 
+func opencodeAllowedPermission(permission string) any {
+	switch permission {
+	case opencodePermissionRead:
+		return opencodeReadPermission{
+			All:        opencodePermissionAllow,
+			Env:        opencodePermissionDeny,
+			EnvFiles:   opencodePermissionDeny,
+			EnvExample: opencodePermissionAllow,
+		}
+	default:
+		return opencodePermissionAllow
+	}
+}
+
 func opencodeManagedPermissions() []string {
 	return []string{
-		"read",
+		opencodePermissionRead,
 		"glob",
 		"grep",
 		"edit",
@@ -343,7 +365,7 @@ func opencodePermissionForTool(tool string) string {
 	name := normalizeToolName(tool)
 	switch name {
 	case "read", "fileread", "ls", "list":
-		return "read"
+		return opencodePermissionRead
 	case "glob":
 		return "glob"
 	case "grep":

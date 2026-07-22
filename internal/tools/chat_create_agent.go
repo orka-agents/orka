@@ -95,16 +95,26 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 	if modelObj, ok := a[modelField]; ok {
 		switch m := modelObj.(type) {
 		case map[string]any:
-			agent.Spec.Model = &corev1alpha1.ModelConfig{
-				Name:     chatGetStringArg(m, nameField),
-				Provider: chatGetStringArg(m, "provider"),
+			name := chatGetStringArg(m, nameField)
+			provider := chatGetStringArg(m, "provider")
+			if chatRuntimeTypeArg(a) == corev1alpha1.AgentRuntimeOpencode && provider != "" {
+				providerPrefix := strings.TrimSuffix(provider, "/") + "/"
+				if !strings.HasPrefix(name, providerPrefix) {
+					name = providerPrefix + strings.TrimPrefix(name, "/")
+				}
+				provider = ""
 			}
+			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: name, Provider: provider}
 			if temp, ok := m["temperature"]; ok {
 				if tempF, ok := temp.(float64); ok {
 					agent.Spec.Model.Temperature = &tempF
 				}
 			}
 		case string:
+			if chatRuntimeTypeArg(a) == corev1alpha1.AgentRuntimeOpencode {
+				agent.Spec.Model = &corev1alpha1.ModelConfig{Name: m}
+				break
+			}
 			provider, modelName := splitModelString(m)
 			if provider != "" {
 				agent.Spec.Model = &corev1alpha1.ModelConfig{Provider: provider, Name: modelName}
@@ -273,6 +283,14 @@ func parseResourceListArg(resourcesMap map[string]any, key string) (corev1.Resou
 		resourceList[corev1.ResourceName(name)] = quantity
 	}
 	return resourceList, "", true
+}
+
+func chatRuntimeTypeArg(a map[string]any) corev1alpha1.AgentRuntimeType {
+	runtimeArgs, ok := a[runtimeField].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return corev1alpha1.AgentRuntimeType(chatGetStringArg(runtimeArgs, jsonSchemaTypeField))
 }
 
 // parseRuntimeConfig extracts runtime configuration from chat args into the agent spec.

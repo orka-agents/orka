@@ -617,7 +617,13 @@ func TestCreateAgentTool_Execute_AcceptsOpencodeRuntimeSecretRef(t *testing.T) {
 
 	k8sClient := newFakeClient(
 		parentTask(),
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace}},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: testRuntimeCredsSecretName, Namespace: defaultNamespace},
+			Data: map[string][]byte{
+				workerenv.OpenAIBaseURL: []byte("https://models.example.invalid/v1"),
+				workerenv.OpenAIAPIKey:  []byte("credential"),
+			},
+		},
 	)
 	tool := NewCreateAgentTool(k8sClient)
 
