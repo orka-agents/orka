@@ -142,6 +142,21 @@ func TestValidateAgent_RejectsInvalidOpencodeModelLimits(t *testing.T) {
 	}
 }
 
+func TestValidateAgent_AcceptsBoundaryOpencodeModelLimits(t *testing.T) {
+	maxTokens := int32(32000)
+	contextWindow := int32(32001)
+	agent := baseAgent("valid-opencode-limits")
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode}
+	agent.Spec.Model = &corev1alpha1.ModelConfig{
+		Name:          "kimi-k2",
+		MaxTokens:     &maxTokens,
+		ContextWindow: &contextWindow,
+	}
+	if err := setupAgentReconciler().validateAgent(context.Background(), agent); err != nil {
+		t.Fatalf("validateAgent() error = %v, want maxTokens boundary and usable context accepted", err)
+	}
+}
+
 func TestValidateAgent_PreservesOtherRuntimeModelLimits(t *testing.T) {
 	maxTokens := int32(40000)
 	contextWindow := int32(10000)
