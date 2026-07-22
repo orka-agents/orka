@@ -582,6 +582,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				artifactErr.Error(),
 			))
 		}
+		// Artifact upload prepares files for the wrapper, while Git cleanup runs as
+		// the child identity. Remove infrastructure artifacts before invoking git clean.
+		ClearTurnArtifacts(turnArtifactsDir)
 		if finalizedWorkDir != "" {
 			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", cleanErr.Error()))
@@ -647,6 +650,9 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				artifactErr.Error(),
 			))
 		}
+		// Artifact upload prepares files for the wrapper, while Git cleanup runs as
+		// the child identity. Remove infrastructure artifacts before invoking git clean.
+		ClearTurnArtifacts(turnArtifactsDir)
 		if finalizedWorkDir != "" {
 			if cleanErr := CleanFinalizedWorkDir(finalizedWorkDir); cleanErr != nil {
 				turn.appendFrame(s.runtimeLogTextFrame(
