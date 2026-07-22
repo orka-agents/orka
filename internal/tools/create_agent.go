@@ -382,7 +382,30 @@ func validateCreateAgentArgs(args *CreateAgentArgs) (string, error) {
 	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) && requestedModel == "" {
 		return "", fmt.Errorf("model.name is required for opencode runtime")
 	}
+	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) {
+		if err := validateOpencodeModelLimits(args.Model.MaxTokens, args.Model.ContextWindow); err != nil {
+			return "", err
+		}
+	}
 	return requestedModel, nil
+}
+
+func validateOpencodeModelLimits(maxTokensValue, contextWindowValue *int32) error {
+	maxTokens := opencodeDefaultMaxTokens
+	contextWindow := opencodeDefaultContext
+	if maxTokensValue != nil {
+		maxTokens = *maxTokensValue
+	}
+	if contextWindowValue != nil {
+		contextWindow = *contextWindowValue
+	}
+	if maxTokens > opencodeMaxTokens {
+		return fmt.Errorf("model.maxTokens must not exceed %d for opencode runtime", opencodeMaxTokens)
+	}
+	if contextWindow <= maxTokens {
+		return fmt.Errorf("model.contextWindow must be greater than model.maxTokens for opencode runtime")
+	}
+	return nil
 }
 
 // Ensure CreateAgentTool implements Tool

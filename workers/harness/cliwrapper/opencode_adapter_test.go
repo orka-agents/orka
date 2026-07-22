@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -135,7 +136,7 @@ func TestOpencodeAdapterUsesModelLimitOverrides(t *testing.T) {
 		Metadata: map[string]string{
 			"model":         "kimi-k2",
 			"contextWindow": "64000",
-			"maxTokens":     "4096",
+			"maxTokens":     "32000",
 		},
 		Env: []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
 	})
@@ -153,8 +154,45 @@ func TestOpencodeAdapterUsesModelLimitOverrides(t *testing.T) {
 		t.Fatalf("unmarshal opencode config: %v", err)
 	}
 	limit := cfg.Provider[opencodeProviderName].Models["kimi-k2"].Limit
-	if limit.Context != 64000 || limit.Output != 4096 {
-		t.Fatalf("limit = %#v, want context=64000 output=4096", limit)
+	if limit.Context != 64000 || limit.Output != 32000 {
+		t.Fatalf("limit = %#v, want context=64000 output=32000", limit)
+	}
+}
+
+func TestOpencodeAdapterRejectsUnusableModelLimitCombinations(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{
+			name:     "output exceeds opencode cap",
+			metadata: map[string]string{"maxTokens": "32001"},
+			want:     "must not exceed 32000",
+		},
+		{
+			name:     "context equals default output",
+			metadata: map[string]string{"contextWindow": "8192"},
+			want:     "contextWindow must be greater than maxTokens after defaults",
+		},
+		{
+			name:     "explicit context equals output",
+			metadata: map[string]string{"contextWindow": "10000", "maxTokens": "10000"},
+			want:     "contextWindow must be greater than maxTokens after defaults",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := map[string]string{"model": "kimi-k2"}
+			maps.Copy(metadata, tt.metadata)
+			_, err := NewOpencodeAdapter(OpencodeAdapterConfig{}).BuildCommand(context.Background(), TurnContext{
+				WorkDir:  t.TempDir(),
+				Metadata: metadata,
+				Env:      []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("BuildCommand() error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

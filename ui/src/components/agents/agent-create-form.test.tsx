@@ -138,6 +138,7 @@ describe('AgentCreateForm', () => {
     expect(screen.getByRole('switch')).not.toBeChecked()
     expect(screen.getByText('Max Output Tokens')).toBeInTheDocument()
     expect(screen.getByText('Context Window')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('8192 (default)')).toHaveAttribute('max', '32000')
   })
 
   it('secret reference select is shown', () => {
@@ -280,6 +281,40 @@ describe('AgentCreateForm', () => {
 
     expect(toast.error).toHaveBeenCalledWith('Context Window must be a positive integer')
     expect(toast.success).not.toHaveBeenCalled()
+  })
+
+  it('rejects an OpenCode output limit above 32000', async () => {
+	useStateModeOverride = 'runtime'
+	const user = userEvent.setup()
+	render(<AgentCreateForm />)
+
+	await user.type(screen.getByPlaceholderText('my-agent'), 'opencode-agent')
+	const selects = screen.getAllByRole('combobox')
+	await user.click(selects[1])
+	const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+	await user.click(opencodeOption!)
+	await user.type(screen.getByPlaceholderText('Endpoint model ID'), 'kimi-k2')
+	await user.type(screen.getByPlaceholderText('8192 (default)'), '32001')
+	fireEvent.submit(screen.getByRole('button', { name: 'Create Agent' }).closest('form')!)
+
+	expect(toast.error).toHaveBeenCalledWith('OpenCode Max Output Tokens cannot exceed 32000')
+  })
+
+  it('requires OpenCode context window to exceed effective output tokens', async () => {
+	useStateModeOverride = 'runtime'
+	const user = userEvent.setup()
+	render(<AgentCreateForm />)
+
+	await user.type(screen.getByPlaceholderText('my-agent'), 'opencode-agent')
+	const selects = screen.getAllByRole('combobox')
+	await user.click(selects[1])
+	const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+	await user.click(opencodeOption!)
+	await user.type(screen.getByPlaceholderText('Endpoint model ID'), 'kimi-k2')
+	await user.type(screen.getByPlaceholderText('128000 (default)'), '8192')
+	fireEvent.submit(screen.getByRole('button', { name: 'Create Agent' }).closest('form')!)
+
+	expect(toast.error).toHaveBeenCalledWith('Context Window must be greater than Max Output Tokens')
   })
 
   it('submits runtime agent with empty allowed tools', async () => {

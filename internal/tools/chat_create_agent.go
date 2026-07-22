@@ -361,6 +361,14 @@ func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace 
 		if modelID, ok := a[modelField].(string); ok {
 			agent.Spec.Model.Name = modelID
 		}
+		if err := validateOpencodeModelLimits(agent.Spec.Model.MaxTokens, agent.Spec.Model.ContextWindow); err != nil {
+			result, _ := ChatToolErrorResult(
+				"invalid_arguments",
+				err.Error(),
+				"Use maxTokens up to 32000 and set contextWindow greater than the effective maxTokens value.",
+			)
+			return result, false
+		}
 	}
 	if agent.Spec.Model != nil {
 		agent.Spec.Model.Provider = ""

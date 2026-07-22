@@ -22,6 +22,7 @@ const (
 	opencodeDefaultAgent             = "build"
 	opencodeModelContextLimit        = 128000
 	opencodeModelOutputLimit         = 8192
+	opencodeModelMaxOutputLimit      = 32000
 	opencodeStartupInstructionsLimit = 96 << 10 // Conservative byte budget below the 128k-token model context.
 	opencodeWorkspaceArtifactsDir    = ".orka-artifacts"
 	opencodeDisableProjectConfig     = "OPENCODE_DISABLE_PROJECT_CONFIG"
@@ -1200,6 +1201,20 @@ func opencodeModelLimitFromMetadata(metadata map[string]string) (opencodeModelLi
 	outputLimit, err := positiveOpencodeMetadataInt(metadata, "maxTokens", opencodeModelOutputLimit)
 	if err != nil {
 		return opencodeModelLimit{}, err
+	}
+	if outputLimit > opencodeModelMaxOutputLimit {
+		return opencodeModelLimit{}, fmt.Errorf(
+			"opencode metadata maxTokens must not exceed %d, got %d",
+			opencodeModelMaxOutputLimit,
+			outputLimit,
+		)
+	}
+	if contextLimit <= outputLimit {
+		return opencodeModelLimit{}, fmt.Errorf(
+			"opencode contextWindow must be greater than maxTokens after defaults, got contextWindow=%d maxTokens=%d",
+			contextLimit,
+			outputLimit,
+		)
 	}
 	return opencodeModelLimit{Context: contextLimit, Output: outputLimit}, nil
 }

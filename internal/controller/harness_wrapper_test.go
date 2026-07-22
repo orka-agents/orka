@@ -2431,7 +2431,7 @@ func TestHarnessWrapperTurnMetadataCarriesTaskTimeout(t *testing.T) {
 func TestHarnessWrapperTurnMetadataCarriesOpencodeModelLimits(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode
-	maxTokens := int32(4096)
+	maxTokens := int32(32000)
 	contextWindow := int32(64000)
 	agent.Spec.Model = &corev1alpha1.ModelConfig{
 		Name:          "kimi-k2",
@@ -2445,7 +2445,7 @@ func TestHarnessWrapperTurnMetadataCarriesOpencodeModelLimits(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"model":         "kimi-k2",
-		"maxTokens":     "4096",
+		"maxTokens":     "32000",
 		"contextWindow": "64000",
 	} {
 		if got := request.Metadata[key]; got != want {
@@ -2476,6 +2476,30 @@ func TestHarnessWrapperTurnMetadataRejectsNonPositiveModelLimits(t *testing.T) {
 			}(),
 			want: "contextWindow must be positive",
 		},
+		{
+			name: "output cap",
+			model: func() *corev1alpha1.ModelConfig {
+				value := int32(32001)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", MaxTokens: &value}
+			}(),
+			want: "maxTokens must not exceed 32000",
+		},
+		{
+			name: "context uses default output",
+			model: func() *corev1alpha1.ModelConfig {
+				value := int32(8192)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", ContextWindow: &value}
+			}(),
+			want: "contextWindow must be greater than maxTokens",
+		},
+		{
+			name: "explicit equal limits",
+			model: func() *corev1alpha1.ModelConfig {
+				value := int32(10000)
+				return &corev1alpha1.ModelConfig{Name: "kimi-k2", MaxTokens: &value, ContextWindow: &value}
+			}(),
+			want: "contextWindow must be greater than maxTokens",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			task, agent := harnessWrapperTaskAndAgent()
@@ -2492,8 +2516,8 @@ func TestHarnessWrapperTurnMetadataRejectsNonPositiveModelLimits(t *testing.T) {
 
 func TestHarnessWrapperTurnMetadataOmitsOpencodeLimitsForOtherRuntimes(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
-	maxTokens := int32(4096)
-	contextWindow := int32(64000)
+	maxTokens := int32(40000)
+	contextWindow := int32(10000)
 	agent.Spec.Model = &corev1alpha1.ModelConfig{
 		Name:          "gpt-5",
 		MaxTokens:     &maxTokens,

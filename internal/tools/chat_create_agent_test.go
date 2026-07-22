@@ -46,7 +46,7 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	})
 
 	tool := &ChatCreateAgentTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-no-provider","model":{"provider":"openai","name":"gpt-4.1-mini","maxTokens":4096,"contextWindow":64000}}`))
+	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-no-provider","model":{"provider":"openai","name":"gpt-4.1-mini","maxTokens":40000,"contextWindow":10000}}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,11 +76,54 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	if created.Spec.Model.Provider != testProviderOpenAI {
 		t.Fatalf("model.provider = %q, want openai when no providerRef is set", created.Spec.Model.Provider)
 	}
-	if created.Spec.Model.MaxTokens == nil || *created.Spec.Model.MaxTokens != 4096 {
-		t.Fatalf("model.maxTokens = %v, want 4096", created.Spec.Model.MaxTokens)
+	if created.Spec.Model.MaxTokens == nil || *created.Spec.Model.MaxTokens != 40000 {
+		t.Fatalf("model.maxTokens = %v, want 40000", created.Spec.Model.MaxTokens)
 	}
-	if created.Spec.Model.ContextWindow == nil || *created.Spec.Model.ContextWindow != 64000 {
-		t.Fatalf("model.contextWindow = %v, want 64000", created.Spec.Model.ContextWindow)
+	if created.Spec.Model.ContextWindow == nil || *created.Spec.Model.ContextWindow != 10000 {
+		t.Fatalf("model.contextWindow = %v, want 10000", created.Spec.Model.ContextWindow)
+	}
+}
+
+func TestChatCreateAgentToolRejectsInvalidOpencodeModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		maxTokens     int
+		contextWindow int
+		want          string
+	}{
+		{name: "output cap", maxTokens: 32001, contextWindow: 64000, want: "must not exceed 32000"},
+		{name: "equal limits", maxTokens: 10000, contextWindow: 10000, want: "must be greater"},
+		{name: "default output", contextWindow: 8192, want: "must be greater"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			model := map[string]any{nameField: "kimi-k2"}
+			if tt.maxTokens != 0 {
+				model["maxTokens"] = tt.maxTokens
+			}
+			if tt.contextWindow != 0 {
+				model["contextWindow"] = tt.contextWindow
+			}
+			args, err := json.Marshal(map[string]any{
+				nameField:    "invalid-opencode-limits",
+				modelField:   model,
+				runtimeField: map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)},
+			})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: newFakeClient(), Namespace: defaultNamespace})
+			result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var toolResult ChatToolResult
+			if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+			if toolResult.Success || !strings.Contains(toolResult.Error, tt.want) {
+				t.Fatalf("Execute() result = %#v, want %q", toolResult, tt.want)
+			}
+		})
 	}
 }
 

@@ -73,6 +73,9 @@ const (
 	harnessWrapperStreamPollTimeout           = 2 * time.Second
 	harnessWrapperNoTimeoutDuration           = time.Hour * 24 * 365 * 100
 	harnessWrapperRuntimeGeneric              = "generic"
+	harnessWrapperOpencodeDefaultContext      = int32(128000)
+	harnessWrapperOpencodeDefaultOutput       = int32(8192)
+	harnessWrapperOpencodeMaxOutput           = int32(32000)
 )
 
 func taskHasHarnessWrapperTurn(task *corev1alpha1.Task) bool {
@@ -1726,16 +1729,13 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 				metadata["model"] = strings.TrimSpace(agent.Spec.Model.Name)
 			}
 			if runtimeName == string(corev1alpha1.AgentRuntimeOpencode) {
+				if err := validateHarnessWrapperOpencodeModelLimits(agent.Spec.Model); err != nil {
+					return nil, err
+				}
 				if agent.Spec.Model.MaxTokens != nil {
-					if *agent.Spec.Model.MaxTokens <= 0 {
-						return nil, fmt.Errorf("agent model maxTokens must be positive")
-					}
 					metadata["maxTokens"] = strconv.FormatInt(int64(*agent.Spec.Model.MaxTokens), 10)
 				}
 				if agent.Spec.Model.ContextWindow != nil {
-					if *agent.Spec.Model.ContextWindow <= 0 {
-						return nil, fmt.Errorf("agent model contextWindow must be positive")
-					}
 					metadata["contextWindow"] = strconv.FormatInt(int64(*agent.Spec.Model.ContextWindow), 10)
 				}
 			}
@@ -1853,6 +1853,30 @@ func (r *TaskReconciler) harnessWrapperTurnMetadata(
 		}
 	}
 	return metadata, nil
+}
+
+func validateHarnessWrapperOpencodeModelLimits(model *corev1alpha1.ModelConfig) error {
+	maxTokens := harnessWrapperOpencodeDefaultOutput
+	contextWindow := harnessWrapperOpencodeDefaultContext
+	if model.MaxTokens != nil {
+		if *model.MaxTokens <= 0 {
+			return fmt.Errorf("agent model maxTokens must be positive")
+		}
+		maxTokens = *model.MaxTokens
+	}
+	if model.ContextWindow != nil {
+		if *model.ContextWindow <= 0 {
+			return fmt.Errorf("agent model contextWindow must be positive")
+		}
+		contextWindow = *model.ContextWindow
+	}
+	if maxTokens > harnessWrapperOpencodeMaxOutput {
+		return fmt.Errorf("agent model maxTokens must not exceed %d for opencode", harnessWrapperOpencodeMaxOutput)
+	}
+	if contextWindow <= maxTokens {
+		return fmt.Errorf("agent model contextWindow must be greater than maxTokens for opencode")
+	}
+	return nil
 }
 
 func (r *TaskReconciler) harnessWrapperDefaultProviderModel(ctx context.Context, namespace string) string {

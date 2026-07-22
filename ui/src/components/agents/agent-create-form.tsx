@@ -13,6 +13,9 @@ import { toast } from 'sonner'
 
 const defaultRuntimeAllowedTools = 'Read,Glob,Grep,Bash,LS'
 const defaultOpencodeAllowedTools = 'Read,Glob,LS'
+const defaultOpencodeMaxTokens = 8192
+const defaultOpencodeContextWindow = 128000
+const maxOpencodeOutputTokens = 32000
 
 export function AgentCreateForm() {
   const navigate = useNavigate()
@@ -69,6 +72,18 @@ export function AgentCreateForm() {
       (!Number.isInteger(parsedContextWindow) || parsedContextWindow <= 0)) {
       toast.error('Context Window must be a positive integer')
       return
+    }
+    if (mode === 'runtime' && runtimeType === 'opencode') {
+      const effectiveMaxTokens = parsedMaxTokens ?? defaultOpencodeMaxTokens
+      const effectiveContextWindow = parsedContextWindow ?? defaultOpencodeContextWindow
+      if (effectiveMaxTokens > maxOpencodeOutputTokens) {
+        toast.error('OpenCode Max Output Tokens cannot exceed 32000')
+        return
+      }
+      if (effectiveContextWindow <= effectiveMaxTokens) {
+        toast.error('Context Window must be greater than Max Output Tokens')
+        return
+      }
     }
 
     const spec: Record<string, unknown> = {}
@@ -217,6 +232,7 @@ export function AgentCreateForm() {
                       <Input
                         type="number"
                         min="1"
+                        max="32000"
                         step="1"
                         value={maxTokens}
                         onChange={(e) => setMaxTokens(e.target.value)}

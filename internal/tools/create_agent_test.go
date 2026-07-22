@@ -730,6 +730,49 @@ func TestCreateAgentTool_Execute_RejectsNonPositiveModelLimits(t *testing.T) {
 	}
 }
 
+func TestValidateCreateAgentArgsRejectsInvalidOpencodeModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		maxTokens     int32
+		contextWindow int32
+		want          string
+	}{
+		{name: "output cap", maxTokens: 32001, contextWindow: 64000, want: "must not exceed 32000"},
+		{name: "equal limits", maxTokens: 10000, contextWindow: 10000, want: "must be greater"},
+		{name: "default output", contextWindow: 8192, want: "must be greater"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &ModelArgs{Name: "kimi-k2"}
+			if tt.maxTokens != 0 {
+				model.MaxTokens = &tt.maxTokens
+			}
+			if tt.contextWindow != 0 {
+				model.ContextWindow = &tt.contextWindow
+			}
+			_, err := validateCreateAgentArgs(&CreateAgentArgs{
+				Role: "coder", SystemPrompt: "write code", Model: model,
+				Runtime: &RuntimeArgs{Type: string(corev1alpha1.AgentRuntimeOpencode)},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validateCreateAgentArgs() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateCreateAgentArgsPreservesOtherRuntimeModelLimits(t *testing.T) {
+	maxTokens := int32(40000)
+	contextWindow := int32(10000)
+	_, err := validateCreateAgentArgs(&CreateAgentArgs{
+		Role: "coder", SystemPrompt: "write code",
+		Model:   &ModelArgs{Name: "claude", MaxTokens: &maxTokens, ContextWindow: &contextWindow},
+		Runtime: &RuntimeArgs{Type: string(corev1alpha1.AgentRuntimeClaude)},
+	})
+	if err != nil {
+		t.Fatalf("validateCreateAgentArgs() error = %v, want non-OpenCode limits preserved", err)
+	}
+}
+
 func TestCreateAgentTool_Execute_RejectsMissingRuntimeSecretRef(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
