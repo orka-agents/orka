@@ -590,6 +590,13 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", cleanErr.Error()))
 			}
 		}
+		if opencodeWorkDir != nil {
+			// Git cleanup runs as the child identity and may tighten the repository
+			// directory again. Restore wrapper group access before deferred removal.
+			if err := opencodeWorkDir.restoreAndVerify(); err != nil {
+				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", err.Error()))
+			}
+		}
 		if len([]byte(partial)) > maxStoredResultBytes {
 			turn.appendFrame(s.failedFrame(turn, "result_too_large", "runtime result exceeded harness storage limit", false))
 			return
@@ -660,6 +667,13 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 					"workdir-cleanup",
 					cleanErr.Error(),
 				))
+			}
+		}
+		if opencodeWorkDir != nil {
+			// Git cleanup runs as the child identity and may tighten the repository
+			// directory again. Restore wrapper group access before deferred removal.
+			if err := opencodeWorkDir.restoreAndVerify(); err != nil {
+				turn.appendFrame(s.runtimeLogTextFrame(turn, "workdir-cleanup", err.Error()))
 			}
 		}
 		if frameErr := s.appendCompletedFrame(turn, parsed); frameErr != nil {
