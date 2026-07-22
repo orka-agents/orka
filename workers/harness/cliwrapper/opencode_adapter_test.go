@@ -584,6 +584,55 @@ func TestOpencodeAdapterDisablesEmbeddedRepositoryExternalDiff(t *testing.T) {
 	}
 }
 
+func TestOpencodeAdapterDisablesRepositoryFSMonitor(t *testing.T) {
+	rootDir := t.TempDir()
+	runOpencodeGitCommand(t, rootDir, "init", "--quiet")
+	trackedPath := filepath.Join(rootDir, "tracked")
+	if err := os.WriteFile(trackedPath, []byte("tracked\n"), 0o600); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	runOpencodeGitCommand(t, rootDir, "add", "tracked")
+
+	hookPath := filepath.Join(rootDir, ".git", "fsmonitor.sh")
+	markerPath := hookPath + ".ran"
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\n: > \"$0.ran\"\nprintf '\\n'\n"), 0o700); err != nil {
+		t.Fatalf("write fsmonitor hook: %v", err)
+	}
+	runOpencodeGitCommand(t, rootDir, "config", "core.fsmonitor", hookPath)
+
+	control := workspaceGitCommand(
+		context.Background(),
+		"-c", "core.fsmonitor="+hookPath,
+		"-C", rootDir,
+		"--work-tree="+rootDir,
+		"ls-files", "--stage", "-z",
+	)
+	if output, err := control.CombinedOutput(); err != nil {
+		t.Fatalf("run fsmonitor control command: %v: %s", err, output)
+	}
+	if _, err := os.Lstat(markerPath); err != nil {
+		t.Fatalf("fsmonitor control command did not run hook: %v", err)
+	}
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatalf("remove fsmonitor marker: %v", err)
+	}
+
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir:  rootDir,
+		RootDir:  rootDir,
+		Metadata: map[string]string{"model": "kimi-k2"},
+		Env:      []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	if _, err := os.Lstat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("repository fsmonitor hook ran during BuildCommand, marker lstat error = %v", err)
+	}
+}
+
 func TestOpencodeAdapterPinsGitWorktreeDuringSymlinkScan(t *testing.T) {
 	rootDir := t.TempDir()
 	runOpencodeGitCommand(t, rootDir, "init", "--quiet")
@@ -1311,6 +1360,34 @@ func TestOpencodeAdapterDenyBash(t *testing.T) {
 	}
 }
 
+func TestOpencodeAdapterGeneratedConfigPreservesSensitiveEnvReadDenies(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir: t.TempDir(),
+		Metadata: map[string]string{
+			"model":        "kimi-k2",
+			"allowedTools": "Read",
+		},
+		Env: []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+
+	data, err := os.ReadFile(spec.TempFiles[0])
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	var cfg struct {
+		Permission map[string]json.RawMessage `json:"permission"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal opencode config: %v", err)
+	}
+	assertOpencodeReadPermission(t, cfg.Permission["read"])
+}
+
 func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
 	permissions, err := opencodePermissions(&agentEnvConfig{
 		AllowedToolsSet: true,
@@ -1321,7 +1398,8 @@ func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
 		t.Fatalf("opencodePermissions() error = %v", err)
 	}
 
-	for _, permission := range []string{"read", "glob", "grep"} {
+	assertOpencodeReadPermission(t, permissions["read"])
+	for _, permission := range []string{"glob", "grep"} {
 		if permissions[permission] != opencodePermissionAllow {
 			t.Fatalf("permission %q = %q, want allow", permission, permissions[permission])
 		}
@@ -1342,9 +1420,7 @@ func TestOpencodePermissionsMapListAliasesToRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("opencodePermissions(%q) error = %v", tool, err)
 		}
-		if permissions["read"] != opencodePermissionAllow {
-			t.Fatalf("permission.read = %q, want allow for %s", permissions["read"], tool)
-		}
+		assertOpencodeReadPermission(t, permissions["read"])
 		if _, ok := permissions["list"]; ok {
 			t.Fatalf("permissions = %#v, want no unsupported list permission", permissions)
 		}
@@ -1465,6 +1541,46 @@ func TestOpencodeAdapterParseResultFallsBackToExactStdout(t *testing.T) {
 	}
 	if result.Result != "plain opencode output" {
 		t.Fatalf("Result = %q, want exact stdout fallback", result.Result)
+	}
+}
+
+func TestOpencodeAdapterParseResultRejectsJSONEventsWithoutCompletedAssistantText(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	stdout := "" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"completed"}}}` + "\n"
+	_, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err == nil || !strings.Contains(err.Error(), "completed assistant text") {
+		t.Fatalf("ParseResult() error = %v, want missing completed assistant text rejection", err)
+	}
+}
+
+func assertOpencodeReadPermission(t *testing.T, permission any) {
+	t.Helper()
+	data, err := json.Marshal(permission)
+	if err != nil {
+		t.Fatalf("marshal read permission: %v", err)
+	}
+	var rules map[string]string
+	if err := json.Unmarshal(data, &rules); err != nil {
+		t.Fatalf("unmarshal read permission %s: %v", data, err)
+	}
+	want := map[string]string{
+		"*":             opencodePermissionAllow,
+		"*.env":         opencodePermissionDeny,
+		"*.env.*":       opencodePermissionDeny,
+		"*.env.example": opencodePermissionAllow,
+	}
+	if !reflect.DeepEqual(rules, want) {
+		t.Fatalf("permission.read = %#v, want %#v", rules, want)
+	}
+	previous := -1
+	for _, pattern := range []string{"*", "*.env", "*.env.*", "*.env.example"} {
+		index := strings.Index(string(data), `"`+pattern+`"`)
+		if index <= previous {
+			t.Fatalf("permission.read JSON = %s, want precedence order through %q", data, pattern)
+		}
+		previous = index
 	}
 }
 

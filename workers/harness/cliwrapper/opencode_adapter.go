@@ -30,7 +30,9 @@ const (
 	opencodeEnvPrefix                = "OPENCODE_"
 	opencodePermissionAllow          = "allow"
 	opencodePermissionDeny           = "deny"
+	opencodePermissionRead           = "read"
 	opencodePermissionWebSearch      = "websearch"
+	opencodeOutputText               = "text"
 	opencodeEnvTrue                  = "true"
 )
 
@@ -45,10 +47,19 @@ type opencodeConfig struct {
 	Schema       string                      `json:"$schema"`
 	Provider     map[string]opencodeProvider `json:"provider"`
 	Agent        map[string]opencodeAgent    `json:"agent"`
-	Permission   map[string]string           `json:"permission"`
+	Permission   opencodePermissionConfig    `json:"permission"`
 	Instructions []string                    `json:"instructions,omitempty"`
 	Share        string                      `json:"share"`
 	AutoUpdate   bool                        `json:"autoupdate"`
+}
+
+type opencodePermissionConfig map[string]any
+
+type opencodeReadPermissionRules struct {
+	All        string `json:"*"`
+	Env        string `json:"*.env"`
+	EnvFiles   string `json:"*.env.*"`
+	EnvExample string `json:"*.env.example"`
 }
 
 type opencodeAgent struct {
@@ -174,8 +185,12 @@ func (a *OpencodeAdapter) BuildCommand(ctx context.Context, turn TurnContext) (*
 
 func (a *OpencodeAdapter) ParseResult(_ context.Context, _ TurnContext, run CommandResult) (TurnResult, error) {
 	stdout := run.ExactStdout()
-	if message := opencodeFinalMessage(stdout); message != "" {
+	message, structured := opencodeFinalMessage(stdout)
+	if message != "" {
 		return TurnResult{Result: message, Metadata: map[string]string{"adapter": RuntimeOpencode}}, nil
+	}
+	if structured {
+		return TurnResult{}, fmt.Errorf("opencode JSON output did not contain completed assistant text")
 	}
 	return TurnResult{Result: stdout, Metadata: map[string]string{"adapter": RuntimeOpencode}}, nil
 }
@@ -1129,8 +1144,8 @@ func opencodePathWithin(rootDir, path string) bool {
 	return err == nil && filepath.IsLocal(rel)
 }
 
-func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
-	permissions := map[string]string{
+func opencodePermissions(cfg *agentEnvConfig) (opencodePermissionConfig, error) {
+	permissions := opencodePermissionConfig{
 		"edit":  opencodePermissionAllow,
 		"bash":  opencodePermissionDeny,
 		"skill": opencodePermissionDeny,
@@ -1148,11 +1163,11 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
 
 	if cfg.AllowedToolsSet {
 		for _, permission := range opencodeManagedPermissions() {
-			permissions[permission] = opencodePermissionDeny
+			setOpencodePermission(permissions, permission, opencodePermissionDeny)
 		}
 		for _, tool := range cfg.AllowedTools {
 			if permission := opencodePermissionForTool(tool); permission != "" {
-				permissions[permission] = opencodePermissionAllow
+				setOpencodePermission(permissions, permission, opencodePermissionAllow)
 			}
 		}
 	} else if cfg.AllowBash {
@@ -1160,7 +1175,7 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
 	}
 	for _, tool := range cfg.DisallowedTools {
 		if permission := opencodePermissionForTool(tool); permission != "" {
-			permissions[permission] = opencodePermissionDeny
+			setOpencodePermission(permissions, permission, opencodePermissionDeny)
 		}
 	}
 	if !cfg.AllowBash {
@@ -1170,9 +1185,24 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]string, error) {
 	return permissions, nil
 }
 
+func setOpencodePermission(permissions opencodePermissionConfig, permission, action string) {
+	if permission == opencodePermissionRead && action == opencodePermissionAllow {
+		// OpenCode appends user permission rules after its defaults and uses the last match.
+		// Keep sensitive env files denied instead of letting a scalar read=allow override that protection.
+		permissions[permission] = opencodeReadPermissionRules{
+			All:        opencodePermissionAllow,
+			Env:        opencodePermissionDeny,
+			EnvFiles:   opencodePermissionDeny,
+			EnvExample: opencodePermissionAllow,
+		}
+		return
+	}
+	permissions[permission] = action
+}
+
 func opencodeManagedPermissions() []string {
 	return []string{
-		"read",
+		opencodePermissionRead,
 		"glob",
 		"grep",
 		"edit",
@@ -1189,8 +1219,8 @@ func opencodeManagedPermissions() []string {
 func opencodePermissionForTool(tool string) string {
 	name := normalizeToolName(tool)
 	switch name {
-	case "read", "fileread", "ls", "list":
-		return "read"
+	case opencodePermissionRead, "fileread", "ls", "list":
+		return opencodePermissionRead
 	case "glob":
 		return "glob"
 	case "grep":
@@ -1221,19 +1251,27 @@ func opencodeBaseURL(value string) string {
 	return strings.TrimSuffix(value, "/chat/completions")
 }
 
-func opencodeFinalMessage(stdout string) string {
+func opencodeFinalMessage(stdout string) (string, bool) {
 	scanner := bufio.NewScanner(strings.NewReader(stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxStoredResultBytes)
 	last := ""
+	structured := false
 	for scanner.Scan() {
 		var event opencodeOutputEvent
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
 		}
-		if event.Type != "text" || event.Part.Type != "text" || strings.TrimSpace(event.Part.Text) == "" {
+		switch event.Type {
+		case "step_start", "step_finish", "tool_use", opencodeOutputText, "reasoning", "error":
+			structured = true
+		default:
+			continue
+		}
+		if event.Type != opencodeOutputText || event.Part.Type != opencodeOutputText ||
+			strings.TrimSpace(event.Part.Text) == "" {
 			continue
 		}
 		last = event.Part.Text
 	}
-	return last
+	return last, structured
 }
