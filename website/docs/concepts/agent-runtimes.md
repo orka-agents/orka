@@ -13,7 +13,7 @@ Agent runtimes cover two paths: built-in CLI runtimes such as Codex CLI, Claude 
 | Codex CLI | `codex` | `OPENAI_API_KEY` or `CODEX_API_KEY` | GA |
 | Claude Code CLI | `claude` | `ANTHROPIC_API_KEY` (direct) or `ANTHROPIC_FOUNDRY_API_KEY` (Azure AI Foundry) | GA |
 | GitHub Copilot CLI | `copilot` | `GITHUB_TOKEN` | Technical Preview |
-| OpenCode CLI | `opencode` | `OPENAI_BASE_URL` and `OPENAI_API_KEY` | Technical Preview |
+| OpenCode CLI | `opencode` | `OPENAI_BASE_URL`; optional `OPENAI_API_KEY` | Technical Preview |
 
 ## Live Coverage
 
@@ -25,7 +25,7 @@ PR-blocking live CI currently exercises these runtime scenarios against real mod
 
 This coverage is about Orka's runtime wiring and task/session/workspace behavior. The live backend used in CI is harness infrastructure, not the main product under test.
 
-OpenCode uses a custom OpenAI-compatible provider, so it can target chat-completions endpoints such as vLLM, Ray Serve, or Ollama. Set `OPENAI_BASE_URL` to the endpoint base, optionally including a trailing `/chat/completions`, and set `OPENAI_API_KEY` to the credential expected by that endpoint. The adapter strips the trailing chat-completions path before configuring OpenCode.
+OpenCode uses a custom OpenAI-compatible provider, so it can target chat-completions endpoints such as vLLM, Ray Serve, or Ollama. Set `OPENAI_BASE_URL` to the endpoint base, optionally including a trailing `/chat/completions`. Set `OPENAI_API_KEY` when the endpoint requires authentication; it may be omitted for unauthenticated local endpoints. The adapter strips the trailing chat-completions path before configuring OpenCode.
 
 OpenCode CLI session continuation is not wired initially. Each Orka turn starts a new OpenCode CLI session, while Orka still retains its own task, result, and lineage records. Read-only scheduled agent tasks do not support OpenCode initially because non-interactive OpenCode runs pre-approve file edits.
 
@@ -83,8 +83,8 @@ kubectl create secret generic copilot-token \
   --from-literal=GITHUB_TOKEN=<github-token>
 
 kubectl create secret generic opencode-credentials \
-  --from-literal=OPENAI_BASE_URL=http://models.example/v1 \
-  --from-literal=OPENAI_API_KEY=<endpoint-api-key>
+  --from-literal=OPENAI_BASE_URL=http://models.example/v1
+# Add --from-literal=OPENAI_API_KEY=<endpoint-api-key> when authentication is required.
 ```
 
 ### Azure AI Foundry for Claude Code CLI
@@ -205,7 +205,7 @@ spec:
   # Codex runtime expects: OPENAI_API_KEY or CODEX_API_KEY
   # Claude runtime expects: ANTHROPIC_API_KEY
   # Copilot runtime expects: GITHUB_TOKEN
-  # OpenCode runtime expects: OPENAI_BASE_URL and OPENAI_API_KEY
+  # OpenCode runtime expects: OPENAI_BASE_URL; OPENAI_API_KEY is optional
   secretRef:
     name: claude-api-key
 
@@ -540,8 +540,8 @@ kubectl create secret generic copilot-token \
   --from-literal=GITHUB_TOKEN=<github-token>
 
 kubectl create secret generic opencode-credentials \
-  --from-literal=OPENAI_BASE_URL=http://models.example/v1 \
-  --from-literal=OPENAI_API_KEY=<endpoint-api-key>
+  --from-literal=OPENAI_BASE_URL=http://models.example/v1
+# Add --from-literal=OPENAI_API_KEY=<endpoint-api-key> when authentication is required.
 ```
 
 ## Controller Configuration
