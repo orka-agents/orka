@@ -496,21 +496,28 @@ func (s *Server) runTurn(turn *turnState) { //nolint:gocyclo
 			return
 		}
 	}
-	if err := chownTreeForChild(preparedWorkspace.rootDir, turnArtifactsDir); err != nil {
-		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
-		return
-	}
 	var opencodeWorkDir *opencodeWorkDirGuard
 	if turnUsesOpencodeRuntime(turnCtx) {
-		// The wrapper runs as root without DAC_OVERRIDE. Once the workspace is
-		// child-owned, keep the work directory searchable so wrapper-side artifact
-		// validation and upload can still reach the in-worktree artifact directory.
+		// Retain the validated directory before ownership is transferred to the child;
+		// the wrapper intentionally lacks DAC_OVERRIDE and may not be able to reopen 0700.
 		opencodeWorkDir, err = openOpencodeWorkDirGuard(turnCtx.WorkDir)
 		if err != nil {
 			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
 			return
 		}
 		defer opencodeWorkDir.Close() //nolint:errcheck
+	}
+	if err := chownTreeForChild(preparedWorkspace.rootDir, turnArtifactsDir); err != nil {
+		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+		return
+	}
+	if opencodeWorkDir != nil {
+		// chownTreeForChild applies the child GID to the tree. Re-establish wrapper
+		// group access through the retained fd before starting the untrusted process.
+		if err := opencodeWorkDir.restoreAndVerify(); err != nil {
+			turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
+			return
+		}
 	}
 	if err := prepareArtifactsForChild(turnArtifactsDir); err != nil {
 		turn.appendFrame(s.failedFrame(turn, "workspace_prepare_failed", err.Error(), false))
