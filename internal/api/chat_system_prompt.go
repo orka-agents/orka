@@ -450,20 +450,21 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	var availableRuntimes []string
 	var secretList corev1.SecretList
 	if err := b.client.List(ctx, &secretList, client.InNamespace(b.namespace)); err == nil {
-		secretNames := make(map[string]bool, len(secretList.Items))
+		secretsByName := make(map[string]*corev1.Secret, len(secretList.Items))
 		for i := range secretList.Items {
-			secretNames[secretList.Items[i].Name] = true
+			secret := &secretList.Items[i]
+			secretsByName[secret.Name] = secret
 		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCodex)) != "" {
+		if chattools.FirstDiscoverableRuntimeSecretName(secretsByName, corev1alpha1.AgentRuntimeCodex) != "" {
 			availableRuntimes = append(availableRuntimes, "codex")
 		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCopilot)) != "" {
+		if chattools.FirstDiscoverableRuntimeSecretName(secretsByName, corev1alpha1.AgentRuntimeCopilot) != "" {
 			availableRuntimes = append(availableRuntimes, "copilot")
 		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeClaude)) != "" {
+		if chattools.FirstDiscoverableRuntimeSecretName(secretsByName, corev1alpha1.AgentRuntimeClaude) != "" {
 			availableRuntimes = append(availableRuntimes, "claude")
 		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeOpencode)) != "" {
+		if chattools.FirstDiscoverableRuntimeSecretName(secretsByName, corev1alpha1.AgentRuntimeOpencode) != "" {
 			availableRuntimes = append(availableRuntimes, "opencode")
 		}
 	}

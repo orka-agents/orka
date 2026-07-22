@@ -20,6 +20,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/workerenv"
+)
+
+const (
+	testOpencodePrimaryCandidate  = "opencode-credentials"
+	testOpencodeFallbackCandidate = "opencode-api-key"
+	testOpencodeEndpoint          = "https://gateway.example.invalid/v1"
+	testOpencodeAuthValue         = "test"
 )
 
 func TestNewSystemPromptBuilder(t *testing.T) {
@@ -622,9 +630,13 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
-	t.Run("opencode runtime detected from opencode-credentials secret", func(t *testing.T) {
+	t.Run("opencode runtime detected from usable opencode-credentials secret", func(t *testing.T) {
 		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: testOpencodePrimaryCandidate, Namespace: "default"},
+			Data: map[string][]byte{
+				workerenv.OpenAIBaseURL: []byte(testOpencodeEndpoint),
+				workerenv.OpenAIAPIKey:  []byte(testOpencodeAuthValue),
+			},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 		b := NewSystemPromptBuilder(c, "default")
@@ -664,6 +676,86 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 		if strings.Contains(agents, "other-ns-agent") {
 			t.Error("agent from other namespace should not appear")
+		}
+	})
+}
+
+func TestBuildDynamicContextOpencodeDiscoveryRequiresCompleteGatewayCredentials(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add Orka scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		data map[string][]byte
+	}{
+		{
+			name: "missing base URL",
+			data: map[string][]byte{workerenv.OpenAIAPIKey: []byte(testOpencodeAuthValue)},
+		},
+		{
+			name: "blank base URL",
+			data: map[string][]byte{
+				workerenv.OpenAIBaseURL: []byte(" \t\n"),
+				workerenv.OpenAIAPIKey:  []byte(testOpencodeAuthValue),
+			},
+		},
+		{
+			name: "missing API key",
+			data: map[string][]byte{workerenv.OpenAIBaseURL: []byte(testOpencodeEndpoint)},
+		},
+		{
+			name: "blank API key",
+			data: map[string][]byte{
+				workerenv.OpenAIBaseURL: []byte(testOpencodeEndpoint),
+				workerenv.OpenAIAPIKey:  []byte(" \t\n"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: testOpencodePrimaryCandidate, Namespace: "default"},
+				Data:       tt.data,
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+			b := NewSystemPromptBuilder(c, "default")
+
+			_, _, providers, _, err := b.buildDynamicContext(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if strings.Contains(providers, "opencode") {
+				t.Errorf("providers = %q, did not expect unusable opencode runtime", providers)
+			}
+		})
+	}
+
+	t.Run("skips an unusable earlier candidate", func(t *testing.T) {
+		invalid := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: testOpencodePrimaryCandidate, Namespace: "default"},
+		}
+		valid := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: testOpencodeFallbackCandidate, Namespace: "default"},
+			Data: map[string][]byte{
+				workerenv.OpenAIBaseURL: []byte(testOpencodeEndpoint),
+				workerenv.OpenAIAPIKey:  []byte(testOpencodeAuthValue),
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(invalid, valid).Build()
+		b := NewSystemPromptBuilder(c, "default")
+
+		_, _, providers, _, err := b.buildDynamicContext(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(providers, "opencode") {
+			t.Errorf("providers = %q, expected usable later opencode candidate", providers)
 		}
 	})
 }

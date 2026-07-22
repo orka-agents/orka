@@ -306,6 +306,11 @@ func parseRuntimeConfig(ctx context.Context, k8sClient client.Reader, namespace 
 			)
 			return result, false
 		}
+		// String shorthand normally splits provider/model. OpenCode model IDs are
+		// endpoint-defined and may contain slashes, so preserve them verbatim.
+		if modelID, ok := a[modelField].(string); ok {
+			agent.Spec.Model.Name = modelID
+		}
 	}
 	if agent.Spec.Model != nil {
 		agent.Spec.Model.Provider = ""

@@ -54,6 +54,19 @@ func FirstPresentSecretName(present map[string]bool, candidates []string) string
 	return ""
 }
 
+// FirstDiscoverableRuntimeSecretName returns the first well-known runtime
+// Secret that is eligible for implicit discovery. OpenCode gateway credentials
+// must include both endpoint and authentication values; other runtimes retain
+// name-based discovery behavior.
+func FirstDiscoverableRuntimeSecretName(secrets map[string]*corev1.Secret, runtimeType corev1alpha1.AgentRuntimeType) string {
+	for _, name := range RuntimeSecretCandidates(runtimeType) {
+		if runtimeSecretSupportsDiscovery(runtimeType, secrets[name]) {
+			return name
+		}
+	}
+	return ""
+}
+
 func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, namespace string, runtimeType corev1alpha1.AgentRuntimeType, requested string) (*corev1.LocalObjectReference, error) {
 	candidates := RuntimeSecretCandidates(runtimeType)
 	if len(candidates) == 0 {
@@ -71,11 +84,14 @@ func resolveRuntimeSecretRef(ctx context.Context, k8sClient client.Reader, names
 		return &corev1.LocalObjectReference{Name: requested}, nil
 	}
 
-	name, err := firstExistingSecretName(ctx, k8sClient, namespace, candidates)
+	name, err := firstDiscoverableRuntimeSecretName(ctx, k8sClient, namespace, runtimeType, candidates)
 	if err != nil {
 		return nil, err
 	}
 	if name == "" {
+		if runtimeType == corev1alpha1.AgentRuntimeOpencode {
+			return nil, fmt.Errorf("no usable %s runtime credentials found in namespace %q; expected one of %s with non-empty %s and %s", runtimeType, namespace, strings.Join(candidates, ", "), workerenv.OpenAIBaseURL, workerenv.OpenAIAPIKey)
+		}
 		return nil, fmt.Errorf("no supported %s runtime credentials found in namespace %q; expected one of %s", runtimeType, namespace, strings.Join(candidates, ", "))
 	}
 	return &corev1.LocalObjectReference{Name: name}, nil
@@ -176,6 +192,37 @@ func firstExistingSecretName(ctx context.Context, k8sClient client.Reader, names
 		}
 	}
 	return "", nil
+}
+
+func firstDiscoverableRuntimeSecretName(ctx context.Context, k8sClient client.Reader, namespace string, runtimeType corev1alpha1.AgentRuntimeType, candidates []string) (string, error) {
+	for _, name := range candidates {
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return "", fmt.Errorf("failed to get secret %q: %w", name, err)
+		}
+		if runtimeSecretSupportsDiscovery(runtimeType, secret) {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
+func runtimeSecretSupportsDiscovery(runtimeType corev1alpha1.AgentRuntimeType, secret *corev1.Secret) bool {
+	if secret == nil {
+		return false
+	}
+	if runtimeType != corev1alpha1.AgentRuntimeOpencode {
+		return true
+	}
+	return secretDataHasNonEmptyValue(secret, workerenv.OpenAIBaseURL) &&
+		secretDataHasNonEmptyValue(secret, workerenv.OpenAIAPIKey)
+}
+
+func secretDataHasNonEmptyValue(secret *corev1.Secret, key string) bool {
+	return strings.TrimSpace(string(secret.Data[key])) != ""
 }
 
 func secretExists(ctx context.Context, k8sClient client.Reader, namespace, name string) (bool, error) {

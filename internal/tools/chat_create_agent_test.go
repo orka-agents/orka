@@ -62,6 +62,113 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	}
 }
 
+func TestChatCreateAgentTool_Execute_PreservesSlashQualifiedOpencodeModelString(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRuntimeCredsSecretName,
+			Namespace: defaultNamespace,
+		},
+	})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+	})
+
+	const modelID = "moonshotai/Kimi-K2-Instruct-0905"
+	runtimeArgs := map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)}
+	runtimeArgs[secretRefField] = testRuntimeCredsSecretName
+	args, err := json.Marshal(map[string]any{
+		nameField:    "opencode-string-model",
+		modelField:   modelID,
+		runtimeField: runtimeArgs,
+	})
+	if err != nil {
+		t.Fatalf("marshal arguments: %v", err)
+	}
+
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var toolResult ChatToolResult
+	if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !toolResult.Success {
+		t.Fatalf("Execute() result = %#v, want success", toolResult)
+	}
+
+	var created corev1alpha1.Agent
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      "opencode-string-model",
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("get created agent: %v", err)
+	}
+	if created.Spec.Model == nil {
+		t.Fatal("model is nil")
+	}
+	if created.Spec.Model.Name != modelID {
+		t.Fatalf("model.name = %q, want %q", created.Spec.Model.Name, modelID)
+	}
+	if created.Spec.Model.Provider != "" {
+		t.Fatalf("model.provider = %q, want empty for OpenCode runtime", created.Spec.Model.Provider)
+	}
+}
+
+func TestChatCreateAgentTool_Execute_PreservesOtherRuntimeModelStringBehavior(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRuntimeCredsSecretName,
+			Namespace: defaultNamespace,
+		},
+	})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+	})
+
+	runtimeArgs := map[string]any{jsonSchemaTypeField: runtimeTypeClaude}
+	runtimeArgs[secretRefField] = testRuntimeCredsSecretName
+	args, err := json.Marshal(map[string]any{
+		nameField:    "claude-string-model",
+		modelField:   "anthropic/claude-sonnet-4",
+		runtimeField: runtimeArgs,
+	})
+	if err != nil {
+		t.Fatalf("marshal arguments: %v", err)
+	}
+
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var toolResult ChatToolResult
+	if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !toolResult.Success {
+		t.Fatalf("Execute() result = %#v, want success", toolResult)
+	}
+
+	var created corev1alpha1.Agent
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      "claude-string-model",
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("get created agent: %v", err)
+	}
+	if created.Spec.Model == nil {
+		t.Fatal("model is nil")
+	}
+	if created.Spec.Model.Name != "claude-sonnet-4" {
+		t.Fatalf("model.name = %q, want %q", created.Spec.Model.Name, "claude-sonnet-4")
+	}
+	if created.Spec.Model.Provider != "" {
+		t.Fatalf("model.provider = %q, want empty for CLI runtime", created.Spec.Model.Provider)
+	}
+}
+
 func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationFails(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
