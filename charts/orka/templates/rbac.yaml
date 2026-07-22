@@ -9,10 +9,10 @@ metadata:
 rules:
   # Custom Resource permissions
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "providers", "skills", "repositorymonitors", "repositoryscans"]
+    resources: ["tasks", "tools", "agents", "providers", "skills", "repositorymonitors", "repositoryscans", "outboundaccesspolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "outboundaccesspolicies/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers"]
@@ -45,6 +45,9 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
@@ -109,7 +112,7 @@ rules:
     resources: ["clusterroles", "roles", "rolebindings"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["rolebindings"]
+    resources: ["roles", "rolebindings"]
     verbs: ["create", "update", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterrolebindings"]
@@ -118,6 +121,7 @@ rules:
     resources: ["clusterroles"]
     resourceNames:
       - {{ include "orka.aiWorkerClusterRoleName" . }}
+      - {{ include "orka.aiWorkerTokenRequestClusterRoleName" . }}
       - {{ include "orka.vendorWorkerClusterRoleName" . }}
       - {{ include "orka.containerWorkerClusterRoleName" . }}
     verbs: ["bind"]
@@ -236,7 +240,7 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "update", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
+    resources: ["tools", "outboundaccesspolicies"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
@@ -327,6 +331,21 @@ subjects:
     name: orka-ai-worker
     namespace: {{ .Release.Namespace }}
 ---
+# Namespaced TokenRequest capability for AI workers. This ClusterRole is always
+# attached with a RoleBinding in the task namespace, even when other worker
+# permissions are cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.aiWorkerTokenRequestClusterRoleName" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+
+---
 # Vendor Worker Role (restricted worker for external agent providers)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -339,7 +358,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tools"]
+    resources: ["tools", "outboundaccesspolicies"]
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]

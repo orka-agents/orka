@@ -31,10 +31,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
@@ -75,6 +78,7 @@ type ToolReconciler struct {
 	SubstrateEnabled          bool
 	SubstrateConfig           SubstrateConfig
 	EnforceNamespaceIsolation bool
+	OutboundAccessTrust       outboundaccess.TrustConfig
 
 	// SubstrateExecutorFactory is injectable for tests.
 	SubstrateExecutorFactory func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
@@ -83,6 +87,7 @@ type ToolReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core.orka.ai,resources=outboundaccesspolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 
@@ -100,7 +105,7 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Reconciling Tool", "tool", tool.Name, "url", toolHTTPURL(tool))
+	logger.Info("Reconciling Tool", "tool", tool.Name, "endpoint", safeToolURLIdentity(tool))
 	if !tool.DeletionTimestamp.IsZero() {
 		return r.finalizeSubstrateMCPTool(ctx, tool)
 	}
@@ -147,13 +152,21 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP.URL == "" {
 		return fmt.Errorf("http.url is required")
 	}
-	if _, err := url.ParseRequestURI(tool.Spec.HTTP.URL); err != nil {
-		return fmt.Errorf("invalid http.url %q: %w", tool.Spec.HTTP.URL, err)
+	parsedURL, err := url.Parse(tool.Spec.HTTP.URL)
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return fmt.Errorf("invalid http.url")
+	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("http.url must not contain embedded credentials")
+	}
+	for name := range parsedURL.Query() {
+		if sensitiveURLParameter(name) {
+			return fmt.Errorf("http.url must not contain credential query parameters")
+		}
 	}
 
 	// Block private/internal network targets (unless in test mode)
 	if !r.SkipSSRFValidation {
-		parsedURL, _ := url.Parse(tool.Spec.HTTP.URL)
 		host := parsedURL.Hostname()
 		blockedHosts := []string{
 			"169.254.169.254",
@@ -192,6 +205,43 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1alpha1.Tool) error {
 	if tool == nil || tool.Spec.HTTP == nil {
 		return nil
+	}
+	if ref := tool.Spec.HTTP.OutboundAccessPolicyRef; ref != nil {
+		if strings.TrimSpace(ref.Name) == "" {
+			return fmt.Errorf("outboundAccessPolicyRef.name is required")
+		}
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("referenced outbound access policy %q not found", ref.Name)
+			}
+			return fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
+		}
+		if policy.Status.ObservedGeneration != policy.Generation {
+			return fmt.Errorf("outbound access policy %q has not observed its current generation", ref.Name)
+		}
+		for _, conditionType := range []string{corev1alpha1.OutboundAccessPolicyConditionAccepted, corev1alpha1.OutboundAccessPolicyConditionResolvedRefs} {
+			condition := meta.FindStatusCondition(policy.Status.Conditions, conditionType)
+			if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != policy.Generation {
+				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
+			}
+		}
+		if policy.Spec.Direct != nil {
+			if tool.Spec.HTTP.AuthSecretRef != nil {
+				return fmt.Errorf("direct outbound access policy %q cannot coexist with authSecretRef", ref.Name)
+			}
+			targetURL := strings.TrimSpace(tool.Spec.HTTP.URL)
+			if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
+				targetURL = strings.TrimSpace(tool.Status.Endpoint)
+				if targetURL == "" {
+					return nil
+				}
+			}
+			parsed, err := url.Parse(targetURL)
+			if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+				return fmt.Errorf("direct outbound access policy %q requires an HTTPS Tool URL", ref.Name)
+			}
+		}
 	}
 	if tool.Spec.HTTP.AuthSecretRef != nil {
 		secret := &corev1.Secret{}
@@ -1389,6 +1439,15 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 	if tool == nil || tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
+	if ref := tool.Spec.HTTP.OutboundAccessPolicyRef; ref != nil {
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: tool.Namespace, Name: ref.Name}, policy); err != nil {
+			return fmt.Errorf("failed to resolve outbound access policy for health check: %w", err)
+		}
+		if policy.Spec.Gateway != nil {
+			return nil
+		}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, tool.Spec.HTTP.URL, nil)
 	if err != nil {
@@ -1397,7 +1456,7 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("endpoint unreachable: %w", err)
+		return fmt.Errorf("endpoint unreachable")
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
@@ -1406,11 +1465,27 @@ func (r *ToolReconciler) healthCheck(ctx context.Context, tool *corev1alpha1.Too
 	return nil
 }
 
-func toolHTTPURL(tool *corev1alpha1.Tool) string {
+func safeToolURLIdentity(tool *corev1alpha1.Tool) string {
 	if tool == nil || tool.Spec.HTTP == nil {
 		return ""
 	}
-	return tool.Spec.HTTP.URL
+	parsed, err := url.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+	if err != nil || parsed.Host == "" {
+		return "invalid"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func sensitiveURLParameter(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	return strings.Contains(normalized, "token") ||
+		strings.Contains(normalized, "secret") ||
+		strings.Contains(normalized, "password") ||
+		strings.Contains(normalized, "credential") ||
+		strings.Contains(normalized, "authorization") ||
+		strings.Contains(normalized, "api-key") ||
+		strings.Contains(normalized, "apikey")
 }
 
 func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string) error {
@@ -1544,10 +1619,30 @@ func deterministicSubstrateToolActorID(namespace, name, templateNamespace, templ
 	return "orka-tool-" + hex.EncodeToString(sum[:])[:32]
 }
 
+func (r *ToolReconciler) requestsForOutboundAccessPolicy(ctx context.Context, object client.Object) []reconcile.Request {
+	policy, ok := object.(*corev1alpha1.OutboundAccessPolicy)
+	if !ok || policy == nil {
+		return nil
+	}
+	tools := &corev1alpha1.ToolList{}
+	if err := r.List(ctx, tools, client.InNamespace(policy.Namespace)); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0)
+	for i := range tools.Items {
+		tool := &tools.Items[i]
+		if tool.Spec.HTTP != nil && tool.Spec.HTTP.OutboundAccessPolicyRef != nil && tool.Spec.HTTP.OutboundAccessPolicyRef.Name == policy.Name {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: tool.Namespace, Name: tool.Name}})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ToolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Tool{}).
+		Watches(&corev1alpha1.OutboundAccessPolicy{}, handler.EnqueueRequestsFromMapFunc(r.requestsForOutboundAccessPolicy)).
 		Named("tool").
 		Complete(r)
 }

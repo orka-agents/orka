@@ -99,17 +99,17 @@ Implementation (`internal/tools/delegate_task.go`):
    - `OwnerReferences` pointing to parent Task
    - `Spec.Type: ai`, `Spec.AgentRef.Name: <agent>`, `Spec.Prompt: <prompt>`
 5. If `auto_retry: true`, stores retry config as annotations: `orka.ai/auto-retry`, `orka.ai/max-retries`, `orka.ai/retry-count`, `orka.ai/original-prompt`
-6. Inherits safe transaction metadata from the parent Task. When `ORKA_CONTEXT_TOKEN_TTS_URL`, `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE`, and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE` are set in the worker, exchanges the mounted subject token for a child TxToken whose scope must be a subset of the parent transaction scopes. The raw child token is stored only in an owner-referenced Secret and mounted into the child worker.
+6. Inherits safe transaction metadata from the parent Task. When `ORKA_CONTEXT_TOKEN_TTS_ENDPOINT`, `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE`, and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE` are set in the worker, exchanges the mounted subject token for a child TxToken whose scope must be a subset of the parent transaction scopes. The raw child token is stored only in an owner-referenced Secret and mounted into the child worker.
 7. Returns `{"taskName": "<name>", "status": "created"}` to LLM
 
 ### TxToken-aware delegation
 
-When a coordinator Task has transaction metadata, delegated Tasks inherit the same safe transaction identity (`spec.transaction`, transaction labels, and annotations) so parent and child work can be audited by transaction ID. If worker-side kontxt TTS exchange is configured, `delegate_task` and `create_container_task` request a narrower child TxToken before creating the child Task.
+When a coordinator Task has transaction metadata, delegated Tasks inherit the same safe transaction identity (`spec.transaction`, transaction labels, and annotations) so parent and child work can be audited by transaction ID. If worker-side transaction-token TTS exchange is configured, `delegate_task` and `create_container_task` request a narrower child TxToken before creating the child Task.
 
 Required worker environment for child-token exchange:
 
 ```bash
-ORKA_CONTEXT_TOKEN_TTS_URL=https://kontxt-tts.kontxt-system.svc
+ORKA_CONTEXT_TOKEN_TTS_ENDPOINT=https://transaction-token-tts.transaction-token-system.svc/oauth/token
 ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE=/var/run/orka/transaction-token/token
 ORKA_CONTEXT_TOKEN_CHILD_SCOPE=orka:agents:run
 ```

@@ -20,9 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aramase/kontxt/pkg/keys"
-	kontxttoken "github.com/aramase/kontxt/pkg/token"
-	sdkverify "github.com/aramase/kontxt/sdk/verify"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
@@ -33,21 +30,23 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/transactiontoken"
+	txtest "github.com/orka-agents/orka/internal/transactiontoken/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestPrepareChildTransactionToken(t *testing.T) {
 	subjectPath := writeTestSubjectToken(t)
-	keyManager := newKontxtKeyManager(t)
-	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	issuer := newTransactionTokenIssuer(t)
+	jwksServer := httptest.NewServer(issuer.JWKSHandler())
 	defer jwksServer.Close()
-	childToken := newChildTransactionToken(t, keyManager)
+	childToken := newChildTransactionToken(t, issuer)
 
 	var exchange childTokenExchange
 	ttsServer := startChildTransactionTokenServer(t, childToken, &exchange)
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
@@ -78,16 +77,16 @@ func TestPrepareChildTransactionToken(t *testing.T) {
 }
 
 func TestPrepareChildTransactionTokenDefaultsToServiceAccountSubjectToken(t *testing.T) {
-	keyManager := newKontxtKeyManager(t)
-	jwksServer := httptest.NewServer(keyManager.JWKSHandler())
+	issuer := newTransactionTokenIssuer(t)
+	jwksServer := httptest.NewServer(issuer.JWKSHandler())
 	defer jwksServer.Close()
-	childToken := newChildTransactionToken(t, keyManager)
+	childToken := newChildTransactionToken(t, issuer)
 
 	var exchange childTokenExchange
 	ttsServer := startChildTransactionTokenServer(t, childToken, &exchange)
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSAudience, "child.example.test")
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 	t.Setenv(workerenv.ContextTokenChildTokenTTL, "42s")
@@ -108,8 +107,8 @@ func TestPrepareChildTransactionTokenDefaultsToServiceAccountSubjectToken(t *tes
 	if exchange.subjectToken != "service-account-token" {
 		t.Fatalf("subject_token = %q, want service-account-token", exchange.subjectToken)
 	}
-	if exchange.subjectTokenTyp != kontxttoken.SubjectTokenTypeAccessToken {
-		t.Fatalf("subject_token_type = %q, want %q", exchange.subjectTokenTyp, kontxttoken.SubjectTokenTypeAccessToken)
+	if exchange.subjectTokenTyp != transactiontoken.SubjectTokenTypeAccessToken {
+		t.Fatalf("subject_token_type = %q, want %q", exchange.subjectTokenTyp, transactiontoken.SubjectTokenTypeAccessToken)
 	}
 	if exchange.scope != childTransactionScope {
 		t.Fatalf("scope = %q, want %q", exchange.scope, childTransactionScope)
@@ -136,21 +135,14 @@ func writeTestSubjectToken(t *testing.T) string {
 	return subjectPath
 }
 
-func newKontxtKeyManager(t *testing.T) *keys.Manager {
+func newTransactionTokenIssuer(t *testing.T) *txtest.Issuer {
 	t.Helper()
-
-	keyManager, err := keys.NewManager(2048, time.Hour)
-	if err != nil {
-		t.Fatalf("failed to create kontxt key manager: %v", err)
-	}
-	return keyManager
+	return txtest.NewIssuer(t)
 }
 
-func newChildTransactionToken(t *testing.T, keyManager *keys.Manager) string {
+func newChildTransactionToken(t *testing.T, issuer *txtest.Issuer) string {
 	t.Helper()
-
-	signingKey, kid := keyManager.SigningKey()
-	childToken, err := kontxttoken.New(kontxttoken.Claims{
+	return issuer.Sign(t, transactiontoken.Claims{
 		Issuer:             "https://tts.example.test",
 		Audience:           "child.example.test",
 		TransactionID:      parentTransactionID,
@@ -161,11 +153,7 @@ func newChildTransactionToken(t *testing.T, keyManager *keys.Manager) string {
 			"operation": "delegateTask",
 			"agent":     testResearcherAgentName,
 		},
-	}, signingKey, kid, time.Minute)
-	if err != nil {
-		t.Fatalf("failed to create child TxToken: %v", err)
-	}
-	return childToken
+	}, time.Minute)
 }
 
 func startChildTransactionTokenServer(t *testing.T, childToken string, exchange *childTokenExchange) *httptest.Server {
@@ -207,7 +195,7 @@ func requireChildTokenExchange(t *testing.T, exchange childTokenExchange) {
 	if exchange.audience != "child.example.test" {
 		t.Fatalf("audience = %q, want child.example.test", exchange.audience)
 	}
-	if exchange.subjectTokenTyp != kontxttoken.SubjectTokenTypeTxnToken {
+	if exchange.subjectTokenTyp != transactiontoken.SubjectTokenTypeTransactionToken {
 		t.Fatalf("subject_token_type = %q", exchange.subjectTokenTyp)
 	}
 	if exchange.requestedExpiresIn != "42" {
@@ -240,7 +228,7 @@ func requirePreparedChildTransactionToken(
 	if secretToken != childToken {
 		t.Fatalf("secret token did not contain child TxToken returned by TTS")
 	}
-	claims, err := sdkverify.New(jwksURL, "child.example.test").Verify(context.Background(), secretToken)
+	claims, err := txtest.Verify(context.Background(), jwksURL, "child.example.test", secretToken)
 	if err != nil {
 		t.Fatalf("failed to verify child TxToken from secret: %v", err)
 	}
@@ -302,7 +290,7 @@ func TestPrepareChildTransactionTokenRequiresParentUID(t *testing.T) {
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 
 	parent := parentTask()
 	parent.UID = ""
@@ -446,7 +434,7 @@ func TestPrepareChildTransactionTokenFailsClosedOnTTSExchangeError(t *testing.T)
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
@@ -470,7 +458,7 @@ func TestPrepareChildTransactionTokenRejectsScopeExpansion(t *testing.T) {
 		t.Fatal("TTS should not be called when child scope exceeds parent")
 	}))
 	defer ttsServer.Close()
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenSubjectTokenFile, subjectPath)
 	t.Setenv(workerenv.ContextTokenChildScope, "orka:admin")
@@ -500,7 +488,7 @@ func TestPrepareChildTransactionTokenDisabledForNonTransactionalParent(t *testin
 	}))
 	defer ttsServer.Close()
 
-	t.Setenv(workerenv.ContextTokenTTSURL, ttsServer.URL)
+	t.Setenv(workerenv.ContextTokenTTSEndpoint, ttsServer.URL+"/token_endpoint")
 	t.Setenv(workerenv.ContextTokenTTSTokenSource, contexttoken.TTSTokenSourceIncoming)
 	t.Setenv(workerenv.ContextTokenChildScope, childTransactionScope)
 

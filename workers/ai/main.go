@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -410,6 +413,10 @@ func loadCustomTools(
 			continue
 		}
 		bindApprovalAuthRefVersion(ctx, k8sClient, namespace, tool)
+		if err := bindApprovalOutboundAccessPolicyVersion(ctx, k8sClient, namespace, tool); err != nil {
+			fmt.Printf("Warning: outbound access policy approval binding for tool %q failed: %v\n", tool.Name, err)
+			continue
+		}
 
 		customTools[name] = tool
 	}
@@ -463,6 +470,164 @@ func bindApprovalAuthRefVersion(
 	}
 	tool.Annotations[approvalAuthRefUIDAnnotation] = string(secret.UID)
 	tool.Annotations[approvalAuthRefResourceVersionAnnotation] = secret.ResourceVersion
+}
+
+func clearApprovalOutboundAccessPolicyVersion(tool *corev1alpha1.Tool) {
+	if tool == nil || tool.Annotations == nil {
+		return
+	}
+	delete(tool.Annotations, approvalOutboundPolicyUIDAnnotation)
+	delete(tool.Annotations, approvalOutboundPolicyGenerationAnnotation)
+	delete(tool.Annotations, approvalOutboundPolicyResourceVersionAnnotation)
+	delete(tool.Annotations, approvalOutboundPolicySecretsDigestAnnotation)
+}
+
+func bindApprovalOutboundAccessPolicyVersion(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	tool *corev1alpha1.Tool,
+) error {
+	if tool == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+		return nil
+	}
+	clearApprovalOutboundAccessPolicyVersion(tool)
+	policy := &corev1alpha1.OutboundAccessPolicy{}
+	key := client.ObjectKey{Namespace: namespace, Name: tool.Spec.HTTP.OutboundAccessPolicyRef.Name}
+	if err := k8sClient.Get(ctx, key, policy); err != nil {
+		return fmt.Errorf("read outbound access policy %q for approval binding: %w", key.Name, err)
+	}
+	secretRefs := approvalOutboundPolicySecretRefs(policy)
+	serviceAccountNames := approvalOutboundPolicyServiceAccountNames(policy)
+	serviceRefs := approvalOutboundPolicyServiceRefs(policy)
+	secretVersions := make([]string, 0, len(secretRefs)+len(serviceAccountNames)+len(serviceRefs))
+	serviceAccountNamespace := strings.TrimSpace(policy.Namespace)
+	if serviceAccountNamespace == "" {
+		serviceAccountNamespace = namespace
+	}
+	for _, name := range serviceAccountNames {
+		serviceAccount := &corev1.ServiceAccount{}
+		if err := k8sClient.Get(
+			ctx,
+			client.ObjectKey{Namespace: serviceAccountNamespace, Name: name},
+			serviceAccount,
+		); err != nil {
+			return fmt.Errorf("read outbound access ServiceAccount %q for approval binding: %w", name, err)
+		}
+		secretVersions = append(
+			secretVersions,
+			serviceAccountNamespace+"/"+name+"\x00"+string(serviceAccount.UID)+"\x00"+serviceAccount.ResourceVersion,
+		)
+	}
+	for _, ref := range serviceRefs {
+		serviceNamespace := strings.TrimSpace(ref.Namespace)
+		if serviceNamespace == "" {
+			serviceNamespace = policy.Namespace
+		}
+		service := &corev1.Service{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: serviceNamespace, Name: ref.Name}, service); err != nil {
+			return fmt.Errorf("read outbound access Service %q for approval binding: %w", ref.Name, err)
+		}
+		secretVersions = append(
+			secretVersions,
+			serviceNamespace+"/"+ref.Name+"\x00"+string(service.UID)+"\x00"+service.ResourceVersion,
+		)
+	}
+	for _, ref := range secretRefs {
+		if ref == nil || strings.TrimSpace(ref.Name) == "" {
+			continue
+		}
+		refNamespace := strings.TrimSpace(ref.Namespace)
+		if refNamespace == "" {
+			refNamespace = namespace
+		}
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: refNamespace, Name: ref.Name}, secret); err != nil {
+			return fmt.Errorf("read outbound access Secret %q for approval binding: %w", ref.Name, err)
+		}
+		secretVersions = append(
+			secretVersions,
+			refNamespace+"/"+ref.Name+"\x00"+string(secret.UID)+"\x00"+secret.ResourceVersion,
+		)
+	}
+	sort.Strings(secretVersions)
+	secretsDigest := ""
+	if len(secretVersions) > 0 {
+		sum := sha256.Sum256([]byte(strings.Join(secretVersions, "\n")))
+		secretsDigest = hex.EncodeToString(sum[:])
+	}
+	if tool.Annotations == nil {
+		tool.Annotations = map[string]string{}
+	}
+	tool.Annotations[approvalOutboundPolicyUIDAnnotation] = string(policy.UID)
+	tool.Annotations[approvalOutboundPolicyGenerationAnnotation] = strconv.FormatInt(policy.Generation, 10)
+	tool.Annotations[approvalOutboundPolicyResourceVersionAnnotation] = policy.ResourceVersion
+	if secretsDigest != "" {
+		tool.Annotations[approvalOutboundPolicySecretsDigestAnnotation] = secretsDigest
+	}
+	return nil
+}
+
+func approvalOutboundPolicyServiceRefs(
+	policy *corev1alpha1.OutboundAccessPolicy,
+) []corev1alpha1.OutboundServiceReference {
+	if policy == nil {
+		return nil
+	}
+	refs := []corev1alpha1.OutboundServiceReference{}
+	if policy.Spec.Direct != nil && policy.Spec.Direct.TokenEndpoint.ServiceRef != nil {
+		refs = append(refs, *policy.Spec.Direct.TokenEndpoint.ServiceRef)
+	}
+	if policy.Spec.Gateway != nil {
+		refs = append(refs, policy.Spec.Gateway.ServiceRef)
+	}
+	return refs
+}
+
+func approvalOutboundPolicyServiceAccountNames(policy *corev1alpha1.OutboundAccessPolicy) []string {
+	if policy == nil || policy.Spec.Direct == nil {
+		return nil
+	}
+	names := []string{}
+	appendSource := func(source *corev1alpha1.OutboundTokenSource) {
+		if source == nil || source.ServiceAccountRef == nil {
+			return
+		}
+		if name := strings.TrimSpace(source.ServiceAccountRef.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	appendSource(&policy.Spec.Direct.Subject)
+	appendSource(policy.Spec.Direct.Actor)
+	return names
+}
+
+func approvalOutboundPolicySecretRefs(
+	policy *corev1alpha1.OutboundAccessPolicy,
+) []*corev1alpha1.NamespacedSecretKeySelector {
+	if policy == nil {
+		return nil
+	}
+	refs := []*corev1alpha1.NamespacedSecretKeySelector{}
+	appendTLS := func(config *corev1alpha1.OutboundTLSConfig) {
+		if config != nil && config.CASecretRef != nil {
+			refs = append(refs, config.CASecretRef)
+		}
+	}
+	if direct := policy.Spec.Direct; direct != nil {
+		refs = append(refs, direct.Subject.SecretRef)
+		if direct.Actor != nil {
+			refs = append(refs, direct.Actor.SecretRef)
+		}
+		if auth := direct.ClientAuthentication; auth != nil {
+			refs = append(refs, auth.ClientSecretRef, auth.PrivateKeyRef)
+		}
+		appendTLS(direct.TokenEndpoint.TLS)
+	}
+	if gateway := policy.Spec.Gateway; gateway != nil {
+		appendTLS(gateway.TLS)
+	}
+	return refs
 }
 
 // buildLLMTools builds the combined tool list for the LLM

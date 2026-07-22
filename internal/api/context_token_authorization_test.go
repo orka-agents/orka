@@ -10,6 +10,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -488,7 +490,7 @@ func TestContextStringSupportsStructuredMaps(t *testing.T) {
 func TestAuthorizeAndStampToolTaskCreateStampsContextTokenProvenance(t *testing.T) {
 	cfg := enforceContextTokenAuthorizationConfig()
 	token := &ContextToken{
-		Profile:            ContextTokenProfileKontxt,
+		Profile:            ContextTokenProfileTransactionToken,
 		Issuer:             "https://issuer.example.test",
 		Subject:            testContextTokenSubject,
 		Audience:           []string{"orka"},
@@ -620,4 +622,387 @@ func TestRedactedContextTokenAuthorizationFailuresRedactsRepositoryCredentials(t
 	if !strings.Contains(got, "[REDACTED]") {
 		t.Fatalf("redacted failures = %q, want redaction marker", got)
 	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresForOutboundAccessPolicy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	policy := readyContextTokenOutboundPolicy(corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+		Subject: corev1alpha1.OutboundTokenSource{
+			Source:    corev1alpha1.OutboundTokenSourceSecretRef,
+			TokenType: "urn:example:assertion",
+			SecretRef: &corev1alpha1.NamespacedSecretKeySelector{Name: "resource-assertion", Key: "token"},
+		},
+		TokenEndpoint:           corev1alpha1.OutboundTokenEndpoint{URL: "https://identity.example.test/token"},
+		ExpectedIssuedTokenType: "urn:example:resource",
+	}})
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+		}},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+	token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+
+	token.TransactionContext = map[string]any{"secret": "different-secret"}
+	failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "resource-assertion")
+}
+
+func TestContextTokenTaskToolCredentialFailuresForTLSCASecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		spec corev1alpha1.OutboundAccessPolicySpec
+	}{
+		{
+			name: "direct token endpoint",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+				Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+				TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{
+					URL: "https://identity.example.test/token",
+					TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: &corev1alpha1.NamespacedSecretKeySelector{
+						Name: "direct-ca", Key: "ca.crt",
+					}},
+				},
+			}},
+		},
+		{
+			name: "gateway",
+			spec: corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{
+				ServiceRef: corev1alpha1.OutboundServiceReference{Name: "agentgateway", Port: 8443},
+				Scheme:     "https",
+				TLS: &corev1alpha1.OutboundTLSConfig{CASecretRef: &corev1alpha1.NamespacedSecretKeySelector{
+					Name: "gateway-ca", Key: "ca.crt",
+				}},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			policy := readyContextTokenOutboundPolicy(tt.spec)
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy.Name},
+				}},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+			cfg := enforceContextTokenAuthorizationConfig()
+			cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+			authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{tool.Name}}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+			token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+
+			token.TransactionContext = map[string]any{"secret": "different-ca"}
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], "-ca")
+		})
+	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedOutboundAccessPolicy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+		}},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tool).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+	require.NoError(t, err)
+	require.Len(t, failures, 1)
+	require.Contains(t, failures[0], "search")
+	require.Contains(t, failures[0], "resource-api")
+}
+
+func TestContextTokenTaskToolCredentialFailuresForServiceAccountSources(t *testing.T) {
+	serviceAccountSource := func() corev1alpha1.OutboundTokenSource {
+		return corev1alpha1.OutboundTokenSource{
+			Source: corev1alpha1.OutboundTokenSourceServiceAccount,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{
+				Name: "workload",
+			},
+		}
+	}
+	transactionTokenSource := corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken}
+
+	tests := []struct {
+		name                    string
+		direct                  corev1alpha1.DirectOutboundAccess
+		requiresCredentialScope bool
+	}{
+		{
+			name: "subject ServiceAccount",
+			direct: corev1alpha1.DirectOutboundAccess{
+				Subject: serviceAccountSource(),
+			},
+			requiresCredentialScope: true,
+		},
+		{
+			name: "actor ServiceAccount",
+			direct: corev1alpha1.DirectOutboundAccess{
+				Subject: transactionTokenSource,
+				Actor: func() *corev1alpha1.OutboundTokenSource {
+					source := serviceAccountSource()
+					return &source
+				}(),
+			},
+			requiresCredentialScope: true,
+		},
+		{
+			name: "transaction token only",
+			direct: corev1alpha1.DirectOutboundAccess{
+				Subject: transactionTokenSource,
+			},
+			requiresCredentialScope: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			policy := readyContextTokenOutboundPolicy(
+				corev1alpha1.OutboundAccessPolicySpec{Direct: &tt.direct},
+			)
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+				}},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+			cfg := enforceContextTokenAuthorizationConfig()
+			cfg.SecretCredentialReadScopeList = []string{ContextTokenScopeSecretsCredentialsRead}
+			authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			if !tt.requiresCredentialScope {
+				require.Empty(t, failures)
+				return
+			}
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], ContextTokenScopeSecretsCredentialsRead)
+
+			token.Scopes = append(token.Scopes, ContextTokenScopeSecretsCredentialsRead)
+			failures, err = contextTokenTaskToolCredentialFailures(context.Background(), client, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+		})
+	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresRejectsStaleOrRejectedOutboundAccessPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*corev1alpha1.OutboundAccessPolicy)
+	}{
+		{
+			name: "stale observed generation",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.ObservedGeneration--
+			},
+		},
+		{
+			name: "rejected",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.Conditions[0].Status = metav1.ConditionFalse
+			},
+		},
+		{
+			name: "unresolved references",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.Conditions[1].Status = metav1.ConditionFalse
+			},
+		},
+		{
+			name: "stale condition",
+			mutate: func(policy *corev1alpha1.OutboundAccessPolicy) {
+				policy.Status.Conditions[0].ObservedGeneration--
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			policy := readyContextTokenOutboundPolicy(corev1alpha1.OutboundAccessPolicySpec{
+				Direct: &corev1alpha1.DirectOutboundAccess{
+					Subject: corev1alpha1.OutboundTokenSource{Source: corev1alpha1.OutboundTokenSourceTransactionToken},
+				},
+			})
+			tt.mutate(policy)
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "team-a"},
+				Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+					OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: policy.Name},
+				}},
+			}
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy, tool).Build()
+			authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"search"}}
+			token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate, ContextTokenScopeSecretsCredentialsRead}}
+
+			failures, err := contextTokenTaskToolCredentialFailures(
+				context.Background(),
+				client,
+				token,
+				enforceContextTokenAuthorizationConfig(),
+				authzCtx,
+			)
+			require.NoError(t, err)
+			require.Len(t, failures, 1)
+			require.Contains(t, failures[0], "unresolved OutboundAccessPolicy")
+		})
+	}
+}
+
+func readyContextTokenOutboundPolicy(
+	spec corev1alpha1.OutboundAccessPolicySpec,
+) *corev1alpha1.OutboundAccessPolicy {
+	generation := int64(2)
+	return &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "resource-api", Namespace: "team-a", Generation: generation},
+		Spec:       spec,
+		Status: corev1alpha1.OutboundAccessPolicyStatus{
+			ObservedGeneration: generation,
+			Conditions: []metav1.Condition{
+				{
+					Type: corev1alpha1.OutboundAccessPolicyConditionAccepted, Status: metav1.ConditionTrue,
+					ObservedGeneration: generation,
+				},
+				{
+					Type: corev1alpha1.OutboundAccessPolicyConditionResolvedRefs, Status: metav1.ConditionTrue,
+					ObservedGeneration: generation,
+				},
+			},
+		},
+	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedCustomTool(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"custom-search"}}
+	failures, err := contextTokenTaskToolCredentialFailures(
+		context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []string{`Tool "custom-search" is unresolved`}, failures)
+}
+
+func TestContextTokenTaskToolCredentialFailuresAllowsUnresolvedBuiltinAndRuntimeTools(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Namespace: "team-a", EffectiveAITools: []string{"web_search"}, RuntimeAllowedTools: []string{"Bash"},
+	}
+	failures, err := contextTokenTaskToolCredentialFailures(
+		context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx,
+	)
+	require.NoError(t, err)
+	require.Empty(t, failures)
+}
+
+func TestContextTokenTaskToolCredentialFailuresRejectsUnresolvedBrokeredRuntimeTool(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	authzCtx := contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", RuntimeAllowedTools: []string{"read_incident"}}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
+	require.NoError(t, err)
+	require.Equal(t, []string{`Tool "read_incident" is unresolved`}, failures)
+}
+
+func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	builtinAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}}}
+	remoteAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "remote"}}}}
+	tests := []struct {
+		name        string
+		ctx         contextTokenTaskCreateAuthorizationContext
+		wantFailure string
+	}{
+		{name: "AI name matching native tool still resolves", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"Read"}}, wantFailure: "Read"},
+		{name: "AI coordination tool is builtin when coordination is enabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, EffectiveAITools: []string{"list_issues"}}},
+		{name: "AI coordination name resolves as custom without coordination", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"list_issues"}}, wantFailure: "list_issues"},
+		{name: "AI explicit coordination tool remains builtin when injection disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}, Request: CreateTaskRequest{Annotations: map[string]string{labels.AnnotationDisableCoordinationToolInject: queryTrue}}, EffectiveAITools: []string{"list_pull_requests"}}},
+		{name: "controller proxy coordination name resolves as custom when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"create_pull_request"}}, wantFailure: "create_pull_request"},
+		{name: "dual-registered coordination name remains builtin when coordination disabled", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", EffectiveAITools: []string{"cancel_task"}}},
+		{name: "built-in runtime accepts scoped native syntax", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: builtinAgent, RuntimeAllowedTools: []string{"Read(/workspace/**)"}}},
+		{name: "runtimeRef observed defaults remain backend-owned", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, RuntimeAllowedTools: []string{"analyze"}}},
+		{name: "runtimeRef brokered coordination tool is builtin", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"delegate_task"}}}, RuntimeAllowedTools: []string{"delegate_task"}, RuntimeAllowBash: true}},
+		{name: "runtimeRef brokered override must resolve", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}}, RuntimeAllowedTools: []string{"read_incident"}, RuntimeAllowBash: true}, wantFailure: "read_incident"},
+		{name: "runtimeRef brokered registry collision must resolve", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"web_search"}}}, RuntimeAllowedTools: []string{"web_search"}}, wantFailure: "web_search"},
+		{name: "runtimeRef explicit Bash must resolve", ctx: contextTokenTaskCreateAuthorizationContext{Namespace: "team-a", Agent: remoteAgent, Request: CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Bash"}}}, RuntimeAllowedTools: []string{"Bash"}, RuntimeAllowBash: true}, wantFailure: "Bash"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), tt.ctx)
+			require.NoError(t, err)
+			if tt.wantFailure == "" {
+				require.Empty(t, failures)
+			} else {
+				require.Len(t, failures, 1)
+				require.Contains(t, failures[0], tt.wantFailure)
+			}
+		})
+	}
+}
+
+func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSyntheticNativeBash(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	bashTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "team-a"}}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bashTool).Build()
+	remoteAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "remote"}}}}
+	authzCtx := contextTokenTaskCreateAuthorizationContext{
+		Namespace: "team-a", Agent: remoteAgent,
+		Request:             CreateTaskRequest{Type: corev1alpha1.TaskTypeAgent, AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"bash"}}},
+		RuntimeAllowedTools: []string{"bash"}, RuntimeAllowBash: true,
+	}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), client, &ContextToken{}, enforceContextTokenAuthorizationConfig(), authzCtx)
+	require.NoError(t, err)
+	require.Empty(t, failures)
 }

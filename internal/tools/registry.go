@@ -69,7 +69,7 @@ type ToolContext struct {
 	ApprovalEmitter                func(context.Context, approvals.ApprovalTarget) error
 	ApprovalTargetSpecDigest       func(context.Context, string) (string, error)
 	ApprovalTargetArguments        func(context.Context, string, json.RawMessage) (json.RawMessage, error)
-	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool)
+	ApprovalTargetRefresh          func(context.Context, string, *corev1alpha1.Tool) error
 }
 
 type toolContextKey struct{}

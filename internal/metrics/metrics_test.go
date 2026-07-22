@@ -108,6 +108,8 @@ func TestMetricsRegistered(t *testing.T) {
 		ContextTokenAuthorizationTotal,
 		ContextTokenTTSExchangeTotal,
 		ContextTokenTTSExchangeDuration,
+		TokenExchangeTotal,
+		TokenExchangeDuration,
 	}
 
 	for i, m := range metrics {
@@ -122,9 +124,11 @@ func TestRecordContextTokenMetrics(t *testing.T) {
 	ContextTokenAuthorizationTotal.Reset()
 	ContextTokenTTSExchangeTotal.Reset()
 	ContextTokenTTSExchangeDuration.Reset()
+	TokenExchangeTotal.Reset()
+	TokenExchangeDuration.Reset()
 
-	RecordContextTokenAuth("kontxt", "success")
-	if count := getCounterValue(ContextTokenAuthTotal, "kontxt", "success"); count != 1 {
+	RecordContextTokenAuth("transaction-token", "success")
+	if count := getCounterValue(ContextTokenAuthTotal, "transaction-token", "success"); count != 1 {
 		t.Fatalf("ContextTokenAuthTotal = %v, want 1", count)
 	}
 
@@ -144,6 +148,14 @@ func TestRecordContextTokenMetrics(t *testing.T) {
 	}
 	if count := getHistogramCount(ContextTokenTTSExchangeDuration, "success", "ok"); count != 1 {
 		t.Fatalf("ContextTokenTTSExchangeDuration count = %v, want 1", count)
+	}
+
+	RecordTokenExchange("direct", "rfc8693", "success", "ok", 0.5)
+	if count := getCounterValue(TokenExchangeTotal, "direct", "rfc8693", "success", "ok"); count != 1 {
+		t.Fatalf("TokenExchangeTotal = %v, want 1", count)
+	}
+	if count := getHistogramCount(TokenExchangeDuration, "direct", "rfc8693", "success", "ok"); count != 1 {
+		t.Fatalf("TokenExchangeDuration count = %v, want 1", count)
 	}
 }
 

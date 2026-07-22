@@ -103,3 +103,11 @@ func TestSafeTransactionContextPreservesAllowedAgentsAndEmptyAllowLists(t *testi
 		}
 	}
 }
+
+func TestTaskTransactionPreservesCredentialSecretConstraint(t *testing.T) {
+	token := &ContextToken{TransactionContext: map[string]any{"secret": "resource-credential"}}
+	tx := taskTransactionFromContextToken(token)
+	if tx.Context["secret"] != "resource-credential" {
+		t.Fatalf("context = %#v", tx.Context)
+	}
+}

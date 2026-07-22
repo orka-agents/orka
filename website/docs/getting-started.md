@@ -281,7 +281,7 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 - [Architecture](concepts/architecture.md) — Controller, workers, CRDs, and task lifecycle
 - [Configuration](concepts/configuration.md) — Helm values, controller flags, and metrics
 - [Memory](concepts/memory.md) — Namespace-scoped durable memory and reviewable proposals
-- [Kontxt TxToken Integration](concepts/kontxt.md) — Request-scoped transaction-token auth
+- [Transaction Token Integration](concepts/transaction-tokens.md) — Request-scoped transaction-token auth
 - [Agent Sandbox Workspaces](concepts/agent-sandbox.md) / [Substrate](concepts/substrate.md) — Durable, reusable execution workspaces
 - [Security](concepts/security.md) — Pod hardening, authentication, and multi-tenancy
 

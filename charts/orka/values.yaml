@@ -96,16 +96,16 @@ controller:
     # Namespace assigned to authorized OIDC callers for namespace isolation. Empty uses controller default.
     namespace: ""
 
-  # Context-token authentication, scoped authorization, and optional kontxt TTS exchange.
+  # Transaction-token authentication, scoped authorization, and optional vendor-neutral TTS exchange.
   # Empty values keep the controller defaults / corresponding environment variables.
   contextToken:
-    # Profile for external context tokens (supported: kontxt).
+    # Profile for external context tokens (supported: transaction-token).
     profile: ""
     # Issuer URL expected in context tokens. Requires profile and audience when set.
     issuer: ""
     # Audience expected in context tokens. Requires profile and issuer when set.
     audience: ""
-    # Optional JWKS URL. For kontxt, defaults to <issuer>/.well-known/jwks.json.
+    # Optional JWKS URL. For transaction-token, defaults to <issuer>/.well-known/jwks.json.
     jwksUrl: ""
     # Comma-separated token headers, e.g. Txn-Token or Txn-Token,Authorization:Bearer.
     headers: ""
@@ -135,8 +135,8 @@ controller:
       skillRead: ""
       skillWrite: ""
     tts:
-      # kontxt TTS base URL for child/outbound token exchange.
-      url: ""
+      # Exact TTS OAuth endpoint for child/outbound transaction-token exchange.
+      endpoint: ""
       # Optional exchange audience.
       audience: ""
       # Exchange timeout, e.g. 5s.
@@ -152,6 +152,12 @@ controller:
       # Requested TTLs, e.g. 5m and 2m.
       childTokenTTL: ""
       toolTokenTTL: ""
+
+  outboundAccess:
+    # Exact namespace/name:port tuples trusted for cross-namespace gateway refs.
+    trustedGatewayServices: []
+    # Exact namespace/name:port tuples trusted for cross-namespace token endpoint refs.
+    trustedTokenEndpointServices: []
 
 # Worker configuration
 workers:

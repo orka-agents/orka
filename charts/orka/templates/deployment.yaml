@@ -149,8 +149,8 @@ spec:
             {{- end }}
             {{- end }}
             {{- with .tts }}
-            {{- if .url }}
-            - {{ printf "--context-token-tts-url=%s" .url | quote }}
+            {{- if .endpoint }}
+            - {{ printf "--context-token-tts-endpoint=%s" .endpoint | quote }}
             {{- end }}
             {{- if .audience }}
             - {{ printf "--context-token-tts-audience=%s" .audience | quote }}
@@ -178,10 +178,19 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- with .Values.controller.outboundAccess }}
+            {{- if .trustedGatewayServices }}
+            - {{ printf "--outbound-access-trusted-gateway-services=%s" (join "," .trustedGatewayServices) | quote }}
+            {{- end }}
+            {{- if .trustedTokenEndpointServices }}
+            - {{ printf "--outbound-access-trusted-token-endpoint-services=%s" (join "," .trustedTokenEndpointServices) | quote }}
+            {{- end }}
+            {{- end }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
             - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
+            - --ai-worker-tokenrequest-cluster-role-name={{ include "orka.aiWorkerTokenRequestClusterRoleName" . }}
             - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
             - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
             - --worker-cluster-role-binding-prefix={{ include "orka.fullname" . }}

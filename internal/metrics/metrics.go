@@ -74,6 +74,23 @@ var (
 		[]string{"result", "reason"},
 	)
 
+	TokenExchangeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_token_exchange_total",
+			Help: "Total OAuth token exchanges by adapter, grant class, result, and low-cardinality reason",
+		},
+		[]string{"adapter", "grant_class", "result", "reason"},
+	)
+
+	TokenExchangeDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_token_exchange_duration_seconds",
+			Help:    "OAuth token exchange latency by adapter, grant class, result, and low-cardinality reason",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"adapter", "grant_class", "result", "reason"},
+	)
+
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -184,6 +201,8 @@ func init() {
 		ContextTokenAuthorizationTotal,
 		ContextTokenTTSExchangeTotal,
 		ContextTokenTTSExchangeDuration,
+		TokenExchangeTotal,
+		TokenExchangeDuration,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -225,12 +244,22 @@ func RecordContextTokenAuthorization(action, result, reason string) {
 	).Inc()
 }
 
-// RecordContextTokenTTSExchange records a kontxt TTS token exchange attempt.
+// RecordContextTokenTTSExchange records a transaction-token TTS exchange attempt.
 func RecordContextTokenTTSExchange(result, reason string, durationSeconds float64) {
 	result = normalizeMetricLabel(result)
 	reason = normalizeMetricLabel(reason)
 	ContextTokenTTSExchangeTotal.WithLabelValues(result, reason).Inc()
 	ContextTokenTTSExchangeDuration.WithLabelValues(result, reason).Observe(durationSeconds)
+}
+
+// RecordTokenExchange records one low-cardinality OAuth exchange observation.
+func RecordTokenExchange(adapter, grantClass, result, reason string, durationSeconds float64) {
+	adapter = normalizeMetricLabel(adapter)
+	grantClass = normalizeMetricLabel(grantClass)
+	result = normalizeMetricLabel(result)
+	reason = normalizeMetricLabel(reason)
+	TokenExchangeTotal.WithLabelValues(adapter, grantClass, result, reason).Inc()
+	TokenExchangeDuration.WithLabelValues(adapter, grantClass, result, reason).Observe(durationSeconds)
 }
 
 // RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.

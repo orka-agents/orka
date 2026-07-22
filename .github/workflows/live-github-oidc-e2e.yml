@@ -3,7 +3,6 @@ name: Live GitHub OIDC E2E
 on:
   workflow_dispatch:
   schedule:
-    # Nightly at 09:17 UTC (~02:17 Pacific during daylight saving time).
     - cron: "17 9 * * *"
   push:
     paths-ignore:
@@ -20,77 +19,33 @@ concurrency:
 
 jobs:
   live-github-oidc-e2e:
-    name: Live GitHub OIDC E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 45
     env:
       KIND_CLUSTER: orka-live-github-oidc-e2e
       ORKA_GITHUB_OIDC_AUDIENCE: orka-live-github-oidc-e2e
       KIND_VERSION: v0.31.0
+      KIND_SHA256_AMD64: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+      KIND_SHA256_ARM64: 8e1014e87c34901cc422a1445866835d1e666f2a61301c27e722bdeab5a1f7e4
     steps:
-      - name: Clone Orka
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-
-      - name: Check scheduled run necessity
-        id: schedule_gate
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" != "schedule" ]]; then
-            echo "run_e2e=true" >>"${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          # Nightly runs are only useful when the checked-out ref has changed
-          # since the previous nightly window. Push and workflow_dispatch runs
-          # always execute.
-          if git log --since="25 hours ago" --format=%H -n 1 | grep -q .; then
-            echo "run_e2e=true" >>"${GITHUB_OUTPUT}"
-          else
-            echo "No commits in the last 25 hours; skipping live e2e."
-            echo "run_e2e=false" >>"${GITHUB_OUTPUT}"
-          fi
-
-      - name: Free disk space for Docker-heavy live E2E
-        if: steps.schedule_gate.outputs.run_e2e == 'true'
-        run: |
-          set -euxo pipefail
-          echo "Disk usage before cleanup"
-          df -h
-          docker system df || true
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/share/swift
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          echo "Disk usage after cleanup"
-          df -h
-          docker system df || true
-
-      - name: Setup Go
-        if: steps.schedule_gate.outputs.run_e2e == 'true'
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-
       - name: Install kind
-        if: steps.schedule_gate.outputs.run_e2e == 'true'
         run: |
-          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)"
+          arch="$(go env GOARCH)"
+          case "${arch}" in
+            amd64) expected_sha="${KIND_SHA256_AMD64}" ;;
+            arm64) expected_sha="${KIND_SHA256_ARM64}" ;;
+            *) echo "unsupported runner architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}"
+          printf '%s  %s\n' "${expected_sha}" ./kind | sha256sum --check --strict -
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
-
       - name: Verify kind installation
-        if: steps.schedule_gate.outputs.run_e2e == 'true'
         run: kind version
-
-      - name: Run live GitHub OIDC e2e
-        if: steps.schedule_gate.outputs.run_e2e == 'true'
-        run: bash scripts/live-github-oidc-e2e.sh
+      - run: bash scripts/live-github-oidc-e2e.sh

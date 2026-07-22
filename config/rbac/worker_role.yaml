@@ -43,11 +43,12 @@ rules:
   - delete
   - get
   - update
-# Orka Tool CRDs
+# Orka Tool and OutboundAccessPolicy CRDs
 - apiGroups:
   - core.orka.ai
   resources:
   - tools
+  - outboundaccesspolicies
   verbs:
   - get
   - list
@@ -266,11 +267,12 @@ rules:
   - get
   - list
   - watch
-# Orka Tool CRDs
+# Orka Tool and OutboundAccessPolicy CRDs
 - apiGroups:
   - core.orka.ai
   resources:
   - tools
+  - outboundaccesspolicies
   verbs:
   - get
   - list
@@ -460,6 +462,18 @@ rules:
   - tasks
   verbs:
   - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-worker-tokenrequest-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -20,9 +20,12 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
+	toolspkg "github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,7 +57,7 @@ const (
 	ContextTokenScopeProvidersUse = "orka:providers:use"
 	// ContextTokenScopeSecretsRead authorizes context-token callers to read Secret metadata.
 	ContextTokenScopeSecretsRead = "orka:secrets:read"
-	// ContextTokenScopeSecretsCredentialsRead authorizes use of Secret data as outbound credentials.
+	// ContextTokenScopeSecretsCredentialsRead authorizes use of cluster-managed outbound credential material, including Secret data and ServiceAccount tokens.
 	ContextTokenScopeSecretsCredentialsRead = "orka:secrets:credentials:read"
 	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
 	ContextTokenScopeAgentsRead = "orka:agents:read"
@@ -283,6 +286,11 @@ func (h *Handlers) authorizeContextTokenTaskCreate(c fiber.Ctx, req CreateTaskRe
 	}
 
 	failures := contextTokenTaskCreateFailures(ui.ContextToken, h.contextTokenAuthorization, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(c.Context(), h.client, ui.ContextToken, h.contextTokenAuthorization, authzCtx)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures = append(failures, credentialFailures...)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization("createTask", "allowed", "ok")
 		return nil
@@ -308,6 +316,11 @@ func authorizeContextTokenTaskCreateObject(ctx context.Context, k8sClient client
 	}
 
 	failures := contextTokenTaskCreateFailures(token, cfg, authzCtx)
+	credentialFailures, err := contextTokenTaskToolCredentialFailures(ctx, k8sClient, token, cfg, authzCtx)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	failures = append(failures, credentialFailures...)
 	if len(failures) == 0 {
 		metrics.RecordContextTokenAuthorization(action, "allowed", "ok")
 		return nil
@@ -1261,27 +1274,12 @@ func memoryToolNames() []string {
 
 func coordinationToolNames() []string {
 	return []string{
-		"delegate_task",
-		"wait_for_tasks",
-		"create_container_task",
-		"cancel_task",
-		"send_message",
-		"check_messages",
-		"recall_memory",
-		"remember",
-		"propose_memory",
-		"search_transcript",
-		"create_pull_request",
-		"list_pull_requests",
-		"check_pr_review_marker",
-		"check_pull_request_ci",
-		"merge_pull_request",
-		"auto_merge_pull_request",
-		"review_pull_request",
-		"post_review_comment",
-		"create_agent",
-		"delete_agent",
-		"update_plan",
+		"delegate_task", "wait_for_tasks", "create_container_task", "cancel_task",
+		"send_message", "check_messages", "recall_memory", "remember",
+		"propose_memory", "search_transcript", "create_pull_request",
+		"list_pull_requests", "check_pr_review_marker", "check_pull_request_ci",
+		"merge_pull_request", "auto_merge_pull_request", "review_pull_request",
+		"post_review_comment", "create_agent", "delete_agent", "update_plan",
 	}
 }
 
@@ -1304,6 +1302,166 @@ func contextTokenTaskCreateEffectiveRuntimeAllowBash(req CreateTaskRequest, agen
 		allowBash = *req.AgentRuntime.AllowBash
 	}
 	return allowBash
+}
+
+func contextTokenTaskToolCredentialFailures(
+	ctx context.Context,
+	k8sClient client.Client,
+	token *ContextToken,
+	cfg ContextTokenAuthorizationConfig,
+	authzCtx contextTokenTaskCreateAuthorizationContext,
+) ([]string, error) {
+	if token == nil || k8sClient == nil {
+		return nil, nil
+	}
+	toolNames := append([]string{}, authzCtx.EffectiveAITools...)
+	runtimeToolNames := contextTokenRuntimeToolConstraints(authzCtx)
+	toolNames = append(toolNames, runtimeToolNames...)
+	requiresResolution := make(map[string]bool, len(toolNames))
+	for _, name := range authzCtx.EffectiveAITools {
+		name = strings.TrimSpace(name)
+		if name != "" && !contextTokenPlatformAIToolName(authzCtx, name) {
+			requiresResolution[name] = true
+		}
+	}
+	for _, name := range runtimeToolNames {
+		name = strings.TrimSpace(name)
+		if name != "" && !contextTokenNativeRuntimeToolName(authzCtx, name) {
+			requiresResolution[name] = true
+		}
+	}
+	seenTools := map[string]struct{}{}
+	credentialSecrets := map[string]struct{}{}
+	requiresCredentialScope := false
+	failures := []string{}
+	for _, toolName := range toolNames {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			continue
+		}
+		if _, ok := seenTools[toolName]; ok {
+			continue
+		}
+		seenTools[toolName] = struct{}{}
+		if !requiresResolution[toolName] {
+			continue
+		}
+		tool := &corev1alpha1.Tool{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: toolName}, tool); err != nil {
+			if apierrors.IsNotFound(err) {
+				failures = append(failures, fmt.Sprintf("Tool %q is unresolved", toolName))
+				continue
+			}
+			return nil, fmt.Errorf("resolve Tool %q credential policy: %w", toolName, err)
+		}
+		if tool.Spec.HTTP == nil {
+			continue
+		}
+		if tool.Spec.HTTP.AuthSecretRef != nil {
+			requiresCredentialScope = true
+			credentialSecrets[tool.Spec.HTTP.AuthSecretRef.Name] = struct{}{}
+		}
+		if tool.Spec.HTTP.OutboundAccessPolicyRef == nil {
+			continue
+		}
+		policyName := strings.TrimSpace(tool.Spec.HTTP.OutboundAccessPolicyRef.Name)
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: authzCtx.Namespace, Name: policyName}, policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				failures = append(failures, fmt.Sprintf("Tool %q references unresolved OutboundAccessPolicy %q", toolName, policyName))
+				continue
+			}
+			return nil, fmt.Errorf("resolve OutboundAccessPolicy %q: %w", policyName, err)
+		}
+		if !outboundAccessPolicyReadyForContextAuthorization(policy) {
+			failures = append(failures, fmt.Sprintf("Tool %q references unresolved OutboundAccessPolicy %q", toolName, policyName))
+			continue
+		}
+		if direct := policy.Spec.Direct; direct != nil {
+			collectOutboundCredentialSecrets(credentialSecrets, direct)
+			if outboundAccessUsesServiceAccount(direct) {
+				requiresCredentialScope = true
+			}
+		}
+		if gateway := policy.Spec.Gateway; gateway != nil {
+			collectOutboundTLSCredentialSecret(credentialSecrets, gateway.TLS)
+		}
+	}
+	if len(credentialSecrets) > 0 {
+		requiresCredentialScope = true
+	}
+	if !requiresCredentialScope {
+		return failures, nil
+	}
+	requiredScopes := cfg.SecretCredentialReadScopes()
+	if !hasAnyScope(token.Scopes, requiredScopes) {
+		failures = append(failures, fmt.Sprintf("Tool outbound credentials require one of scopes %q", strings.Join(requiredScopes, ",")))
+	}
+	if want, ok := contextString(token.TransactionContext, "secret"); ok {
+		for secretName := range credentialSecrets {
+			if secretName != want {
+				failures = append(failures, fmt.Sprintf("credential secret %q does not match token context %q", secretName, want))
+			}
+		}
+	}
+	return failures, nil
+}
+
+func outboundAccessPolicyReadyForContextAuthorization(policy *corev1alpha1.OutboundAccessPolicy) bool {
+	if policy == nil || policy.Status.ObservedGeneration != policy.Generation {
+		return false
+	}
+	for _, conditionType := range []string{
+		corev1alpha1.OutboundAccessPolicyConditionAccepted,
+		corev1alpha1.OutboundAccessPolicyConditionResolvedRefs,
+	} {
+		condition := meta.FindStatusCondition(policy.Status.Conditions, conditionType)
+		if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != policy.Generation {
+			return false
+		}
+	}
+	return true
+}
+
+func outboundAccessUsesServiceAccount(direct *corev1alpha1.DirectOutboundAccess) bool {
+	if direct == nil {
+		return false
+	}
+	if direct.Subject.Source == corev1alpha1.OutboundTokenSourceServiceAccount {
+		return true
+	}
+	return direct.Actor != nil && direct.Actor.Source == corev1alpha1.OutboundTokenSourceServiceAccount
+}
+
+func collectOutboundCredentialSecrets(names map[string]struct{}, direct *corev1alpha1.DirectOutboundAccess) {
+	if direct == nil {
+		return
+	}
+	collect := func(source *corev1alpha1.OutboundTokenSource) {
+		if source != nil && source.SecretRef != nil && strings.TrimSpace(source.SecretRef.Name) != "" {
+			names[source.SecretRef.Name] = struct{}{}
+		}
+	}
+	collect(&direct.Subject)
+	collect(direct.Actor)
+	if auth := direct.ClientAuthentication; auth != nil {
+		if auth.ClientSecretRef != nil && strings.TrimSpace(auth.ClientSecretRef.Name) != "" {
+			names[auth.ClientSecretRef.Name] = struct{}{}
+		}
+		if auth.PrivateKeyRef != nil && strings.TrimSpace(auth.PrivateKeyRef.Name) != "" {
+			names[auth.PrivateKeyRef.Name] = struct{}{}
+		}
+	}
+	collectOutboundTLSCredentialSecret(names, direct.TokenEndpoint.TLS)
+}
+
+func collectOutboundTLSCredentialSecret(names map[string]struct{}, tlsConfig *corev1alpha1.OutboundTLSConfig) {
+	if tlsConfig == nil || tlsConfig.CASecretRef == nil {
+		return
+	}
+	if name := strings.TrimSpace(tlsConfig.CASecretRef.Name); name != "" {
+		names[name] = struct{}{}
+	}
 }
 
 func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, authzCtx contextTokenTaskCreateAuthorizationContext) []string {
@@ -1444,6 +1602,57 @@ func contextTokenTaskToolFailures(token *ContextToken, authzCtx contextTokenTask
 		}
 	}
 	return failures
+}
+
+func contextTokenPlatformAIToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
+	if slices.Contains(memoryToolNames(), name) {
+		return true
+	}
+	if slices.Contains(toolspkg.CoordinationToolNames(), name) {
+		coordinationEnabled := authzCtx.Agent != nil && authzCtx.Agent.Spec.Coordination != nil && authzCtx.Agent.Spec.Coordination.Enabled
+		return coordinationEnabled || slices.Contains(toolspkg.ChatToolNames(), name)
+	}
+	_, builtin := toolspkg.DefaultRegistry.Get(name)
+	return builtin
+}
+
+func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizationContext, name string) bool {
+	base := strings.TrimSpace(name)
+	if index := strings.IndexByte(base, '('); index >= 0 {
+		base = strings.TrimSpace(base[:index])
+	}
+	runtime := (*corev1alpha1.AgentCLIRuntime)(nil)
+	if authzCtx.Agent != nil {
+		runtime = authzCtx.Agent.Spec.Runtime
+	}
+	if runtime != nil && runtime.RuntimeRef != nil {
+		brokeredOverride := authzCtx.Request.AgentRuntime != nil && hasNonEmptyToolNames(authzCtx.Request.AgentRuntime.AllowedTools)
+		if !brokeredOverride {
+			return true
+		}
+		if slices.Contains([]string{"delegate_task", "wait_for_tasks", "cancel_task", "send_message", "check_messages"}, base) {
+			return true
+		}
+		explicitBash := slices.ContainsFunc(authzCtx.Request.AgentRuntime.AllowedTools, func(value string) bool {
+			return strings.TrimSpace(value) == "Bash"
+		})
+		return base == "Bash" && !explicitBash
+	}
+	if _, builtin := toolspkg.DefaultRegistry.Get(base); builtin {
+		return true
+	}
+	if runtime != nil && runtime.Type != "" {
+		return true
+	}
+	if slices.Contains(toolspkg.CoordinationToolNames(), base) {
+		return true
+	}
+	switch strings.ToLower(base) {
+	case "bash", "read", "write", "edit", "glob", "grep", "websearch", "webfetch", "ls", "create_file", "web_search":
+		return true
+	default:
+		return false
+	}
 }
 
 func contextTokenRuntimeToolConstraints(authzCtx contextTokenTaskCreateAuthorizationContext) []string {

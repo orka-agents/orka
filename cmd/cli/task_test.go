@@ -199,7 +199,7 @@ func taskAPIServer() *httptest.Server {
 				"spec": map[string]any{
 					"transaction": map[string]any{
 						"id":      "txn-123",
-						"profile": "kontxt",
+						"profile": "transaction-token",
 					},
 				},
 				"status": map[string]any{"phase": "Succeeded"},

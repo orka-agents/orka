@@ -110,7 +110,7 @@ Orka uses eight core CRDs:
 | **Memory Storage** | SQLite (embedded) | Persists durable memories and reviewable memory proposals for namespace-scoped recall. |
 | **Artifact Storage** | SQLite stores artifact metadata and BLOB content, 10MB max per artifact. | Keeps worker outputs co-located with task/session state while bounding per-artifact size. |
 | **Security Scan Storage** | SQLite stores repository scan runs, threat models, findings, and patch proposals. | Provides durable repository-security history without an external database. |
-| **API Authentication** | Kubernetes ServiceAccount tokens plus optional OIDC JWT and generic context-token validation. | Native K8s auth by default; OIDC and `kontxt` TxTokens support external/request-scoped API clients. |
+| **API Authentication** | Kubernetes ServiceAccount tokens plus optional OIDC JWT and generic context-token validation. | Native K8s auth by default; OIDC and `transaction-token` TxTokens support external/request-scoped API clients. |
 | **Task Queue** | Priority queuing (0-1000) | Higher priority tasks are scheduled first. |
 | **Secret Management** | Reference K8s Secrets in specs | Controller mounts secrets to worker/harness pods. |
 | **Observability** | Prometheus metrics, structured logs, optional OpenTelemetry traces and GenAI OTLP metrics. | Standard K8s metrics/logging with opt-in distributed tracing and model/tool latency telemetry. |
@@ -303,7 +303,7 @@ Proposal review is intentionally separate from durable memory mutation. Acceptin
 - **Controller**: Non-root (uid 65532), read-only rootfs, seccomp RuntimeDefault
 - **ServiceAccount TokenReview**: Default API authentication validates Kubernetes ServiceAccount bearer tokens via the TokenReview API.
 - **Optional OIDC JWT validation**: External API endpoints can validate OIDC JWTs when issuer/audience settings are configured.
-- **Optional context-token validation**: External API endpoints can validate generic context tokens, with built-in `kontxt` TxToken support via `Txn-Token` and profile-specific issuer/audience/JWKS settings. Orka can enforce operation scopes and signed `tctx` constraints, stamp immutable transaction metadata, and use kontxt TTS to narrow child/outbound tokens for delegated agents and downstream Tool calls.
+- **Optional context-token validation**: External API endpoints can validate generic context tokens, with built-in `transaction-token` TxToken support via `Txn-Token` and profile-specific issuer/audience/JWKS settings. Orka can enforce operation scopes and signed `tctx` constraints, stamp immutable transaction metadata, and use transaction-token TTS to narrow child/outbound tokens for delegated agents and downstream Tool calls.
 - **Internal worker endpoints**: `/internal/v1` endpoints require ServiceAccount authentication for worker result, plan, message, artifact, memory, and transcript calls.
 - **Secrets**: API keys referenced via `secretRef`, mounted as read-only volumes, never logged
 - **`--watch-namespace`**: Optionally scopes the controller and API to a single namespace.

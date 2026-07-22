@@ -52,7 +52,7 @@ func TestContextTokenAllowedToolsFiltersInjectedProxyTools(t *testing.T) {
 		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/filter", nil)
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestOpenAICompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *testi
 	})
 	body := []byte(`{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})
@@ -203,7 +203,7 @@ func TestAnthropicCompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *te
 	})
 	body := []byte(`{"model":"anthropic/claude-sonnet-4-20250514","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", bytes.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second})

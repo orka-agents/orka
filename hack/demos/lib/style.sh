@@ -4,7 +4,6 @@
 # Provides:
 #   banner, chapter, narrate, log_info/success/warning/error
 #   demo_profile, demo_profile_is, demo_pe, demo_show
-#   payoff_card_pr / _security / _cron / _kontxt / _sandbox
 #
 # Pure bash + ANSI — no gum/glow/bat. Designed to be sourced from
 # lib/common.sh so every script picks it up without explicit sourcing.
@@ -623,100 +622,6 @@ payoff_card_cron() {
   fi
   __card_kv "lastChild" "${child_task:-(none)}"
   __card_kv "phase"     "${phase}"
-  __card_bottom
-}
-
-# ---------------------------------------------------------------------------
-# payoff_card_kontxt <allowed-job> <denied-job> [<job-namespace>]
-#
-# Renders the kontxt "same identity, two outcomes" card. The two caller
-# Jobs are vanilla Kubernetes Jobs (not Orka Tasks); the meaningful
-# per-run facts live in their pod logs as the line emitted by
-# images/kontxt-caller/caller.sh:
-#     3/3 orka api call: ok|denied|error status=NNN namespace=NS
-# We pull that one line per Job, parse out status + target namespace,
-# and show them side-by-side so the viewer can read down the rows and
-# see that everything matched except `target ns` and `result`.
-#
-# SECURITY: caller.sh already redacts JWT-ish strings before printing,
-# and this card only reads the post-redaction status/namespace fields
-# from `kubectl logs`. No raw TxToken material is read or displayed.
-# ---------------------------------------------------------------------------
-payoff_card_kontxt() {
-  local allowed_job="${1:-}"
-  local denied_job="${2:-}"
-  local job_ns="${3:-${DEMO_KONTXT_NAMESPACE:-${ORKA_TOKEN_NAMESPACE:-default}}}"
-
-  # __kontxt_job_outcome <job> <var-status> <var-ns>
-  # Sets <var-status> to the HTTP code (or "-") and <var-ns> to the
-  # target namespace (or "-") parsed from the caller's 3/3 log line.
-  __kontxt_job_outcome() {
-    local job="$1"
-    local __status_var="$2"
-    local __ns_var="$3"
-    local line=""
-    if [[ -n "${job}" ]] && command -v kubectl >/dev/null 2>&1; then
-      line="$(kubectl logs -n "${job_ns}" "job/${job}" --tail=20 2>/dev/null \
-              | grep -E '^3/3 orka api call:' \
-              | tail -n 1 || true)"
-    fi
-    local s="-" n="-"
-    if [[ -n "${line}" ]]; then
-      s="$(printf '%s' "${line}" | sed -nE 's/.*status=([0-9]+).*/\1/p')"
-      n="$(printf '%s' "${line}" | sed -nE 's/.*namespace=([^ ]+).*/\1/p')"
-      [[ -z "${s}" ]] && s="-"
-      [[ -z "${n}" ]] && n="-"
-    fi
-    printf -v "${__status_var}" '%s' "${s}"
-    printf -v "${__ns_var}"     '%s' "${n}"
-  }
-
-  # __kontxt_job_bound_ns <job> <var-bound>
-  # Reads KONTXT_BOUND_NAMESPACE from the Job spec's caller container env
-  # so the card can show the TxToken's tctx scope-down next to the
-  # target namespace. The Job spec is the authoritative source — we
-  # don't decode any JWT.
-  __kontxt_job_bound_ns() {
-    local job="$1"
-    local __bound_var="$2"
-    local b=""
-    if [[ -n "${job}" ]] && command -v kubectl >/dev/null 2>&1; then
-      b="$(kubectl get job "${job}" -n "${job_ns}" \
-            -o jsonpath='{.spec.template.spec.containers[?(@.name=="caller")].env[?(@.name=="KONTXT_BOUND_NAMESPACE")].value}' \
-            2>/dev/null || true)"
-    fi
-    [[ -z "${b}" ]] && b="-"
-    printf -v "${__bound_var}" '%s' "${b}"
-  }
-
-  local ok_status ok_ns_target denied_status denied_ns_target
-  local ok_bound denied_bound
-  __kontxt_job_outcome  "${allowed_job}" ok_status     ok_ns_target
-  __kontxt_job_outcome  "${denied_job}"  denied_status denied_ns_target
-  __kontxt_job_bound_ns "${allowed_job}" ok_bound
-  __kontxt_job_bound_ns "${denied_job}"  denied_bound
-
-  local ok_result="-"
-  [[ "${ok_status}" != "-" ]] && ok_result="HTTP ${ok_status}"
-  local denied_result="-"
-  [[ "${denied_status}" != "-" ]] && denied_result="HTTP ${denied_status}"
-
-  __card_top "Same identity, two outcomes"
-  __card_blank
-  __card_line "ALLOWED"
-  __card_line "  job         ${allowed_job:-(none)}"
-  __card_line "  bound ns    ${ok_bound}"
-  __card_line "  target ns   ${ok_ns_target}"
-  __card_line "  result      ${ok_result}"
-  __card_blank
-  __card_line "DENIED"
-  __card_line "  job         ${denied_job:-(none)}"
-  __card_line "  bound ns    ${denied_bound}"
-  __card_line "  target ns   ${denied_ns_target}"
-  __card_line "  result      ${denied_result}"
-  __card_blank
-  __card_line "Same SA + same scope-down."
-  __card_line "Denial = target ns != bound ns."
   __card_bottom
 }
 

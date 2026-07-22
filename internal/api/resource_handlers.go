@@ -82,7 +82,7 @@ func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
 	if spec.HTTP == nil {
 		return false
 	}
-	if spec.HTTP.AuthSecretRef != nil {
+	if spec.HTTP.AuthSecretRef != nil || spec.HTTP.OutboundAccessPolicyRef != nil {
 		return true
 	}
 	for name := range spec.HTTP.Headers {
@@ -101,6 +101,12 @@ func validateToolRESTMutation(spec corev1alpha1.ToolSpec) error {
 		return fiber.NewError(
 			fiber.StatusBadRequest,
 			"spec.http.authSecretRef is not allowed through the REST API; create tools with Kubernetes RBAC instead",
+		)
+	}
+	if spec.HTTP.OutboundAccessPolicyRef != nil {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.http.outboundAccessPolicyRef is not allowed through the REST API; create tools with Kubernetes RBAC instead",
 		)
 	}
 	if err := validateToolRESTURL(spec.HTTP.URL); err != nil {

@@ -539,7 +539,7 @@ func TestRepositoryMonitorActions_ContextTokenAuthorization(t *testing.T) {
 			app, _ := setupRepositoryMonitorHandlers(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -593,7 +593,7 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeRejectsExtraAgents(t *tes
 				"tctx":  tt.transactionContext,
 			})
 			req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(createBody))
-			req.Header.Set(KontxtHeaderName, token)
+			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
 			require.NoError(t, err)
@@ -622,7 +622,7 @@ func TestCreateRepositoryMonitor_ContextTokenAgentScopeAuthorizesBeforeReviewerL
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/monitors/repositories", strings.NewReader(body))
-	req.Header.Set(KontxtHeaderName, token)
+	req.Header.Set(TransactionTokenHeaderName, token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)

@@ -24,6 +24,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/harness/harnesstest"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
@@ -321,6 +322,102 @@ func TestHarnessWrapperBrokeredReadToolExecutesAndContinuesRuntime(t *testing.T)
 	}
 	if !hasExecutionEventType(listed, events.ExecutionEventTypeToolCallCompleted) {
 		t.Fatalf("events = %#v, want brokered ToolCallCompleted", listed)
+	}
+}
+
+type captureBrokeredOutboundResolver struct {
+	request outboundaccess.ResolveRequest
+}
+
+func (r *captureBrokeredOutboundResolver) Resolve(_ context.Context, req outboundaccess.ResolveRequest) (outboundaccess.Resolution, error) {
+	r.request = req
+	return outboundaccess.Resolution{}, errors.New("captured outbound resolution")
+}
+
+func TestHarnessWrapperBrokeredPropagatesTransactionCredentialAuthority(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{
+		ID:     "txn-1",
+		Scopes: []string{"tenant:outbound-credentials:read"},
+		Context: map[string]string{
+			"secret": "resource-subject",
+		},
+	}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:                     "https://api.example.test/incidents",
+				OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "resource-api"},
+			},
+		},
+	}
+	resolver := &captureBrokeredOutboundResolver{}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	r.TransactionCredentialReadScopes = []string{"tenant:outbound-credentials:read"}
+	r.OutboundAccessResolver = resolver
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         tool.Name,
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"incident":"inc-1"}`),
+	}
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "tool_execution_failed" {
+		t.Fatalf("result = %#v, want captured tool_execution_failed", result)
+	}
+	if !resolver.request.CredentialAuthorityEnforced || !resolver.request.CredentialScopeAllowed || resolver.request.CredentialSecret != "resource-subject" {
+		t.Fatalf("resolver credential authority = enforced %t allowed %t secret %q", resolver.request.CredentialAuthorityEnforced, resolver.request.CredentialScopeAllowed, resolver.request.CredentialSecret)
+	}
+}
+
+func TestHarnessWrapperBrokeredRejectsUnauthorizedAuthSecretBeforeRead(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "runtime"}}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"read_incident"}}
+	task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1"}
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "read_incident", Namespace: task.Namespace},
+		Spec: corev1alpha1.ToolSpec{
+			Description:       "Read incident",
+			BrokeredToolClass: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+			HTTP: &corev1alpha1.HTTPExecution{
+				URL:           "https://api.example.test/incidents",
+				AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "resource-auth", Key: "token"},
+			},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, tool)
+	frame := harness.HarnessEventFrame{
+		Version:          harness.ProtocolVersion,
+		Type:             harness.FrameToolCallRequested,
+		RuntimeSessionID: "runtime-session",
+		TurnID:           "turn-1",
+		CorrelationID:    "corr-1",
+		Seq:              1,
+		ToolName:         tool.Name,
+		ToolCallID:       "call-1",
+		Content:          json.RawMessage(`{"incident":"inc-1"}`),
+	}
+	result, err := r.handleHarnessBrokeredToolCall(context.Background(), task, agent, frame)
+	if err != nil {
+		t.Fatalf("handleHarnessBrokeredToolCall() error = %v", err)
+	}
+	if result.Error == nil || result.Error.Code != "credential_authority_unavailable" ||
+		!strings.Contains(result.Error.Message, "not authorized") {
+		t.Fatalf("result = %#v, want pre-read credential authority rejection", result)
 	}
 }
 
