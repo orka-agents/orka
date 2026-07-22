@@ -216,12 +216,9 @@ rbac:
   # Create RBAC resources
   create: true
 
-# CRD configuration
-crds:
-  # Install CRDs
-  install: true
-  # Keep CRDs on chart uninstall
-  keep: true
+# CRDs use Helm's static crds/ lifecycle and are not controlled by values.
+# Run `helm show readme <chart reference or archive>` before upgrading or
+# using --skip-crds.
 
 # Security context for pods
 podSecurityContext:

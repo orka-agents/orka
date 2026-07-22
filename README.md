@@ -60,7 +60,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
 - 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
-- 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, Skill, RepositoryScan, and RepositoryMonitor custom resources for GitOps workflows
+- 📦 **Declarative CRDs** — Task, Agent, AgentRuntime, Tool, Provider, Skill, RepositoryScan, RepositoryMonitor, and SubstrateActorPool custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
 - 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
@@ -77,6 +77,17 @@ helm install orka charts/orka \
   --namespace orka-system \
   --create-namespace
 ```
+
+A fresh install creates all nine cluster-scoped Orka CRDs. Use `--skip-crds`
+only when one designated platform or release owner already manages compatible
+Orka CRDs for the cluster.
+
+> [!IMPORTANT]
+> Helm does not create or update files from `crds/` during `helm upgrade`.
+> Run the guarded CRD migration from the exact target chart before
+> **every** upgrade, including an upgrade from the previous chart that installed
+> zero CRDs. Helm retains CRDs
+> on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).
 
 ### Set Up a Provider
 

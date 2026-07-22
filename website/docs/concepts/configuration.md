@@ -701,12 +701,29 @@ Key configuration values for the Helm chart:
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
-| `crds.install` | `true` | Install CRDs |
-| `crds.keep` | `true` | Keep CRDs on uninstall |
 | `monitoring.enabled` | `false` | Enable Prometheus ServiceMonitor |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 | `client.namespace` | `""` | Client ServiceAccount namespace override. Empty defaults to `controller.watchNamespace` when namespace isolation is enforced and `watchNamespace` is set, otherwise the release namespace. |
+
+### Helm CRD lifecycle
+
+CRD behavior is not controlled through chart values. The chart packages nine
+static CRDs under `crds/`; a fresh install creates them unless `--skip-crds` is
+used. Because CRDs are cluster-scoped and shared by all Orka releases, designate
+one platform workflow or release owner for their lifecycle and install every
+other release with `--skip-crds`.
+
+Helm does not create or update `crds/` resources during `helm upgrade`. The
+guarded migration from the exact target chart must preflight, replace, and
+verify all nine CRD specs before every controller upgrade. This includes
+releases created from the previous zero-CRD chart: an ordinary upgrade will not
+install the missing definitions.
+Helm retains CRDs and Orka custom resources on uninstall.
+
+See the
+[Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md)
+for the CRD-first upgrade and replacement-install commands.
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:

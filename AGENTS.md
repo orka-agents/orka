@@ -68,7 +68,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 
 ## Auto-Generated — Do NOT Edit
 
-- `config/crd/bases/*.yaml`, `config/rbac/role.yaml` — `make manifests`
+- `config/crd/bases/*.yaml`, `charts/orka/crds/*.yaml`, `config/rbac/role.yaml` — `make manifests`
 - `**/zz_generated.*.go` — `make generate`
 - `PROJECT` — kubebuilder CLI
 - `ui/src/routeTree.gen.ts` — TanStack Router

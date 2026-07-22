@@ -41,6 +41,23 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
+A normal fresh install creates Orka's nine cluster-scoped CRDs before the
+controller resources. Use `--skip-crds` only when one designated platform or
+release owner already manages compatible Orka CRDs for the cluster; all other
+Orka releases should use that flag.
+
+:::important[CRDs before every upgrade]
+Helm does not create or update files from `crds/` during `helm upgrade`. Run
+the guarded migration from the exact target chart and verify all nine
+server-normalized CRD specs before **every** upgrade. This is also mandatory for
+releases installed from the previous chart that contained zero CRDs—an
+ordinary upgrade will not create
+them. Helm retains CRDs and Orka custom resources on uninstall.
+:::
+
+Follow the complete commands and ownership guidance in
+[`charts/orka/README.md`](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
+
 ### Using kubectl
 
 ```bash
