@@ -37,8 +37,13 @@ const (
 var oaiLog = logf.Log.WithName("openai-compat")
 
 const (
-	finishReasonStop      = "stop"
-	finishReasonToolCalls = "tool_calls"
+	anthropicStopReasonModelContextWindowExceeded = "model_context_window_exceeded"
+	completionStatusCompleted                     = "completed"
+	finishReasonContentFilter                     = "content_filter"
+	finishReasonFunctionCall                      = "function_call"
+	finishReasonStop                              = "stop"
+	finishReasonStopSequence                      = "stop_sequence"
+	finishReasonToolCalls                         = "tool_calls"
 )
 
 // OpenAICompatHandler implements OpenAI-compatible /openai/v1/chat/completions and /openai/v1/models endpoints.
@@ -489,14 +494,24 @@ func (h *OpenAICompatHandler) handleStreamingToolLoop(
 		resp, err := runToolLoopWithObserver(streamCtx, capturedProvider, capturedReq, model, h.config, capturedToolCtx, observer)
 		if err != nil {
 			oaiLog.Error(err, "streaming tool loop failed")
-			writeContent("Error: " + err.Error())
+			_ = writeStreamError(w, "provider_error")
+			return
+		}
+		if resp == nil {
+			_ = writeStreamError(w, "")
+			return
+		}
+		finishReason, ok := mapStreamFinishReason(
+			resp.StopReason,
+			strings.TrimSpace(stripGoalStateSentinel(resp.Content)) != "",
+			len(resp.ToolCalls) > 0,
+		)
+		if !ok {
+			_ = writeStreamError(w, resp.StopReason)
+			return
 		}
 
 		// Send finish chunk
-		finishReason := finishReasonStop
-		if resp != nil {
-			finishReason = mapFinishReason(resp.StopReason)
-		}
 		finishChunk := OAIResponse{
 			ID:      completionID,
 			Object:  "chat.completion.chunk",
@@ -559,8 +574,17 @@ func stripGoalStateSentinelFromResponse(resp *llm.CompletionResponse) *llm.Compl
 
 // formatOAIResponse formats a CompletionResponse into OpenAI API format.
 func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.CompletionResponse, completionID, model string, created int64) error {
-
-	finishReason := mapFinishReason(resp.StopReason)
+	if resp == nil {
+		return openAICompletionOutcomeError(c, "")
+	}
+	finishReason, ok := mapStreamFinishReason(
+		resp.StopReason,
+		strings.TrimSpace(resp.Content) != "",
+		len(resp.ToolCalls) > 0,
+	)
+	if !ok {
+		return openAICompletionOutcomeError(c, resp.StopReason)
+	}
 
 	msg := &OAIMessage{
 		Role:    "assistant",
@@ -605,6 +629,17 @@ func (h *OpenAICompatHandler) formatOAIResponse(c fiber.Ctx, resp *llm.Completio
 	})
 }
 
+func openAICompletionOutcomeError(c fiber.Ctx, reason string) error {
+	message := "provider returned an invalid completion outcome"
+	if strings.TrimSpace(reason) != "" {
+		message = fmt.Sprintf("provider returned non-success outcome %q", reason)
+	}
+	return c.Status(fiber.StatusBadGateway).JSON(OAIError{Error: OAIErrorDetail{
+		Message: message,
+		Type:    "server_error",
+	}})
+}
+
 // handleStreamingCompletion handles a streaming chat completion request.
 func (h *OpenAICompatHandler) handleStreamingCompletion(
 	c fiber.Ctx,
@@ -634,18 +669,21 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			// Try non-streaming fallback via Complete
 			resp, completeErr := capturedProvider.Complete(streamCtx, capturedReq)
 			if completeErr != nil {
-				errChunk := OAIResponse{
-					ID:      completionID,
-					Object:  "chat.completion.chunk",
-					Created: created,
-					Model:   model,
-					Choices: []OAIChoice{{
-						Index: 0,
-						Delta: &OAIMessage{Role: "assistant", Content: "Error: " + completeErr.Error()},
-					}},
-				}
-				_ = writeStreamChunk(w, errChunk)
-				_ = writeStreamDone(w)
+				oaiLog.Error(completeErr, "stream fallback completion failed")
+				_ = writeStreamError(w, "provider_error")
+				return
+			}
+			if resp == nil {
+				_ = writeStreamError(w, "")
+				return
+			}
+			finishReason, ok := mapStreamFinishReason(
+				resp.StopReason,
+				strings.TrimSpace(resp.Content) != "",
+				len(resp.ToolCalls) > 0,
+			)
+			if !ok {
+				_ = writeStreamError(w, resp.StopReason)
 				return
 			}
 
@@ -704,10 +742,6 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			}
 
 			// Send finish
-			finishReason := mapFinishReason(resp.StopReason)
-			if len(resp.ToolCalls) > 0 {
-				finishReason = finishReasonToolCalls
-			}
 			finishChunk := OAIResponse{
 				ID:      completionID,
 				Object:  "chat.completion.chunk",
@@ -756,13 +790,17 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 		_ = writeStreamChunk(w, roleChunk)
 
 		toolCallIndex := 0
+		hasNonBlankContent := false
+		terminalSeen := false
 		for chunk := range streamCh {
 			if chunk.Error != nil {
 				oaiLog.Error(chunk.Error, "stream error")
-				break
+				_ = writeStreamError(w, "provider_error")
+				return
 			}
 
 			if chunk.Content != "" {
+				hasNonBlankContent = hasNonBlankContent || strings.TrimSpace(chunk.Content) != ""
 				contentChunk := OAIResponse{
 					ID:      completionID,
 					Object:  "chat.completion.chunk",
@@ -804,7 +842,15 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 			}
 
 			if chunk.Done {
-				finishReason := mapFinishReason(chunk.StopReason)
+				finishReason, ok := mapStreamFinishReason(
+					chunk.StopReason,
+					hasNonBlankContent,
+					toolCallIndex > 0,
+				)
+				if !ok {
+					_ = writeStreamError(w, chunk.StopReason)
+					return
+				}
 				finishChunk := OAIResponse{
 					ID:      completionID,
 					Object:  "chat.completion.chunk",
@@ -832,7 +878,13 @@ func (h *OpenAICompatHandler) handleStreamingCompletion(
 					}
 					_ = writeStreamChunk(w, usageChunk)
 				}
+				terminalSeen = true
+				break
 			}
+		}
+		if !terminalSeen {
+			_ = writeStreamError(w, "missing_terminal_chunk")
+			return
 		}
 
 		_ = writeStreamDone(w)
@@ -1007,16 +1059,63 @@ func mapFinishReason(reason string) string {
 		return finishReasonToolCalls
 	case oaiParamMaxTokens, oaiStopReasonLength:
 		return oaiStopReasonLength
-	case "content_filter":
-		return "content_filter"
+	case finishReasonContentFilter:
+		return finishReasonContentFilter
 	default:
 		return finishReasonStop
+	}
+}
+
+func mapStreamFinishReason(reason string, hasNonBlankContent, hasToolCalls bool) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case finishReasonStopSequence:
+		if hasToolCalls {
+			return finishReasonToolCalls, true
+		}
+		return finishReasonStop, true
+	case oaiStopReasonEndTurn, finishReasonStop, completionStatusCompleted, "response.completed":
+		if hasToolCalls {
+			return finishReasonToolCalls, true
+		}
+		if !hasNonBlankContent {
+			return "", false
+		}
+		return finishReasonStop, true
+	case oaiStopReasonToolUse, finishReasonToolCalls, finishReasonFunctionCall:
+		if !hasToolCalls {
+			return "", false
+		}
+		return finishReasonToolCalls, true
+	case oaiParamMaxTokens, oaiStopReasonLength:
+		return oaiStopReasonLength, true
+	case finishReasonContentFilter:
+		return finishReasonContentFilter, true
+	default:
+		return "", false
 	}
 }
 
 // writeStreamChunk writes a single SSE chunk in OpenAI streaming format.
 func writeStreamChunk(w *bufio.Writer, chunk OAIResponse) error {
 	data, err := json.Marshal(chunk)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		return err
+	}
+	return w.Flush()
+}
+
+func writeStreamError(w *bufio.Writer, reason string) error {
+	message := "provider stream ended without a successful terminal outcome"
+	if strings.TrimSpace(reason) != "" {
+		message = fmt.Sprintf("provider stream ended with non-success outcome %q", reason)
+	}
+	data, err := json.Marshal(OAIError{Error: OAIErrorDetail{
+		Message: message,
+		Type:    "server_error",
+	}})
 	if err != nil {
 		return err
 	}
