@@ -104,10 +104,23 @@ jobs:
           comparison_dir=$(mktemp -d)
           trap 'rm -rf "${comparison_dir}"' EXIT
 
-          if ! git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages; then
-            echo "No published Helm repository exists yet."
-            exit 0
-          fi
+          set +e
+          git ls-remote --exit-code --heads origin gh-pages >/dev/null
+          probe_status=$?
+          set -e
+          case "${probe_status}" in
+            0)
+              git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages
+              ;;
+            2)
+              echo "No published Helm repository exists yet."
+              exit 0
+              ;;
+            *)
+              echo "Could not determine whether the gh-pages branch exists." >&2
+              exit "${probe_status}"
+              ;;
+          esac
 
           for published_path in "charts/${package_name}" "${package_name}"; do
             if ! git cat-file -e "origin/gh-pages:${published_path}" 2>/dev/null; then
