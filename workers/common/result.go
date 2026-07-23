@@ -37,6 +37,10 @@ var resultStdoutMarkerPath = agentSandboxResultMarkerExecPath
 // It reads ORKA_RESULT_ENDPOINT or constructs the URL from ORKA_CONTROLLER_URL.
 // Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s) on failure.
 func SubmitResult(result []byte) error {
+	if len(bytes.TrimSpace(result)) == 0 {
+		return fmt.Errorf("result must not be blank")
+	}
+
 	if workerenv.IsTrue(os.Getenv(workerenv.ResultStdout)) {
 		marker := workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(result)
 		fileData := marker + "\n"

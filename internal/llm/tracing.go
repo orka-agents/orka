@@ -44,6 +44,8 @@ type tracingMetrics struct {
 
 var noopTracingSpan = trace.SpanFromContext(context.Background())
 
+const unknownStopReasonErrorType = "unknown_stop_reason"
+
 // NewTracingProvider returns a Provider that records a GenAI span and metrics
 // for every LLM call once an OpenTelemetry provider is configured. Legacy llm.*
 // attributes are dual-emitted during migration.
@@ -208,9 +210,13 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 		setResponseAttributes(span, resp, providerName)
 	}
 	modelName := responseModel(resp, req)
-	errType := stopReasonErrorType(resp.StopReason)
+	errType := completionResponseErrorType(resp)
 	if errType != "" && spanRecording {
-		span.SetStatus(codes.Error, resp.StopReason)
+		statusDescription := errType
+		if resp != nil && strings.TrimSpace(resp.StopReason) != "" {
+			statusDescription = resp.StopReason
+		}
+		span.SetStatus(codes.Error, statusDescription)
 		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 	}
 	tp.recordOperationDuration(ctx, durationSeconds, providerName, modelName, errType)
@@ -279,6 +285,10 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		}()
 
 		var firstChunkRecorded bool
+		var lastStopReason string
+		var toolCallSeen bool
+		var providerErrorSeen bool
+		var terminalSignalSeen bool
 		for chunk := range innerCh {
 			if strings.TrimSpace(chunk.Provider) != "" {
 				selectedProviderName = genai.NormalizeProviderName(chunk.Provider)
@@ -301,21 +311,34 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 				tp.recordTimeToFirstChunk(ctx, latency, selectedProviderName, selectedModel)
 			}
 			if chunk.StopReason != "" {
+				lastStopReason = chunk.StopReason
 				finishReasons = []string{chunk.StopReason}
-				if stopErrType := stopReasonErrorType(chunk.StopReason); stopErrType != "" && chunk.Error == nil {
-					errType = stopErrType
-					if spanRecording {
-						span.SetStatus(codes.Error, chunk.StopReason)
-						span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-					}
-				}
+			}
+			if chunk.ToolCall != nil {
+				toolCallSeen = true
 			}
 			if chunk.Error != nil {
+				providerErrorSeen = true
+				terminalSignalSeen = true
 				errType = errorType(chunk.Error)
 				if spanRecording {
 					span.RecordError(chunk.Error)
 					span.SetStatus(codes.Error, chunk.Error.Error())
 					if errType != "" {
+						span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+					}
+				}
+			}
+			if chunk.Done {
+				terminalSignalSeen = true
+				if !providerErrorSeen {
+					errType = streamCompletionErrorType(lastStopReason, toolCallSeen)
+					if errType != "" && spanRecording {
+						statusDescription := lastStopReason
+						if statusDescription == "" {
+							statusDescription = errType
+						}
+						span.SetStatus(codes.Error, statusDescription)
 						span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
 					}
 				}
@@ -334,6 +357,22 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 				return
 			}
 		}
+		if !terminalSignalSeen {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				errType = errorType(ctxErr)
+				if spanRecording {
+					span.RecordError(ctxErr)
+					span.SetStatus(codes.Error, ctxErr.Error())
+					span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+				}
+				return
+			}
+			errType = stopReasonErrorType("")
+			if spanRecording {
+				span.SetStatus(codes.Error, errType)
+				span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+			}
+		}
 	}()
 	return out, nil
 }
@@ -346,9 +385,31 @@ func isStreamingRequiredErr(err error) bool {
 }
 
 func stopReasonErrorType(reason string) string {
+	return completionOutcomeErrorType(completionOutcomeForStopReason(reason), reason)
+}
+
+func streamCompletionErrorType(reason string, hasToolCall bool) string {
+	resp := &CompletionResponse{StopReason: reason}
+	if hasToolCall {
+		resp.ToolCalls = []ToolCall{{}}
+	}
+	return completionOutcomeErrorType(NormalizeCompletionOutcome(resp), reason)
+}
+
+func completionResponseErrorType(resp *CompletionResponse) string {
+	if resp == nil {
+		return unknownStopReasonErrorType
+	}
+	return completionOutcomeErrorType(NormalizeCompletionOutcome(resp), resp.StopReason)
+}
+
+func completionOutcomeErrorType(outcome CompletionOutcome, reason string) string {
 	trimmed := strings.TrimSpace(reason)
-	switch strings.ToLower(trimmed) {
-	case "failed", "incomplete", "cancelled", "canceled", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
+	switch outcome {
+	case CompletionOutcomeIncomplete, CompletionOutcomeRefused, CompletionOutcomeFailed, CompletionOutcomeUnknown:
+		if trimmed == "" {
+			return unknownStopReasonErrorType
+		}
 		return trimmed
 	default:
 		return ""

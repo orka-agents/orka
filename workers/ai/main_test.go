@@ -609,6 +609,115 @@ func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
 	}
 }
 
+func TestExecuteAgentLoop_RetriesBlankFinalResponseOnceWithoutTools(t *testing.T) {
+	provider := &mockProvider{responses: []*llm.CompletionResponse{
+		{Content: " \n", StopReason: "end_turn"},
+		{Content: "final answer", StopReason: "end_turn"},
+	}}
+	llmTools := []llm.Tool{{Name: "web_search"}}
+
+	result, err := executeAgentLoop(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "investigate"}}, "", "test-model",
+		llmTools, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("executeAgentLoop() error = %v", err)
+	}
+	if result != "final answer" {
+		t.Fatalf("result = %q, want final answer", result)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 {
+		t.Fatalf("first request tools = %d, want 1", len(provider.requests[0].Tools))
+	}
+	if len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("retry request tools = %d, want 0", len(provider.requests[1].Tools))
+	}
+	retryMessages := provider.requests[1].Messages
+	if len(retryMessages) != 2 || retryMessages[1].Role != roleUser || retryMessages[1].Content != finalAnswerRetryPrompt {
+		t.Fatalf("retry messages = %#v", retryMessages)
+	}
+}
+
+func TestExecuteAgentLoop_RejectsBlankFinalResponseAfterRetry(t *testing.T) {
+	provider := &mockProvider{responses: []*llm.CompletionResponse{
+		{Content: "", StopReason: "stop"},
+		{Content: "\t", StopReason: "end_turn"},
+	}}
+
+	_, err := executeAgentLoop(
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "investigate"}}, "", "test-model",
+		[]llm.Tool{{Name: "web_search"}}, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "empty final response after one retry") {
+		t.Fatalf("error = %q", err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(provider.requests))
+	}
+	if len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("retry request tools = %d, want 0", len(provider.requests[1].Tools))
+	}
+}
+
+func TestExecuteAgentLoop_RejectsNonCompletionStopReasons(t *testing.T) {
+	stopReasons := []string{"length", "max_tokens", "incomplete", "failed", "pause_turn", "content_filter", "refusal"}
+	for _, stopReason := range stopReasons {
+		t.Run(stopReason, func(t *testing.T) {
+			provider := &mockProvider{response: &llm.CompletionResponse{
+				Content:    "partial output",
+				StopReason: stopReason,
+			}}
+
+			_, err := executeAgentLoop(
+				context.Background(), provider, []llm.Message{{Role: roleUser, Content: "investigate"}}, "", "test-model",
+				nil, nil, nil,
+			)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), stopReason) {
+				t.Fatalf("error = %q, want stop reason %q", err, stopReason)
+			}
+		})
+	}
+}
+
+func TestExecuteAgentLoop_RejectsMissingStopReason(t *testing.T) {
+	provider := &mockProvider{response: &llm.CompletionResponse{Content: "partial output"}}
+
+	_, err := executeAgentLoop(
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "investigate"}}, "", "test-model",
+		nil, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unsupported completion outcome") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestExecuteAgentLoop_RejectsNilResponse(t *testing.T) {
+	provider := &mockProvider{}
+
+	_, err := executeAgentLoop(
+		context.Background(), provider, []llm.Message{{Role: roleUser, Content: "investigate"}}, "", "test-model",
+		nil, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "unsupported completion outcome") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
 func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	provider := &mockProvider{
 		response: &llm.CompletionResponse{
@@ -967,10 +1076,14 @@ type mockProvider struct {
 	responses []*llm.CompletionResponse
 	err       error
 	errs      []error
+	requests  []*llm.CompletionRequest
 }
 
 func (m *mockProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
-	_ = req
+	reqCopy := *req
+	reqCopy.Messages = append([]llm.Message(nil), req.Messages...)
+	reqCopy.Tools = append([]llm.Tool(nil), req.Tools...)
+	m.requests = append(m.requests, &reqCopy)
 	if len(m.errs) > 0 {
 		err := m.errs[0]
 		m.errs = m.errs[1:]
