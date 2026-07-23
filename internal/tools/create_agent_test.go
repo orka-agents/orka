@@ -630,7 +630,7 @@ func TestCreateAgentTool_Execute_AcceptsOpencodeRuntimeSecretRef(t *testing.T) {
 	args := json.RawMessage(`{
 		"role": "coder",
 		"systemPrompt": "You write code",
-		"model": {"name": "kimi-k2"},
+		"model": {"provider": "moonshotai", "name": "Kimi-K2-Instruct-0905"},
 		"runtime": {
 			"type": "opencode",
 			"secretRef": "runtime-creds"
@@ -657,8 +657,14 @@ func TestCreateAgentTool_Execute_AcceptsOpencodeRuntimeSecretRef(t *testing.T) {
 	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("runtime = %#v, want opencode", agent.Spec.Runtime)
 	}
-	if agent.Spec.Model == nil || agent.Spec.Model.Name != "kimi-k2" {
-		t.Fatalf("model = %#v, want kimi-k2", agent.Spec.Model)
+	if agent.Spec.Model == nil || agent.Spec.Model.Name != "moonshotai/Kimi-K2-Instruct-0905" {
+		t.Fatalf("model = %#v, want provider-qualified OpenCode model", agent.Spec.Model)
+	}
+	if agent.Spec.Model.Provider != "" {
+		t.Fatalf("model.provider = %q, want empty for runtime agent", agent.Spec.Model.Provider)
+	}
+	if agent.Spec.ProviderRef != nil {
+		t.Fatalf("providerRef = %#v, want nil for runtime agent", agent.Spec.ProviderRef)
 	}
 	if agent.Spec.SecretRef == nil || agent.Spec.SecretRef.Name != testRuntimeCredsSecretName {
 		t.Fatalf("secretRef = %#v, want %q", agent.Spec.SecretRef, testRuntimeCredsSecretName)

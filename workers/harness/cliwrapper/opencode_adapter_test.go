@@ -13,6 +13,12 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
+const (
+	opencodeAllowedToolsMetadata = "allowedTools"
+	opencodeToolLSP              = "LSP"
+	opencodeToolWebSearch        = "WebSearch"
+)
+
 func TestOpencodeAdapterBuildCommand(t *testing.T) {
 	t.Setenv(workerenv.AllowBash, "true")
 	workDir := t.TempDir()
@@ -98,11 +104,12 @@ func TestOpencodeAdapterBuildCommand(t *testing.T) {
 	if limit.Context != opencodeModelContextLimit || limit.Output != opencodeModelOutputLimit {
 		t.Fatalf("limit = %#v, want context=%d output=%d", limit, opencodeModelContextLimit, opencodeModelOutputLimit)
 	}
-	if cfg.Permission["edit"] != opencodePermissionAllow || cfg.Permission["bash"] != opencodePermissionAllow {
+	if cfg.Permission[opencodePermissionEdit] != opencodePermissionAllow ||
+		cfg.Permission[opencodePermissionBash] != opencodePermissionAllow {
 		t.Fatalf("permission = %#v, want edit and bash allowed", cfg.Permission)
 	}
-	if cfg.Permission["skill"] != opencodePermissionDeny {
-		t.Fatalf("permission.skill = %q, want deny", cfg.Permission["skill"])
+	if cfg.Permission[opencodePermissionSkill] != opencodePermissionDeny {
+		t.Fatalf("permission.skill = %q, want deny", cfg.Permission[opencodePermissionSkill])
 	}
 	agent := cfg.Agent[opencodeDefaultAgent]
 	if agent.Steps != 7 {
@@ -202,6 +209,9 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 			workerenv.OpenAIBaseURL + "=http://models.example/v1",
 			"OPENCODE_PERMISSION={\"bash\":\"allow\"}",
 			"OPENCODE_CONFIG_CONTENT={}",
+			opencodeEnableExa + "=true",
+			opencodeExperimentalLSPTool + "=true",
+			"OPENCODE_EXPERIMENTAL=true",
 			"XDG_CONFIG_HOME=/workspace/config",
 			"XDG_DATA_HOME=/workspace/data",
 			"XDG_CACHE_HOME=/workspace/cache",
@@ -213,7 +223,14 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 	}
 	defer removeTempFiles(spec.TempFiles)
 
-	for _, name := range []string{"OPENCODE_AUTO_SHARE", "OPENCODE_PERMISSION", "OPENCODE_CONFIG_CONTENT"} {
+	for _, name := range []string{
+		"OPENCODE_AUTO_SHARE",
+		"OPENCODE_PERMISSION",
+		"OPENCODE_CONFIG_CONTENT",
+		opencodeEnableExa,
+		opencodeExperimentalLSPTool,
+		"OPENCODE_EXPERIMENTAL",
+	} {
 		if !slices.Contains(spec.UnsetEnv, name) {
 			t.Fatalf("UnsetEnv = %#v, want %s removed", spec.UnsetEnv, name)
 		}
@@ -240,6 +257,56 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 		if got := envEntryValue(spec.Env, name); got != want {
 			t.Fatalf("%s = %q, want isolated path %q", name, got, want)
 		}
+	}
+}
+
+func TestOpencodeAdapterEnablesSafeFeatureFlagsForAllowedTools(t *testing.T) {
+	t.Setenv(workerenv.AllowedTools, "")
+	t.Setenv(workerenv.DisallowedTools, "")
+	t.Setenv(opencodeEnableExa, "false")
+	t.Setenv(opencodeExperimentalLSPTool, "false")
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt:  "review the repository",
+		WorkDir: t.TempDir(),
+		Metadata: map[string]string{
+			"model":                      "kimi-k2",
+			opencodeAllowedToolsMetadata: opencodeToolWebSearch + "," + opencodeToolLSP,
+		},
+		Env: []string{
+			workerenv.OpenAIBaseURL + "=http://models.example/v1",
+			"OPENCODE_EXPERIMENTAL=true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+
+	for _, name := range []string{opencodeEnableExa, opencodeExperimentalLSPTool} {
+		if got := envEntryValue(spec.Env, name); got != opencodeEnvTrue {
+			t.Fatalf("%s = %q, want true for explicitly allowed tool", name, got)
+		}
+		if slices.Contains(spec.UnsetEnv, name) {
+			t.Fatalf("UnsetEnv = %#v, want synthesized %s preserved", spec.UnsetEnv, name)
+		}
+	}
+	if got := envEntryValue(spec.Env, "OPENCODE_EXPERIMENTAL"); got != "" {
+		t.Fatalf("OPENCODE_EXPERIMENTAL = %q, want broad feature flag stripped", got)
+	}
+	if !slices.Contains(spec.UnsetEnv, "OPENCODE_EXPERIMENTAL") {
+		t.Fatalf("UnsetEnv = %#v, want broad feature flag removed", spec.UnsetEnv)
+	}
+}
+
+func TestOpencodeFeatureEnvRespectsDisallowedTools(t *testing.T) {
+	featureEnv := opencodeFeatureEnv(&agentEnvConfig{
+		AllowedToolsSet: true,
+		AllowedTools:    []string{opencodeToolWebSearch, opencodeToolLSP},
+		DisallowedTools: []string{opencodeToolWebSearch, opencodeToolLSP},
+	})
+	if len(featureEnv) != 0 {
+		t.Fatalf("opencodeFeatureEnv() = %#v, want no flags for disallowed tools", featureEnv)
 	}
 }
 
@@ -270,8 +337,8 @@ func TestOpencodeAdapterDenyBash(t *testing.T) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatalf("unmarshal opencode config: %v", err)
 	}
-	if cfg.Permission["bash"] != opencodePermissionDeny {
-		t.Fatalf("permission.bash = %q, want deny", cfg.Permission["bash"])
+	if cfg.Permission[opencodePermissionBash] != opencodePermissionDeny {
+		t.Fatalf("permission.bash = %q, want deny", cfg.Permission[opencodePermissionBash])
 	}
 }
 
@@ -293,12 +360,19 @@ func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
 		read.EnvFiles != opencodePermissionDeny || read.EnvExample != opencodePermissionAllow {
 		t.Fatalf("permission.read = %#v, want dotenv files denied except examples", read)
 	}
-	for _, permission := range []string{"glob", "grep"} {
+	for _, permission := range []string{opencodePermissionGlob, opencodePermissionGrep} {
 		if permissions[permission] != opencodePermissionAllow {
 			t.Fatalf("permission %q = %q, want allow", permission, permissions[permission])
 		}
 	}
-	for _, permission := range []string{"edit", "bash", "webfetch", opencodePermissionWebSearch, "task"} {
+	for _, permission := range []string{
+		opencodePermissionEdit,
+		opencodePermissionBash,
+		opencodePermissionWebFetch,
+		opencodePermissionWebSearch,
+		opencodePermissionTask,
+		opencodePermissionExternalDir,
+	} {
 		if permissions[permission] != opencodePermissionDeny {
 			t.Fatalf("permission %q = %q, want deny when excluded from allowlist", permission, permissions[permission])
 		}
@@ -326,21 +400,21 @@ func TestOpencodePermissionsMapListAliasesToRead(t *testing.T) {
 
 func TestOpencodePermissionsRespectDisallowedTools(t *testing.T) {
 	permissions, err := opencodePermissions(&agentEnvConfig{
-		DisallowedTools: []string{"Patch", "WebSearch"},
+		DisallowedTools: []string{"Patch", opencodeToolWebSearch},
 		AllowBash:       true,
 	})
 	if err != nil {
 		t.Fatalf("opencodePermissions() error = %v", err)
 	}
 
-	if permissions["edit"] != opencodePermissionDeny {
-		t.Fatalf("permission.edit = %q, want deny for Patch", permissions["edit"])
+	if permissions[opencodePermissionEdit] != opencodePermissionDeny {
+		t.Fatalf("permission.edit = %q, want deny for Patch", permissions[opencodePermissionEdit])
 	}
 	if permissions[opencodePermissionWebSearch] != opencodePermissionDeny {
 		t.Fatalf("permission.websearch = %q, want deny", permissions[opencodePermissionWebSearch])
 	}
-	if permissions["bash"] != opencodePermissionAllow {
-		t.Fatalf("permission.bash = %q, want allow", permissions["bash"])
+	if permissions[opencodePermissionBash] != opencodePermissionAllow {
+		t.Fatalf("permission.bash = %q, want allow", permissions[opencodePermissionBash])
 	}
 }
 
@@ -355,11 +429,11 @@ func TestOpencodePermissionsDisallowedToolsTakePrecedence(t *testing.T) {
 		t.Fatalf("opencodePermissions() error = %v", err)
 	}
 
-	if permissions["edit"] != opencodePermissionDeny {
-		t.Fatalf("permission.edit = %q, want deny", permissions["edit"])
+	if permissions[opencodePermissionEdit] != opencodePermissionDeny {
+		t.Fatalf("permission.edit = %q, want deny", permissions[opencodePermissionEdit])
 	}
-	if permissions["bash"] != opencodePermissionDeny {
-		t.Fatalf("permission.bash = %q, want deny", permissions["bash"])
+	if permissions[opencodePermissionBash] != opencodePermissionDeny {
+		t.Fatalf("permission.bash = %q, want deny", permissions[opencodePermissionBash])
 	}
 }
 
@@ -382,8 +456,8 @@ func TestOpencodePermissionsMapTodoRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opencodePermissions() error = %v", err)
 	}
-	if permissions["todowrite"] != opencodePermissionAllow {
-		t.Fatalf("permission.todowrite = %q, want allow for TodoRead", permissions["todowrite"])
+	if permissions[opencodePermissionTodoWrite] != opencodePermissionAllow {
+		t.Fatalf("permission.todowrite = %q, want allow for TodoRead", permissions[opencodePermissionTodoWrite])
 	}
 }
 
@@ -414,7 +488,8 @@ func TestOpencodeAdapterParseResult(t *testing.T) {
 	stdout := "" +
 		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
 		`{"type":"text","part":{"type":"text","text":"intermediate"}}` + "\n" +
-		`{"type":"text","part":{"type":"text","text":"final assistant message"}}` + "\n"
+		`{"type":"text","part":{"type":"text","text":"final assistant message"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}` + "\n"
 	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
 	if err != nil {
 		t.Fatalf("ParseResult() error = %v", err)
@@ -422,8 +497,27 @@ func TestOpencodeAdapterParseResult(t *testing.T) {
 	if result.Result != "final assistant message" {
 		t.Fatalf("Result = %q, want final assistant message", result.Result)
 	}
-	if result.Metadata["adapter"] != RuntimeOpencode {
+	if result.Metadata[opencodeMetadataAdapter] != RuntimeOpencode {
 		t.Fatalf("Metadata = %#v, want opencode adapter", result.Metadata)
+	}
+}
+
+func TestOpencodeAdapterParseResultRejectsFailedFinish(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	for _, reason := range []string{opencodeFinishReasonUnknown, opencodeFinishReasonError} {
+		t.Run(reason, func(t *testing.T) {
+			stdout := "" +
+				`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+				`{"type":"text","part":{"type":"text","text":"partial assistant message"}}` + "\n" +
+				`{"type":"step_finish","part":{"type":"step-finish","reason":"` + reason + `"}}` + "\n"
+			result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+			if err == nil || !strings.Contains(err.Error(), reason+" finish reason") {
+				t.Fatalf("ParseResult() error = %v, want %s finish rejection", err, reason)
+			}
+			if result.Result != stdout {
+				t.Fatalf("Result = %q, want exact failed stdout", result.Result)
+			}
+		})
 	}
 }
 

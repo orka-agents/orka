@@ -217,7 +217,35 @@ describe('AgentCreateForm', () => {
       expect(toast.success).toHaveBeenCalledWith('Agent created')
     })
     expect(submitted.spec.runtime.type).toBe('opencode')
+    expect(submitted.spec.runtime.defaultAllowedTools).toEqual(['Read', 'Glob', 'Grep', 'Bash', 'LS', 'Edit'])
     expect(submitted.spec.model).toEqual({ name: 'moonshotai/Kimi-K2-Instruct-0905' })
+  })
+
+  it('preserves an edited tool list across runtime changes', async () => {
+    useStateModeOverride = 'runtime'
+    const user = userEvent.setup()
+    render(<AgentCreateForm />)
+
+    const runtimeSelect = screen.getAllByRole('combobox')[1]
+    await user.click(runtimeSelect)
+    const opencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+    expect(opencodeOption).toBeDefined()
+    await user.click(opencodeOption!)
+
+    const toolsInput = screen.getByPlaceholderText('Read,Glob,Grep,Bash,LS,Edit')
+    await user.clear(toolsInput)
+    await user.type(toolsInput, 'Read,Glob,Grep,Bash,LS')
+
+    await user.click(runtimeSelect)
+    const claudeOption = screen.getAllByText('Claude Code').find((element) => element.tagName !== 'OPTION')
+    expect(claudeOption).toBeDefined()
+    await user.click(claudeOption!)
+    await user.click(runtimeSelect)
+    const reopenedOpencodeOption = screen.getAllByText('OpenCode').find((element) => element.tagName !== 'OPTION')
+    expect(reopenedOpencodeOption).toBeDefined()
+    await user.click(reopenedOpencodeOption!)
+
+    expect(toolsInput).toHaveValue('Read,Glob,Grep,Bash,LS')
   })
 
   it('rejects a whitespace-only OpenCode model', async () => {

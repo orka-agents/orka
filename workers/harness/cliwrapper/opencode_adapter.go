@@ -24,11 +24,27 @@ const (
 	opencodeDisableExternalSkills = "OPENCODE_DISABLE_EXTERNAL_SKILLS"
 	opencodeConfigPathEnv         = "OPENCODE_CONFIG"
 	opencodeEnvPrefix             = "OPENCODE_"
+	opencodeEnableExa             = "OPENCODE_ENABLE_EXA"
+	opencodeExperimentalLSPTool   = "OPENCODE_EXPERIMENTAL_LSP_TOOL"
+	opencodeMetadataAdapter       = "adapter"
 	opencodePermissionAllow       = "allow"
+	opencodePermissionBash        = "bash"
 	opencodePermissionDeny        = "deny"
+	opencodePermissionEdit        = "edit"
+	opencodePermissionExternalDir = "external_directory"
+	opencodePermissionGlob        = "glob"
+	opencodePermissionGrep        = "grep"
+	opencodePermissionLSP         = "lsp"
+	opencodePermissionQuestion    = "question"
 	opencodePermissionWebSearch   = "websearch"
 	opencodePermissionRead        = "read"
+	opencodePermissionSkill       = "skill"
+	opencodePermissionTask        = "task"
+	opencodePermissionTodoWrite   = "todowrite"
+	opencodePermissionWebFetch    = "webfetch"
 	opencodeEnvTrue               = "true"
+	opencodeFinishReasonError     = "error"
+	opencodeFinishReasonUnknown   = "unknown"
 	opencodeEscapedValueEnv       = "ORKA_OPENCODE_API_KEY_JSON_ESCAPED"
 	opencodeReadOnlyConfigHome    = "/opt/orka-opencode-config"
 )
@@ -83,8 +99,9 @@ type opencodeModelLimit struct {
 type opencodeOutputEvent struct {
 	Type string `json:"type"`
 	Part struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type   string `json:"type"`
+		Text   string `json:"text"`
+		Reason string `json:"reason"`
 	} `json:"part"`
 }
 
@@ -123,6 +140,7 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 	xdgDataHome := filepath.Join(scratchDir, "data")
 	xdgCacheHome := filepath.Join(scratchDir, "cache")
 	xdgStateHome := filepath.Join(scratchDir, "state")
+	featureEnv := opencodeFeatureEnv(agentCfg)
 	env, unsetEnv := buildOpencodeEnv(
 		turn.Env,
 		scratchDir,
@@ -131,6 +149,7 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 		xdgCacheHome,
 		xdgStateHome,
 		configPath,
+		featureEnv,
 	)
 	escapedValue := opencodeEscapedConfigValue(envEntryValue(turn.Env, workerenv.OpenAIAPIKey))
 	env = setEnv(env, opencodeEscapedValueEnv, escapedValue)
@@ -149,10 +168,15 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 
 func (a *OpencodeAdapter) ParseResult(_ context.Context, _ TurnContext, run CommandResult) (TurnResult, error) {
 	stdout := run.ExactStdout()
-	if message := opencodeFinalMessage(stdout); message != "" {
-		return TurnResult{Result: message, Metadata: map[string]string{"adapter": RuntimeOpencode}}, nil
+	message, finishReason := opencodeFinalMessage(stdout)
+	if finishReason == opencodeFinishReasonUnknown || finishReason == opencodeFinishReasonError {
+		return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
+			fmt.Errorf("opencode output ended with %s finish reason", finishReason)
 	}
-	return TurnResult{Result: stdout, Metadata: map[string]string{"adapter": RuntimeOpencode}},
+	if message != "" {
+		return TurnResult{Result: message, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}}, nil
+	}
+	return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
 		fmt.Errorf("opencode output did not contain a completed text event")
 }
 
@@ -164,7 +188,16 @@ func buildOpencodeEnv(
 	xdgCacheHome string,
 	xdgStateHome string,
 	configPath string,
+	featureEnv []string,
 ) ([]string, []string) {
+	enabledFeatureFlags := make(map[string]struct{}, len(featureEnv))
+	for _, entry := range featureEnv {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok {
+			enabledFeatureFlags[name] = struct{}{}
+		}
+	}
+
 	reserved := map[string]struct{}{}
 	for _, entry := range append(os.Environ(), turnEnv...) {
 		name, _, ok := strings.Cut(entry, "=")
@@ -175,6 +208,9 @@ func buildOpencodeEnv(
 		case opencodeConfigPathEnv, opencodeDisableProjectConfig, opencodeDisableAutoUpdate, opencodeDisableExternalSkills:
 			continue
 		default:
+			if _, ok := enabledFeatureFlags[name]; ok {
+				continue
+			}
 			reserved[name] = struct{}{}
 		}
 	}
@@ -184,7 +220,7 @@ func buildOpencodeEnv(
 	}
 	sort.Strings(unsetEnv)
 
-	env := make([]string, 0, len(turnEnv)+6)
+	env := make([]string, 0, len(turnEnv)+len(featureEnv)+6)
 	for _, entry := range turnEnv {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && strings.HasPrefix(name, opencodeEnvPrefix) {
@@ -201,7 +237,40 @@ func buildOpencodeEnv(
 	env = setEnv(env, opencodeDisableProjectConfig, opencodeEnvTrue)
 	env = setEnv(env, opencodeDisableAutoUpdate, opencodeEnvTrue)
 	env = setEnv(env, opencodeDisableExternalSkills, opencodeEnvTrue)
+	for _, entry := range featureEnv {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env = setEnv(env, name, value)
+		}
+	}
 	return env, unsetEnv
+}
+
+func opencodeFeatureEnv(cfg *agentEnvConfig) []string {
+	if cfg == nil || !cfg.AllowedToolsSet {
+		return nil
+	}
+
+	allowed := map[string]bool{}
+	for _, tool := range cfg.AllowedTools {
+		if permission := opencodePermissionForTool(tool); permission != "" {
+			allowed[permission] = true
+		}
+	}
+	for _, tool := range cfg.DisallowedTools {
+		if permission := opencodePermissionForTool(tool); permission != "" {
+			delete(allowed, permission)
+		}
+	}
+
+	featureEnv := []string(nil)
+	if allowed[opencodePermissionWebSearch] {
+		featureEnv = append(featureEnv, opencodeEnableExa+"="+opencodeEnvTrue)
+	}
+	if allowed[opencodePermissionLSP] {
+		featureEnv = append(featureEnv, opencodeExperimentalLSPTool+"="+opencodeEnvTrue)
+	}
+	return featureEnv
 }
 
 func writeOpencodeConfig(cfg *agentEnvConfig, baseURL string) (string, string, error) {
@@ -293,9 +362,9 @@ func writeOpencodeConfig(cfg *agentEnvConfig, baseURL string) (string, string, e
 
 func opencodePermissions(cfg *agentEnvConfig) (map[string]any, error) {
 	permissions := map[string]any{
-		"edit":  opencodePermissionAllow,
-		"bash":  opencodePermissionDeny,
-		"skill": opencodePermissionDeny,
+		opencodePermissionEdit:  opencodePermissionAllow,
+		opencodePermissionBash:  opencodePermissionDeny,
+		opencodePermissionSkill: opencodePermissionDeny,
 	}
 	if cfg == nil {
 		return permissions, nil
@@ -318,7 +387,7 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]any, error) {
 			}
 		}
 	} else if cfg.AllowBash {
-		permissions["bash"] = opencodePermissionAllow
+		permissions[opencodePermissionBash] = opencodePermissionAllow
 	}
 	for _, tool := range cfg.DisallowedTools {
 		if permission := opencodePermissionForTool(tool); permission != "" {
@@ -326,9 +395,9 @@ func opencodePermissions(cfg *agentEnvConfig) (map[string]any, error) {
 		}
 	}
 	if !cfg.AllowBash {
-		permissions["bash"] = opencodePermissionDeny
+		permissions[opencodePermissionBash] = opencodePermissionDeny
 	}
-	permissions["skill"] = opencodePermissionDeny
+	permissions[opencodePermissionSkill] = opencodePermissionDeny
 	return permissions, nil
 }
 
@@ -349,16 +418,17 @@ func opencodeAllowedPermission(permission string) any {
 func opencodeManagedPermissions() []string {
 	return []string{
 		opencodePermissionRead,
-		"glob",
-		"grep",
-		"edit",
-		"bash",
-		"webfetch",
+		opencodePermissionExternalDir,
+		opencodePermissionGlob,
+		opencodePermissionGrep,
+		opencodePermissionEdit,
+		opencodePermissionBash,
+		opencodePermissionWebFetch,
 		opencodePermissionWebSearch,
-		"task",
-		"todowrite",
-		"question",
-		"lsp",
+		opencodePermissionTask,
+		opencodePermissionTodoWrite,
+		opencodePermissionQuestion,
+		opencodePermissionLSP,
 	}
 }
 
@@ -367,26 +437,26 @@ func opencodePermissionForTool(tool string) string {
 	switch name {
 	case "read", "fileread", "ls", "list":
 		return opencodePermissionRead
-	case "glob":
-		return "glob"
-	case "grep":
-		return "grep"
-	case "write", "edit", "multiedit", "notebookedit", "patch", "filewrite":
-		return "edit"
-	case "bash", "shell", "codeexec":
-		return "bash"
-	case "webfetch":
-		return "webfetch"
+	case opencodePermissionGlob:
+		return opencodePermissionGlob
+	case opencodePermissionGrep:
+		return opencodePermissionGrep
+	case "write", opencodePermissionEdit, "multiedit", "notebookedit", "patch", "filewrite":
+		return opencodePermissionEdit
+	case opencodePermissionBash, "shell", "codeexec":
+		return opencodePermissionBash
+	case opencodePermissionWebFetch:
+		return opencodePermissionWebFetch
 	case "websearch":
 		return opencodePermissionWebSearch
-	case "task":
-		return "task"
-	case "todoread", "todowrite":
-		return "todowrite"
-	case "question":
-		return "question"
+	case opencodePermissionTask:
+		return opencodePermissionTask
+	case "todoread", opencodePermissionTodoWrite:
+		return opencodePermissionTodoWrite
+	case opencodePermissionQuestion:
+		return opencodePermissionQuestion
 	case "lsp":
-		return "lsp"
+		return opencodePermissionLSP
 	default:
 		return ""
 	}
@@ -404,19 +474,22 @@ func opencodeBaseURL(value string) string {
 	return strings.TrimSuffix(value, "/chat/completions")
 }
 
-func opencodeFinalMessage(stdout string) string {
+func opencodeFinalMessage(stdout string) (string, string) {
 	scanner := bufio.NewScanner(strings.NewReader(stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxStoredResultBytes)
 	last := ""
+	finishReason := ""
 	for scanner.Scan() {
 		var event opencodeOutputEvent
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
 		}
-		if event.Type != "text" || event.Part.Type != "text" || strings.TrimSpace(event.Part.Text) == "" {
-			continue
+		switch {
+		case event.Type == "text" && event.Part.Type == "text" && strings.TrimSpace(event.Part.Text) != "":
+			last = event.Part.Text
+		case event.Type == "step_finish" && event.Part.Type == "step-finish":
+			finishReason = strings.TrimSpace(event.Part.Reason)
 		}
-		last = event.Part.Text
 	}
-	return last
+	return last, finishReason
 }

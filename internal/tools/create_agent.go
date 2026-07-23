@@ -203,8 +203,16 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if a.Model != nil {
 		requestedModel = strings.TrimSpace(a.Model.Name)
 	}
-	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) && requestedModel == "" {
-		return "", fmt.Errorf("model.name is required for opencode runtime")
+	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) {
+		if requestedModel == "" {
+			return "", fmt.Errorf("model.name is required for opencode runtime")
+		}
+		if provider := strings.TrimSpace(a.Model.Provider); provider != "" {
+			providerPrefix := strings.TrimSuffix(provider, "/") + "/"
+			if !strings.HasPrefix(requestedModel, providerPrefix) {
+				requestedModel = providerPrefix + strings.TrimPrefix(requestedModel, "/")
+			}
+		}
 	}
 
 	parentName := os.Getenv(envOrkaTaskName)
