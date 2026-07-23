@@ -12,6 +12,7 @@ on:
         type: string
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -84,7 +85,8 @@ jobs:
           if git checkout "${TARGET_BRANCH}"; then
             exit 0
           fi
-          git checkout -b "${TARGET_BRANCH}"
+          git fetch origin main:refs/remotes/origin/main
+          git checkout -b "${TARGET_BRANCH}" origin/main
           git push --set-upstream origin "${TARGET_BRANCH}"
 
       - name: Generate and promote release manifests
@@ -153,6 +155,7 @@ jobs:
           scripts/helm-crds.sh check-package "${chart_packages[0]}"
 
       - name: Create release pull request
+        id: create-pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -173,3 +176,21 @@ jobs:
             - verifies chart metadata, staging parity, lint, and packaged CRDs
 
             Merge this PR before creating the matching `${{ env.NEWVERSION }}` tag. The tag workflow publishes the already-reviewed promoted snapshot; it does not regenerate or promote manifests.
+
+
+      - name: Dispatch release pull request validation
+        if: steps.create-pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_PR_BRANCH: release-${{ env.NEWVERSION }}
+        run: |
+          set -euo pipefail
+
+          # Events created by GITHUB_TOKEN do not recursively trigger ordinary
+          # push/pull_request workflows. workflow_dispatch is the documented
+          # exception, so explicitly attach the normal release validations to
+          # the generated PR head commit.
+          gh workflow run test.yml --ref "${RELEASE_PR_BRANCH}"
+          gh workflow run lint.yml --ref "${RELEASE_PR_BRANCH}"
+          gh workflow run helm-chart.yml --ref "${RELEASE_PR_BRANCH}"
+          gh workflow run govulncheck.yml --ref "${RELEASE_PR_BRANCH}"
