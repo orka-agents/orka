@@ -31,12 +31,14 @@ var (
 	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "ghcr.io/orka-agents/orka:latest"
 
-	// Worker and harness images to build and load for e2e testing.
+	// Worker, harness, and focused fixture images to build and load for e2e testing.
 	aiWorkerImage                    = "ghcr.io/orka-agents/orka/ai-worker:latest"
 	generalWorkerImage               = "ghcr.io/orka-agents/orka/general-worker:latest"
 	harnessWrapperImage              = "ghcr.io/orka-agents/orka/agent-harness-wrapper:latest"
 	agentRuntimeExternalHarnessImage = "ghcr.io/orka-agents/orka/agent-runtime-external-harness:e2e"
+	gatewayReferenceAdapterImage     = "ghcr.io/orka-agents/orka/gateway-reference-adapter:e2e"
 	agentRuntimeExternalE2EEnvVar    = "E2E_AGENTRUNTIME_EXTERNAL"
+	gatewayE2EEnvVar                 = "E2E_GATEWAY"
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
@@ -72,12 +74,19 @@ var _ = BeforeSuite(func() {
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Docker images")
 
-	if agentRuntimeExternalE2EEnabled() {
+	if agentRuntimeExternalE2EEnabled() || gatewayE2EEnabled() {
 		By("building the AgentRuntime external harness Docker image")
 		cmd = exec.Command("docker", "build", "-t", agentRuntimeExternalHarnessImage,
 			"-f", "examples/harness/echo/Dockerfile", ".")
 		_, err = utils.Run(cmd)
 		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build AgentRuntime external harness image")
+	}
+	if gatewayE2EEnabled() {
+		By("building the Gateway reference adapter Docker image")
+		cmd = exec.Command("docker", "build", "-t", gatewayReferenceAdapterImage,
+			"-f", "cmd/orka-gateway-reference-adapter/Dockerfile", ".")
+		_, err = utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build Gateway reference adapter image")
 	}
 
 	By("loading all images into Kind cluster")
@@ -87,8 +96,11 @@ var _ = BeforeSuite(func() {
 		generalWorkerImage,
 		harnessWrapperImage,
 	}
-	if agentRuntimeExternalE2EEnabled() {
+	if agentRuntimeExternalE2EEnabled() || gatewayE2EEnabled() {
 		images = append(images, agentRuntimeExternalHarnessImage)
+	}
+	if gatewayE2EEnabled() {
+		images = append(images, gatewayReferenceAdapterImage)
 	}
 	for _, img := range images {
 		err = utils.LoadImageToKindClusterWithName(img)
@@ -148,18 +160,26 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
 	By("waiting for CRDs to be established")
+	requiredCRDs := []string{
+		"tasks.core.orka.ai",
+		"agents.core.orka.ai",
+		"agentruntimes.core.orka.ai",
+		"tools.core.orka.ai",
+		"providers.core.orka.ai",
+		"skills.core.orka.ai",
+		"repositoryscans.core.orka.ai",
+		"repositorymonitors.core.orka.ai",
+		"substrateactorpools.core.orka.ai",
+	}
+	if gatewayE2EEnabled() {
+		requiredCRDs = append(requiredCRDs,
+			"gatewayclasses.gateway.orka.ai",
+			"gateways.gateway.orka.ai",
+			"gatewaybindings.gateway.orka.ai",
+		)
+	}
 	Eventually(func(g Gomega) {
-		for _, crd := range []string{
-			"tasks.core.orka.ai",
-			"agents.core.orka.ai",
-			"agentruntimes.core.orka.ai",
-			"tools.core.orka.ai",
-			"providers.core.orka.ai",
-			"skills.core.orka.ai",
-			"repositoryscans.core.orka.ai",
-			"repositorymonitors.core.orka.ai",
-			"substrateactorpools.core.orka.ai",
-		} {
+		for _, crd := range requiredCRDs {
 			cmd := exec.Command("kubectl", "wait", "--for=condition=Established",
 				"crd/"+crd, "--timeout=30s")
 			_, err := utils.Run(cmd)
@@ -313,7 +333,15 @@ func createK8sSecret(name, ns string, data map[string]string) error {
 }
 
 func agentRuntimeExternalE2EEnabled() bool {
-	value := strings.TrimSpace(strings.ToLower(os.Getenv(agentRuntimeExternalE2EEnvVar)))
+	return e2eFlagEnabled(agentRuntimeExternalE2EEnvVar)
+}
+
+func gatewayE2EEnabled() bool {
+	return e2eFlagEnabled(gatewayE2EEnvVar)
+}
+
+func e2eFlagEnabled(name string) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	return value == "1" || value == "true" || value == "yes"
 }
 
