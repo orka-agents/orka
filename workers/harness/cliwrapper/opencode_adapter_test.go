@@ -521,6 +521,20 @@ func TestOpencodeAdapterParseResultRejectsFailedFinish(t *testing.T) {
 	}
 }
 
+func TestOpencodeAdapterParseResultRejectsTextWithoutStepFinish(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	stdout := "" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"partial assistant message"}}` + "\n"
+	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err == nil || !strings.Contains(err.Error(), "terminal step_finish event") {
+		t.Fatalf("ParseResult() error = %v, want missing terminal step_finish rejection", err)
+	}
+	if result.Result != stdout {
+		t.Fatalf("Result = %q, want exact truncated stdout", result.Result)
+	}
+}
+
 func TestOpencodeAdapterParseResultRejectsIncompleteJSON(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
 	stdout := `{"type":"step_start","part":{"type":"step-start"}}` + "\n"

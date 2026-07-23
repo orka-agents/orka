@@ -97,10 +97,14 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 		case map[string]any:
 			name := chatGetStringArg(m, nameField)
 			provider := chatGetStringArg(m, "provider")
-			if chatRuntimeTypeArg(a) == corev1alpha1.AgentRuntimeOpencode && provider != "" {
-				providerPrefix := strings.TrimSuffix(provider, "/") + "/"
-				if !strings.HasPrefix(name, providerPrefix) {
-					name = providerPrefix + strings.TrimPrefix(name, "/")
+			if chatRuntimeTypeArg(a) == corev1alpha1.AgentRuntimeOpencode {
+				if strings.TrimSpace(name) == "" {
+					name = ""
+				} else if provider != "" {
+					providerPrefix := strings.TrimSuffix(provider, "/") + "/"
+					if !strings.HasPrefix(name, providerPrefix) {
+						name = providerPrefix + strings.TrimPrefix(name, "/")
+					}
 				}
 				provider = ""
 			}

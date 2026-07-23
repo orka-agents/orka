@@ -146,7 +146,7 @@ call in the SAME response. If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
 without stopping to narrate between steps. Act first, summarize after.
 
-LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex) typically run for 5-20 minutes.
+LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
 You MUST keep calling wait_for_task in a loop until the task reaches a terminal state
 (Succeeded or Failed). Do NOT give up after a few polls — keep waiting. If wait_for_task
 returns "still running", immediately call wait_for_task again. Only stop when the task

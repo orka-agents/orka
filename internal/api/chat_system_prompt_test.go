@@ -80,6 +80,9 @@ func TestBuildBehaviorSection(t *testing.T) {
 	if !strings.Contains(s, "CRITICAL RULE") {
 		t.Error("missing critical rule")
 	}
+	if !strings.Contains(s, "Agent tasks (Copilot, Claude Code, Codex, OpenCode)") {
+		t.Error("missing complete agent runtime list")
+	}
 }
 
 func TestBuildToolCallStyleSection(t *testing.T) {
@@ -124,6 +127,9 @@ func TestBuildTaskTypesSection(t *testing.T) {
 			}
 			if tt.wantContainer && !strings.Contains(s, "container") {
 				t.Error("missing container task type")
+			}
+			if !strings.Contains(s, "external CLI runtime (Copilot, Claude Code, Codex, OpenCode)") {
+				t.Error("missing complete agent runtime list")
 			}
 			for _, want := range []string{
 				"Use create_agent_task only for Agents that have runtime listed",

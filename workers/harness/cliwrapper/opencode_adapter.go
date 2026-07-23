@@ -174,6 +174,10 @@ func (a *OpencodeAdapter) ParseResult(_ context.Context, _ TurnContext, run Comm
 			fmt.Errorf("opencode output ended with %s finish reason", finishReason)
 	}
 	if message != "" {
+		if finishReason == "" {
+			return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
+				fmt.Errorf("opencode output did not contain a terminal step_finish event")
+		}
 		return TurnResult{Result: message, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}}, nil
 	}
 	return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},

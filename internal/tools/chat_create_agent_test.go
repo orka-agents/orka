@@ -142,6 +142,64 @@ func TestChatCreateAgentTool_Execute_PreservesObjectOpencodeModel(t *testing.T) 
 	}
 }
 
+func TestChatCreateAgentTool_Execute_RejectsBlankObjectOpencodeModelNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentName string
+		modelName string
+	}{
+		{name: "empty", agentName: "opencode-empty-model", modelName: ""},
+		{name: "whitespace", agentName: "opencode-whitespace-model", modelName: " \t\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: defaultNamespace},
+				Data: map[string][]byte{
+					workerenv.OpenAIBaseURL: []byte("https://models.example.invalid/v1"),
+					workerenv.OpenAIAPIKey:  []byte("credential"),
+				},
+			}
+			fc := newFakeClient(secret)
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			args, err := json.Marshal(map[string]any{
+				nameField: tt.agentName,
+				modelField: map[string]any{
+					"provider": testProviderOpenAI,
+					nameField:  tt.modelName,
+				},
+				runtimeField: map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)},
+			})
+			if err != nil {
+				t.Fatalf("marshal args: %v", err)
+			}
+
+			result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if response.Success {
+				t.Fatalf("expected blank OpenCode model name to be rejected, got success: %#v", response)
+			}
+			if response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, "model.name is required for opencode") {
+				t.Fatalf("error result = %#v, want invalid_arguments for blank model.name", response)
+			}
+
+			var created corev1alpha1.Agent
+			err = fc.Get(context.Background(), client.ObjectKey{Name: tt.agentName, Namespace: defaultNamespace}, &created)
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("agent should not be created for blank model.name, get err=%v", err)
+			}
+		})
+	}
+}
+
 func TestChatCreateAgentTool_Execute_RollsBackAgentWhenInitialTaskAuthorizationFails(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
