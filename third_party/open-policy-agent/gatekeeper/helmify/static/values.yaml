@@ -8,7 +8,7 @@ controller:
   # Controller image
   image:
     repository: ghcr.io/orka-agents/orka
-    tag: "0.1.0"
+    tag: "0.1.1"
     pullPolicy: IfNotPresent
 
   # Resource limits
@@ -158,18 +158,18 @@ workers:
   ai:
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
-      tag: "0.1.0"
+      tag: "0.1.1"
       pullPolicy: IfNotPresent
 
   general:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
-      tag: "0.1.0"
+      tag: "0.1.1"
 
   harnessWrapper:
     image:
       repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-      tag: "0.1.0"
+      tag: "0.1.1"
       pullPolicy: IfNotPresent
     auth:
       # Existing Secret containing the shared wrapper bearer token.

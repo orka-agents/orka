@@ -7152,7 +7152,7 @@ spec:
           value: danger-full-access
         - name: ORKA_SA_TOKEN_PATH
           value: /var/run/orka/upload-token/token
-        image: ghcr.io/orka-agents/orka/agent-harness-wrapper:0.1.0
+        image: ghcr.io/orka-agents/orka/agent-harness-wrapper:0.1.1
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -7249,8 +7249,8 @@ spec:
         - --store-backend=sqlite
         - --store-path=/data/orka.db
         - --controller-url=http://orka-api.orka-system.svc:8080
-        - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.0
-        - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.0
+        - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
+        - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
         - --execution-workspace-default-provider=agent-sandbox
         - --agent-sandbox-enabled=false
         - --agent-sandbox-warm-pool-policy=disabled
@@ -7274,7 +7274,7 @@ spec:
           value: /var/run/orka/harness-wrapper/token
         - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
           value: orka-agent-harness-wrapper
-        image: ghcr.io/orka-agents/orka:0.1.0
+        image: ghcr.io/orka-agents/orka:0.1.1
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

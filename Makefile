@@ -1,7 +1,7 @@
 # Current application release version. Chart.yaml has its own version and may
 # advance independently for chart-only changes. Release preparation aligns both
 # versions for a tagged application release.
-VERSION := v0.1.0
+VERSION := v0.1.1
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
