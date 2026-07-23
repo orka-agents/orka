@@ -66,8 +66,9 @@ func TestOpencodeAdapterBuildCommand(t *testing.T) {
 
 	configPath := spec.TempFiles[0]
 	xdgConfigHome := envEntryValue(spec.Env, "XDG_CONFIG_HOME")
-	if xdgConfigHome != opencodeReadOnlyConfigHome {
-		t.Fatalf("XDG_CONFIG_HOME = %q, want read-only global config %q", xdgConfigHome, opencodeReadOnlyConfigHome)
+	wantXDGConfigHome := filepath.Join(spec.TempFiles[1], "config")
+	if xdgConfigHome != wantXDGConfigHome {
+		t.Fatalf("XDG_CONFIG_HOME = %q, want writable per-turn config %q", xdgConfigHome, wantXDGConfigHome)
 	}
 	if !strings.HasPrefix(configPath, spec.TempFiles[1]+string(filepath.Separator)) {
 		t.Fatalf("config path = %q, want isolated under scratch directory", configPath)
@@ -249,7 +250,7 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 	}
 	scratchDir := spec.TempFiles[1]
 	for name, want := range map[string]string{
-		"XDG_CONFIG_HOME": opencodeReadOnlyConfigHome,
+		"XDG_CONFIG_HOME": filepath.Join(scratchDir, "config"),
 		"XDG_DATA_HOME":   filepath.Join(scratchDir, "data"),
 		"XDG_CACHE_HOME":  filepath.Join(scratchDir, "cache"),
 		"XDG_STATE_HOME":  filepath.Join(scratchDir, "state"),
@@ -257,6 +258,29 @@ func TestOpencodeAdapterStripsRuntimeControlEnvironment(t *testing.T) {
 		if got := envEntryValue(spec.Env, name); got != want {
 			t.Fatalf("%s = %q, want isolated path %q", name, got, want)
 		}
+	}
+}
+
+func TestOpencodeAdapterUsesWritablePerTurnConfigHome(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		WorkDir:  t.TempDir(),
+		Metadata: map[string]string{"model": "kimi-k2"},
+		Env:      []string{workerenv.OpenAIBaseURL + "=http://models.example/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand() error = %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+
+	scratchDir := spec.TempFiles[1]
+	want := filepath.Join(scratchDir, "config")
+	got := envEntryValue(spec.Env, "XDG_CONFIG_HOME")
+	if got != want {
+		t.Fatalf("XDG_CONFIG_HOME = %q, want writable per-turn path %q", got, want)
+	}
+	if err := os.WriteFile(filepath.Join(got, "opencode", ".gitignore"), []byte("node_modules\n"), 0o600); err != nil {
+		t.Fatalf("write OpenCode config metadata: %v", err)
 	}
 }
 

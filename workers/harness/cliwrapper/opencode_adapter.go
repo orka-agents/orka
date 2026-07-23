@@ -47,7 +47,6 @@ const (
 	opencodeFinishReasonToolCalls = "tool-calls"
 	opencodeFinishReasonUnknown   = "unknown"
 	opencodeEscapedValueEnv       = "ORKA_OPENCODE_API_KEY_JSON_ESCAPED"
-	opencodeReadOnlyConfigHome    = "/opt/orka-opencode-config"
 )
 
 type OpencodeAdapter struct {
@@ -137,7 +136,7 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 		return nil, err
 	}
 
-	xdgConfigHome := opencodeReadOnlyConfigHome
+	xdgConfigHome := filepath.Join(scratchDir, "config")
 	xdgDataHome := filepath.Join(scratchDir, "data")
 	xdgCacheHome := filepath.Join(scratchDir, "cache")
 	xdgStateHome := filepath.Join(scratchDir, "state")

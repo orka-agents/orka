@@ -44,10 +44,6 @@ COPY --from=builder /out/orka-workspace-agent /orka-workspace-agent
 RUN printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /bin/echo-token \
     && chmod +x /bin/echo-token
 
-# OpenCode loads the generated config via OPENCODE_CONFIG. Keep its global config root read-only so background dependency setup is skipped without retaining cross-turn state.
-RUN mkdir -p /opt/orka-opencode-config/opencode \
-    && chmod -R 0555 /opt/orka-opencode-config
-
 RUN mkdir -p /workspace /home/node /tmp /app \
     && ln -s /home/node /home/worker \
     && chown -R 1000:1000 /workspace /home/node /tmp /app /orka-agent-harness-wrapper /orka-workspace-agent \
