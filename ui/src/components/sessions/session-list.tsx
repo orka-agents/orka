@@ -69,7 +69,15 @@ export function SessionList() {
                   </TableCell>
                   <TableCell>{timeAgo(session.createdAt)}</TableCell>
                   <TableCell>
-                    <Button variant="ghost" size="icon" onClick={() => deleteSession.mutate(session.name)}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Delete session ${session.name}`}
+                      onClick={() => {
+                        if (!confirm(`Delete session "${session.name}"?`)) return
+                        deleteSession.mutate(session.name)
+                      }}
+                    >
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
                     </Button>
                   </TableCell>

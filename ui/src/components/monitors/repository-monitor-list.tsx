@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import type { RepositoryMonitor } from '@/schemas/monitor'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
+import { toast } from 'sonner'
 
 function timeAgo(ts?: string) {
   if (!ts) return 'Never'
@@ -79,6 +80,13 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
   const status = monitor.status
   const displayName = repositoryMonitorDisplayName(monitor)
 
+  const handleRunMonitor = () => {
+    runMonitor.mutate(undefined, {
+      onSuccess: () => toast.success('Repository monitor run started'),
+      onError: (error) => toast.error(`Failed to run repository monitor: ${error instanceof Error ? error.message : 'Unknown error'}`),
+    })
+  }
+
   return (
     <Card className="transition-colors hover:border-primary/50">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
@@ -113,7 +121,7 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
           <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }}>
             <Button variant="outline">Open</Button>
           </Link>
-          <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
+          <Button variant="secondary" onClick={handleRunMonitor} disabled={runMonitor.isPending}>
             <Play className="mr-2 h-4 w-4" />
             Run
           </Button>

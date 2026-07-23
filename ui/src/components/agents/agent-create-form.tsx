@@ -82,13 +82,13 @@ export function AgentCreateForm() {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Name</label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-agent" required />
+                <label htmlFor="agent-name" className="text-sm font-medium">Name</label>
+                <Input id="agent-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-agent" required />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Mode</label>
+                <label htmlFor="agent-mode" className="text-sm font-medium">Mode</label>
                 <Select value={mode} onValueChange={(v) => setMode(v as 'ai' | 'runtime')}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="agent-mode"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ai">AI (LLM Provider)</SelectItem>
                     <SelectItem value="runtime">CLI Runtime (Copilot / Claude / Codex)</SelectItem>
@@ -101,9 +101,9 @@ export function AgentCreateForm() {
               <div className="space-y-4">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Provider</label>
+                    <label htmlFor="agent-provider" className="text-sm font-medium">Provider</label>
                     <Select value={provider} onValueChange={setProvider}>
-                      <SelectTrigger><SelectValue placeholder="Select provider" /></SelectTrigger>
+                      <SelectTrigger id="agent-provider"><SelectValue placeholder="Select provider" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="anthropic">Anthropic</SelectItem>
                         <SelectItem value="openai">OpenAI</SelectItem>
@@ -111,23 +111,24 @@ export function AgentCreateForm() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Model</label>
-                    <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-opus-4-5-20250514" />
+                    <label htmlFor="agent-model" className="text-sm font-medium">Model</label>
+                    <Input id="agent-model" value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-opus-4-5-20250514" />
                   </div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Temperature</label>
-                    <Input type="number" step="0.1" min="0" max="2" value={temperature} onChange={(e) => setTemperature(e.target.value)} />
+                    <label htmlFor="agent-temperature" className="text-sm font-medium">Temperature</label>
+                    <Input id="agent-temperature" type="number" step="0.1" min="0" max="2" value={temperature} onChange={(e) => setTemperature(e.target.value)} />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Max Tokens</label>
-                    <Input type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="Optional" />
+                    <label htmlFor="agent-max-tokens" className="text-sm font-medium">Max Tokens</label>
+                    <Input id="agent-max-tokens" type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="Optional" />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">System Prompt</label>
+                  <label htmlFor="agent-system-prompt" className="text-sm font-medium">System Prompt</label>
                   <textarea
+                    id="agent-system-prompt"
                     className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     value={systemPrompt}
                     onChange={(e) => setSystemPrompt(e.target.value)}
@@ -141,9 +142,9 @@ export function AgentCreateForm() {
               <div className="space-y-4">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Runtime Type</label>
+                    <label htmlFor="agent-runtime-type" className="text-sm font-medium">Runtime Type</label>
                     <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot' | 'codex')}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectTrigger id="agent-runtime-type"><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="claude">Claude Code</SelectItem>
                         <SelectItem value="copilot">GitHub Copilot</SelectItem>
@@ -152,26 +153,26 @@ export function AgentCreateForm() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Max Turns</label>
-                    <Input type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
+                    <label htmlFor="agent-max-turns" className="text-sm font-medium">Max Turns</label>
+                    <Input id="agent-max-turns" type="number" min="1" max="1000" value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Allowed Tools</label>
-                  <Input value={allowedTools} onChange={(e) => setAllowedTools(e.target.value)} placeholder="Read,Glob,Grep,Bash,LS" />
+                  <label htmlFor="agent-allowed-tools" className="text-sm font-medium">Allowed Tools</label>
+                  <Input id="agent-allowed-tools" value={allowedTools} onChange={(e) => setAllowedTools(e.target.value)} placeholder="Read,Glob,Grep,Bash,LS" />
                   <p className="text-xs text-muted-foreground">Comma-separated list of tool names</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Switch checked={allowBash} onCheckedChange={setAllowBash} />
-                  <label className="text-sm font-medium">Allow Bash</label>
+                  <Switch id="agent-allow-bash" checked={allowBash} onCheckedChange={setAllowBash} />
+                  <label htmlFor="agent-allow-bash" className="text-sm font-medium">Allow Bash</label>
                 </div>
               </div>
             )}
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">Secret Reference</label>
+              <label htmlFor="agent-secret-ref" className="text-sm font-medium">Secret Reference</label>
               <Select value={secretRef} onValueChange={setSecretRef}>
-                <SelectTrigger><SelectValue placeholder="Select a secret..." /></SelectTrigger>
+                <SelectTrigger id="agent-secret-ref"><SelectValue placeholder="Select a secret..." /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__none__">None</SelectItem>
                   {(secretsData?.items ?? []).map((s) => (

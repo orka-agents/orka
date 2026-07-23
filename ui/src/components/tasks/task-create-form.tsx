@@ -96,13 +96,13 @@ export function TaskCreateForm() {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Name</label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-task" required />
+                <label htmlFor="task-name" className="text-sm font-medium">Name</label>
+                <Input id="task-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-task" required />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Type</label>
+                <label htmlFor="task-type" className="text-sm font-medium">Type</label>
                 <Select value={type} onValueChange={setType}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="task-type"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="container">Container</SelectItem>
                     <SelectItem value="ai">AI</SelectItem>
@@ -115,12 +115,12 @@ export function TaskCreateForm() {
             {type === 'container' && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Image</label>
-                  <Input value={image} onChange={(e) => setImage(e.target.value)} placeholder="alpine:latest" required />
+                  <label htmlFor="task-image" className="text-sm font-medium">Image</label>
+                  <Input id="task-image" value={image} onChange={(e) => setImage(e.target.value)} placeholder="alpine:latest" required />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Command</label>
-                  <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="echo hello" />
+                  <label htmlFor="task-command" className="text-sm font-medium">Command</label>
+                  <Input id="task-command" value={command} onChange={(e) => setCommand(e.target.value)} placeholder="echo hello" />
                 </div>
               </div>
             )}
@@ -129,9 +129,9 @@ export function TaskCreateForm() {
               <div className="space-y-4">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Provider</label>
+                    <label htmlFor="task-ai-provider" className="text-sm font-medium">Provider</label>
                     <Select value={provider} onValueChange={setProvider}>
-                      <SelectTrigger><SelectValue placeholder="Select provider" /></SelectTrigger>
+                      <SelectTrigger id="task-ai-provider"><SelectValue placeholder="Select provider" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="anthropic">Anthropic</SelectItem>
                         <SelectItem value="openai">OpenAI</SelectItem>
@@ -139,13 +139,14 @@ export function TaskCreateForm() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Model</label>
-                    <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-4-20250514" />
+                    <label htmlFor="task-ai-model" className="text-sm font-medium">Model</label>
+                    <Input id="task-ai-model" value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-4-20250514" />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Prompt</label>
+                  <label htmlFor="task-ai-prompt" className="text-sm font-medium">Prompt</label>
                   <textarea
+                    id="task-ai-prompt"
                     className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
@@ -159,9 +160,9 @@ export function TaskCreateForm() {
             {type === 'agent' && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Agent Reference</label>
+                  <label htmlFor="task-agent-ref" className="text-sm font-medium">Agent Reference</label>
                   <Select value={agentRef} onValueChange={setAgentRef}>
-                    <SelectTrigger><SelectValue placeholder="Select an agent..." /></SelectTrigger>
+                    <SelectTrigger id="task-agent-ref"><SelectValue placeholder="Select an agent..." /></SelectTrigger>
                     <SelectContent>
                       {(agentsData?.items ?? []).map((a) => (
                         <SelectItem key={a.metadata.name} value={a.metadata.name}>
@@ -195,8 +196,9 @@ export function TaskCreateForm() {
                   </div>
                 )}
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Prompt</label>
+                  <label htmlFor="task-agent-prompt" className="text-sm font-medium">Prompt</label>
                   <textarea
+                    id="task-agent-prompt"
                     className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
@@ -218,8 +220,9 @@ export function TaskCreateForm() {
               <div className="space-y-4 border-l-2 border-border pl-4">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Priority</label>
+                    <label htmlFor="task-priority" className="text-sm font-medium">Priority</label>
                     <Input
+                      id="task-priority"
                       type="number"
                       min={0}
                       max={1000}
@@ -229,8 +232,9 @@ export function TaskCreateForm() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Timeout</label>
+                    <label htmlFor="task-timeout" className="text-sm font-medium">Timeout</label>
                     <Input
+                      id="task-timeout"
                       value={timeout}
                       onChange={(e) => setTimeout(e.target.value)}
                       placeholder="30m"
@@ -251,16 +255,18 @@ export function TaskCreateForm() {
                       <div className="space-y-4 border-l-2 border-border pl-4">
                         <div className="grid gap-4 md:grid-cols-2">
                           <div className="space-y-2">
-                            <label className="text-sm font-medium">Git Repo URL</label>
+                            <label htmlFor="task-git-repo" className="text-sm font-medium">Git Repo URL</label>
                             <Input
+                              id="task-git-repo"
                               value={gitRepo}
                               onChange={(e) => setGitRepo(e.target.value)}
                               placeholder="https://github.com/org/repo"
                             />
                           </div>
                           <div className="space-y-2">
-                            <label className="text-sm font-medium">Branch</label>
+                            <label htmlFor="task-branch" className="text-sm font-medium">Branch</label>
                             <Input
+                              id="task-branch"
                               value={branch}
                               onChange={(e) => setBranch(e.target.value)}
                               placeholder="main"
@@ -269,16 +275,18 @@ export function TaskCreateForm() {
                         </div>
                         <div className="grid gap-4 md:grid-cols-2">
                           <div className="space-y-2">
-                            <label className="text-sm font-medium">Push Branch</label>
+                            <label htmlFor="task-push-branch" className="text-sm font-medium">Push Branch</label>
                             <Input
+                              id="task-push-branch"
                               value={pushBranch}
                               onChange={(e) => setPushBranch(e.target.value)}
                               placeholder="feature/my-task"
                             />
                           </div>
                           <div className="space-y-2">
-                            <label className="text-sm font-medium">Git Secret Ref</label>
+                            <label htmlFor="task-git-secret-ref" className="text-sm font-medium">Git Secret Ref</label>
                             <Input
+                              id="task-git-secret-ref"
                               value={gitSecretRef}
                               onChange={(e) => setGitSecretRef(e.target.value)}
                               placeholder="git-credentials"
@@ -289,8 +297,9 @@ export function TaskCreateForm() {
                     )}
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Max Turns</label>
+                        <label htmlFor="task-max-turns" className="text-sm font-medium">Max Turns</label>
                         <Input
+                          id="task-max-turns"
                           type="number"
                           min={1}
                           value={maxTurns}
@@ -299,9 +308,9 @@ export function TaskCreateForm() {
                         />
                       </div>
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Allow Bash</label>
+                        <label htmlFor="task-allow-bash" className="text-sm font-medium">Allow Bash</label>
                         <div className="flex items-center gap-2 pt-1">
-                          <Switch checked={allowBash} onCheckedChange={setAllowBash} />
+                          <Switch id="task-allow-bash" checked={allowBash} onCheckedChange={setAllowBash} />
                           <span className="text-sm text-muted-foreground">{allowBash ? 'Enabled' : 'Disabled'}</span>
                         </div>
                       </div>

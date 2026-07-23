@@ -89,6 +89,7 @@ describe('TaskList', () => {
 
   it('delete button calls deleteTask', async () => {
     const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/tasks', () =>
         HttpResponse.json({
@@ -111,8 +112,10 @@ describe('TaskList', () => {
     const row = screen.getByText('del-task').closest('tr')!
     const deleteBtn = row.querySelector('button')!
     await user.click(deleteBtn)
+    expect(confirmSpy).toHaveBeenCalledWith('Delete task "del-task"?')
     // Verify no error - mutation fires without throwing
     expect(screen.getByText('del-task')).toBeInTheDocument()
+    confirmSpy.mockRestore()
   })
 
   it('timeAgo covers minutes, hours, and days', async () => {

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { GitPullRequest } from 'lucide-react'
@@ -57,15 +57,19 @@ export function PRCreateDialog({ taskName, pushBranch, summary, targetBranch = '
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Create Pull Request</DialogTitle>
+          <DialogDescription className="sr-only">
+            Create a pull request from the task branch to the selected base branch.
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Title</label>
-            <Input value={title} onChange={e => setTitle(e.target.value)} />
+            <label htmlFor="pr-title" className="text-sm font-medium">Title</label>
+            <Input id="pr-title" value={title} onChange={e => setTitle(e.target.value)} />
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Description</label>
+            <label htmlFor="pr-description" className="text-sm font-medium">Description</label>
             <textarea
+              id="pr-description"
               className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
               value={body}
               onChange={e => setBody(e.target.value)}
@@ -73,17 +77,17 @@ export function PRCreateDialog({ taskName, pushBranch, summary, targetBranch = '
           </div>
           <div className="grid gap-4 grid-cols-2">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Head Branch</label>
-              <Input value={pushBranch} disabled />
+              <label htmlFor="pr-head-branch" className="text-sm font-medium">Head Branch</label>
+              <Input id="pr-head-branch" value={pushBranch} disabled />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Base Branch</label>
-              <Input value={base} onChange={e => setBase(e.target.value)} />
+              <label htmlFor="pr-base-branch" className="text-sm font-medium">Base Branch</label>
+              <Input id="pr-base-branch" value={base} onChange={e => setBase(e.target.value)} />
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Switch checked={draft} onCheckedChange={setDraft} />
-            <label className="text-sm">Create as draft</label>
+            <Switch id="pr-draft" checked={draft} onCheckedChange={setDraft} />
+            <label htmlFor="pr-draft" className="text-sm">Create as draft</label>
           </div>
           <div className="flex gap-2 justify-end">
             <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>

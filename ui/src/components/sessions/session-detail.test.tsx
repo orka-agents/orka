@@ -158,6 +158,7 @@ describe('SessionDetail', () => {
 
   it('delete button removes session and navigates', async () => {
     const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     server.use(
       http.get('/api/v1/sessions/:id', () =>
         HttpResponse.json({
@@ -174,8 +175,10 @@ describe('SessionDetail', () => {
       expect(screen.getByText('del-session')).toBeInTheDocument()
     })
     await user.click(screen.getByRole('button', { name: /delete/i }))
+    expect(confirmSpy).toHaveBeenCalledWith('Delete session "del-session"?')
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({ to: '/sessions' })
     })
+    confirmSpy.mockRestore()
   })
 })

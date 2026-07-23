@@ -1,4 +1,4 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useFindings } from '@/hooks/use-security'
 import { FindingTable } from './finding-table'
@@ -9,7 +9,7 @@ export function RecommendedFindings({ repositoryName }: { repositoryName: string
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Recommended Findings</CardTitle>
+        <h2 className="leading-none font-semibold">Recommended Findings</h2>
       </CardHeader>
       <CardContent>
         {isLoading ? <Skeleton className="h-32 w-full" /> : <FindingTable findings={data?.items ?? []} />}

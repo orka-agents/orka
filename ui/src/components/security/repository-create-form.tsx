@@ -82,25 +82,25 @@ export function RepositoryCreateForm() {
           <form className="space-y-4" onSubmit={handleSubmit}>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Name</label>
-                <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="payments-api" required />
+                <label htmlFor="security-repo-name" className="text-sm font-medium">Name</label>
+                <Input id="security-repo-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="payments-api" required />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Branch</label>
-                <Input value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" />
+                <label htmlFor="security-repo-branch" className="text-sm font-medium">Branch</label>
+                <Input id="security-repo-branch" value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" />
               </div>
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">GitHub Repository URL</label>
-              <Input value={repoURL} onChange={(event) => setRepoURL(event.target.value)} placeholder="https://github.com/org/repo" required />
+              <label htmlFor="security-repo-url" className="text-sm font-medium">GitHub Repository URL</label>
+              <Input id="security-repo-url" value={repoURL} onChange={(event) => setRepoURL(event.target.value)} placeholder="https://github.com/org/repo" required />
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Analysis Agent</label>
+                <label htmlFor="security-analysis-agent" className="text-sm font-medium">Analysis Agent</label>
                 <Select disabled={agentsLoading || noAgentsInNamespace} value={analysisAgentRef} onValueChange={setAnalysisAgentRef}>
-                  <SelectTrigger><SelectValue placeholder={agentsLoading ? 'Loading agents...' : 'Select analysis agent'} /></SelectTrigger>
+                  <SelectTrigger id="security-analysis-agent"><SelectValue placeholder={agentsLoading ? 'Loading agents...' : 'Select analysis agent'} /></SelectTrigger>
                   <SelectContent>
                     {currentAgents.map((agent) => (
                       <SelectItem key={agent.metadata.name} value={agent.metadata.name}>{agent.metadata.name}</SelectItem>
@@ -109,9 +109,9 @@ export function RepositoryCreateForm() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Patch Agent</label>
+                <label htmlFor="security-patch-agent" className="text-sm font-medium">Patch Agent</label>
                 <Select disabled={agentsLoading || noAgentsInNamespace} value={patchAgentRef} onValueChange={setPatchAgentRef}>
-                  <SelectTrigger><SelectValue placeholder="Optional patch agent" /></SelectTrigger>
+                  <SelectTrigger id="security-patch-agent"><SelectValue placeholder="Optional patch agent" /></SelectTrigger>
                   <SelectContent>
                     {currentAgents.map((agent) => (
                       <SelectItem key={agent.metadata.name} value={agent.metadata.name}>{agent.metadata.name}</SelectItem>
@@ -144,9 +144,9 @@ export function RepositoryCreateForm() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Git Secret</label>
+                <label htmlFor="security-git-secret" className="text-sm font-medium">Git Secret</label>
                 <Select value={gitSecretRef} onValueChange={setGitSecretRef}>
-                  <SelectTrigger><SelectValue placeholder="Optional Git credential secret" /></SelectTrigger>
+                  <SelectTrigger id="security-git-secret"><SelectValue placeholder="Optional Git credential secret" /></SelectTrigger>
                   <SelectContent>
                     {(secrets?.items ?? []).map((secret) => (
                       <SelectItem key={secret.name} value={secret.name}>{secret.name}</SelectItem>
@@ -155,9 +155,9 @@ export function RepositoryCreateForm() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Validation Mode</label>
+                <label htmlFor="security-validation-mode" className="text-sm font-medium">Validation Mode</label>
                 <Select value={validationMode} onValueChange={setValidationMode}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="security-validation-mode"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="off">Off</SelectItem>
                     <SelectItem value="light">Light</SelectItem>
@@ -169,18 +169,18 @@ export function RepositoryCreateForm() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium">Schedule</label>
-                <Input value={schedule} onChange={(event) => setSchedule(event.target.value)} placeholder="0 */6 * * *" />
+                <label htmlFor="security-schedule" className="text-sm font-medium">Schedule</label>
+                <Input id="security-schedule" value={schedule} onChange={(event) => setSchedule(event.target.value)} placeholder="0 */6 * * *" />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">History Window (days)</label>
-                <Input value={historyDays} onChange={(event) => setHistoryDays(event.target.value)} type="number" min={1} />
+                <label htmlFor="security-history-days" className="text-sm font-medium">History Window (days)</label>
+                <Input id="security-history-days" value={historyDays} onChange={(event) => setHistoryDays(event.target.value)} type="number" min={1} />
               </div>
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">Sub-path</label>
-              <Input value={subPath} onChange={(event) => setSubPath(event.target.value)} placeholder="services/api" />
+              <label htmlFor="security-sub-path" className="text-sm font-medium">Sub-path</label>
+              <Input id="security-sub-path" value={subPath} onChange={(event) => setSubPath(event.target.value)} placeholder="services/api" />
             </div>
 
             <div className="flex justify-end gap-2">

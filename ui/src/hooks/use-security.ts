@@ -107,10 +107,11 @@ export function useRunSecurityScan(name: string) {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: () => api.post<ScanRun>(`/security/repositories/${name}/scans`, { namespace }),
+    mutationFn: () => api.post<ScanRun>(`/security/repositories/${name}/scans`, {}, { namespace }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security', 'scans', namespace, name] })
       queryClient.invalidateQueries({ queryKey: ['security', 'repository', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['security', 'repositories', namespace] })
     },
   })
 }
