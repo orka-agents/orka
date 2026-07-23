@@ -366,9 +366,12 @@ func writeOpencodeConfig(cfg *agentEnvConfig, baseURL string) (string, string, e
 
 func opencodePermissions(cfg *agentEnvConfig) (map[string]any, error) {
 	permissions := map[string]any{
-		opencodePermissionEdit:  opencodePermissionAllow,
-		opencodePermissionBash:  opencodePermissionDeny,
-		opencodePermissionSkill: opencodePermissionDeny,
+		opencodePermissionRead:        opencodeAllowedPermission(opencodePermissionRead),
+		opencodePermissionExternalDir: opencodePermissionDeny,
+		opencodePermissionGrep:        opencodePermissionDeny,
+		opencodePermissionEdit:        opencodePermissionAllow,
+		opencodePermissionBash:        opencodePermissionDeny,
+		opencodePermissionSkill:       opencodePermissionDeny,
 	}
 	if cfg == nil {
 		return permissions, nil

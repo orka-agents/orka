@@ -366,6 +366,32 @@ func TestOpencodeAdapterDenyBash(t *testing.T) {
 	}
 }
 
+func TestOpencodePermissionsProtectReadsByDefault(t *testing.T) {
+	tests := map[string]*agentEnvConfig{
+		"nil config":     nil,
+		"default config": {},
+		"bash allowed":   {AllowBash: true},
+	}
+	for name, cfg := range tests {
+		t.Run(name, func(t *testing.T) {
+			permissions, err := opencodePermissions(cfg)
+			if err != nil {
+				t.Fatalf("opencodePermissions() error = %v", err)
+			}
+			read, ok := permissions[opencodePermissionRead].(opencodeReadPermission)
+			if !ok || read.All != opencodePermissionAllow || read.Env != opencodePermissionDeny ||
+				read.EnvFiles != opencodePermissionDeny || read.EnvExample != opencodePermissionAllow {
+				t.Fatalf("permission.read = %#v, want protected default read access", permissions[opencodePermissionRead])
+			}
+			for _, permission := range []string{opencodePermissionExternalDir, opencodePermissionGrep} {
+				if permissions[permission] != opencodePermissionDeny {
+					t.Fatalf("permission %q = %#v, want deny by default", permission, permissions[permission])
+				}
+			}
+		})
+	}
+}
+
 func TestOpencodePermissionsRespectAllowedTools(t *testing.T) {
 	permissions, err := opencodePermissions(&agentEnvConfig{
 		AllowedToolsSet: true,
