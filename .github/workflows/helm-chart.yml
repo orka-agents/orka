@@ -104,7 +104,7 @@ jobs:
             --include-crds \
             --set-string workers.harnessWrapper.auth.token=mock-token \
             >/dev/null
-          kubectl create --dry-run=client --validate=false -f deploy/orka.yaml >/dev/null
+          ./bin/kustomize cfg cat deploy/orka.yaml >/dev/null
 
           mkdir -p promoted-release-packages
           helm package charts/orka --destination promoted-release-packages
