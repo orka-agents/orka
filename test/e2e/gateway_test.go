@@ -912,11 +912,11 @@ func getGatewayE2EDeliveries(apiBaseURL, token, eventID string) ([]store.Gateway
 func gatewayE2EDelete(kind string, args ...string) {
 	commandArgs := []string{"delete", kind}
 	commandArgs = append(commandArgs, args...)
-	commandArgs = append(commandArgs, "-n", namespace, "--ignore-not-found", "--wait=false")
+	commandArgs = append(commandArgs, "-n", namespace, "--ignore-not-found", "--timeout=2m")
 	if kind == "gatewayclass" {
 		commandArgs = []string{"delete", kind}
 		commandArgs = append(commandArgs, args...)
-		commandArgs = append(commandArgs, "--ignore-not-found", "--wait=false")
+		commandArgs = append(commandArgs, "--ignore-not-found", "--timeout=2m")
 	}
 	if _, err := utils.Run(exec.Command("kubectl", commandArgs...)); err != nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup failed: kubectl %s: %v\n", strings.Join(commandArgs, " "), err)
