@@ -150,12 +150,10 @@ sync_crds() {
   mv "$temp_directory" "$CHART_CRD_DIR"
   temp_directory=""
 
-  if [[ -n "$backup_directory" ]]; then
-    rm -rf "$backup_directory"
-    backup_directory=""
-  fi
-
   trap - EXIT
+  if [[ -n "$backup_directory" ]] && ! rm -rf "$backup_directory"; then
+    fail "synchronized CRDs installed, but backup cleanup failed: ${backup_directory}"
+  fi
   printf 'Synced %s CRDs from %s to %s.\n' "$EXPECTED_CRD_COUNT" "$GENERATED_CRD_DIR" "$CHART_CRD_DIR"
 }
 

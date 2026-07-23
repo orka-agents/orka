@@ -81,8 +81,12 @@ manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style s
 	tmp_dir=""; \
 	installed_new=true; \
 	./scripts/generate-manifests.sh sync --kustomize "$(KUSTOMIZE)"; \
-	if [ -n "$$backup_dir" ]; then rm -rf "$$backup_dir"; backup_dir=""; fi; \
-	trap - EXIT
+	installed_new=false; \
+	trap - EXIT; \
+	if [ -n "$$backup_dir" ] && ! rm -rf "$$backup_dir"; then \
+		echo "manifests: generated CRDs installed, but backup cleanup failed: $$backup_dir" >&2; \
+		exit 1; \
+	fi
 
 .PHONY: helm-crds-sync
 helm-crds-sync: ## Synchronize generated CRDs into the staging Helm chart.
