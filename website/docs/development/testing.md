@@ -53,7 +53,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |
-| `workers/harness/cliwrapper/` | adapter and server tests | CLI harness wrapper, including Codex, Claude, Copilot, generic, conformance, cancellation, and redaction |
+| `workers/harness/cliwrapper/` | adapter and server tests | CLI harness wrapper, including Codex, Claude, Copilot, OpenCode, generic, conformance, cancellation, and redaction |
 
 ### E2E Tests
 

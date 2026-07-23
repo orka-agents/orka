@@ -633,7 +633,16 @@ func TestOpencodeAdapterParseResultRejectsBlankFinishReason(t *testing.T) {
 
 func TestOpencodeAdapterParseResultRejectsFailedFinish(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
-	for _, reason := range []string{opencodeFinishReasonUnknown, opencodeFinishReasonError} {
+	for _, reason := range []string{
+		opencodeFinishReasonUnknown,
+		opencodeFinishReasonError,
+		"length",
+		"max_tokens",
+		"incomplete",
+		"content-filter",
+		"refusal",
+		"other",
+	} {
 		t.Run(reason, func(t *testing.T) {
 			stdout := "" +
 				`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +

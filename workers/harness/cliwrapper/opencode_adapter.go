@@ -44,6 +44,7 @@ const (
 	opencodePermissionWebFetch    = "webfetch"
 	opencodeEnvTrue               = "true"
 	opencodeFinishReasonError     = "error"
+	opencodeFinishReasonStop      = "stop"
 	opencodeFinishReasonToolCalls = "tool-calls"
 	opencodeFinishReasonUnknown   = "unknown"
 	opencodeEscapedValueEnv       = "ORKA_OPENCODE_API_KEY_JSON_ESCAPED"
@@ -173,7 +174,7 @@ func (a *OpencodeAdapter) ParseResult(_ context.Context, _ TurnContext, run Comm
 		return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
 			fmt.Errorf("opencode output did not contain a terminal step_finish event")
 	}
-	if finishReason == opencodeFinishReasonUnknown || finishReason == opencodeFinishReasonError {
+	if finishReason != opencodeFinishReasonStop {
 		return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
 			fmt.Errorf("opencode output ended with %s finish reason", finishReason)
 	}
