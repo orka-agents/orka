@@ -259,23 +259,45 @@ func prepareCleanupRootForChild(path string) error {
 	if !ok {
 		return nil
 	}
-	info, err := os.Lstat(path)
+	cleanPath := filepath.Clean(path)
+	fd, err := unix.Open(cleanPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	root := os.NewFile(uintptr(fd), cleanPath)
+	if root == nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("open cleanup root")
+	}
+	defer root.Close() //nolint:errcheck
+	identity, err := root.Stat()
+	if err != nil {
+		return err
+	}
+	if !identity.IsDir() {
 		return fmt.Errorf("cleanup root must be a real directory")
 	}
 	// The child cannot remove the root-owned temporary directory itself, but it
 	// needs read/search access to empty its child-owned descendants before the
-	// wrapper removes the now-empty root.
-	if err := os.Lchown(path, 0, gid); err != nil {
+	// wrapper removes the now-empty root. Use the retained fd so a path swap cannot
+	// redirect privileged ownership or mode changes.
+	if err := root.Chown(0, gid); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o750)
+	if err := root.Chmod(0o750); err != nil {
+		return err
+	}
+	current, err := os.Lstat(cleanPath)
+	if err != nil {
+		return err
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(identity, current) {
+		return fmt.Errorf("cleanup root path was replaced")
+	}
+	return nil
 }
 
 func removeAllForChild(path string) error {
