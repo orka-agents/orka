@@ -251,6 +251,33 @@ func prepareOpenControlFileForChild(file *os.File, mode os.FileMode) error {
 	return nil
 }
 
+func prepareCleanupRootForChild(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	_, gid, ok := childCredentialIDs()
+	if !ok {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("cleanup root must be a real directory")
+	}
+	// The child cannot remove the root-owned temporary directory itself, but it
+	// needs read/search access to empty its child-owned descendants before the
+	// wrapper removes the now-empty root.
+	if err := os.Lchown(path, 0, gid); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o750)
+}
+
 func removeAllForChild(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return nil

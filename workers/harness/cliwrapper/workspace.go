@@ -127,12 +127,18 @@ func cleanupTurnWorkspacePath(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}
+	prepareErr := prepareCleanupRootForChild(path)
 	childErr := removeAllForChild(path)
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return nil
 	}
-	if err := relaxWorkspaceTreePermissions(path); err != nil && childErr != nil {
-		return fmt.Errorf("remove workspace as child: %w; relax workspace permissions: %v", childErr, err)
+	if err := relaxWorkspaceTreePermissions(path); err != nil && (prepareErr != nil || childErr != nil) {
+		return fmt.Errorf(
+			"prepare workspace cleanup for child: %v; remove workspace as child: %v; relax workspace permissions: %w",
+			prepareErr,
+			childErr,
+			err,
+		)
 	}
 	if err := os.RemoveAll(path); err != nil {
 		if childErr != nil {

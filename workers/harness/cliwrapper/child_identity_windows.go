@@ -22,6 +22,8 @@ func prepareControlFileForChild(string, uint32) error { return nil }
 
 func prepareOpenControlFileForChild(*os.File, uint32) error { return nil }
 
+func prepareCleanupRootForChild(string) error { return nil }
+
 func removeAllForChild(string) error { return nil }
 
 func suspendChildIdentity() func() { return func() {} }
