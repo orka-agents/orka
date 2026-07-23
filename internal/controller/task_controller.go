@@ -2883,16 +2883,7 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 			return err
 		}
 	case hasBuiltInRuntime:
-		if hasFrozenRuntimeRef {
-			if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
-				return err
-			}
-		}
-
-		if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
-			return err
-		}
-		if err := validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type); err != nil {
+		if err := validateBuiltInRuntimeTaskCompatibility(task, agent, hasFrozenRuntimeRef); err != nil {
 			return err
 		}
 	default:
@@ -2920,9 +2911,27 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	return nil
 }
 
+func validateBuiltInRuntimeTaskCompatibility(
+	task *corev1alpha1.Task, agent *corev1alpha1.Agent, hasFrozenRuntimeRef bool,
+) error {
+	if hasFrozenRuntimeRef {
+		if err := validateRuntimeRefAgentTaskRestrictions(task, agent); err != nil {
+			return err
+		}
+	}
+	if err := validateBuiltInAgentRuntime(agent.Spec.Runtime.Type); err != nil {
+		return err
+	}
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode &&
+		(agent.Spec.Model == nil || strings.TrimSpace(agent.Spec.Model.Name) == "") {
+		return fmt.Errorf("agent %q opencode runtime requires spec.model.name", agent.Name)
+	}
+	return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
+}
+
 func validateBuiltInAgentRuntime(runtimeType corev1alpha1.AgentRuntimeType) error {
 	switch runtimeType {
-	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
 		return nil
 	default:
 		return fmt.Errorf("agent runtime %q does not have a harness adapter configured", runtimeType)
@@ -2938,6 +2947,8 @@ func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType co
 		return fmt.Errorf("read-only agent tasks do not support codex runtime because Codex requires shell access while model credentials are exposed")
 	case corev1alpha1.AgentRuntimeCopilot:
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime because GitHub tokens can allow repository mutation")
+	case corev1alpha1.AgentRuntimeOpencode:
+		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
 	default:
 		return nil
 	}

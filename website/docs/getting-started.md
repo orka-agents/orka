@@ -138,7 +138,7 @@ orka task download <task-name> [filename] -o <path>
 
 ## Agent Runtimes Quick Start
 
-Agent runtimes let you run tasks via Codex CLI, Claude Code CLI, or GitHub Copilot CLI with full autonomous coding capabilities.
+Agent runtimes let you run tasks via Codex CLI, Claude Code CLI, GitHub Copilot CLI, or OpenCode CLI with full autonomous coding capabilities.
 
 ### 1. Create Credentials
 
@@ -287,7 +287,7 @@ The CLI supports token extraction from bearer tokens, token files, exec-based au
 
 **Guides & reference**
 
-- [Agent Runtimes](concepts/agent-runtimes.md) — Codex CLI, Claude Code CLI, and Copilot CLI configuration
+- [Agent Runtimes](concepts/agent-runtimes.md) — Codex CLI, Claude Code CLI, Copilot CLI, and OpenCode CLI configuration
 - [Interactive Chat](guides/chat.md) — Chat endpoint with tool execution
 - [Multi-Agent Coordination](guides/multi-agent-coordination.md) — Coordinator agents and delegation
 - [OpenAI Compatibility](reference/openai-compat.md) — Use any OpenAI-compatible client via `/openai/v1/`

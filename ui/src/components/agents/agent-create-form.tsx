@@ -11,6 +11,15 @@ import { useSecretNames } from '@/hooks/use-secrets'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 
+type AgentRuntimeType = 'claude' | 'copilot' | 'codex' | 'opencode'
+
+const defaultAllowedTools = 'Read,Glob,Grep,Bash,LS'
+const openCodeDefaultAllowedTools = `${defaultAllowedTools},Edit`
+
+function allowedToolsForRuntime(runtimeType: AgentRuntimeType) {
+  return runtimeType === 'opencode' ? openCodeDefaultAllowedTools : defaultAllowedTools
+}
+
 export function AgentCreateForm() {
   const navigate = useNavigate()
   const createAgent = useCreateAgent()
@@ -29,13 +38,28 @@ export function AgentCreateForm() {
   const [systemPrompt, setSystemPrompt] = useState('')
 
   // Runtime mode fields
-  const [runtimeType, setRuntimeType] = useState<'claude' | 'copilot' | 'codex'>('claude')
+  const [runtimeType, setRuntimeType] = useState<AgentRuntimeType>('claude')
   const [maxTurns, setMaxTurns] = useState('50')
   const [allowBash, setAllowBash] = useState(true)
-  const [allowedTools, setAllowedTools] = useState('Read,Glob,Grep,Bash,LS')
+  const [allowedTools, setAllowedTools] = useState(defaultAllowedTools)
+  const [allowedToolsEdited, setAllowedToolsEdited] = useState(false)
+
+  const handleRuntimeTypeChange = (value: string) => {
+    const nextRuntimeType = value as AgentRuntimeType
+    if (!allowedToolsEdited) {
+      setAllowedTools(allowedToolsForRuntime(nextRuntimeType))
+    }
+    setRuntimeType(nextRuntimeType)
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+
+    const trimmedModel = model.trim()
+    if (mode === 'runtime' && runtimeType === 'opencode' && !trimmedModel) {
+      toast.error('OpenCode requires an endpoint model ID')
+      return
+    }
 
     const spec: Record<string, unknown> = {}
 
@@ -55,6 +79,9 @@ export function AgentCreateForm() {
         defaultMaxTurns: parseInt(maxTurns),
         defaultAllowBash: allowBash,
         ...(allowedTools.trim() ? { defaultAllowedTools: allowedTools.split(',').map(t => t.trim()).filter(Boolean) } : {}),
+      }
+      if (trimmedModel) {
+        spec.model = { name: trimmedModel }
       }
     }
 
@@ -91,7 +118,7 @@ export function AgentCreateForm() {
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ai">AI (LLM Provider)</SelectItem>
-                    <SelectItem value="runtime">CLI Runtime (Copilot / Claude / Codex)</SelectItem>
+                    <SelectItem value="runtime">CLI Runtime (Copilot / Claude / Codex / OpenCode)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -142,12 +169,13 @@ export function AgentCreateForm() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Runtime Type</label>
-                    <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot' | 'codex')}>
+                    <Select value={runtimeType} onValueChange={handleRuntimeTypeChange}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="claude">Claude Code</SelectItem>
                         <SelectItem value="copilot">GitHub Copilot</SelectItem>
                         <SelectItem value="codex">OpenAI Codex</SelectItem>
+                        <SelectItem value="opencode">OpenCode</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -157,8 +185,27 @@ export function AgentCreateForm() {
                   </div>
                 </div>
                 <div className="space-y-2">
+                  <label className="text-sm font-medium">Model</label>
+                  <Input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="Endpoint model ID"
+                    required={runtimeType === 'opencode'}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Required for OpenCode; optional for runtimes with a configured default model
+                  </p>
+                </div>
+                <div className="space-y-2">
                   <label className="text-sm font-medium">Allowed Tools</label>
-                  <Input value={allowedTools} onChange={(e) => setAllowedTools(e.target.value)} placeholder="Read,Glob,Grep,Bash,LS" />
+                  <Input
+                    value={allowedTools}
+                    onChange={(e) => {
+                      setAllowedTools(e.target.value)
+                      setAllowedToolsEdited(true)
+                    }}
+                    placeholder={allowedToolsForRuntime(runtimeType)}
+                  />
                   <p className="text-xs text-muted-foreground">Comma-separated list of tool names</p>
                 </div>
                 <div className="flex items-center gap-2">

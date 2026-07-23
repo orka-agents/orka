@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	RuntimeGeneric = "generic"
-	RuntimeClaude  = "claude"
-	RuntimeCodex   = "codex"
-	RuntimeCopilot = "copilot"
+	RuntimeGeneric  = "generic"
+	RuntimeClaude   = "claude"
+	RuntimeCodex    = "codex"
+	RuntimeCopilot  = "copilot"
+	RuntimeOpencode = "opencode"
 )
 
 // RuntimeAdapter translates a harness turn into one per-turn CLI command.
@@ -65,7 +66,7 @@ type CommandSpec struct {
 	Dir        string
 	Stdin      []byte
 	ResultFile string
-	TempFiles  []string
+	TempFiles  []string // Temporary files or directories removed after the command finishes.
 }
 
 // CommandResult captures bounded process output and lifecycle metadata.
@@ -97,7 +98,7 @@ type TurnResult struct {
 }
 
 func SupportedRuntimeAdapters() []string {
-	return []string{RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeMulti}
+	return []string{RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeMulti}
 }
 
 func NewRuntimeAdapter(cfg Config) (RuntimeAdapter, error) {
@@ -118,6 +119,8 @@ func NewRuntimeAdapter(cfg Config) (RuntimeAdapter, error) {
 		return NewClaudeAdapter(cfg.Claude), nil
 	case RuntimeCopilot:
 		return NewCopilotAdapter(cfg.Copilot), nil
+	case RuntimeOpencode:
+		return NewOpencodeAdapter(cfg.Opencode), nil
 	case RuntimeMulti:
 		return NewMultiAdapter(cfg), nil
 	default:

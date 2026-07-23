@@ -51,7 +51,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 ## Features
 
 - 🤖 **AI Agents** — Anthropic, OpenAI, or Azure OpenAI with tools, skills, and session persistence
-- 🛠️ **Agent Runtimes** — Delegate repo-backed coding tasks to Codex CLI, Claude Code CLI, or GitHub Copilot CLI
+- 🛠️ **Agent Runtimes** — Delegate repo-backed coding tasks to Codex CLI, Claude Code CLI, GitHub Copilot CLI, or OpenCode CLI
 - 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
@@ -120,7 +120,7 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Configuration](website/docs/concepts/configuration.md)                       | CRD reference, Helm values, controller flags, metrics |
 | [Observability](website/docs/guides/observability.md)                        | OpenTelemetry traces, GenAI metrics, and task trace guidance |
 | [Agent Runtimes](website/docs/concepts/agent-runtimes.md)                     | Built-in CLI runtimes and bring-your-own remote AgentRuntime backends |
-| [CLI Harness Wrapper](website/docs/guides/cli-harness-wrapper.md)                  | Harness protocol wrapper for Codex, Claude, and Copilot CLI runtimes |
+| [CLI Harness Wrapper](website/docs/guides/cli-harness-wrapper.md)                  | Harness protocol wrapper for Codex, Claude, Copilot, and OpenCode CLI runtimes |
 | [Agent Sandbox](website/docs/concepts/agent-sandbox.md)                       | Experimental upstream `agent-sandbox` workspace execution for agent runtimes |
 | [Interactive Chat](website/docs/guides/chat.md)                             | Chat endpoint, tools, and SSE streaming               |
 | [Multi-Agent Coordination](website/docs/guides/multi-agent-coordination.md) | Coordinator agents and task delegation                |

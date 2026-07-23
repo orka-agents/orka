@@ -146,7 +146,7 @@ call in the SAME response. If you need to create a task AND fetch its result,
 call create_*_task, then wait_for_task, then fetch_task_output all in sequence
 without stopping to narrate between steps. Act first, summarize after.
 
-LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex) typically run for 5-20 minutes.
+LONG-RUNNING TASKS: Agent tasks (Copilot, Claude Code, Codex, OpenCode) typically run for 5-20 minutes.
 You MUST keep calling wait_for_task in a loop until the task reaches a terminal state
 (Succeeded or Failed). Do NOT give up after a few polls — keep waiting. If wait_for_task
 returns "still running", immediately call wait_for_task again. Only stop when the task
@@ -189,7 +189,7 @@ func buildTaskTypesSection(mode PromptMode) string {
   answering questions about data. The AI worker has built-in tools (code_exec,
   web_search, file_read, web_fetch, file_write) but runs in a minimal container without CLI tools.
   Do NOT use for infrastructure commands.
-- agent: Run an external CLI runtime (Copilot, Claude Code, Codex).
+- agent: Run an external CLI runtime (Copilot, Claude Code, Codex, OpenCode).
   Use create_agent_task only for Agents that have runtime listed in available_agents.
   Use for: code changes in a git repo, multi-file refactoring.
   IMPORTANT: When the user specifies an agent (via --agent or agentRef) that has a
@@ -450,18 +450,17 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	var availableRuntimes []string
 	var secretList corev1.SecretList
 	if err := b.client.List(ctx, &secretList, client.InNamespace(b.namespace)); err == nil {
-		secretNames := make(map[string]bool, len(secretList.Items))
-		for i := range secretList.Items {
-			secretNames[secretList.Items[i].Name] = true
-		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCodex)) != "" {
+		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeCodex) != "" {
 			availableRuntimes = append(availableRuntimes, "codex")
 		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeCopilot)) != "" {
+		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeCopilot) != "" {
 			availableRuntimes = append(availableRuntimes, "copilot")
 		}
-		if chattools.FirstPresentSecretName(secretNames, chattools.RuntimeSecretCandidates(corev1alpha1.AgentRuntimeClaude)) != "" {
+		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeClaude) != "" {
 			availableRuntimes = append(availableRuntimes, "claude")
+		}
+		if chattools.FirstUsableRuntimeSecretName(secretList.Items, corev1alpha1.AgentRuntimeOpencode) != "" {
+			availableRuntimes = append(availableRuntimes, "opencode")
 		}
 	}
 

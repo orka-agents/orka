@@ -471,6 +471,41 @@ func TestValidateTaskAgentCompatibility_AgentTaskCopilotRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntime(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   &corev1alpha1.ModelConfig{Name: "kimi-k2"},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for opencode harness runtime", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntimeRequiresModel(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "requires spec.model.name") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing OpenCode model rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -486,6 +521,25 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	err := r.validateTaskAgentCompatibility(task, agent)
 	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support copilot") {
 		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only copilot rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ReadOnlyOpencodeRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   &corev1alpha1.ModelConfig{Name: "kimi-k2"},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support opencode") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only opencode rejection", err)
 	}
 }
 
