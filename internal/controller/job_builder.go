@@ -1430,6 +1430,9 @@ func validateReadOnlyAgentRuntime(task *corev1alpha1.Task, agent *corev1alpha1.A
 	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCopilot {
 		return fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
 	}
+	if agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeOpencode {
+		return fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
+	}
 	return nil
 }
 
@@ -1513,6 +1516,8 @@ func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error)
 		}, nil
 	case corev1alpha1.AgentRuntimeCopilot:
 		return nil, fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
+	case corev1alpha1.AgentRuntimeOpencode:
+		return nil, fmt.Errorf("read-only agent tasks do not support opencode runtime because the OpenCode adapter pre-approves file edits")
 	default:
 		return nil, nil
 	}
@@ -1523,7 +1528,8 @@ func readOnlyAgentRuntimeType(agent *corev1alpha1.Agent) corev1alpha1.AgentRunti
 		return corev1alpha1.AgentRuntimeClaude
 	}
 	switch agent.Spec.Runtime.Type {
-	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot:
+	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot,
+		corev1alpha1.AgentRuntimeOpencode:
 		return agent.Spec.Runtime.Type
 	default:
 		return corev1alpha1.AgentRuntimeClaude

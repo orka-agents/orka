@@ -18,7 +18,7 @@ spec:
   # runtime marks this Agent for type: agent tasks using Claude Code CLI
   # (mutually exclusive with providerRef, which is for type: ai tasks)
   runtime:
-    # type selects the CLI runtime: "claude", "copilot", or "codex"
+    # type selects the CLI runtime: "claude", "copilot", "codex", or "opencode"
     type: claude
     # defaultMaxTurns is the default max agent loop iterations per task
     defaultMaxTurns: 50
