@@ -41,6 +41,11 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
+When installing from a source release, `charts/orka` is the promoted and
+reviewed release snapshot. Next-release development is generated under
+`manifest_staging/charts/orka`; it is promoted by a release-preparation PR and
+published only from the matching `v*` tag.
+
 A normal fresh install creates Orka's nine cluster-scoped CRDs before the
 controller resources. Use `--skip-crds` only when one designated platform or
 release owner already manages compatible Orka CRDs for the cluster; all other

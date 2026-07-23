@@ -24,17 +24,22 @@ EXPECTED_CRD_COUNT=${#EXPECTED_CRD_FILENAMES[@]}
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/helm-crds.sh sync
-  scripts/helm-crds.sh check
+  scripts/helm-crds.sh sync [<chart-root>]
+  scripts/helm-crds.sh check [<chart-root>]
   scripts/helm-crds.sh check-package <orka-chart.tgz>
+  scripts/helm-crds.sh check-package-against-chart <chart-root> <orka-chart.tgz>
   scripts/helm-crds.sh apply-package <orka-chart.tgz> --kube-context <context>
 
 Commands:
-  sync                 Replace charts/orka/crds with the canonical generated
-                       CRDs from config/crd/bases.
-  check                Verify the canonical CRDs and their chart mirror.
-  check-package PATH   Verify the packaged chart contains the exact canonical
-                       CRDs and that `helm show crds` reports all nine.
+  sync [CHART_ROOT]    Replace CHART_ROOT/crds with the canonical generated
+                       CRDs from config/crd/bases. Defaults to charts/orka.
+  check [CHART_ROOT]   Verify the canonical CRDs and CHART_ROOT/crds mirror.
+                       Defaults to charts/orka.
+  check-package PATH   Verify the packaged chart contains the exact current
+                       canonical CRDs and that `helm show crds` reports all nine.
+  check-package-against-chart CHART_ROOT PATH
+                       Verify the package contains CRDs byte-identical to the
+                       supplied promoted chart snapshot and reports all nine.
   apply-package PATH --kube-context CONTEXT
                        Preflight, apply, and verify the exact packaged CRD specs
                        against an explicit Kubernetes context.
@@ -51,37 +56,55 @@ require_command() {
   command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
 }
 
+set_chart_root() {
+  local chart_root=$1
+  if [[ "$chart_root" != /* ]]; then
+    chart_root="${ROOT_DIR}/${chart_root}"
+  fi
+  CHART_CRD_DIR="${chart_root%/}/crds"
+}
+
+validate_static_crd_directory() {
+  local directory=$1
+  local description=$2
+  local entries=()
+  local entry
+  local kind_count
+
+  [[ -d "$directory" ]] || fail "missing ${description}: ${directory}"
+
+  entries=("$directory"/*)
+  for entry in "${entries[@]}"; do
+    [[ -f "$entry" && ! -L "$entry" ]] || fail "unexpected non-regular file in ${description}: $(basename "$entry")"
+
+    kind_count=$(grep -Ec '^kind:[[:space:]]+CustomResourceDefinition[[:space:]]*$' "$entry" || true)
+    if [[ "$kind_count" -ne 1 ]]; then
+      fail "${description}/$(basename "$entry") must contain exactly one CustomResourceDefinition kind, found ${kind_count}"
+    fi
+
+    if grep -Fq '{{' "$entry" || grep -Fq '}}' "$entry"; then
+      fail "${description}/$(basename "$entry") contains Helm template delimiters; files under crds/ must be static"
+    fi
+  done
+}
+
 validate_crd_directory() {
   local directory=$1
   local description=$2
   local entries=()
   local entry
   local filename
-  local kind_count
 
-  [[ -d "$directory" ]] || fail "missing ${description}: ${directory}"
+  validate_static_crd_directory "$directory" "$description"
 
   entries=("$directory"/*)
   if [[ ${#entries[@]} -ne $EXPECTED_CRD_COUNT ]]; then
     fail "expected exactly ${EXPECTED_CRD_COUNT} files in ${description}, found ${#entries[@]}"
   fi
 
-  for entry in "${entries[@]}"; do
-    [[ -f "$entry" && ! -L "$entry" ]] || fail "unexpected non-regular file in ${description}: $(basename "$entry")"
-  done
-
   for filename in "${EXPECTED_CRD_FILENAMES[@]}"; do
     entry="${directory}/${filename}"
     [[ -f "$entry" && ! -L "$entry" ]] || fail "missing expected CRD in ${description}: ${filename}"
-
-    kind_count=$(grep -Ec '^kind:[[:space:]]+CustomResourceDefinition[[:space:]]*$' "$entry" || true)
-    if [[ "$kind_count" -ne 1 ]]; then
-      fail "${description}/${filename} must contain exactly one CustomResourceDefinition kind, found ${kind_count}"
-    fi
-
-    if grep -Fq '{{' "$entry" || grep -Fq '}}' "$entry"; then
-      fail "${description}/${filename} contains Helm template delimiters; files under crds/ must be static"
-    fi
   done
 }
 
@@ -153,6 +176,12 @@ check_crds() {
 
 check_package() {
   local package_path=$1
+  local expected_crd_directory=${2:-$GENERATED_CRD_DIR}
+  local expected_description=${3:-canonical generated CRD directory}
+  local membership_mode=${4:-canonical}
+  local expected_crd_filenames=()
+  local expected_crd_count=0
+  local expected_entry
   local temp_directory
   local expected_members
   local actual_members
@@ -166,7 +195,27 @@ check_package() {
   [[ -f "$package_path" && ! -L "$package_path" ]] || fail "chart package is not a regular file: ${package_path}"
   require_command tar
   require_command helm
-  validate_crd_directory "$GENERATED_CRD_DIR" "canonical generated CRD directory"
+  case "$membership_mode" in
+    canonical)
+      validate_crd_directory "$expected_crd_directory" "$expected_description"
+      expected_crd_filenames=("${EXPECTED_CRD_FILENAMES[@]}")
+      expected_crd_count=$EXPECTED_CRD_COUNT
+      ;;
+    snapshot)
+      if [[ -e "$expected_crd_directory" || -L "$expected_crd_directory" ]]; then
+        [[ -d "$expected_crd_directory" && ! -L "$expected_crd_directory" ]] || \
+          fail "snapshot CRD path is not a regular directory: ${expected_crd_directory}"
+        validate_static_crd_directory "$expected_crd_directory" "$expected_description"
+        for expected_entry in "$expected_crd_directory"/*; do
+          expected_crd_filenames+=("$(basename "$expected_entry")")
+          expected_crd_count=$((expected_crd_count + 1))
+        done
+      fi
+      ;;
+    *)
+      fail "unknown package CRD membership mode: ${membership_mode}"
+      ;;
+  esac
 
   temp_directory=$(mktemp -d "${TMPDIR:-/tmp}/orka-helm-crds.XXXXXX")
   cleanup_package() {
@@ -185,33 +234,39 @@ check_package() {
   mkdir -p "$extract_directory"
 
   : > "$expected_members"
-  for filename in "${EXPECTED_CRD_FILENAMES[@]}"; do
-    printf 'orka/crds/%s\n' "$filename" >> "$expected_members"
-    member_arguments+=("orka/crds/${filename}")
-  done
+  if [[ $expected_crd_count -gt 0 ]]; then
+    for filename in "${expected_crd_filenames[@]}"; do
+      printf 'orka/crds/%s\n' "$filename" >> "$expected_members"
+      member_arguments+=("orka/crds/${filename}")
+    done
+  fi
 
   tar -tzf "$package_path" > "$archive_members"
   awk 'index($0, "orka/crds/") == 1 && $0 != "orka/crds/" { print }' "$archive_members" | sort > "$actual_members"
   if ! diff -u "$expected_members" "$actual_members"; then
-    fail "chart package must contain exactly the ${EXPECTED_CRD_COUNT} expected CRD members"
+    fail "chart package must contain exactly the ${expected_crd_count} expected CRD members"
   fi
 
-  tar -xzf "$package_path" -C "$extract_directory" "${member_arguments[@]}"
-  for filename in "${EXPECTED_CRD_FILENAMES[@]}"; do
-    if ! cmp -s "${GENERATED_CRD_DIR}/${filename}" "${extract_directory}/orka/crds/${filename}"; then
-      fail "packaged CRD differs from canonical generated CRD: ${filename}"
-    fi
-  done
+  if [[ $expected_crd_count -gt 0 ]]; then
+    tar -xzf "$package_path" -C "$extract_directory" "${member_arguments[@]}"
+  fi
+  if [[ $expected_crd_count -gt 0 ]]; then
+    for filename in "${expected_crd_filenames[@]}"; do
+      if ! cmp -s "${expected_crd_directory}/${filename}" "${extract_directory}/orka/crds/${filename}"; then
+        fail "packaged CRD differs from ${expected_description}: ${filename}"
+      fi
+    done
+  fi
 
   helm show crds "$package_path" > "$helm_output"
   kind_count=$(awk '$0 == "kind: CustomResourceDefinition" { count++ } END { print count + 0 }' "$helm_output")
-  if [[ "$kind_count" -ne $EXPECTED_CRD_COUNT ]]; then
-    fail "helm show crds reported ${kind_count} CRDs; expected ${EXPECTED_CRD_COUNT}"
+  if [[ "$kind_count" -ne $expected_crd_count ]]; then
+    fail "helm show crds reported ${kind_count} CRDs; expected ${expected_crd_count}"
   fi
 
   trap - EXIT
   rm -rf "$temp_directory"
-  printf 'Verified package %s contains %s canonical CRDs and helm show crds reports all of them.\n' "$package_path" "$EXPECTED_CRD_COUNT"
+  printf 'Verified package %s contains %s expected CRDs and helm show crds reports all of them.\n' "$package_path" "$expected_crd_count"
 }
 
 openapi_index_url() {
@@ -627,16 +682,23 @@ apply_package() {
 command_name=${1:-}
 case "$command_name" in
   sync)
-    [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+    [[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
+    if [[ $# -eq 2 ]]; then set_chart_root "$2"; fi
     sync_crds
     ;;
   check)
-    [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+    [[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
+    if [[ $# -eq 2 ]]; then set_chart_root "$2"; fi
     check_crds
     ;;
   check-package)
     [[ $# -eq 2 ]] || { usage >&2; exit 2; }
     check_package "$2"
+    ;;
+  check-package-against-chart)
+    [[ $# -eq 3 ]] || { usage >&2; exit 2; }
+    set_chart_root "$2"
+    check_package "$3" "$CHART_CRD_DIR" "promoted chart CRD directory" snapshot
     ;;
   apply-package)
     [[ $# -eq 4 && "$3" == "--kube-context" ]] || { usage >&2; exit 2; }

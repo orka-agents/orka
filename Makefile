@@ -1,3 +1,8 @@
+# Current application release version. Chart.yaml has its own version and may
+# advance independently for chart-only changes. Release preparation aligns both
+# versions for a tagged application release.
+VERSION := v0.1.0
+
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
@@ -45,7 +50,7 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
 	@set -e; \
 	crd_dir="config/crd/bases"; \
 	crd_parent="$$(dirname "$$crd_dir")"; \
@@ -75,17 +80,31 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 	mv "$$tmp_dir" "$$crd_dir"; \
 	tmp_dir=""; \
 	installed_new=true; \
-	./scripts/helm-crds.sh sync; \
+	./scripts/generate-manifests.sh sync --kustomize "$(KUSTOMIZE)"; \
 	if [ -n "$$backup_dir" ]; then rm -rf "$$backup_dir"; backup_dir=""; fi; \
 	trap - EXIT
 
 .PHONY: helm-crds-sync
-helm-crds-sync: ## Synchronize generated CRDs into the Helm chart.
-	./scripts/helm-crds.sh sync
+helm-crds-sync: ## Synchronize generated CRDs into the staging Helm chart.
+	./scripts/helm-crds.sh sync manifest_staging/charts/orka
 
 .PHONY: helm-crds-check
-helm-crds-check: ## Verify the generated CRDs and Helm chart mirror are identical.
-	./scripts/helm-crds.sh check
+helm-crds-check: ## Verify the generated CRDs and staging Helm chart mirror are identical.
+	./scripts/helm-crds.sh check manifest_staging/charts/orka
+
+.PHONY: helm-chart-check
+helm-chart-check: kustomize ## Verify committed Gatekeeper-style staging manifests are current.
+	./scripts/generate-manifests.sh check --kustomize "$(KUSTOMIZE)"
+
+.PHONY: release-manifest
+release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
+	@test -n "$(NEWVERSION)" || { echo "NEWVERSION is required" >&2; exit 2; }
+	python3 scripts/update-release-version.py "$(NEWVERSION)"
+	$(MAKE) manifests
+
+.PHONY: promote-staging-manifest
+promote-staging-manifest: ## Promote committed staging manifests into release snapshots.
+	./scripts/promote-staging-manifests.sh
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

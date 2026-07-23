@@ -1,0 +1,355 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orka.fullname" . }}-controller
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  {{- if .Values.store.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "orka.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+      {{- with .Values.annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "orka.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          args:
+            - --api-port={{ .Values.controller.apiPort }}
+            - --metrics-bind-address=:{{ .Values.controller.metricsPort }}
+            - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
+            - --metrics-secure=false
+            {{- if .Values.controller.watchNamespace }}
+            - --watch-namespace={{ .Values.controller.watchNamespace }}
+            {{- end }}
+            - --leader-elect={{ .Values.controller.leaderElect }}
+            - --zap-log-level={{ .Values.controller.logLevel }}
+            {{- with .Values.controller.oidc }}
+            {{- if .issuer }}
+            - {{ printf "--oidc-issuer=%s" .issuer | quote }}
+            {{- end }}
+            {{- if .audience }}
+            - {{ printf "--oidc-audience=%s" .audience | quote }}
+            {{- end }}
+            {{- if .jwksUrl }}
+            - {{ printf "--oidc-jwks-url=%s" .jwksUrl | quote }}
+            {{- end }}
+            {{- if .allowedSubjects }}
+            - {{ printf "--oidc-allowed-subjects=%s" .allowedSubjects | quote }}
+            {{- end }}
+            {{- if .namespace }}
+            - {{ printf "--oidc-namespace=%s" .namespace | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.controller.contextToken }}
+            {{- if .profile }}
+            - {{ printf "--context-token-profile=%s" .profile | quote }}
+            {{- end }}
+            {{- if .issuer }}
+            - {{ printf "--context-token-issuer=%s" .issuer | quote }}
+            {{- end }}
+            {{- if .audience }}
+            - {{ printf "--context-token-audience=%s" .audience | quote }}
+            {{- end }}
+            {{- if .jwksUrl }}
+            - {{ printf "--context-token-jwks-url=%s" .jwksUrl | quote }}
+            {{- end }}
+            {{- if .headers }}
+            - {{ printf "--context-token-headers=%s" .headers | quote }}
+            {{- end }}
+            {{- if .authzMode }}
+            - {{ printf "--context-token-authz-mode=%s" .authzMode | quote }}
+            {{- end }}
+            {{- with .scopes }}
+            {{- if .taskCreate }}
+            - {{ printf "--context-token-task-create-scopes=%s" .taskCreate | quote }}
+            {{- end }}
+            {{- if .taskRead }}
+            - {{ printf "--context-token-task-read-scopes=%s" .taskRead | quote }}
+            {{- end }}
+            {{- if .taskList }}
+            - {{ printf "--context-token-task-list-scopes=%s" .taskList | quote }}
+            {{- end }}
+            {{- if .taskDelete }}
+            - {{ printf "--context-token-task-delete-scopes=%s" .taskDelete | quote }}
+            {{- end }}
+            {{- if .taskUpdate }}
+            - {{ printf "--context-token-task-update-scopes=%s" .taskUpdate | quote }}
+            {{- end }}
+            {{- if .toolRead }}
+            - {{ printf "--context-token-tool-read-scopes=%s" .toolRead | quote }}
+            {{- end }}
+            {{- if .toolUse }}
+            - {{ printf "--context-token-tool-use-scopes=%s" .toolUse | quote }}
+            {{- end }}
+            {{- if .providerUse }}
+            - {{ printf "--context-token-provider-use-scopes=%s" .providerUse | quote }}
+            {{- end }}
+            {{- if .secretRead }}
+            - {{ printf "--context-token-secret-read-scopes=%s" .secretRead | quote }}
+            {{- end }}
+            {{- if .agentRead }}
+            - {{ printf "--context-token-agent-read-scopes=%s" .agentRead | quote }}
+            {{- end }}
+            {{- if .agentWrite }}
+            - {{ printf "--context-token-agent-write-scopes=%s" .agentWrite | quote }}
+            {{- end }}
+            {{- if .memoryRead }}
+            - {{ printf "--context-token-memory-read-scopes=%s" .memoryRead | quote }}
+            {{- end }}
+            {{- if .memoryWrite }}
+            - {{ printf "--context-token-memory-write-scopes=%s" .memoryWrite | quote }}
+            {{- end }}
+            {{- if .sessionRead }}
+            - {{ printf "--context-token-session-read-scopes=%s" .sessionRead | quote }}
+            {{- end }}
+            {{- if .sessionWrite }}
+            - {{ printf "--context-token-session-write-scopes=%s" .sessionWrite | quote }}
+            {{- end }}
+            {{- if .securityRead }}
+            - {{ printf "--context-token-security-read-scopes=%s" .securityRead | quote }}
+            {{- end }}
+            {{- if .securityWrite }}
+            - {{ printf "--context-token-security-write-scopes=%s" .securityWrite | quote }}
+            {{- end }}
+            {{- if .monitorRead }}
+            - {{ printf "--context-token-monitor-read-scopes=%s" .monitorRead | quote }}
+            {{- end }}
+            {{- if .monitorWrite }}
+            - {{ printf "--context-token-monitor-write-scopes=%s" .monitorWrite | quote }}
+            {{- end }}
+            {{- if .monitorOperate }}
+            - {{ printf "--context-token-monitor-operate-scopes=%s" .monitorOperate | quote }}
+            {{- end }}
+            {{- if .skillRead }}
+            - {{ printf "--context-token-skill-read-scopes=%s" .skillRead | quote }}
+            {{- end }}
+            {{- if .skillWrite }}
+            - {{ printf "--context-token-skill-write-scopes=%s" .skillWrite | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .tts }}
+            {{- if .url }}
+            - {{ printf "--context-token-tts-url=%s" .url | quote }}
+            {{- end }}
+            {{- if .audience }}
+            - {{ printf "--context-token-tts-audience=%s" .audience | quote }}
+            {{- end }}
+            {{- if .timeout }}
+            - {{ printf "--context-token-tts-timeout=%s" .timeout | quote }}
+            {{- end }}
+            {{- if .tokenSource }}
+            - {{ printf "--context-token-tts-token-source=%s" .tokenSource | quote }}
+            {{- end }}
+            {{- if .subjectTokenType }}
+            - {{ printf "--context-token-subject-token-type=%s" .subjectTokenType | quote }}
+            {{- end }}
+            {{- if .childScope }}
+            - {{ printf "--context-token-child-scope=%s" .childScope | quote }}
+            {{- end }}
+            {{- if .outboundScope }}
+            - {{ printf "--context-token-outbound-scope=%s" .outboundScope | quote }}
+            {{- end }}
+            {{- if .childTokenTTL }}
+            - {{ printf "--context-token-child-token-ttl=%s" .childTokenTTL | quote }}
+            {{- end }}
+            {{- if .toolTokenTTL }}
+            - {{ printf "--context-token-tool-token-ttl=%s" .toolTokenTTL | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            - --store-backend=sqlite
+            - --store-path={{ .Values.store.path }}
+            - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
+            - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
+            - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
+            - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
+            - --worker-cluster-role-binding-prefix={{ include "orka.fullname" . }}
+            {{- if .Values.controller.enforceNamespaceIsolation }}
+            - --enforce-namespace-isolation=true
+            {{- end }}
+            {{- if gt (int .Values.controller.maxTasksPerNamespace) 0 }}
+            - --max-tasks-per-namespace={{ .Values.controller.maxTasksPerNamespace }}
+            {{- end }}
+            {{- with .Values.controller.executionWorkspace }}
+            - --execution-workspace-default-provider={{ .defaultProvider | default "agent-sandbox" }}
+            {{- end }}
+            {{- with .Values.controller.agentSandbox }}
+            {{- if .enabled }}
+            - --agent-sandbox-enabled=true
+            {{- if .routerUrl }}
+            - {{ printf "--agent-sandbox-router-url=%s" .routerUrl | quote }}
+            {{- end }}
+            {{- if .defaultTemplate }}
+            - {{ printf "--agent-sandbox-default-template=%s" .defaultTemplate | quote }}
+            {{- end }}
+            - --agent-sandbox-warm-pool-policy={{ .warmPoolPolicy | default "disabled" }}
+            - --agent-sandbox-namespace-strategy={{ .namespaceStrategy | default "task" }}
+            - --agent-sandbox-claim-timeout={{ .claimTimeout | default "2m" }}
+            - --agent-sandbox-command-timeout={{ .commandTimeout | default "30m" }}
+            - --agent-sandbox-cleanup-policy={{ .cleanupPolicy | default "delete" }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.controller.substrate }}
+            {{- if .enabled }}
+            - --substrate-enabled=true
+            - {{ printf "--substrate-api-endpoint=%s" (.apiEndpoint | default "api.ate-system.svc:443") | quote }}
+            {{- if .apiCAFile }}
+            - {{ printf "--substrate-api-ca-file=%s" .apiCAFile | quote }}
+            {{- end }}
+            {{- if .apiInsecureSkipVerify }}
+            - --substrate-api-insecure-skip-verify=true
+            {{- end }}
+            - {{ printf "--substrate-router-url=%s" (.routerUrl | default "http://atenet-router.ate-system.svc") | quote }}
+            - {{ printf "--substrate-actor-dns-suffix=%s" (.actorDnsSuffix | default "actors.resources.substrate.ate.dev") | quote }}
+            {{- if .defaultTemplate }}
+            - {{ printf "--substrate-default-template=%s" .defaultTemplate | quote }}
+            {{- end }}
+            {{- if .defaultTemplateNamespace }}
+            - {{ printf "--substrate-default-template-namespace=%s" .defaultTemplateNamespace | quote }}
+            {{- end }}
+            {{- if .bootstrapTokenSecretName }}
+            - {{ printf "--substrate-bootstrap-token-secret-name=%s" .bootstrapTokenSecretName | quote }}
+            - {{ printf "--substrate-bootstrap-token-secret-key=%s" (.bootstrapTokenSecretKey | default "token") | quote }}
+            {{- end }}
+            - --substrate-claim-timeout={{ .claimTimeout | default "2m" }}
+            - --substrate-command-timeout={{ .commandTimeout | default "30m" }}
+            - --substrate-cleanup-policy={{ .cleanupPolicy | default "delete" }}
+            {{- end }}
+            {{- end }}
+          env:
+            - name: ORKA_AI_WORKER_CLUSTER_ROLE_NAME
+              value: {{ include "orka.aiWorkerClusterRoleName" . | quote }}
+            - name: ORKA_VENDOR_WORKER_CLUSTER_ROLE_NAME
+              value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
+            - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
+              value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
+            - name: ORKA_HARNESS_WRAPPER_ENDPOINT
+              value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
+            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
+              value: /var/run/orka/harness-wrapper/token
+            - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
+              value: {{ printf "%s-agent-harness-wrapper" (include "orka.fullname" .) | quote }}
+            {{- if .Values.github.webhook.secretName }}
+            - name: ORKA_GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.webhook.secretName | quote }}
+                  key: {{ .Values.github.webhook.secretKey | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.agent }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_AGENT
+              value: {{ .Values.github.labelTrigger.agent | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.namespace }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_NAMESPACE
+              value: {{ .Values.github.labelTrigger.namespace | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.gitSecret }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_GIT_SECRET
+              value: {{ .Values.github.labelTrigger.gitSecret | quote }}
+            {{- end }}
+            {{- if or .Values.github.webhook.secretName .Values.github.labelTrigger.agent .Values.github.labelTrigger.namespace .Values.github.labelTrigger.gitSecret .Values.github.labelTrigger.agents }}
+            {{- if .Values.github.labelTrigger.prefix }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_PREFIX
+              value: {{ .Values.github.labelTrigger.prefix | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.timeout }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_TIMEOUT
+              value: {{ .Values.github.labelTrigger.timeout | quote }}
+            {{- end }}
+            {{- if .Values.github.labelTrigger.maxTurns }}
+            - name: ORKA_GITHUB_LABEL_TRIGGER_MAX_TURNS
+              value: {{ .Values.github.labelTrigger.maxTurns | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $action, $agent := .Values.github.labelTrigger.agents }}
+            - name: ORKA_GITHUB_LABEL_AGENT_{{ regexReplaceAll "[^A-Z0-9]+" (upper $action) "_" | trimAll "_" }}
+              value: {{ $agent | quote }}
+            {{- end }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.controller.apiPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.controller.metricsPort }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.controller.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: store
+              mountPath: /data
+            - name: harness-wrapper-auth
+              mountPath: /var/run/orka/harness-wrapper
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: harness-wrapper-auth
+          secret:
+            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            items:
+              - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
+                path: token
+        - name: store
+          {{- if .Values.store.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "orka.fullname" . }}-store
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

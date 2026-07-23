@@ -4,45 +4,60 @@ on:
   push:
     branches:
       - main
+      - "release-*"
     paths:
       - "api/**"
       - "charts/orka/**"
-      - "config/crd/**"
-      - "config/rbac/**"
+      - "config/**"
+      - "deploy/**"
+      - "manifest_staging/**"
+      - "third_party/open-policy-agent/gatekeeper/helmify/**"
       - "hack/boilerplate.go.txt"
       - "internal/controller/**"
       - "go.mod"
       - "go.sum"
       - "Makefile"
       - "scripts/helm-crds.sh"
+      - "scripts/generate-manifests.sh"
+      - "scripts/promote-staging-manifests.sh"
+      - "scripts/update-release-version.py"
       - "scripts/compare-helm-chart-packages.py"
       - ".github/workflows/helm-chart.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-pr.yml"
   pull_request:
     paths:
       - "api/**"
       - "charts/orka/**"
-      - "config/crd/**"
-      - "config/rbac/**"
+      - "config/**"
+      - "deploy/**"
+      - "manifest_staging/**"
+      - "third_party/open-policy-agent/gatekeeper/helmify/**"
       - "hack/boilerplate.go.txt"
       - "internal/controller/**"
       - "go.mod"
       - "go.sum"
       - "Makefile"
       - "scripts/helm-crds.sh"
+      - "scripts/generate-manifests.sh"
+      - "scripts/promote-staging-manifests.sh"
+      - "scripts/update-release-version.py"
       - "scripts/compare-helm-chart-packages.py"
       - ".github/workflows/helm-chart.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-pr.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('helm-chart-pr-{0}', github.event.pull_request.number) || 'gh-pages' }}
+  group: ${{ github.event_name == 'pull_request' && format('helm-chart-pr-{0}', github.event.pull_request.number) || format('helm-chart-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
   validate:
-    name: Validate Helm chart
+    name: Validate staging Helm chart
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,29 +75,90 @@ jobs:
       - name: Show Helm version
         run: helm version
 
-      - name: Verify generated CRDs and chart mirror
+      - name: Verify generated staging manifests
         run: |
           set -euo pipefail
 
           make manifests
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-            echo "Generated manifests or the synchronized Helm CRDs are stale." >&2
+            echo "Generated staging manifests are stale." >&2
             git status --short --untracked-files=all >&2
             exit 1
           fi
 
-      - name: Check CRD synchronization
-        run: scripts/helm-crds.sh check
+          test -f manifest_staging/deploy/orka.yaml
+          test -f manifest_staging/charts/orka/Chart.yaml
 
-      - name: Lint chart
-        run: helm lint charts/orka
+      - name: Check staging CRD synchronization
+        run: scripts/helm-crds.sh check manifest_staging/charts/orka
 
-      - name: Package chart
+      - name: Validate promoted release snapshots
+        run: |
+          set -euo pipefail
+
+          test -s deploy/orka.yaml
+          test -f charts/orka/Chart.yaml
+          helm lint charts/orka
+          helm template promoted-snapshot charts/orka \
+            --namespace orka-system \
+            --include-crds \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            >/dev/null
+          kubectl create --dry-run=client --validate=false -f deploy/orka.yaml >/dev/null
+
+          mkdir -p promoted-release-packages
+          helm package charts/orka --destination promoted-release-packages
+          shopt -s nullglob
+          promoted_packages=(promoted-release-packages/orka-*.tgz)
+          if [[ ${#promoted_packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one promoted Orka chart, found ${#promoted_packages[@]}." >&2
+            exit 1
+          fi
+          scripts/helm-crds.sh check-package-against-chart \
+            charts/orka "${promoted_packages[0]}"
+
+      - name: Compare staging and promoted chart snapshots
+        run: |
+          set -euo pipefail
+
+          chart_field() {
+            local chart_dir=$1
+            local field=$2
+            local value
+            value=$(awk -v key="${field}:" '$1 == key { print $2; exit }' "${chart_dir}/Chart.yaml")
+            value=${value#\"}
+            value=${value%\"}
+            value=${value#\'}
+            value=${value%\'}
+            if [[ -z "${value}" ]]; then
+              echo "Could not read ${field} from ${chart_dir}/Chart.yaml." >&2
+              return 1
+            fi
+            printf '%s\n' "${value}"
+          }
+
+          staging_version=$(chart_field manifest_staging/charts/orka version)
+          promoted_version=$(chart_field charts/orka version)
+
+          if [[ "${staging_version}" == "${promoted_version}" ]]; then
+            echo "Staging and promoted charts both declare ${staging_version}; requiring exact source parity."
+            diff --no-dereference --recursive --unified \
+              manifest_staging/charts/orka charts/orka
+            diff --no-dereference --recursive --unified \
+              manifest_staging/deploy deploy
+          else
+            echo "Staging chart ${staging_version} is ahead of promoted chart ${promoted_version}; skipping snapshot parity check."
+          fi
+
+      - name: Lint staging chart
+        run: helm lint manifest_staging/charts/orka
+
+      - name: Package staging chart
         run: |
           set -euo pipefail
 
           mkdir -p cr-release-packages
-          helm package charts/orka --destination cr-release-packages
+          helm package manifest_staging/charts/orka --destination cr-release-packages
 
           shopt -s nullglob
           chart_packages=(cr-release-packages/orka-*.tgz)
@@ -97,10 +173,11 @@ jobs:
           set -euo pipefail
 
           shopt -s nullglob
-          chart_packages=(cr-release-packages/orka-*.tgz)
-          [[ ${#chart_packages[@]} -eq 1 ]]
-          candidate=${chart_packages[0]}
-          package_name=$(basename "${candidate}")
+          staging_packages=(cr-release-packages/orka-*.tgz)
+          promoted_packages=(promoted-release-packages/orka-*.tgz)
+          [[ ${#staging_packages[@]} -eq 1 ]]
+          [[ ${#promoted_packages[@]} -eq 1 ]]
+          candidates=("${staging_packages[0]}" "${promoted_packages[0]}")
           comparison_dir=$(mktemp -d)
           trap 'rm -rf "${comparison_dir}"' EXIT
 
@@ -122,20 +199,23 @@ jobs:
               ;;
           esac
 
-          for published_path in "charts/${package_name}" "${package_name}"; do
-            if ! git cat-file -e "origin/gh-pages:${published_path}" 2>/dev/null; then
-              continue
-            fi
-            published_archive="${comparison_dir}/$(basename "${published_path}")"
-            git show "origin/gh-pages:${published_path}" > "${published_archive}"
-            if cmp -s "${candidate}" "${published_archive}" || \
-               python3 -I scripts/compare-helm-chart-packages.py "${candidate}" "${published_archive}"; then
-              echo "Published ${published_path} has identical normalized contents."
-            else
-              echo "Chart ${package_name} already exists with different contents." >&2
-              echo "Bump charts/orka/Chart.yaml before merging this change." >&2
-              exit 1
-            fi
+          for candidate in "${candidates[@]}"; do
+            package_name=$(basename "${candidate}")
+            for published_path in "charts/${package_name}" "${package_name}"; do
+              if ! git cat-file -e "origin/gh-pages:${published_path}" 2>/dev/null; then
+                continue
+              fi
+              published_archive="${comparison_dir}/$(basename "${published_path}")"
+              git show "origin/gh-pages:${published_path}" > "${published_archive}"
+              if cmp -s "${candidate}" "${published_archive}" || \
+                 python3 -I scripts/compare-helm-chart-packages.py "${candidate}" "${published_archive}"; then
+                echo "Published ${published_path} has identical normalized contents for ${candidate}."
+              else
+                echo "Chart ${package_name} already exists with different contents." >&2
+                echo "Prepare a new staging or promoted chart version before merging this change." >&2
+                exit 1
+              fi
+            done
           done
 
       - name: Upload validated chart package
@@ -336,161 +416,3 @@ jobs:
 
           helm uninstall orka-fresh-crds --namespace "${NAMESPACE}"
           assert_all_orka_crds "after helm uninstall"
-
-  publish:
-    name: Publish Helm chart repository
-    needs:
-      - lifecycle
-      - validate
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Download validated chart package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: helm-chart-package
-          path: cr-release-packages
-
-      - name: Show Helm version
-        run: helm version
-
-      - name: Publish chart repository
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          rm -rf gh-pages
-          git init gh-pages
-          cd gh-pages
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          if git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages; then
-            git checkout -B gh-pages origin/gh-pages
-          else
-            git checkout --orphan gh-pages
-            git rm -rf . || true
-          fi
-
-          mkdir -p charts
-          refresh_index=false
-
-          # Migrate chart archives and any matching provenance files as atomic pairs
-          # from the previous root-level repository layout.
-          shopt -s nullglob
-          for artifact in ./*.tgz; do
-            target="charts/$(basename "${artifact}")"
-            provenance="${artifact}.prov"
-            target_provenance="${target}.prov"
-
-            if [[ -e "${target}" ]]; then
-              if ! cmp -s "${artifact}" "${target}"; then
-                if [[ -e "${provenance}" ]]; then
-                  echo "Refusing to normalize $(basename "${artifact}") because its provenance signs the exact archive bytes." >&2
-                  exit 1
-                fi
-                if ! python3 -I "${GITHUB_WORKSPACE}/scripts/compare-helm-chart-packages.py" "${artifact}" "${target}"; then
-                  echo "Conflicting root and charts/ archives exist for $(basename "${artifact}")." >&2
-                  exit 1
-                fi
-              fi
-              rm -f "${artifact}"
-
-              if [[ -e "${provenance}" ]]; then
-                if [[ -e "${target_provenance}" ]]; then
-                  if ! cmp -s "${provenance}" "${target_provenance}"; then
-                    echo "Conflicting root and charts/ provenance files exist for $(basename "${provenance}")." >&2
-                    exit 1
-                  fi
-                  rm -f "${provenance}"
-                else
-                  mv "${provenance}" "${target_provenance}"
-                fi
-              fi
-            else
-              if [[ -e "${target_provenance}" ]]; then
-                echo "Refusing to pair $(basename "${artifact}") with an orphaned charts/ provenance file." >&2
-                exit 1
-              fi
-              mv "${artifact}" "${target}"
-              if [[ -e "${provenance}" ]]; then
-                mv "${provenance}" "${target_provenance}"
-              fi
-            fi
-            refresh_index=true
-          done
-
-          orphaned_provenance=(./*.prov)
-          if [[ ${#orphaned_provenance[@]} -ne 0 ]]; then
-            echo "Refusing to migrate orphaned root-level provenance files:" >&2
-            printf '  %s\n' "${orphaned_provenance[@]}" >&2
-            exit 1
-          fi
-          if [[ -f index.yaml && ! -f charts/index.yaml ]]; then
-            mv index.yaml charts/index.yaml
-            refresh_index=true
-          elif [[ -f index.yaml ]]; then
-            rm -f index.yaml
-            refresh_index=true
-          fi
-
-          chart_packages=(../cr-release-packages/orka-*.tgz)
-          if [[ ${#chart_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one validated Orka chart, found ${#chart_packages[@]}." >&2
-            exit 1
-          fi
-
-          candidate=${chart_packages[0]}
-          published="charts/$(basename "${candidate}")"
-          if [[ -f "${published}" ]]; then
-            if cmp -s "${candidate}" "${published}"; then
-              echo "Chart $(basename "${candidate}") is already published with identical bytes."
-            elif python3 -I "${GITHUB_WORKSPACE}/scripts/compare-helm-chart-packages.py" "${candidate}" "${published}"; then
-              echo "Chart $(basename "${candidate}") is already published with identical normalized contents."
-              echo "Keeping the existing archive to preserve its immutable bytes."
-            else
-              echo "Refusing to overwrite immutable chart archive $(basename "${candidate}")." >&2
-              echo "Bump charts/orka/Chart.yaml version before publishing changed chart contents." >&2
-              sha256sum "${published}" "${candidate}" >&2
-              exit 1
-            fi
-          else
-            if [[ -e "${published}.prov" ]]; then
-              echo "Refusing to pair $(basename "${candidate}") with an orphaned provenance file." >&2
-              exit 1
-            fi
-            cp "${candidate}" "${published}"
-            refresh_index=true
-          fi
-
-          if [[ ! -f charts/index.yaml ]]; then
-            refresh_index=true
-          fi
-          if [[ "${refresh_index}" == true ]]; then
-            if [[ -f charts/index.yaml ]]; then
-              helm repo index charts \
-                --url "https://orka-agents.github.io/orka/charts" \
-                --merge charts/index.yaml
-            else
-              helm repo index charts --url "https://orka-agents.github.io/orka/charts"
-            fi
-          fi
-
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No Helm chart changes to publish."
-            exit 0
-          fi
-
-          git commit -m "Publish Helm chart"
-          git push origin HEAD:gh-pages

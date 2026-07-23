@@ -78,6 +78,11 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
+`charts/orka` is the promoted, reviewed chart snapshot for the current source
+release. Next-release chart changes are generated and tested under
+`manifest_staging/charts/orka`, promoted in a release-preparation PR, and
+published only when the matching `v*` tag is pushed.
+
 A fresh install creates all nine cluster-scoped Orka CRDs. Use `--skip-crds`
 only when one designated platform or release owner already manages compatible
 Orka CRDs for the cluster.
@@ -147,5 +152,5 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [Repository Monitors](website/docs/guides/repository-monitors.md) | Durable GitHub pull request monitor runs, review tasks, and dashboard state |
 | [GitHub Label Triggers](website/docs/guides/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
-| [Development](website/docs/development/development.md)                           | Building, testing, and contributing                   |
+| [Development](website/docs/development/development.md)                           | Building, generated charts, releases, and contributing |
 | [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |

@@ -1,6 +1,27 @@
 # Third-Party Notices
 
-This project distributes container images that include or embed third-party components. This file lists notices for known direct AI CLI runtime components intentionally included in Orka images. Generated release SBOMs provide additional dependency and image-content detail for transitive package-manager dependencies, base image contents, and platform packages.
+This project includes and distributes third-party components. This file records
+notices for source-derived build tooling and direct AI CLI runtime components
+intentionally included in Orka. Generated release SBOMs provide additional
+dependency and image-content detail for transitive package-manager dependencies,
+base image contents, and platform packages.
+
+## Gatekeeper Helm Chart Generator
+
+Orka's Helm chart generation flow includes modified source derived from
+Gatekeeper's in-repository `cmd/build/helmify` generator at commit
+`c9b67657102032a460a28e7f3b9c88ec0c193453`. The derived source is under
+`third_party/open-policy-agent/gatekeeper/helmify`.
+
+Gatekeeper
+
+Copyright 2018-2020 The Gatekeeper Authors
+
+The derived source is licensed under the Apache License, Version 2.0. See
+`third_party/open-policy-agent/gatekeeper/helmify/LICENSE`,
+`third_party/open-policy-agent/gatekeeper/helmify/NOTICE`, and
+`third_party/open-policy-agent/gatekeeper/helmify/README.md` for the license,
+upstream revision, and Orka modification notes.
 
 ## GitHub Copilot CLI
 
