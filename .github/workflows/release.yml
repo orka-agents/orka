@@ -106,7 +106,7 @@ jobs:
           trap 'rm -rf "${comparison_dir}"' EXIT
 
           set +e
-          git ls-remote --exit-code --heads origin gh-pages >/dev/null
+          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
           probe_status=$?
           set -e
           case "${probe_status}" in
@@ -515,12 +515,24 @@ jobs:
           cd gh-pages
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          if git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages; then
-            git checkout -B gh-pages origin/gh-pages
-          else
-            git checkout --orphan gh-pages
-            git rm -rf . || true
-          fi
+          set +e
+          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
+          probe_status=$?
+          set -e
+          case "${probe_status}" in
+            0)
+              git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages
+              git checkout -B gh-pages origin/gh-pages
+              ;;
+            2)
+              git checkout --orphan gh-pages
+              git rm -rf . || true
+              ;;
+            *)
+              echo "Could not determine whether the gh-pages branch exists." >&2
+              exit "${probe_status}"
+              ;;
+          esac
 
           mkdir -p charts
           refresh_index=false

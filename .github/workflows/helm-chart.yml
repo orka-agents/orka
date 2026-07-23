@@ -182,7 +182,7 @@ jobs:
           trap 'rm -rf "${comparison_dir}"' EXIT
 
           set +e
-          git ls-remote --exit-code --heads origin gh-pages >/dev/null
+          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
           probe_status=$?
           set -e
           case "${probe_status}" in

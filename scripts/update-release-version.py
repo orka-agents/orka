@@ -46,7 +46,7 @@ def main() -> int:
     replace_exact(updates, chart, r"^appVersion: .*$", f'appVersion: "{release_tag}"')
 
     values = ROOT / "third_party/open-policy-agent/gatekeeper/helmify/static/values.yaml"
-    replace_exact(updates, values, r"^(\s+tag:)\s*.*$", rf'\1 "{version}"', expected=3)
+    replace_exact(updates, values, r"^(\s+tag:)\s*.*$", rf'\1 "{version}"', expected=4)
 
     substitutions = {
         ROOT / "config/manager/manager.yaml": [

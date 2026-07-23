@@ -181,6 +181,7 @@ spec:
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ .Values.workers.ai.image.repository }}:{{ .Values.workers.ai.image.tag }}
+            - --general-worker-image={{ .Values.workers.general.image.repository }}:{{ .Values.workers.general.image.tag }}
             - --ai-worker-cluster-role-name={{ include "orka.aiWorkerClusterRoleName" . }}
             - --vendor-worker-cluster-role-name={{ include "orka.vendorWorkerClusterRoleName" . }}
             - --container-worker-cluster-role-name={{ include "orka.containerWorkerClusterRoleName" . }}
