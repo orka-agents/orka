@@ -142,6 +142,84 @@ func TestChatCreateAgentTool_Execute_PreservesObjectOpencodeModel(t *testing.T) 
 	}
 }
 
+func TestChatCreateAgentTool_Execute_NormalizesObjectOpencodeModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentName string
+		provider  string
+		modelName string
+		wantName  string
+	}{
+		{
+			name:      "padded name and provider",
+			agentName: "opencode-padded-model",
+			provider:  " / /google/ / ",
+			modelName: " gemma-3n-e4b ",
+			wantName:  "google/gemma-3n-e4b",
+		},
+		{
+			name:      "whitespace provider",
+			agentName: "opencode-whitespace-provider",
+			provider:  " \t\n ",
+			modelName: " gemma-3n-e4b ",
+			wantName:  "gemma-3n-e4b",
+		},
+		{
+			name:      "slash-only provider",
+			agentName: "opencode-slash-only-provider",
+			provider:  " / / / ",
+			modelName: "gemma-3n-e4b",
+			wantName:  "gemma-3n-e4b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "opencode-credentials", Namespace: defaultNamespace},
+				Data: map[string][]byte{
+					workerenv.OpenAIBaseURL: []byte("https://models.example.invalid/v1"),
+					workerenv.OpenAIAPIKey:  []byte("credential"),
+				},
+			}
+			fc := newFakeClient(secret)
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			args, err := json.Marshal(map[string]any{
+				nameField: tt.agentName,
+				modelField: map[string]any{
+					"provider": tt.provider,
+					nameField:  tt.modelName,
+				},
+				runtimeField: map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)},
+			})
+			if err != nil {
+				t.Fatalf("marshal args: %v", err)
+			}
+
+			result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var response ChatToolResult
+			if err := json.Unmarshal([]byte(result), &response); err != nil {
+				t.Fatalf("failed to parse result: %v", err)
+			}
+			if !response.Success {
+				t.Fatalf("expected success, got error: %s", response.Error)
+			}
+
+			var created corev1alpha1.Agent
+			if err := fc.Get(context.Background(), client.ObjectKey{Name: tt.agentName, Namespace: defaultNamespace}, &created); err != nil {
+				t.Fatalf("failed to get created agent: %v", err)
+			}
+			if created.Spec.Model == nil || created.Spec.Model.Name != tt.wantName || created.Spec.Model.Provider != "" {
+				t.Fatalf("model = %#v, want OpenCode model name %q without provider field", created.Spec.Model, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestChatCreateAgentTool_Execute_RejectsBlankObjectOpencodeModelNames(t *testing.T) {
 	tests := []struct {
 		name      string

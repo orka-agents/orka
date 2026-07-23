@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -98,10 +99,12 @@ func (t *ChatCreateAgentTool) Execute(ctx context.Context, args json.RawMessage)
 			name := chatGetStringArg(m, nameField)
 			provider := chatGetStringArg(m, "provider")
 			if chatRuntimeTypeArg(a) == corev1alpha1.AgentRuntimeOpencode {
-				if strings.TrimSpace(name) == "" {
-					name = ""
-				} else if provider != "" {
-					providerPrefix := strings.TrimSuffix(provider, "/") + "/"
+				name = strings.TrimSpace(name)
+				provider = strings.TrimFunc(provider, func(r rune) bool {
+					return r == '/' || unicode.IsSpace(r)
+				})
+				if name != "" && provider != "" {
+					providerPrefix := provider + "/"
 					if !strings.HasPrefix(name, providerPrefix) {
 						name = providerPrefix + strings.TrimPrefix(name, "/")
 					}

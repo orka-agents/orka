@@ -44,6 +44,7 @@ const (
 	opencodePermissionWebFetch    = "webfetch"
 	opencodeEnvTrue               = "true"
 	opencodeFinishReasonError     = "error"
+	opencodeFinishReasonToolCalls = "tool-calls"
 	opencodeFinishReasonUnknown   = "unknown"
 	opencodeEscapedValueEnv       = "ORKA_OPENCODE_API_KEY_JSON_ESCAPED"
 	opencodeReadOnlyConfigHome    = "/opt/orka-opencode-config"
@@ -168,16 +169,16 @@ func (a *OpencodeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Co
 
 func (a *OpencodeAdapter) ParseResult(_ context.Context, _ TurnContext, run CommandResult) (TurnResult, error) {
 	stdout := run.ExactStdout()
-	message, finishReason := opencodeFinalMessage(stdout)
+	message, finishReason, stepFinished := opencodeFinalMessage(stdout)
+	if !stepFinished || finishReason == "" || finishReason == opencodeFinishReasonToolCalls {
+		return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
+			fmt.Errorf("opencode output did not contain a terminal step_finish event")
+	}
 	if finishReason == opencodeFinishReasonUnknown || finishReason == opencodeFinishReasonError {
 		return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
 			fmt.Errorf("opencode output ended with %s finish reason", finishReason)
 	}
 	if message != "" {
-		if finishReason == "" {
-			return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
-				fmt.Errorf("opencode output did not contain a terminal step_finish event")
-		}
 		return TurnResult{Result: message, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}}, nil
 	}
 	return TurnResult{Result: stdout, Metadata: map[string]string{opencodeMetadataAdapter: RuntimeOpencode}},
@@ -478,22 +479,30 @@ func opencodeBaseURL(value string) string {
 	return strings.TrimSuffix(value, "/chat/completions")
 }
 
-func opencodeFinalMessage(stdout string) (string, string) {
+func opencodeFinalMessage(stdout string) (string, string, bool) {
 	scanner := bufio.NewScanner(strings.NewReader(stdout))
 	scanner.Buffer(make([]byte, 64*1024), maxStoredResultBytes)
-	last := ""
+	textParts := make([]string, 0, 1)
 	finishReason := ""
+	stepFinished := false
 	for scanner.Scan() {
 		var event opencodeOutputEvent
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
 		}
 		switch {
+		case event.Type == "step_start" && event.Part.Type == "step-start":
+			textParts = textParts[:0]
+			finishReason = ""
+			stepFinished = false
 		case event.Type == "text" && event.Part.Type == "text" && strings.TrimSpace(event.Part.Text) != "":
-			last = event.Part.Text
+			textParts = append(textParts, event.Part.Text)
+			finishReason = ""
+			stepFinished = false
 		case event.Type == "step_finish" && event.Part.Type == "step-finish":
 			finishReason = strings.TrimSpace(event.Part.Reason)
+			stepFinished = true
 		}
 	}
-	return last, finishReason
+	return strings.Join(textParts, "\n"), finishReason, stepFinished
 }

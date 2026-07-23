@@ -487,7 +487,6 @@ func TestOpencodeAdapterParseResult(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
 	stdout := "" +
 		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
-		`{"type":"text","part":{"type":"text","text":"intermediate"}}` + "\n" +
 		`{"type":"text","part":{"type":"text","text":"final assistant message"}}` + "\n" +
 		`{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}` + "\n"
 	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
@@ -499,6 +498,86 @@ func TestOpencodeAdapterParseResult(t *testing.T) {
 	}
 	if result.Metadata[opencodeMetadataAdapter] != RuntimeOpencode {
 		t.Fatalf("Metadata = %#v, want opencode adapter", result.Metadata)
+	}
+}
+
+func TestOpencodeAdapterParseResultUsesOnlyFinalStepText(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	stdout := "" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"intermediate step text"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"` + opencodeFinishReasonToolCalls + `"}}` + "\n" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"final step text"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}` + "\n"
+	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err != nil {
+		t.Fatalf("ParseResult() error = %v", err)
+	}
+	if result.Result != "final step text" {
+		t.Fatalf("Result = %q, want only final step text", result.Result)
+	}
+}
+
+func TestOpencodeAdapterParseResultRejectsToolCallsWithoutFinalStep(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	stdout := "" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"intermediate step text"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"` + opencodeFinishReasonToolCalls + `"}}` + "\n"
+	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err == nil || !strings.Contains(err.Error(), "terminal step_finish event") {
+		t.Fatalf("ParseResult() error = %v, want trailing tool-calls rejection", err)
+	}
+	if result.Result != stdout {
+		t.Fatalf("Result = %q, want exact incomplete stdout", result.Result)
+	}
+}
+
+func TestOpencodeAdapterParseResultRejectsTextlessToolCallsWithoutFinalStep(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	stdout := "" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"` + opencodeFinishReasonToolCalls + `"}}` + "\n"
+	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err == nil || !strings.Contains(err.Error(), "terminal step_finish event") {
+		t.Fatalf("ParseResult() error = %v, want textless trailing tool-calls rejection", err)
+	}
+	if result.Result != stdout {
+		t.Fatalf("Result = %q, want exact incomplete stdout", result.Result)
+	}
+}
+
+func TestOpencodeAdapterParseResultAggregatesFinalStepText(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	stdout := "" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"first text part"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"second text part"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}` + "\n"
+	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+	if err != nil {
+		t.Fatalf("ParseResult() error = %v", err)
+	}
+	if result.Result != "first text part\nsecond text part" {
+		t.Fatalf("Result = %q, want all final-step text parts", result.Result)
+	}
+}
+
+func TestOpencodeAdapterParseResultRejectsBlankFinishReason(t *testing.T) {
+	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
+	for _, reason := range []string{"", "   "} {
+		stdout := "" +
+			`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+			`{"type":"text","part":{"type":"text","text":"partial assistant message"}}` + "\n" +
+			`{"type":"step_finish","part":{"type":"step-finish","reason":"` + reason + `"}}` + "\n"
+		result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
+		if err == nil || !strings.Contains(err.Error(), "terminal step_finish event") {
+			t.Fatalf("ParseResult() error = %v, want blank finish reason rejection", err)
+		}
+		if result.Result != stdout {
+			t.Fatalf("Result = %q, want exact failed stdout", result.Result)
+		}
 	}
 }
 
@@ -521,11 +600,14 @@ func TestOpencodeAdapterParseResultRejectsFailedFinish(t *testing.T) {
 	}
 }
 
-func TestOpencodeAdapterParseResultRejectsTextWithoutStepFinish(t *testing.T) {
+func TestOpencodeAdapterParseResultRejectsFinalStepTextWithoutStepFinish(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
 	stdout := "" +
 		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
-		`{"type":"text","part":{"type":"text","text":"partial assistant message"}}` + "\n"
+		`{"type":"text","part":{"type":"text","text":"completed earlier step"}}` + "\n" +
+		`{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}` + "\n" +
+		`{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
+		`{"type":"text","part":{"type":"text","text":"partial final step"}}` + "\n"
 	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
 	if err == nil || !strings.Contains(err.Error(), "terminal step_finish event") {
 		t.Fatalf("ParseResult() error = %v, want missing terminal step_finish rejection", err)
@@ -535,12 +617,12 @@ func TestOpencodeAdapterParseResultRejectsTextWithoutStepFinish(t *testing.T) {
 	}
 }
 
-func TestOpencodeAdapterParseResultRejectsIncompleteJSON(t *testing.T) {
+func TestOpencodeAdapterParseResultRejectsStepWithoutFinish(t *testing.T) {
 	adapter := NewOpencodeAdapter(OpencodeAdapterConfig{})
 	stdout := `{"type":"step_start","part":{"type":"step-start"}}` + "\n"
 	result, err := adapter.ParseResult(context.Background(), TurnContext{}, CommandResult{FullStdout: stdout})
-	if err == nil || !strings.Contains(err.Error(), "completed text event") {
-		t.Fatalf("ParseResult() error = %v, want incomplete JSON error", err)
+	if err == nil || !strings.Contains(err.Error(), "terminal step_finish event") {
+		t.Fatalf("ParseResult() error = %v, want missing terminal step_finish rejection", err)
 	}
 	if result.Result != stdout {
 		t.Fatalf("Result = %q, want exact incomplete stdout", result.Result)
