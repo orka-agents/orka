@@ -639,7 +639,7 @@ type TaskList struct {
 }
 
 // AgentRuntimeType defines the agent runtime to use
-// +kubebuilder:validation:Enum=copilot;claude;codex
+// +kubebuilder:validation:Enum=copilot;claude;codex;opencode
 type AgentRuntimeType string
 
 const (
@@ -649,6 +649,8 @@ const (
 	AgentRuntimeClaude AgentRuntimeType = "claude"
 	// AgentRuntimeCodex uses OpenAI Codex CLI as the agent runtime
 	AgentRuntimeCodex AgentRuntimeType = "codex"
+	// AgentRuntimeOpencode uses OpenCode CLI as the agent runtime
+	AgentRuntimeOpencode AgentRuntimeType = "opencode"
 )
 
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.

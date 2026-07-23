@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -106,7 +107,7 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 			},
 			"model": {
 				"type": "object",
-				"description": "LLM model config; inherited from coordinator if not set",
+				"description": "LLM model config; model.name is required for OpenCode runtimes and otherwise inherited from the coordinator when omitted",
 				"properties": {
 					"provider": {
 						"type": "string",
@@ -164,11 +165,11 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 			},
 			"runtime": {
 				"type": "object",
-				"description": "Set to make this a CLI runtime agent (copilot, claude, or codex). Runtime agents run code, edit files, and use git. Do NOT set runtime on coordinator agents.",
+				"description": "Set to make this a CLI runtime agent (copilot, claude, codex, or opencode). Runtime agents run code, edit files, and use git. Do NOT set runtime on coordinator agents.",
 				"properties": {
 					"type": {
 						"type": "string",
-						"description": "Runtime type: copilot, claude, or codex"
+						"description": "Runtime type: copilot, claude, codex, or opencode"
 					},
 					"secretRef": {
 						"type": "string",
@@ -194,6 +195,25 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if a.SystemPrompt == "" {
 		return "", fmt.Errorf("systemPrompt is required")
 	}
+	runtimeType := ""
+	if a.Runtime != nil {
+		runtimeType = strings.TrimSpace(a.Runtime.Type)
+	}
+	requestedModel := ""
+	if a.Model != nil {
+		requestedModel = strings.TrimSpace(a.Model.Name)
+	}
+	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) {
+		if requestedModel == "" {
+			return "", fmt.Errorf("model.name is required for opencode runtime")
+		}
+		if provider := strings.TrimSpace(a.Model.Provider); provider != "" {
+			providerPrefix := strings.TrimSuffix(provider, "/") + "/"
+			if !strings.HasPrefix(requestedModel, providerPrefix) {
+				requestedModel = providerPrefix + strings.TrimPrefix(requestedModel, "/")
+			}
+		}
+	}
 
 	parentName := os.Getenv(envOrkaTaskName)
 	parentNamespace := os.Getenv(envOrkaTaskNamespace)
@@ -217,7 +237,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	// Build model config — clear provider to avoid mismatch with providerRef
 	model := &corev1alpha1.ModelConfig{}
 	if a.Model != nil {
-		model.Name = a.Model.Name
+		model.Name = requestedModel
 	}
 	if model.Name == "" {
 		model.Name = os.Getenv(workerenv.AIModel)
@@ -302,7 +322,7 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		agent.Spec.Coordination = coord
 	}
 
-	// Set runtime if provided (makes this a CLI agent like copilot/claude/codex)
+	// Set runtime if provided (makes this a CLI agent like copilot/claude/codex/opencode)
 	if a.Runtime != nil && a.Runtime.Type != "" {
 		agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 			Type: corev1alpha1.AgentRuntimeType(a.Runtime.Type),

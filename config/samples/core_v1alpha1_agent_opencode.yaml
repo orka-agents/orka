@@ -1,0 +1,19 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: opencode-agent
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  model:
+    name: "kimi-k2"
+  systemPrompt:
+    inline: "You are a helpful coding assistant."
+  # The Secret must contain OPENAI_BASE_URL. Add OPENAI_API_KEY when authentication is required.
+  secretRef:
+    name: opencode-credentials
+  runtime:
+    type: opencode
+    defaultMaxTurns: 50
+    defaultAllowBash: true
