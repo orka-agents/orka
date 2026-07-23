@@ -1734,6 +1734,7 @@ spec:
                     - copilot
                     - claude
                     - codex
+                    - opencode
                     type: string
                 type: object
                 x-kubernetes-validations:
