@@ -65,10 +65,23 @@ charts_installed=true
 if ! diff -ruN "${STAGING_DIR}/deploy" "$DEPLOY_DIR"; then fail "promoted deploy tree differs from staging"; fi
 if ! diff -ruN "${STAGING_DIR}/charts" "$CHARTS_DIR"; then fail "promoted chart tree differs from staging"; fi
 
-if [[ -n "$deploy_backup" ]]; then rm -rf "$deploy_backup"; deploy_backup=""; fi
-if [[ -n "$charts_backup" ]]; then rm -rf "$charts_backup"; charts_backup=""; fi
 deploy_installed=false
 charts_installed=false
 trap - EXIT
-rm -rf "$work_dir"
+cleanup_failed=false
+if [[ -n "$deploy_backup" ]] && ! rm -rf "$deploy_backup"; then
+  printf 'promote-staging-manifests: warning: could not remove backup %s\n' "$deploy_backup" >&2
+  cleanup_failed=true
+fi
+if [[ -n "$charts_backup" ]] && ! rm -rf "$charts_backup"; then
+  printf 'promote-staging-manifests: warning: could not remove backup %s\n' "$charts_backup" >&2
+  cleanup_failed=true
+fi
+if ! rm -rf "$work_dir"; then
+  printf 'promote-staging-manifests: warning: could not remove work directory %s\n' "$work_dir" >&2
+  cleanup_failed=true
+fi
+if [[ "$cleanup_failed" == true ]]; then
+  exit 1
+fi
 printf 'Promoted manifest_staging/deploy and manifest_staging/charts into release snapshots.\n'

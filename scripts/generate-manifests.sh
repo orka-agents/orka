@@ -117,10 +117,16 @@ mv "$work_dir" "$STAGING_DIR"
 work_dir=""
 installed_new=true
 
-if [[ -n "$backup_dir" ]]; then
-  rm -rf "$backup_dir"
-  backup_dir=""
-fi
 installed_new=false
 trap - EXIT
+cleanup_failed=false
+if [[ -n "$backup_dir" ]]; then
+  if ! rm -rf "$backup_dir"; then
+    printf 'generate-manifests: warning: could not remove backup %s\n' "$backup_dir" >&2
+    cleanup_failed=true
+  fi
+fi
+if [[ "$cleanup_failed" == true ]]; then
+  exit 1
+fi
 printf 'Generated staging deploy manifest and Helm chart under %s.\n' "$STAGING_DIR"

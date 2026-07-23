@@ -345,7 +345,11 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
 		"$(KUBECTL)" -n orka-system create secret generic harness-wrapper-auth --from-literal=token="$$token"; \
 	fi
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+	"$(KUSTOMIZE)" build config/default | \
+		sed -E \
+			-e 's|^([[:space:]]*- --ai-worker-image=).*$$|\1$(AI_WORKER_IMG)|' \
+			-e 's|^([[:space:]]*- --general-worker-image=).*$$|\1$(GENERAL_WORKER_IMG)|' | \
+		"$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
