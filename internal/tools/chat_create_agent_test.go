@@ -22,6 +22,22 @@ import (
 
 const testProviderOpenAI = "openai"
 
+func TestChatCreateAgentToolParametersExposePositiveModelLimits(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal((&ChatCreateAgentTool{}).Parameters(), &schema); err != nil {
+		t.Fatalf("unmarshal parameters: %v", err)
+	}
+	properties := schema[jsonSchemaPropertiesField].(map[string]any)
+	modelSchema := properties[modelField].(map[string]any)
+	modelProperties := modelSchema[jsonSchemaPropertiesField].(map[string]any)
+	for _, key := range []string{"maxTokens", "contextWindow"} {
+		field := modelProperties[key].(map[string]any)
+		if field[jsonSchemaTypeField] != jsonSchemaTypeInteger || field["minimum"] != float64(1) {
+			t.Fatalf("model.%s schema = %#v, want positive integer", key, field)
+		}
+	}
+}
+
 func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	fc := newFakeClient()
 	ctx := WithToolContext(context.Background(), &ToolContext{
@@ -30,7 +46,7 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	})
 
 	tool := &ChatCreateAgentTool{}
-	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-no-provider","model":{"provider":"openai","name":"gpt-4.1-mini"}}`))
+	result, err := tool.Execute(ctx, json.RawMessage(`{"name":"agent-no-provider","model":{"provider":"openai","name":"gpt-4.1-mini","maxTokens":40000,"contextWindow":10000}}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,6 +75,202 @@ func TestChatCreateAgentTool_Execute_OmittedProviderRefLeavesNil(t *testing.T) {
 	}
 	if created.Spec.Model.Provider != testProviderOpenAI {
 		t.Fatalf("model.provider = %q, want openai when no providerRef is set", created.Spec.Model.Provider)
+	}
+	if created.Spec.Model.MaxTokens == nil || *created.Spec.Model.MaxTokens != 40000 {
+		t.Fatalf("model.maxTokens = %v, want 40000", created.Spec.Model.MaxTokens)
+	}
+	if created.Spec.Model.ContextWindow == nil || *created.Spec.Model.ContextWindow != 10000 {
+		t.Fatalf("model.contextWindow = %v, want 10000", created.Spec.Model.ContextWindow)
+	}
+}
+
+func TestChatCreateAgentToolRejectsInvalidOpencodeModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		maxTokens     int
+		contextWindow int
+		want          string
+	}{
+		{name: "output cap", maxTokens: 32001, contextWindow: 64000, want: "must not exceed 32000"},
+		{name: "equal limits", maxTokens: 10000, contextWindow: 10000, want: "must be greater"},
+		{name: "default output", contextWindow: 8192, want: "must be greater"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			model := map[string]any{nameField: "kimi-k2"}
+			if tt.maxTokens != 0 {
+				model["maxTokens"] = tt.maxTokens
+			}
+			if tt.contextWindow != 0 {
+				model["contextWindow"] = tt.contextWindow
+			}
+			args, err := json.Marshal(map[string]any{
+				nameField:    "invalid-opencode-limits",
+				modelField:   model,
+				runtimeField: map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)},
+			})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: newFakeClient(), Namespace: defaultNamespace})
+			result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var toolResult ChatToolResult
+			if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+			if toolResult.Success || !strings.Contains(toolResult.Error, tt.want) {
+				t.Fatalf("Execute() result = %#v, want %q", toolResult, tt.want)
+			}
+		})
+	}
+}
+
+func TestChatCreateAgentTool_Execute_RejectsInvalidModelLimits(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "zero max tokens", field: "maxTokens", value: 0},
+		{name: "fractional max tokens", field: "maxTokens", value: 1.5},
+		{name: "negative context window", field: "contextWindow", value: -1},
+		{name: "string context window", field: "contextWindow", value: "64000"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := newFakeClient()
+			ctx := WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace})
+			args, err := json.Marshal(map[string]any{
+				nameField: "invalid-model-limit",
+				modelField: map[string]any{
+					nameField: "gpt-4.1-mini",
+					tt.field:  tt.value,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal arguments: %v", err)
+			}
+			result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			var toolResult ChatToolResult
+			if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+			if toolResult.Success || toolResult.ErrorType != errTypeInvalidArgs ||
+				!strings.Contains(toolResult.Error, "model."+tt.field+" must be a positive integer") {
+				t.Fatalf("Execute() result = %#v, want invalid %s rejection", toolResult, tt.field)
+			}
+		})
+	}
+}
+
+func TestChatCreateAgentTool_Execute_PreservesSlashQualifiedOpencodeModelString(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRuntimeCredsSecretName,
+			Namespace: defaultNamespace,
+		},
+	})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+	})
+
+	const modelID = "moonshotai/Kimi-K2-Instruct-0905"
+	runtimeArgs := map[string]any{jsonSchemaTypeField: string(corev1alpha1.AgentRuntimeOpencode)}
+	runtimeArgs[secretRefField] = testRuntimeCredsSecretName
+	args, err := json.Marshal(map[string]any{
+		nameField:    "opencode-string-model",
+		modelField:   modelID,
+		runtimeField: runtimeArgs,
+	})
+	if err != nil {
+		t.Fatalf("marshal arguments: %v", err)
+	}
+
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var toolResult ChatToolResult
+	if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !toolResult.Success {
+		t.Fatalf("Execute() result = %#v, want success", toolResult)
+	}
+
+	var created corev1alpha1.Agent
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      "opencode-string-model",
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("get created agent: %v", err)
+	}
+	if created.Spec.Model == nil {
+		t.Fatal("model is nil")
+	}
+	if created.Spec.Model.Name != modelID {
+		t.Fatalf("model.name = %q, want %q", created.Spec.Model.Name, modelID)
+	}
+	if created.Spec.Model.Provider != "" {
+		t.Fatalf("model.provider = %q, want empty for OpenCode runtime", created.Spec.Model.Provider)
+	}
+}
+
+func TestChatCreateAgentTool_Execute_PreservesOtherRuntimeModelStringBehavior(t *testing.T) {
+	fc := newFakeClient(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRuntimeCredsSecretName,
+			Namespace: defaultNamespace,
+		},
+	})
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		Client:    fc,
+		Namespace: defaultNamespace,
+	})
+
+	runtimeArgs := map[string]any{jsonSchemaTypeField: runtimeTypeClaude}
+	runtimeArgs[secretRefField] = testRuntimeCredsSecretName
+	args, err := json.Marshal(map[string]any{
+		nameField:    "claude-string-model",
+		modelField:   "anthropic/claude-sonnet-4",
+		runtimeField: runtimeArgs,
+	})
+	if err != nil {
+		t.Fatalf("marshal arguments: %v", err)
+	}
+
+	result, err := (&ChatCreateAgentTool{}).Execute(ctx, args)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var toolResult ChatToolResult
+	if err := json.Unmarshal([]byte(result), &toolResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !toolResult.Success {
+		t.Fatalf("Execute() result = %#v, want success", toolResult)
+	}
+
+	var created corev1alpha1.Agent
+	if err := fc.Get(context.Background(), client.ObjectKey{
+		Name:      "claude-string-model",
+		Namespace: defaultNamespace,
+	}, &created); err != nil {
+		t.Fatalf("get created agent: %v", err)
+	}
+	if created.Spec.Model == nil {
+		t.Fatal("model is nil")
+	}
+	if created.Spec.Model.Name != "claude-sonnet-4" {
+		t.Fatalf("model.name = %q, want %q", created.Spec.Model.Name, "claude-sonnet-4")
+	}
+	if created.Spec.Model.Provider != "" {
+		t.Fatalf("model.provider = %q, want empty for CLI runtime", created.Spec.Model.Provider)
 	}
 }
 

@@ -3,6 +3,7 @@
 package cliwrapper
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,10 +121,26 @@ func prepareArtifactsForChild(path string) error {
 }
 
 func prepareArtifactsForWrapper(path string) error {
-	if strings.TrimSpace(path) == "" || os.Geteuid() != 0 {
+	if strings.TrimSpace(path) == "" {
 		return nil
 	}
 	root := filepath.Clean(path)
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("artifacts directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("artifacts path is not a directory")
+	}
+	if os.Geteuid() != 0 {
+		return nil
+	}
 	return filepath.WalkDir(root, func(p string, entry os.DirEntry, err error) error {
 		if err != nil {
 			if filepath.Clean(p) != root && os.IsPermission(err) {
@@ -132,6 +149,9 @@ func prepareArtifactsForWrapper(path string) error {
 			return err
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
+			if filepath.Clean(p) == root {
+				return fmt.Errorf("artifacts directory must not be a symlink")
+			}
 			return nil
 		}
 		if entry.IsDir() {
@@ -227,6 +247,56 @@ func prepareOpenControlFileForChild(file *os.File, mode os.FileMode) error {
 	if err := file.Chown(uid, 0); err != nil {
 		_ = file.Chmod(0o600)
 		return err
+	}
+	return nil
+}
+
+func prepareCleanupRootForChild(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	_, gid, ok := childCredentialIDs()
+	if !ok {
+		return nil
+	}
+	cleanPath := filepath.Clean(path)
+	fd, err := unix.Open(cleanPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	root := os.NewFile(uintptr(fd), cleanPath)
+	if root == nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("open cleanup root")
+	}
+	defer root.Close() //nolint:errcheck
+	identity, err := root.Stat()
+	if err != nil {
+		return err
+	}
+	if !identity.IsDir() {
+		return fmt.Errorf("cleanup root must be a real directory")
+	}
+	// Keep the wrapper-created temporary root wrapper-owned so sticky /tmp blocks
+	// child rename/replacement races. Grant the child group write/search access so
+	// child-identity rm can remove all descendants; the wrapper then removes the
+	// empty top-level root. Use the retained fd so privileged mutations cannot be
+	// redirected through a path swap.
+	if err := root.Chown(0, gid); err != nil {
+		return err
+	}
+	if err := root.Chmod(0o770); err != nil {
+		return err
+	}
+	current, err := os.Lstat(cleanPath)
+	if err != nil {
+		return err
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.IsDir() || !os.SameFile(identity, current) {
+		return fmt.Errorf("cleanup root path was replaced")
 	}
 	return nil
 }

@@ -44,8 +44,10 @@ type CreateAgentArgs struct {
 
 // ModelArgs specifies LLM model configuration
 type ModelArgs struct {
-	Provider string `json:"provider,omitempty"`
-	Name     string `json:"name,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	Name          string `json:"name,omitempty"`
+	MaxTokens     *int32 `json:"maxTokens,omitempty"`
+	ContextWindow *int32 `json:"contextWindow,omitempty"`
 }
 
 // RuntimeArgs specifies agent CLI runtime configuration
@@ -116,6 +118,16 @@ func (t *CreateAgentTool) Parameters() json.RawMessage {
 					"name": {
 						"type": "string",
 						"description": "Model identifier"
+					},
+					"maxTokens": {
+						"type": "integer",
+						"minimum": 1,
+						"description": "Maximum output tokens; used as the OpenCode output limit"
+					},
+					"contextWindow": {
+						"type": "integer",
+						"minimum": 1,
+						"description": "Model context-window size in tokens; used by OpenCode"
 					}
 				}
 			},
@@ -188,23 +200,9 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-
-	if a.Role == "" {
-		return "", fmt.Errorf("role is required")
-	}
-	if a.SystemPrompt == "" {
-		return "", fmt.Errorf("systemPrompt is required")
-	}
-	runtimeType := ""
-	if a.Runtime != nil {
-		runtimeType = strings.TrimSpace(a.Runtime.Type)
-	}
-	requestedModel := ""
-	if a.Model != nil {
-		requestedModel = strings.TrimSpace(a.Model.Name)
-	}
-	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) && requestedModel == "" {
-		return "", fmt.Errorf("model.name is required for opencode runtime")
+	requestedModel, err := validateCreateAgentArgs(&a)
+	if err != nil {
+		return "", err
 	}
 
 	parentName := os.Getenv(envOrkaTaskName)
@@ -230,6 +228,8 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 	model := &corev1alpha1.ModelConfig{}
 	if a.Model != nil {
 		model.Name = requestedModel
+		model.MaxTokens = a.Model.MaxTokens
+		model.ContextWindow = a.Model.ContextWindow
 	}
 	if model.Name == "" {
 		model.Name = os.Getenv(workerenv.AIModel)
@@ -356,6 +356,56 @@ func (t *CreateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		return "", err
 	}
 	return string(output), nil
+}
+
+func validateCreateAgentArgs(args *CreateAgentArgs) (string, error) {
+	if args.Role == "" {
+		return "", fmt.Errorf("role is required")
+	}
+	if args.SystemPrompt == "" {
+		return "", fmt.Errorf("systemPrompt is required")
+	}
+	runtimeType := ""
+	if args.Runtime != nil {
+		runtimeType = strings.TrimSpace(args.Runtime.Type)
+	}
+	requestedModel := ""
+	if args.Model != nil {
+		requestedModel = strings.TrimSpace(args.Model.Name)
+		if args.Model.MaxTokens != nil && *args.Model.MaxTokens <= 0 {
+			return "", fmt.Errorf("model.maxTokens must be a positive integer")
+		}
+		if args.Model.ContextWindow != nil && *args.Model.ContextWindow <= 0 {
+			return "", fmt.Errorf("model.contextWindow must be a positive integer")
+		}
+	}
+	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) && requestedModel == "" {
+		return "", fmt.Errorf("model.name is required for opencode runtime")
+	}
+	if runtimeType == string(corev1alpha1.AgentRuntimeOpencode) {
+		if err := validateOpencodeModelLimits(args.Model.MaxTokens, args.Model.ContextWindow); err != nil {
+			return "", err
+		}
+	}
+	return requestedModel, nil
+}
+
+func validateOpencodeModelLimits(maxTokensValue, contextWindowValue *int32) error {
+	maxTokens := opencodeDefaultMaxTokens
+	contextWindow := opencodeDefaultContext
+	if maxTokensValue != nil {
+		maxTokens = *maxTokensValue
+	}
+	if contextWindowValue != nil {
+		contextWindow = *contextWindowValue
+	}
+	if maxTokens > opencodeMaxTokens {
+		return fmt.Errorf("model.maxTokens must not exceed %d for opencode runtime", opencodeMaxTokens)
+	}
+	if contextWindow <= maxTokens {
+		return fmt.Errorf("model.contextWindow must be greater than model.maxTokens for opencode runtime")
+	}
+	return nil
 }
 
 // Ensure CreateAgentTool implements Tool

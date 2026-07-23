@@ -131,8 +131,14 @@ type ModelConfig struct {
 	Temperature *float64 `json:"temperature,omitempty"`
 
 	// MaxTokens limits the response length
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxTokens *int32 `json:"maxTokens,omitempty"`
+
+	// ContextWindow is the model context-window size in tokens.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ContextWindow *int32 `json:"contextWindow,omitempty"`
 
 	// Fallbacks defines alternative providers to try when the primary fails.
 	// Each fallback specifies a Provider CRD and optional model override.

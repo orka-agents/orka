@@ -139,6 +139,9 @@ const (
 	titleField                = "title"
 	toolsField                = "tools"
 	priorityField             = "priority"
+	opencodeDefaultMaxTokens  = int32(8192)
+	opencodeDefaultContext    = int32(128000)
+	opencodeMaxTokens         = int32(32000)
 )
 
 const (

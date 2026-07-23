@@ -11,6 +11,12 @@ import { useSecretNames } from '@/hooks/use-secrets'
 import { useUIStore } from '@/stores/ui'
 import { toast } from 'sonner'
 
+const defaultRuntimeAllowedTools = 'Read,Glob,Grep,Bash,LS'
+const defaultOpencodeAllowedTools = 'Read,Glob,LS'
+const defaultOpencodeMaxTokens = 8192
+const defaultOpencodeContextWindow = 128000
+const maxOpencodeOutputTokens = 32000
+
 export function AgentCreateForm() {
   const navigate = useNavigate()
   const createAgent = useCreateAgent()
@@ -25,6 +31,7 @@ export function AgentCreateForm() {
   const [model, setModel] = useState('')
   const [temperature, setTemperature] = useState('0.7')
   const [maxTokens, setMaxTokens] = useState('')
+  const [contextWindow, setContextWindow] = useState('')
   const [secretRef, setSecretRef] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
 
@@ -32,7 +39,18 @@ export function AgentCreateForm() {
   const [runtimeType, setRuntimeType] = useState<'claude' | 'copilot' | 'codex' | 'opencode'>('claude')
   const [maxTurns, setMaxTurns] = useState('50')
   const [allowBash, setAllowBash] = useState(true)
-  const [allowedTools, setAllowedTools] = useState('Read,Glob,Grep,Bash,LS')
+  const [allowedTools, setAllowedTools] = useState(defaultRuntimeAllowedTools)
+
+  const handleRuntimeTypeChange = (value: 'claude' | 'copilot' | 'codex' | 'opencode') => {
+    setRuntimeType(value)
+    if (value === 'opencode') {
+      setAllowBash(false)
+      setAllowedTools(defaultOpencodeAllowedTools)
+    } else if (runtimeType === 'opencode') {
+      setAllowBash(true)
+      setAllowedTools(defaultRuntimeAllowedTools)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -43,6 +61,31 @@ export function AgentCreateForm() {
       return
     }
 
+    const parsedMaxTokens = maxTokens.trim() === '' ? undefined : Number(maxTokens)
+    const usesMaxTokens = mode === 'ai' || (mode === 'runtime' && runtimeType === 'opencode')
+    if (usesMaxTokens && parsedMaxTokens !== undefined && (!Number.isInteger(parsedMaxTokens) || parsedMaxTokens <= 0)) {
+      toast.error('Max Tokens must be a positive integer')
+      return
+    }
+    const parsedContextWindow = contextWindow.trim() === '' ? undefined : Number(contextWindow)
+    if (mode === 'runtime' && runtimeType === 'opencode' && parsedContextWindow !== undefined &&
+      (!Number.isInteger(parsedContextWindow) || parsedContextWindow <= 0)) {
+      toast.error('Context Window must be a positive integer')
+      return
+    }
+    if (mode === 'runtime' && runtimeType === 'opencode') {
+      const effectiveMaxTokens = parsedMaxTokens ?? defaultOpencodeMaxTokens
+      const effectiveContextWindow = parsedContextWindow ?? defaultOpencodeContextWindow
+      if (effectiveMaxTokens > maxOpencodeOutputTokens) {
+        toast.error('OpenCode Max Output Tokens cannot exceed 32000')
+        return
+      }
+      if (effectiveContextWindow <= effectiveMaxTokens) {
+        toast.error('Context Window must be greater than Max Output Tokens')
+        return
+      }
+    }
+
     const spec: Record<string, unknown> = {}
 
     if (mode === 'ai') {
@@ -50,7 +93,7 @@ export function AgentCreateForm() {
         provider,
         name: model,
         ...(temperature ? { temperature: parseFloat(temperature) } : {}),
-        ...(maxTokens ? { maxTokens: parseInt(maxTokens) } : {}),
+        ...(parsedMaxTokens !== undefined ? { maxTokens: parsedMaxTokens } : {}),
       }
       if (systemPrompt) {
         spec.systemPrompt = { inline: systemPrompt }
@@ -63,7 +106,11 @@ export function AgentCreateForm() {
         ...(allowedTools.trim() ? { defaultAllowedTools: allowedTools.split(',').map(t => t.trim()).filter(Boolean) } : {}),
       }
       if (trimmedModel) {
-        spec.model = { name: trimmedModel }
+        spec.model = {
+          name: trimmedModel,
+          ...(runtimeType === 'opencode' && parsedMaxTokens !== undefined ? { maxTokens: parsedMaxTokens } : {}),
+          ...(runtimeType === 'opencode' && parsedContextWindow !== undefined ? { contextWindow: parsedContextWindow } : {}),
+        }
       }
     }
 
@@ -131,7 +178,7 @@ export function AgentCreateForm() {
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Max Tokens</label>
-                    <Input type="number" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="Optional" />
+                    <Input type="number" min="1" step="1" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="Optional" />
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -151,7 +198,7 @@ export function AgentCreateForm() {
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Runtime Type</label>
-                    <Select value={runtimeType} onValueChange={(v) => setRuntimeType(v as 'claude' | 'copilot' | 'codex' | 'opencode')}>
+                    <Select value={runtimeType} onValueChange={(v) => handleRuntimeTypeChange(v as 'claude' | 'copilot' | 'codex' | 'opencode')}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="claude">Claude Code</SelectItem>
@@ -178,9 +225,40 @@ export function AgentCreateForm() {
                     Required for OpenCode; optional for runtimes with a configured default model
                   </p>
                 </div>
+                {runtimeType === 'opencode' && (
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Max Output Tokens</label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max="32000"
+                        step="1"
+                        value={maxTokens}
+                        onChange={(e) => setMaxTokens(e.target.value)}
+                        placeholder="8192 (default)"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Context Window</label>
+                      <Input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={contextWindow}
+                        onChange={(e) => setContextWindow(e.target.value)}
+                        placeholder="128000 (default)"
+                      />
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Allowed Tools</label>
-                  <Input value={allowedTools} onChange={(e) => setAllowedTools(e.target.value)} placeholder="Read,Glob,Grep,Bash,LS" />
+                  <Input
+                    value={allowedTools}
+                    onChange={(e) => setAllowedTools(e.target.value)}
+                    placeholder={runtimeType === 'opencode' ? defaultOpencodeAllowedTools : defaultRuntimeAllowedTools}
+                  />
                   <p className="text-xs text-muted-foreground">Comma-separated list of tool names</p>
                 </div>
                 <div className="flex items-center gap-2">

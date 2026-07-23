@@ -431,6 +431,150 @@ func TestPrepareTurnContextRejectsUnsafePRBaseRepo(t *testing.T) {
 	}
 }
 
+func TestPrepareTurnContextUsesTrustedOpencodeArtifactsDirectory(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	artifactDir := filepath.Join(workDir, opencodeWorkspaceArtifactsDir)
+	turn := &TurnContext{
+		RuntimeName: RuntimeOpencode,
+		WorkDir:     workDir,
+		Env:         []string{"ORKA_ARTIFACTS_DIR=/tmp/caller-controlled"},
+	}
+	if _, err := PrepareTurnContext(context.Background(), turn, root, artifactDir); err != nil {
+		t.Fatalf("PrepareTurnContext() error = %v", err)
+	}
+	if turn.ArtifactsDir != artifactDir {
+		t.Fatalf("ArtifactsDir = %q, want %q", turn.ArtifactsDir, artifactDir)
+	}
+	if got := envEntryValue(turn.Env, "ORKA_ARTIFACTS_DIR"); got != artifactDir {
+		t.Fatalf("ORKA_ARTIFACTS_DIR = %q, want trusted %q", got, artifactDir)
+	}
+	info, err := os.Lstat(artifactDir)
+	if err != nil {
+		t.Fatalf("lstat artifacts directory: %v", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("artifacts path mode = %v, want real directory", info.Mode())
+	}
+}
+
+func TestPrepareTurnArtifactsDirForRuntimeRejectsSymlinkedWorkDirBeforeWrite(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	workDir := filepath.Join(root, "repo")
+	if err := os.Symlink(outside, workDir); err != nil {
+		t.Skipf("create symlinked workdir: %v", err)
+	}
+	artifactDir := filepath.Join(workDir, opencodeWorkspaceArtifactsDir)
+	err := prepareTurnArtifactsDirForRuntime(TurnContext{
+		RuntimeName: RuntimeOpencode,
+		RootDir:     root,
+		WorkDir:     workDir,
+	}, artifactDir)
+	if err == nil || !strings.Contains(err.Error(), "outside root") {
+		t.Fatalf("prepareTurnArtifactsDirForRuntime() error = %v, want symlinked workdir rejection", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, opencodeWorkspaceArtifactsDir)); !os.IsNotExist(err) {
+		t.Fatalf("outside artifact path was created, lstat error = %v", err)
+	}
+}
+
+func TestTurnArtifactDirUsesOpencodeWorkDir(t *testing.T) {
+	workspace := preparedWorkspace{
+		workDir: filepath.Join("/tmp", "turn", "repo", "subdir"),
+		rootDir: filepath.Join("/tmp", "turn", "repo"),
+		baseDir: filepath.Join("/tmp", "turn"),
+	}
+	want := filepath.Join(workspace.workDir, opencodeWorkspaceArtifactsDir)
+	for _, turn := range []TurnContext{
+		{RuntimeName: RuntimeOpencode},
+		{RuntimeName: RuntimeMulti, Metadata: map[string]string{"runtime": RuntimeOpencode}},
+	} {
+		if got := turnArtifactDir(workspace, turn); got != want {
+			t.Fatalf("turnArtifactDir() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestPrepareTurnWorkspaceAlwaysCreatesWorkDirWithoutRepo(t *testing.T) {
+	workspace, err := prepareTurnWorkspace(context.Background(), TurnContext{})
+	if err != nil {
+		t.Fatalf("prepareTurnWorkspace() error = %v", err)
+	}
+	defer workspace.cleanup()
+	if workspace.workDir == "" || workspace.rootDir == "" {
+		t.Fatalf("prepared workspace = %#v, want non-empty workDir and rootDir", workspace)
+	}
+	info, err := os.Stat(workspace.workDir)
+	if err != nil {
+		t.Fatalf("stat workdir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("workdir mode = %v, want directory", info.Mode())
+	}
+}
+
+func TestPrepareTurnArtifactsDirForRuntimeRejectsPreexistingOpencodePath(t *testing.T) {
+	rootDir := t.TempDir()
+	workDir := filepath.Join(rootDir, "repo")
+	artifactDir := filepath.Join(workDir, opencodeWorkspaceArtifactsDir)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact path: %v", err)
+	}
+	marker := filepath.Join(artifactDir, "repository-file")
+	if err := os.WriteFile(marker, []byte("keep\n"), 0o600); err != nil {
+		t.Fatalf("write repository marker: %v", err)
+	}
+	err := prepareTurnArtifactsDirForRuntime(TurnContext{
+		RuntimeName: RuntimeOpencode,
+		RootDir:     rootDir,
+		WorkDir:     workDir,
+	}, artifactDir)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("prepareTurnArtifactsDirForRuntime() error = %v, want reserved path rejection", err)
+	}
+	if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "keep\n" {
+		t.Fatalf("preexisting artifact marker = %q, %v; want preserved", got, readErr)
+	}
+}
+
+func TestEnsureDirectoryTraversableAddsNonOwnerExecute(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod workdir: %v", err)
+	}
+	if err := ensureDirectoryTraversable(dir); err != nil {
+		t.Fatalf("ensureDirectoryTraversable() error = %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat workdir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o711 {
+		t.Fatalf("workdir mode = %#o, want 0711", got)
+	}
+}
+
+func TestEnsureOpencodeWorkDirAccessibleAddsWrapperGroupAccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod workdir: %v", err)
+	}
+	if err := ensureOpencodeWorkDirAccessible(dir); err != nil {
+		t.Fatalf("ensureOpencodeWorkDirAccessible() error = %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat workdir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o770 {
+		t.Fatalf("workdir mode = %#o, want 0770", got)
+	}
+}
+
 func TestValidateWorkspaceRepoURLRejectsLocalInputs(t *testing.T) {
 	withWorkspaceHostLookup(t, map[string][]net.IPAddr{
 		"github.com": {{IP: net.ParseIP("140.82.112.3")}},

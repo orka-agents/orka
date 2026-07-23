@@ -11,7 +11,13 @@ import type { Agent, AgentSpec, AgentStatus } from './agent'
 
 describe('modelConfigSchema', () => {
   it('parses valid data with all fields', () => {
-    const data = { provider: 'openai', name: 'gpt-4', temperature: 0.7, maxTokens: 1000 }
+    const data = {
+      provider: 'openai',
+      name: 'gpt-4',
+      temperature: 0.7,
+      maxTokens: 1000,
+      contextWindow: 128000,
+    }
     expect(modelConfigSchema.parse(data)).toEqual(data)
   })
 
@@ -22,6 +28,14 @@ describe('modelConfigSchema', () => {
   it('rejects wrong types', () => {
     expect(() => modelConfigSchema.parse({ temperature: 'warm' })).toThrow()
     expect(() => modelConfigSchema.parse({ maxTokens: '1000' })).toThrow()
+    expect(() => modelConfigSchema.parse({ contextWindow: '128000' })).toThrow()
+  })
+
+  it('rejects non-positive or fractional model limits', () => {
+    expect(() => modelConfigSchema.parse({ maxTokens: 0 })).toThrow()
+    expect(() => modelConfigSchema.parse({ maxTokens: 1.5 })).toThrow()
+    expect(() => modelConfigSchema.parse({ contextWindow: -1 })).toThrow()
+    expect(() => modelConfigSchema.parse({ contextWindow: 1.5 })).toThrow()
   })
 })
 

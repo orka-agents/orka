@@ -52,6 +52,7 @@ type TurnContext struct {
 	WorkDir          string
 	RootDir          string
 	SkillsRoot       string
+	ArtifactsDir     string
 	Env              []string
 	Deadline         time.Time
 	Metadata         map[string]string
@@ -99,6 +100,17 @@ type TurnResult struct {
 
 func SupportedRuntimeAdapters() []string {
 	return []string{RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeMulti}
+}
+
+func turnUsesOpencodeRuntime(turn TurnContext) bool {
+	runtime := strings.ToLower(strings.TrimSpace(turn.RuntimeName))
+	if runtime == RuntimeOpencode {
+		return true
+	}
+	if runtime != RuntimeMulti {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(turn.Metadata["runtime"]), RuntimeOpencode)
 }
 
 func NewRuntimeAdapter(cfg Config) (RuntimeAdapter, error) {

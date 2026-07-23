@@ -27,6 +27,10 @@ This coverage is about Orka's runtime wiring and task/session/workspace behavior
 
 OpenCode uses a custom OpenAI-compatible provider, so it can target chat-completions endpoints such as vLLM, Ray Serve, or Ollama. Set `OPENAI_BASE_URL` to the endpoint base, optionally including a trailing `/chat/completions`, and set `OPENAI_API_KEY` to the credential expected by that endpoint. The adapter strips the trailing chat-completions path before configuring OpenCode.
 
+For OpenCode Agents, `spec.model.name` is the endpoint-specific model ID. `spec.model.maxTokens` sets the OpenCode output limit, defaults to `8192`, and must not exceed the OpenCode 1.18.2 cap of `32000`. `spec.model.contextWindow` sets the context limit and defaults to `128000`. After defaults are applied, `contextWindow` must be greater than `maxTokens` so input context remains available. These OpenCode-specific constraints do not impose a global output maximum on other runtimes.
+
+OpenCode 1.18.2 cannot path-filter its `grep` permission. Orka therefore forces OpenCode `grep` to `deny`, even when `Grep` is present in `defaultAllowedTools` or a task allowlist. The adapter still allows path-aware `read` while denying `*.env` and `*.env.*` (except `*.env.example`). The Agent creation UI starts OpenCode with `defaultAllowBash: false` and omits both `Grep` and `Bash` from its tool defaults; direct API clients can request Bash, but the adapter always keeps Grep denied.
+
 OpenCode CLI session continuation is not wired initially. Each Orka turn starts a new OpenCode CLI session, while Orka still retains its own task, result, and lineage records. Read-only scheduled agent tasks do not support OpenCode initially because non-interactive OpenCode runs pre-approve file edits.
 
 ## Bring-your-own AgentRuntime
@@ -231,6 +235,10 @@ spec:
   # model: LLM model configuration (passed as --model flag)
   model:
     name: "claude-sonnet-4-20250514"
+    # OpenCode output limit (positive integer, default: 8192, maximum: 32000)
+    # maxTokens: 8192
+    # OpenCode context limit (positive integer, default: 128000; must exceed maxTokens)
+    # contextWindow: 128000
 
   # resources: compute resources for harness wrapper pods
   resources:
@@ -521,6 +529,8 @@ Writable directories are provided via `emptyDir` volumes:
 All tools are allowed by default for autonomous operation. To restrict high-risk tools, set `defaultAllowBash: false` on the Agent or `allowBash: false` on individual Tasks.
 
 For Codex specifically, bash-disabled tasks are not currently supported. Use `defaultAllowBash: true` for Codex Agents until the upstream CLI exposes a reliable shell-disable mode.
+
+For OpenCode 1.18.2, Grep is always denied because the CLI cannot constrain grep to approved workspace paths. This deny overrides Agent and Task allowlists. Read access retains the sensitive environment-file deny rules described above.
 
 ### Secrets
 
