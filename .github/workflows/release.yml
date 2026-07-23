@@ -65,6 +65,42 @@ jobs:
             exit 1
           fi
 
+          rendered_chart=$(mktemp)
+          trap 'rm -f "${rendered_chart}"' EXIT
+          helm template release-validation charts/orka \
+            --namespace orka-system \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${rendered_chart}"
+
+          runtime_images=()
+          while IFS= read -r image_line; do
+            image_ref=${image_line#*image: }
+            image_ref=${image_ref#\"}
+            image_ref=${image_ref%\"}
+            runtime_images+=("${image_ref}")
+          done < <(grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}")
+          if [[ ${#runtime_images[@]} -ne 2 ]]; then
+            echo "Expected two rendered runtime images; found ${#runtime_images[@]}." >&2
+            exit 1
+          fi
+          for image_ref in "${runtime_images[@]}"; do
+            if [[ "${image_ref##*:}" != "${expected_chart_version}" ]]; then
+              echo "Tag ${tag} requires runtime image ${image_ref} to use ${expected_chart_version}." >&2
+              exit 1
+            fi
+          done
+
+          for worker in ai general; do
+            worker_refs=()
+            while IFS= read -r worker_line; do
+              worker_refs+=("${worker_line#*=}")
+            done < <(grep -E "^[[:space:]]+- --${worker}-worker-image=" "${rendered_chart}")
+            if [[ ${#worker_refs[@]} -ne 1 || "${worker_refs[0]##*:}" != "${expected_chart_version}" ]]; then
+              echo "Tag ${tag} requires exactly one rendered ${worker} worker image using ${expected_chart_version}." >&2
+              exit 1
+            fi
+          done
+
       - name: Verify promoted snapshot provenance
         run: |
           set -euo pipefail
