@@ -255,7 +255,7 @@ func prepareCleanupRootForChild(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}
-	_, gid, ok := childCredentialIDs()
+	uid, _, ok := childCredentialIDs()
 	if !ok {
 		return nil
 	}
@@ -280,14 +280,14 @@ func prepareCleanupRootForChild(path string) error {
 	if !identity.IsDir() {
 		return fmt.Errorf("cleanup root must be a real directory")
 	}
-	// The child cannot remove the root-owned temporary directory itself, but it
-	// needs read/search access to empty its child-owned descendants before the
-	// wrapper removes the now-empty root. Use the retained fd so a path swap cannot
-	// redirect privileged ownership or mode changes.
-	if err := root.Chown(0, gid); err != nil {
+	// Transfer the wrapper-created temporary root to the child only after the
+	// untrusted runtime has exited. This lets the child-identity rm remove the root
+	// itself under sticky /tmp, while group 0 retains wrapper fallback access. Use
+	// the retained fd so a path swap cannot redirect privileged mutations.
+	if err := root.Chown(uid, 0); err != nil {
 		return err
 	}
-	if err := root.Chmod(0o750); err != nil {
+	if err := root.Chmod(0o770); err != nil {
 		return err
 	}
 	current, err := os.Lstat(cleanPath)
