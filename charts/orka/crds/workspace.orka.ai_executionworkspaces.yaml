@@ -1,0 +1,635 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspaces.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspace
+    listKind: ExecutionWorkspaceList
+    plural: executionworkspaces
+    shortNames:
+    - ew
+    singular: executionworkspace
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.classBinding.name
+      name: Class
+      type: string
+    - jsonPath: .spec.providerBinding.name
+      name: Provider
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.attachedEpoch
+      name: Epoch
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspace represents one concrete provider-bound environment.
+          It is controller-created.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ExecutionWorkspaceSpec defines one concrete provider-bound
+              environment.
+            properties:
+              attachment:
+                description: Attachment grants exclusive Task access for Interactive
+                  mode.
+                properties:
+                  epoch:
+                    description: Epoch monotonically increases for every attachment
+                      attempt.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  expiresAt:
+                    description: ExpiresAt is the hard attachment credential expiry.
+                    format: date-time
+                    type: string
+                  taskRef:
+                    description: TaskRef identifies the attached Task.
+                    properties:
+                      name:
+                        description: Name is the object name.
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: UID is the immutable object UID.
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                    x-kubernetes-validations:
+                    - message: uid is required
+                      rule: self.uid.size() > 0
+                  tokenSHA256:
+                    description: TokenSHA256 is the digest of the bearer token held
+                      only in tokenSecretRef.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  tokenSecretRef:
+                    description: TokenSecretRef references the core-owned attachment
+                      Secret in this namespace.
+                    properties:
+                      name:
+                        description: Name is the Secret name in the workspace namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - epoch
+                - expiresAt
+                - taskRef
+                - tokenSHA256
+                - tokenSecretRef
+                type: object
+              classBinding:
+                description: ClassBinding pins the immutable class revision used to
+                  create this workspace.
+                properties:
+                  generation:
+                    description: Generation is the observed generation used to resolve
+                      the binding.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  name:
+                    description: Name is the bound object's name.
+                    minLength: 1
+                    type: string
+                  profileHash:
+                    description: |-
+                      ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                      It is populated for class bindings and may be omitted for provider bindings.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  uid:
+                    description: UID is the bound object's immutable Kubernetes UID.
+                    type: string
+                required:
+                - generation
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: uid is required
+                  rule: self.uid.size() > 0
+              desiredState:
+                default: Ready
+                description: DesiredState is owned by Orka core.
+                enum:
+                - Ready
+                - Suspended
+                - Deleted
+                - Quarantined
+                type: string
+              lifecycle:
+                description: Lifecycle is the class policy resolved at creation time.
+                properties:
+                  allowedOnDetach:
+                    description: AllowedOnDetach lists the actions a Task may request.
+                    items:
+                      description: WorkspaceOnDetach is the lifecycle action taken
+                        after an interactive attachment is revoked.
+                      enum:
+                      - Suspend
+                      - Delete
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  defaultOnDetach:
+                    default: Suspend
+                    description: DefaultOnDetach is used when a Task does not request
+                      an allowed override.
+                    enum:
+                    - Suspend
+                    - Delete
+                    type: string
+                  deletionPolicy:
+                    description: DeletionPolicy describes the required disposition
+                      of provider and retained data.
+                    properties:
+                      checkpoints:
+                        description: Checkpoints controls provider checkpoints and
+                          snapshots.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      persistentVolumes:
+                        description: PersistentVolumes controls durable volume retention.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                      providerResources:
+                        description: ProviderResources controls provider-native compute
+                          and control-plane objects.
+                        enum:
+                        - Delete
+                        - Retain
+                        type: string
+                    required:
+                    - checkpoints
+                    - persistentVolumes
+                    - providerResources
+                    type: object
+                  detachTimeout:
+                    default: 2m
+                    description: DetachTimeout bounds how long Task finalization waits
+                      for attachment revocation.
+                    type: string
+                  idleTimeout:
+                    description: IdleTimeout is the maximum idle duration before the
+                      provider may apply the class policy.
+                    type: string
+                  maxLifetime:
+                    description: MaxLifetime is the maximum lifetime of a concrete
+                      workspace.
+                    type: string
+                required:
+                - allowedOnDetach
+                - defaultOnDetach
+                - deletionPolicy
+                - detachTimeout
+                type: object
+                x-kubernetes-validations:
+                - message: defaultOnDetach must be included in allowedOnDetach
+                  rule: self.allowedOnDetach.exists(action, action == self.defaultOnDetach)
+                - message: detachTimeout must be positive
+                  rule: duration(self.detachTimeout) > duration('0s')
+                - message: idleTimeout must be positive when set
+                  rule: '!has(self.idleTimeout) || duration(self.idleTimeout) > duration(''0s'')'
+                - message: maxLifetime must be positive when set
+                  rule: '!has(self.maxLifetime) || duration(self.maxLifetime) > duration(''0s'')'
+                - message: maxLifetime must be greater than or equal to idleTimeout
+                  rule: '!has(self.idleTimeout) || !has(self.maxLifetime) || duration(self.maxLifetime)
+                    >= duration(self.idleTimeout)'
+              mode:
+                description: Mode is copied from the class.
+                enum:
+                - Interactive
+                - Service
+                type: string
+              providerBinding:
+                description: ProviderBinding pins the provider installation used to
+                  create this workspace.
+                properties:
+                  generation:
+                    description: Generation is the observed generation used to resolve
+                      the binding.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  name:
+                    description: Name is the bound object's name.
+                    minLength: 1
+                    type: string
+                  profileHash:
+                    description: |-
+                      ProfileHash is a SHA-256 digest of the functional profile resolved for this binding.
+                      It is populated for class bindings and may be omitted for provider bindings.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  uid:
+                    description: UID is the bound object's immutable Kubernetes UID.
+                    type: string
+                required:
+                - generation
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: uid is required
+                  rule: self.uid.size() > 0
+              service:
+                description: Service declares requested endpoints for Service mode.
+                properties:
+                  ports:
+                    description: Ports lists requested service ports.
+                    items:
+                      description: ExecutionWorkspaceServicePort declares a Service-mode
+                        port requested by the owning Tool.
+                      properties:
+                        name:
+                          description: Name is a stable endpoint name.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        port:
+                          description: Port is the container/service port.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        protocol:
+                          description: Protocol is the endpoint application protocol.
+                          enum:
+                          - HTTP
+                          - HTTPS
+                          - TCP
+                          type: string
+                      required:
+                      - name
+                      - port
+                      - protocol
+                      type: object
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                required:
+                - ports
+                type: object
+              sessionRef:
+                description: SessionRef pins the conversation Session for session-scoped
+                  reuse.
+                properties:
+                  name:
+                    description: Name is the object name.
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the immutable object UID.
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: uid is required
+                  rule: self.uid.size() > 0
+              slot:
+                default: default
+                description: Slot allows one Session to hold multiple independently
+                  named workspaces.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - classBinding
+            - desiredState
+            - lifecycle
+            - mode
+            - providerBinding
+            - slot
+            type: object
+            x-kubernetes-validations:
+            - message: classBinding.profileHash is required
+              rule: self.classBinding.profileHash.size() > 0
+            - message: mode is immutable
+              rule: self.mode == oldSelf.mode
+            - message: classBinding is immutable
+              rule: self.classBinding == oldSelf.classBinding
+            - message: providerBinding is immutable
+              rule: self.providerBinding == oldSelf.providerBinding
+            - message: sessionRef is immutable
+              rule: has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef)
+                || self.sessionRef == oldSelf.sessionRef)
+            - message: slot is immutable
+              rule: self.slot == oldSelf.slot
+            - message: lifecycle is immutable
+              rule: self.lifecycle == oldSelf.lifecycle
+            - message: attachments are only valid for Interactive workspaces
+              rule: '!has(self.attachment) || self.mode == ''Interactive'''
+            - message: service ports are only valid for Service workspaces
+              rule: '!has(self.service) || self.mode == ''Service'''
+            - message: Service workspaces require service configuration
+              rule: self.mode != 'Service' || has(self.service)
+            - message: Interactive workspaces cannot request service ports
+              rule: self.mode != 'Interactive' || !has(self.service)
+          status:
+            description: |-
+              ExecutionWorkspaceStatus defines adapter-observed state. Exactly one provider adapter owns this status;
+              Orka core projects it into Task and Tool status rather than allowing adapters to write those resources.
+            properties:
+              attachedEpoch:
+                description: AttachedEpoch is the epoch currently enforced by the
+                  data plane.
+                format: int64
+                type: integer
+              conditions:
+                description: Conditions represent admission, provisioning, data-plane,
+                  attachment, and finalization state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connectionSecretRef:
+                description: ConnectionSecretRef contains endpoint, CA, and provider
+                  lifecycle credentials for trusted control-plane consumers.
+                properties:
+                  name:
+                    description: Name is the Secret name in the workspace namespace.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              disposition:
+                description: Disposition reports cleanup progress independent of owning
+                  Task/Tool terminal state.
+                properties:
+                  accessCredentials:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  checkpoints:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  compute:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  ephemeralSecrets:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  persistentVolumes:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  providerResources:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                  workspaceData:
+                    description: ExecutionWorkspaceDispositionState reports progress
+                      for one cleanup category.
+                    enum:
+                    - Pending
+                    - Active
+                    - Revoked
+                    - Retained
+                    - Deleted
+                    - Failed
+                    - NotApplicable
+                    type: string
+                required:
+                - accessCredentials
+                - checkpoints
+                - compute
+                - ephemeralSecrets
+                - persistentVolumes
+                - providerResources
+                - workspaceData
+                type: object
+              endpoints:
+                description: Endpoints contains sanitized endpoint metadata only.
+                items:
+                  description: |-
+                    ExecutionWorkspaceEndpoint is sanitized endpoint metadata. Credentials and private connection material
+                    are always delivered through a Secret and never placed in status.
+                  properties:
+                    name:
+                      description: Name matches a requested service port or the reserved
+                        data-plane name.
+                      type: string
+                    protocol:
+                      description: Protocol is the endpoint application protocol.
+                      type: string
+                    url:
+                      description: URL is the sanitized endpoint URL. It must not
+                        contain userinfo or credentials.
+                      minLength: 1
+                      pattern: ^(https?|tcp)://[^/:@?#[:space:]][^@?#[:space:]]*$
+                      type: string
+                  required:
+                  - name
+                  - url
+                  type: object
+                type: array
+              externalID:
+                description: ExternalID is a sanitized opaque provider resource identifier
+                  for operator diagnostics.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  observed by the adapter.
+                format: int64
+                type: integer
+              providerBinding:
+                description: ProviderBinding records the exact adapter/backend contract
+                  serving this workspace.
+                properties:
+                  adapterDigest:
+                    description: AdapterDigest is the immutable adapter build digest.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  adapterVersion:
+                    description: AdapterVersion is the adapter semantic version.
+                    type: string
+                  backendAPIVersion:
+                    description: BackendAPIVersion is the selected provider-native
+                      API version.
+                    type: string
+                  contractVersion:
+                    description: ContractVersion is the selected generic provider
+                      contract.
+                    type: string
+                type: object
+              state:
+                description: State is the provider-neutral lifecycle state.
+                enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Attaching
+                - Attached
+                - Detaching
+                - Suspending
+                - Suspended
+                - Deleting
+                - Deleted
+                - Quarantined
+                - Failed
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
