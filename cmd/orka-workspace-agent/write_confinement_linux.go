@@ -38,10 +38,10 @@ func runWriteConfinedCommand(command []string) error {
 func applyCommandWriteConfinement(roots []string) error {
 	abi, err := landlockABIVersion()
 	if err != nil {
-		return fmt.Errorf("Landlock is unavailable: %w", err)
+		return fmt.Errorf("detect Landlock ABI: %w", err)
 	}
 	if abi < minimumLandlockWriteABI {
-		return fmt.Errorf("Landlock ABI %d lacks truncate confinement", abi)
+		return fmt.Errorf("unsupported Landlock ABI %d: truncate confinement requires ABI %d", abi, minimumLandlockWriteABI)
 	}
 	access := landlockWriteAccess(abi)
 	ruleset := unix.LandlockRulesetAttr{Access_fs: access}

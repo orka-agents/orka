@@ -563,7 +563,7 @@ func secureMetadata(fd int) (secureFileMetadata, error) {
 	}
 	return secureFileMetadata{
 		Size:    stat.Size,
-		Mode:    uint32(stat.Mode & 0o777),
+		Mode:    uint32(stat.Mode & 0o777), //nolint:unconvert // stat.Mode is uint16 on darwin and uint32 on linux
 		ModTime: time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec),
 	}, nil
 }
