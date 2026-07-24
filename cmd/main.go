@@ -905,6 +905,7 @@ func main() {
 		Scheme:                    mgr.GetScheme(),
 		Store:                     sqliteStore,
 		ResultStore:               sqliteStore,
+		ArtifactStore:             sqliteStore,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")

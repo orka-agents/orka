@@ -58,9 +58,17 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	Targets RepositoryMonitorTargets `json:"targets,omitempty"`
 
-	// Agents configures the agents used by monitor review and repair tasks.
+	// Triggers configures external events that create durable monitor commands.
+	// +optional
+	Triggers RepositoryMonitorTriggers `json:"triggers,omitempty"`
+
+	// Agents configures the agents used by monitor review, issue, and repair tasks.
 	// +optional
 	Agents RepositoryMonitorAgents `json:"agents,omitempty"`
+
+	// IssueWorkflow controls issue triage, research, planning, and implementation behavior.
+	// +optional
+	IssueWorkflow RepositoryMonitorIssueWorkflowSpec `json:"issueWorkflow,omitempty"`
 
 	// Review controls pull-request review behavior.
 	// +optional
@@ -128,6 +136,16 @@ type RepositoryMonitorIssueTarget struct {
 	// +kubebuilder:validation:Maximum=100
 	// +optional
 	MaxPerRun *int32 `json:"maxPerRun,omitempty"`
+
+	// IncludeLabels optionally restricts issue inventory to issues with any of these labels.
+	// +listType=set
+	// +optional
+	IncludeLabels []string `json:"includeLabels,omitempty"`
+
+	// ExcludeLabels excludes matching issues from actionable inventory.
+	// +listType=set
+	// +optional
+	ExcludeLabels []string `json:"excludeLabels,omitempty"`
 }
 
 // RepositoryMonitorCommitTarget configures commit monitoring.
@@ -143,11 +161,101 @@ type RepositoryMonitorCommitTarget struct {
 	MaxPerRun *int32 `json:"maxPerRun,omitempty"`
 }
 
+// RepositoryMonitorTriggers configures external RepositoryMonitor triggers.
+type RepositoryMonitorTriggers struct {
+	// GitHub configures GitHub webhook triggers.
+	// +optional
+	GitHub RepositoryMonitorGitHubTriggers `json:"github,omitempty"`
+}
+
+// RepositoryMonitorGitHubTriggers configures GitHub-specific monitor triggers.
+type RepositoryMonitorGitHubTriggers struct {
+	// Labels maps GitHub labels to durable RepositoryMonitor commands.
+	// +optional
+	Labels RepositoryMonitorGitHubLabelTriggers `json:"labels,omitempty"`
+}
+
+// RepositoryMonitorGitHubLabelTriggers configures orka:* label command intake.
+type RepositoryMonitorGitHubLabelTriggers struct {
+	// Enabled enables durable command intake for configured GitHub labels.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ConsumeCommandLabels removes accepted one-shot command labels after durable intake.
+	// +optional
+	ConsumeCommandLabels bool `json:"consumeCommandLabels,omitempty"`
+
+	// RequireActorPermission is the minimum GitHub permission for mutating/code-executing commands.
+	// Supported values are write, maintain, and admin. Defaults to write.
+	// +kubebuilder:validation:Enum=write;maintain;admin
+	// +kubebuilder:default=write
+	// +optional
+	RequireActorPermission string `json:"requireActorPermission,omitempty"`
+
+	// Issues maps issue command intents to label names. Empty fields use the default orka:* labels.
+	// +optional
+	Issues RepositoryMonitorIssueCommandLabels `json:"issues,omitempty"`
+
+	// PullRequests maps pull-request command intents to label names. Empty fields use the default orka:* labels.
+	// +optional
+	PullRequests RepositoryMonitorPullRequestCommandLabels `json:"pullRequests,omitempty"`
+}
+
+// RepositoryMonitorIssueCommandLabels configures issue command label names.
+type RepositoryMonitorIssueCommandLabels struct {
+	// +optional
+	Triage string `json:"triage,omitempty"`
+	// +optional
+	Research string `json:"research,omitempty"`
+	// +optional
+	Plan string `json:"plan,omitempty"`
+	// +optional
+	ApprovePlan string `json:"approvePlan,omitempty"`
+	// +optional
+	Implement string `json:"implement,omitempty"`
+	// +optional
+	Decompose string `json:"decompose,omitempty"`
+	// +optional
+	Stop string `json:"stop,omitempty"`
+	// +optional
+	Resume string `json:"resume,omitempty"`
+}
+
+// RepositoryMonitorPullRequestCommandLabels configures pull-request command label names.
+type RepositoryMonitorPullRequestCommandLabels struct {
+	// +optional
+	Review string `json:"review,omitempty"`
+	// +optional
+	Fix string `json:"fix,omitempty"`
+	// +optional
+	FixCI string `json:"fixCI,omitempty"`
+	// +optional
+	UpdateBranch string `json:"updateBranch,omitempty"`
+	// +optional
+	Automerge string `json:"automerge,omitempty"`
+	// +optional
+	Stop string `json:"stop,omitempty"`
+	// +optional
+	Resume string `json:"resume,omitempty"`
+}
+
 // RepositoryMonitorAgents configures task agents for monitor workflows.
 type RepositoryMonitorAgents struct {
 	// Reviewer is the agent used for pull-request review tasks.
 	// +optional
 	Reviewer *AgentReference `json:"reviewer,omitempty"`
+
+	// Triager is the agent used for issue triage tasks.
+	// +optional
+	Triager *AgentReference `json:"triager,omitempty"`
+
+	// Researcher is the agent used for issue research tasks.
+	// +optional
+	Researcher *AgentReference `json:"researcher,omitempty"`
+
+	// Planner is the agent used for issue planning tasks.
+	// +optional
+	Planner *AgentReference `json:"planner,omitempty"`
 
 	// Repairer is the agent used for repair tasks.
 	// +optional
@@ -156,6 +264,80 @@ type RepositoryMonitorAgents struct {
 	// Implementer is the agent used for guarded issue implementation tasks.
 	// +optional
 	Implementer *AgentReference `json:"implementer,omitempty"`
+}
+
+// RepositoryMonitorIssueWorkflowSpec configures issue workflow phases.
+type RepositoryMonitorIssueWorkflowSpec struct {
+	// Triage controls read-only issue classification.
+	// +optional
+	Triage RepositoryMonitorIssueWorkflowPhaseSpec `json:"triage,omitempty"`
+
+	// Research controls read-only issue research.
+	// +optional
+	Research RepositoryMonitorIssueWorkflowPhaseSpec `json:"research,omitempty"`
+
+	// Planning controls read-only implementation plan generation.
+	// +optional
+	Planning RepositoryMonitorIssuePlanningSpec `json:"planning,omitempty"`
+
+	// Implementation controls bounded implementation tasks.
+	// +optional
+	Implementation RepositoryMonitorIssueImplementationSpec `json:"implementation,omitempty"`
+}
+
+// RepositoryMonitorIssueWorkflowPhaseSpec configures a read-only issue phase.
+type RepositoryMonitorIssueWorkflowPhaseSpec struct {
+	// Enabled enables this phase. Defaults to true when the corresponding agent is configured and a command requests it.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// RepositoryMonitorIssuePlanningSpec configures planning behavior.
+type RepositoryMonitorIssuePlanningSpec struct {
+	// Enabled enables planning. Defaults to true when a planner agent is configured and a command requests it.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// RequireHumanApprovalFor names risk levels or plan categories that require explicit approval.
+	// +listType=set
+	// +optional
+	RequireHumanApprovalFor []string `json:"requireHumanApprovalFor,omitempty"`
+}
+
+// RepositoryMonitorIssueImplementationSpec configures implementation behavior.
+type RepositoryMonitorIssueImplementationSpec struct {
+	// Enabled enables implementation. Defaults to true when an implementer agent is configured and a command requests it.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// RequireApprovedPlan blocks implementation unless the latest plan was approved.
+	// +optional
+	RequireApprovedPlan *bool `json:"requireApprovedPlan,omitempty"`
+
+	// BranchPrefix is the branch prefix for implementation push branches. Defaults to orka/issue.
+	// +optional
+	BranchPrefix string `json:"branchPrefix,omitempty"`
+
+	// MaxActive bounds concurrently active issue implementation/mutation jobs per monitor. Defaults to 2.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxActive *int32 `json:"maxActive,omitempty"`
+
+	// MaxAttemptsPerIssue bounds implementation attempts for one issue. Defaults to 2.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxAttemptsPerIssue *int32 `json:"maxAttemptsPerIssue,omitempty"`
+
+	// MaxChangedFiles bounds changed files in an implementation patch. Defaults to 12.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxChangedFiles *int32 `json:"maxChangedFiles,omitempty"`
+
+	// AllowedPaths optionally restricts implementation patch files to these path globs/prefixes.
+	// Examples: api/**, internal/**, docs/**.
+	// +listType=set
+	// +optional
+	AllowedPaths []string `json:"allowedPaths,omitempty"`
 }
 
 // RepositoryMonitorReviewSpec configures review behavior.
@@ -409,6 +591,18 @@ type RepositoryMonitorStatus struct {
 	// MergeReadyItems is the count of items ready for merge.
 	// +optional
 	MergeReadyItems int32 `json:"mergeReadyItems,omitempty"`
+
+	// OpenIssues is the current count of open issues seen by the monitor.
+	// +optional
+	OpenIssues int32 `json:"openIssues,omitempty"`
+
+	// PendingIssueActions is the count of issues waiting for a queued workflow action.
+	// +optional
+	PendingIssueActions int32 `json:"pendingIssueActions,omitempty"`
+
+	// BlockedIssues is the count of issues blocked by guard labels or workflow policy.
+	// +optional
+	BlockedIssues int32 `json:"blockedIssues,omitempty"`
 
 	// Conditions represent the current state of the repository monitor.
 	// +listType=map

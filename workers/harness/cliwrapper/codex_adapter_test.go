@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,6 +20,7 @@ func TestCodexAdapterBuildsLegacyCompatibleArgs(t *testing.T) {
 	t.Setenv(workerenv.MaxTurns, "12")
 	t.Setenv(workerenv.OpenAIBaseURL, "https://example.invalid/v1")
 	t.Setenv(workerenv.AllowedTools, "web_search")
+	t.Setenv(codexReasoningEffortEnv, "high")
 
 	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
 	spec, err := adapter.BuildCommand(context.Background(), TurnContext{Prompt: "do work"})
@@ -36,6 +38,7 @@ func TestCodexAdapterBuildsLegacyCompatibleArgs(t *testing.T) {
 		"--config approval_policy=never",
 		"--sandbox workspace-write",
 		"--model gpt-test",
+		"--config model_reasoning_effort=high",
 		"--config openai_base_url=https://example.invalid/v1",
 		"--config web_search=live",
 	} {
@@ -48,6 +51,117 @@ func TestCodexAdapterBuildsLegacyCompatibleArgs(t *testing.T) {
 	}
 	if !containsEnv(spec.Env, "HOME=/home/worker") {
 		t.Fatalf("env = %#v, want HOME", spec.Env)
+	}
+}
+
+func TestCodexAdapterForcesHardenedReadOnlyCommand(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.CodexSandboxMode, "danger-full-access")
+	home := t.TempDir()
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		HomeDir:  home,
+		Metadata: map[string]string{"allowBash": "false", "readOnly": "true", "reasoningEffort": "high"},
+		Env: []string{
+			"HOME=" + home,
+			workerenv.AgentReadOnly + "=true",
+			"NODE_OPTIONS=--require=/workspace/payload.cjs",
+			"CODEX_HOME=/workspace/.codex",
+			"PATH=/workspace/bin",
+			"HTTP_PROXY=https://attacker.invalid",
+			"UNTRUSTED_CHILD_VALUE=present",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	for _, want := range []string{
+		"--sandbox read-only",
+		"--config use_legacy_landlock=true",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--disable hooks",
+		"--disable shell_snapshot",
+		"--disable apps",
+		"--disable plugins",
+		"--config project_doc_max_bytes=0",
+		"--config model_reasoning_effort=high",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing %q", joined, want)
+		}
+	}
+	for _, name := range []string{"NODE_OPTIONS", "ZDOTDIR", "BASH_ENV", "LD_PRELOAD", "LD_AUDIT", "GIT_CONFIG_COUNT"} {
+		if !slices.Contains(spec.UnsetEnv, name) {
+			t.Fatalf("UnsetEnv = %#v, missing %s", spec.UnsetEnv, name)
+		}
+	}
+	codexHome := filepath.Join(home, ".codex")
+	if !containsEnv(spec.Env, "CODEX_HOME="+codexHome) {
+		t.Fatalf("env = %#v, want trusted read-only CODEX_HOME", spec.Env)
+	}
+	if stat, err := os.Stat(codexHome); err != nil || !stat.IsDir() {
+		t.Fatalf("read-only CODEX_HOME stat = %#v, %v, want existing directory", stat, err)
+	}
+	if !spec.ClearEnv {
+		t.Fatal("ClearEnv = false, want read-only Codex to drop inherited wrapper environment")
+	}
+	if !containsEnv(spec.Env, "PATH="+wrapperSafeCommandPath) {
+		t.Fatalf("env = %#v, want fixed read-only PATH", spec.Env)
+	}
+	for _, unwanted := range []string{"NODE_OPTIONS=", "HTTP_PROXY=", "UNTRUSTED_CHILD_VALUE=", "PATH=/workspace"} {
+		if strings.Contains(strings.Join(spec.Env, "\n"), unwanted) {
+			t.Fatalf("env = %#v, retained untrusted read-only value %q", spec.Env, unwanted)
+		}
+	}
+}
+
+func TestCodexAdapterReadOnlyRequiresWrapperManagedHome(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	adapter := NewCodexAdapter(CodexAdapterConfig{})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{Metadata: map[string]string{"readOnly": "true"}})
+	if err == nil || !strings.Contains(err.Error(), "wrapper-managed home") {
+		t.Fatalf("BuildCommand error = %v, want trusted home requirement", err)
+	}
+}
+
+func TestCodexAdapterDoesNotTrustReadOnlyEnvWithoutMetadata(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "false")
+	adapter := NewCodexAdapter(CodexAdapterConfig{})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{Env: []string{workerenv.AgentReadOnly + "=true"}})
+	if err == nil || !strings.Contains(err.Error(), workerenv.AllowBash) {
+		t.Fatalf("BuildCommand error = %v, want trusted metadata requirement", err)
+	}
+}
+
+func TestCodexAdapterRejectsInvalidReasoningEffort(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(codexReasoningEffortEnv, "maximum")
+	adapter := NewCodexAdapter(CodexAdapterConfig{})
+	_, err := adapter.BuildCommand(context.Background(), TurnContext{})
+	if err == nil || !strings.Contains(err.Error(), codexReasoningEffortEnv) {
+		t.Fatalf("BuildCommand error = %v, want reasoning effort validation", err)
+	}
+}
+
+func TestCodexAdapterUsesTrustedReasoningMetadata(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(codexReasoningEffortEnv, "low")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Metadata: map[string]string{"reasoningEffort": "high"},
+		Env:      []string{codexReasoningEffortEnv + "=xhigh"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "model_reasoning_effort=high") ||
+		strings.Contains(joined, "model_reasoning_effort=xhigh") {
+		t.Fatalf("args = %q, want controller metadata to override task env and wrapper default", joined)
 	}
 }
 
@@ -419,6 +533,28 @@ func TestCodexAdapterIgnoresTurnEnvOpenAIBaseURL(t *testing.T) {
 	}
 	if !containsEnv(spec.Env, workerenv.OpenAIBaseURL+"=https://operator.example.invalid/v1") {
 		t.Fatalf("env = %#v, want operator base URL", spec.Env)
+	}
+}
+
+func TestCodexAdapterRuntimeAuthOnlyPrefersProtectedTurnBaseURL(t *testing.T) {
+	t.Setenv(workerenv.AllowBash, "true")
+	t.Setenv(workerenv.OpenAIBaseURL, "https://operator.example.invalid/v1")
+	adapter := NewCodexAdapter(CodexAdapterConfig{Path: "/fake/codex", WorkDir: t.TempDir()})
+	spec, err := adapter.BuildCommand(context.Background(), TurnContext{
+		Prompt:   "do work",
+		Metadata: map[string]string{"runtimeAuthOnly": "true"},
+		Env:      []string{workerenv.OpenAIBaseURL + "=http://127.0.0.1:4321/v1"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommand: %v", err)
+	}
+	defer removeTempFiles(spec.TempFiles)
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "openai_base_url=http://127.0.0.1:4321/v1") {
+		t.Fatalf("args = %q, want protected turn base URL", joined)
+	}
+	if !containsEnv(spec.Env, workerenv.OpenAIBaseURL+"=http://127.0.0.1:4321/v1") {
+		t.Fatalf("env = %#v, want protected turn base URL", spec.Env)
 	}
 }
 

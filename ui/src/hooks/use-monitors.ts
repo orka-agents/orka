@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { useUIStore } from '@/stores/ui'
-import type { MonitorItem, MonitorRun, RepositoryMonitor } from '@/schemas/monitor'
+import type { MonitorAction, MonitorCommand, MonitorImplementationJob, MonitorItem, MonitorMutation, MonitorRun, MonitorWorkAction, RepositoryMonitor } from '@/schemas/monitor'
 
 interface ListResponse<T> {
   items: T[]
@@ -51,6 +51,81 @@ export function useRepositoryMonitorItems(name: string, kind = 'pull_request') {
     queryFn: () => api.get<ListResponse<MonitorItem>>(`/monitors/repositories/${name}/items`, { namespace, kind }),
     enabled: !!name,
     refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorActions(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'actions', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorAction>>('/monitors/actions', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorCommands(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'commands', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorCommand>>('/monitors/commands', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorWorkActions(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'work-actions', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorWorkAction>>('/monitors/work-actions', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorImplementationJobs(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'implementation-jobs', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorImplementationJob>>('/monitors/implementation-jobs', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+export function useRepositoryMonitorMutations(name: string) {
+  const namespace = useUIStore((s) => s.namespace)
+  return useQuery({
+    queryKey: ['monitors', 'mutations', namespace, name],
+    queryFn: () => api.get<ListResponse<MonitorMutation>>('/monitors/mutations', { namespace, name }),
+    enabled: !!name,
+    refetchInterval: 10000,
+  })
+}
+
+
+export interface CreateRepositoryMonitorCommandBody {
+  kind: string
+  number: number
+  intent: string
+  targetSHA?: string
+}
+
+export function useCreateRepositoryMonitorCommand(name: string) {
+  const queryClient = useQueryClient()
+  const namespace = useUIStore((s) => s.namespace)
+  return useMutation({
+    mutationFn: (body: CreateRepositoryMonitorCommandBody) => api.post<MonitorCommand>(`/monitors/repositories/${name}/commands`, body, { namespace }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'commands', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'runs', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'work-actions', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'implementation-jobs', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'mutations', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'items', namespace, name] })
+      queryClient.invalidateQueries({ queryKey: ['monitors', 'repository', namespace, name] })
+    },
   })
 }
 

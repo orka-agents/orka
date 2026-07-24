@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -21,6 +23,36 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
+
+func TestValidateAgentRuntimeReasoningEffort(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		runtime   corev1alpha1.AgentRuntimeType
+		effort    string
+		wantError string
+	}{
+		{name: "codex high", runtime: corev1alpha1.AgentRuntimeCodex, effort: agentReasoningEffortHigh},
+		{name: "codex max rejected", runtime: corev1alpha1.AgentRuntimeCodex, effort: "max", wantError: "low, medium, high, or xhigh"},
+		{name: "claude max", runtime: corev1alpha1.AgentRuntimeClaude, effort: "max"},
+		{name: "copilot rejected", runtime: corev1alpha1.AgentRuntimeCopilot, effort: agentReasoningEffortHigh, wantError: "does not support"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAgentRuntimeReasoningEffort(&corev1alpha1.AgentCLIRuntime{
+				Type:                   tt.runtime,
+				DefaultReasoningEffort: tt.effort,
+			})
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateAgentRuntimeReasoningEffort() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateAgentRuntimeReasoningEffort() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
 
 var _ = Describe("Agent Controller", func() {
 	Context("When reconciling a valid agent with model config", func() {

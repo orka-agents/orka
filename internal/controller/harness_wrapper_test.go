@@ -2324,8 +2324,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	agentSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime-secret", Namespace: agent.Namespace},
 		Data: map[string][]byte{
-			workerenv.AnthropicAPIKey: []byte("runtime-anthropic-key"),
-			workerenv.GitHubToken:     []byte("runtime-github-token"),
+			workerenv.AnthropicAPIKey:         []byte("runtime-anthropic-key"),
+			workerenv.AnthropicFoundryBaseURL: []byte("https://foundry.example.test/anthropic"),
+			workerenv.GitHubToken:             []byte("runtime-github-token"),
 		},
 	}
 	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime-secret"}
@@ -2348,6 +2349,9 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	}
 	if env[workerenv.AnthropicAPIKey] != "runtime-anthropic-key" {
 		t.Fatalf("%s = %q, want runtime credential", workerenv.AnthropicAPIKey, env[workerenv.AnthropicAPIKey])
+	}
+	if env[workerenv.AnthropicFoundryBaseURL] != "https://foundry.example.test/anthropic" {
+		t.Fatalf("%s = %q, want Foundry endpoint", workerenv.AnthropicFoundryBaseURL, env[workerenv.AnthropicFoundryBaseURL])
 	}
 	if env[workerenv.GitHubToken] == "runtime-github-token" {
 		t.Fatalf("read-only Claude runtime should not receive unrelated %s", workerenv.GitHubToken)
@@ -2729,6 +2733,7 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 
 func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
+	agent.Spec.Runtime.DefaultReasoningEffort = agentReasoningEffortHigh
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
 	if err != nil {
@@ -2736,6 +2741,105 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	}
 	if request.Metadata["maxTurns"] != "50" {
 		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+	if request.Metadata["reasoningEffort"] != "high" {
+		t.Fatalf("metadata reasoningEffort = %q, want high", request.Metadata["reasoningEffort"])
+	}
+}
+
+func TestHarnessWrapperTurnRequestFiltersRuntimeAuthOnlySecrets(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	immutable := true
+	task.Annotations = map[string]string{
+		labels.AnnotationAgentRuntimeAuthOnly:                  scheduledRunLabelValue,
+		repositoryMonitorIssueAnnotationActionKind:             repositoryMonitorIssueActionImplementation,
+		repositoryMonitorIssueAnnotationRuntimeAgentUID:        "uid-harness-agent",
+		repositoryMonitorIssueAnnotationRuntimeAgentGeneration: "0",
+		repositoryMonitorIssueAnnotationRuntimeAuthUID:         "uid-task-runtime",
+		repositoryMonitorIssueAnnotationRuntimeAuthFields:      workerenv.OpenAIAPIKey,
+	}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
+	agent.UID = "uid-harness-agent"
+	agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "agent-runtime"}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		GitRepo:      "https://github.com/orka-agents/orka",
+		GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"},
+	}}
+	task.Spec.SecretRef = &corev1alpha1.SecretReference{Name: "task-runtime"}
+	agentSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "agent-runtime", Namespace: task.Namespace}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey: []byte("x"),
+		workerenv.GitHubToken:  []byte("y"),
+	}}
+	taskSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "task-runtime", Namespace: task.Namespace, UID: "uid-task-runtime"}, Data: map[string][]byte{
+		workerenv.OpenAIAPIKey:    []byte("z"),
+		workerenv.AnthropicAPIKey: []byte("task-only"),
+	}, Immutable: &immutable}
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-auth", Namespace: task.Namespace}, Data: map[string][]byte{"token": []byte("g")}}
+	r := newUnitReconciler(newTestScheme(), task, agent, agentSecret, taskSecret, gitSecret)
+	request, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err != nil {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v", err)
+	}
+	env := map[string]string{}
+	for _, item := range request.Input.Env {
+		env[item.Name] = item.Value
+	}
+	if env[workerenv.OpenAIAPIKey] != "z" {
+		t.Fatalf("%s = %q, want task-pinned scoped model credential", workerenv.OpenAIAPIKey, env[workerenv.OpenAIAPIKey])
+	}
+	if _, ok := env[workerenv.GitHubToken]; ok {
+		t.Fatalf("runtime GitHub credential reached harness request: %#v", env)
+	}
+	if _, ok := env[workerenv.AnthropicAPIKey]; ok {
+		t.Fatalf("task secret reached runtime-auth-only harness request: %#v", env)
+	}
+	if env[workerenv.GitToken] != "g" {
+		t.Fatalf("%s = %q, want root-side workspace credential", workerenv.GitToken, env[workerenv.GitToken])
+	}
+	if request.Metadata["runtimeAuthOnly"] != scheduledRunLabelValue {
+		t.Fatalf("metadata = %#v, want runtimeAuthOnly", request.Metadata)
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsRuntimeAuthOnlyRuntimeRef(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentRuntimeAuthOnly: scheduledRunLabelValue}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"}}}
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	agent.Spec.SecretRef = nil
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperTurnRequestRejectsReadOnlyRuntimeRefWithoutSecret(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
+	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{Workspace: &corev1alpha1.WorkspaceConfig{GitSecretRef: &corev1.LocalObjectReference{Name: "git-auth"}}}
+	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
+	agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external-runtime"}
+	agent.Spec.SecretRef = nil
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.harnessWrapperStartTurnRequest(context.Background(), task, agent, time.Now(), 1)
+	if err == nil || !strings.Contains(err.Error(), "do not support external runtimeRef") {
+		t.Fatalf("harnessWrapperStartTurnRequest() error = %v, want read-only runtimeRef rejection", err)
+	}
+}
+
+func TestHarnessWrapperReadOnlyEnvBlocksStartupInjection(t *testing.T) {
+	for _, name := range []string{
+		"NODE_OPTIONS", "NODE_PATH", "HOME", "ZDOTDIR", "CODEX_HOME", "BASH_ENV", "ENV",
+		"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PYTHONPATH",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "XDG_CONFIG_HOME",
+	} {
+		if !harnessWrapperReadOnlyEnvBlocked(name) {
+			t.Errorf("harnessWrapperReadOnlyEnvBlocked(%q) = false", name)
+		}
+	}
+	if harnessWrapperReadOnlyEnvBlocked("SAFE_REVIEW_SETTING") {
+		t.Fatal("ordinary review setting was unexpectedly blocked")
 	}
 }
 

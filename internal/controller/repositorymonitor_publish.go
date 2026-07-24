@@ -207,11 +207,41 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if exists {
 		return skip(repositoryMonitorPublishSkipDuplicateSameHead, fmt.Sprintf("Pull request #%d review publishing skipped: same head was already published", item.Number), nil)
 	}
-	exists, err = r.repositoryMonitorGitHubReviewMarkerExists(ctx, monitor, item, owner, repository, token, reviewedHead)
+	matchedReview, matchedPublishID, err := r.repositoryMonitorGitHubReviewMarkerMatch(ctx, monitor, item, owner, repository, token, reviewedHead)
 	if err != nil {
 		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "list_reviews"})
 	}
-	if exists {
+	if matchedReview != nil {
+		mutationID := "ghmut-" + repositoryMonitorShortHash(matchedPublishID+"-submit-review")
+		mutation, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
+		if errors.Is(mutationErr, store.ErrNotFound) {
+			mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", GitHubURL: matchedReview.HTMLURL, ExternalID: strconv.FormatInt(matchedReview.ID, 10), Status: repositoryMonitorRunPhaseSucceeded}
+			if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+				return err
+			}
+		} else if mutationErr != nil {
+			return mutationErr
+		} else if mutation.Status != repositoryMonitorRunPhaseSucceeded {
+			mutation.Status = repositoryMonitorRunPhaseSucceeded
+			mutation.Error = ""
+			mutation.GitHubURL = matchedReview.HTMLURL
+			mutation.ExternalID = strconv.FormatInt(matchedReview.ID, 10)
+			if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+				return err
+			}
+		}
+		if existingPublish, getErr := r.Store.GetReviewPublishRecord(ctx, monitor.Namespace, matchedPublishID); getErr == nil {
+			existingPublish.Phase = repositoryMonitorPublishPhaseSucceeded
+			existingPublish.GitHubReviewID = strconv.FormatInt(matchedReview.ID, 10)
+			existingPublish.GitHubReviewURL = matchedReview.HTMLURL
+			existingPublish.Error = ""
+			existingPublish.UpdatedAt = time.Now()
+			if err := r.Store.UpdateReviewPublishRecord(ctx, existingPublish); err != nil {
+				return err
+			}
+		} else if !errors.Is(getErr, store.ErrNotFound) {
+			return getErr
+		}
 		return skip(repositoryMonitorPublishSkipDuplicateSameHead, fmt.Sprintf("Pull request #%d review publishing skipped: GitHub already has an Orka review for this head", item.Number), nil)
 	}
 
@@ -248,14 +278,38 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		return err
 	}
 
-	response, err := r.createRepositoryMonitorPullRequestReview(ctx, owner, repository, token, item.Number, repositoryMonitorPullRequestReviewRequest{
-		CommitID: reviewedHead,
-		Event:    repositoryMonitorPublishEventComment,
-		Body:     body,
-		Comments: comments,
-	})
-	if err != nil {
-		return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "create_review"})
+	mutationID := "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review")
+	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", Status: repositoryMonitorAutomergeStateStarted}
+	existing, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
+	if mutationErr == nil {
+		mutation = existing
+	} else if errors.Is(mutationErr, store.ErrNotFound) {
+		if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+			return err
+		}
+	} else {
+		return mutationErr
+	}
+	response := &repositoryMonitorPullRequestReviewResponse{HTMLURL: mutation.GitHubURL}
+	if mutation.Status == repositoryMonitorRunPhaseSucceeded {
+		response.ID, _ = strconv.ParseInt(mutation.ExternalID, 10, 64)
+	} else {
+		response, err = r.createRepositoryMonitorPullRequestReview(ctx, owner, repository, token, item.Number, repositoryMonitorPullRequestReviewRequest{CommitID: reviewedHead, Event: repositoryMonitorPublishEventComment, Body: body, Comments: comments})
+		if err != nil {
+			mutation.Status = repositoryMonitorRunPhaseFailed
+			mutation.Error = err.Error()
+			if auditErr := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); auditErr != nil {
+				return fmt.Errorf("publish review failed: %w; additionally failed to update mutation audit: %v", err, auditErr)
+			}
+			return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{"operation": "create_review"})
+		}
+		mutation.Status = repositoryMonitorRunPhaseSucceeded
+		mutation.Error = ""
+		mutation.GitHubURL = response.HTMLURL
+		mutation.ExternalID = strconv.FormatInt(response.ID, 10)
+		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+			return err
+		}
 	}
 	publishRecord.Phase = repositoryMonitorPublishPhaseSucceeded
 	publishRecord.GitHubReviewID = strconv.FormatInt(response.ID, 10)
@@ -949,10 +1003,10 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestFilesPage
 	return response, nil
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubReviewMarkerExists(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, owner, repository, token, headSHA string) (bool, error) {
+func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubReviewMarkerMatch(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, owner, repository, token, headSHA string) (*repositoryMonitorPullRequestReviewResponse, string, error) {
 	reviews, err := r.listRepositoryMonitorPullRequestReviews(ctx, owner, repository, token, item.Number)
 	if err != nil {
-		return false, err
+		return nil, "", err
 	}
 	markerPrefix := repositoryMonitorReviewMarkerPrefix(monitor, item.Number, headSHA)
 	for _, review := range reviews {
@@ -961,13 +1015,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubReviewMarkerExists(
 		}
 		trusted, err := r.repositoryMonitorGitHubReviewMarkerTrustedByStore(ctx, monitor, item, headSHA, review.Body, markerPrefix)
 		if err != nil {
-			return false, err
+			return nil, "", err
 		}
 		if trusted {
-			return true, nil
+			return &review, repositoryMonitorPublishIDFromMarker(review.Body, markerPrefix), nil
 		}
 	}
-	return false, nil
+	return nil, "", nil
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubReviewMarkerTrustedByStore(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA, body, markerPrefix string) (bool, error) {

@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const publishPhaseFailed = "failed"
+const (
+	publishPhaseFailed = "failed"
+	testPhaseSucceeded = "succeeded"
+)
 
 func TestRepositoryMonitorStoreCRUD(t *testing.T) {
 	s := setupTestStore(t)
@@ -83,7 +87,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		HeadSHA:           "abc123",
 		LastVerdict:       "needs_changes",
 		LastPublishID:     "publish-1",
-		LastPublishPhase:  "succeeded",
+		LastPublishPhase:  testPhaseSucceeded,
 		LastPublishReason: "",
 		LastPublishURL:    "https://github.example/review/1",
 	}); err != nil {
@@ -124,7 +128,7 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 		ItemNumber:         42,
 		HeadSHA:            "abc123",
 		ReviewRecordID:     "review-1",
-		Phase:              "succeeded",
+		Phase:              testPhaseSucceeded,
 		Event:              "COMMENT",
 		GitHubReviewID:     "123",
 		GitHubReviewURL:    "https://github.example/review/123",
@@ -152,12 +156,12 @@ func TestMonitorStoreRunsItemsReviewsRepairsAndEvents(t *testing.T) {
 	if publishRecord.Phase != publishPhaseFailed || publishRecord.Error == "" {
 		t.Fatalf("publishRecord = %#v, want updated failure outcome", publishRecord)
 	}
-	publishRecord.Phase = "succeeded"
+	publishRecord.Phase = testPhaseSucceeded
 	publishRecord.Error = ""
 	if err := s.UpdateReviewPublishRecord(ctx, publishRecord); err != nil {
 		t.Fatalf("UpdateReviewPublishRecord(succeeded) error = %v", err)
 	}
-	publishRecords, _, err := s.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "demo", MonitorName: "orka", ItemNumber: 42, HeadSHA: "abc123", Phase: "succeeded"})
+	publishRecords, _, err := s.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{Namespace: "demo", MonitorName: "orka", ItemNumber: 42, HeadSHA: "abc123", Phase: testPhaseSucceeded})
 	if err != nil {
 		t.Fatalf("ListReviewPublishRecords() error = %v", err)
 	}
@@ -250,7 +254,7 @@ func TestCreateMonitorRunRejectsDuplicateActiveRun(t *testing.T) {
 		MonitorNamespace: "demo",
 		MonitorName:      "orka",
 		Trigger:          "manual",
-		Phase:            "succeeded",
+		Phase:            testPhaseSucceeded,
 	}); err != nil {
 		t.Fatalf("CreateMonitorRun(succeeded) error = %v", err)
 	}
@@ -563,5 +567,125 @@ func TestDeleteRepositoryMonitorCascadesMonitorState(t *testing.T) {
 	}
 	if _, err := s.GetCommandEvent(ctx, "demo", "command-1"); err != store.ErrNotFound {
 		t.Fatalf("GetCommandEvent() error = %v, want ErrNotFound", err)
+	}
+}
+
+//nolint:gocyclo // This integration-style store test intentionally exercises the full workflow schema.
+func TestMonitorWorkflowStoresActionsJobsAndMutations(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	action := &store.WorkAction{
+		ID:                "wa-1",
+		MonitorNamespace:  "demo",
+		MonitorName:       "orka",
+		MonitorGeneration: 2,
+		TargetKind:        "issue",
+		TargetNumber:      123,
+		Intent:            "implement",
+		DesiredAction:     "implement",
+		DedupeKey:         "dedupe-1",
+		Status:            "queued",
+		Phase:             "implementation_queued",
+	}
+	if err := s.CreateWorkAction(ctx, action); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	leased, err := s.LeaseNextWorkAction(ctx, store.WorkActionFilter{Namespace: "demo", MonitorName: "orka", DesiredAction: "implement"}, "controller-1", time.Minute)
+	if err != nil {
+		t.Fatalf("LeaseNextWorkAction() error = %v", err)
+	}
+	if leased.ID != "wa-1" || leased.Status != "leased" || leased.LeaseOwner != "controller-1" || leased.Attempt != 1 || leased.LeaseExpiresAt == nil {
+		t.Fatalf("leased action = %#v, want leased wa-1 with owner/attempt/expiry", leased)
+	}
+	leased.Status = "running"
+	leased.TaskName = "task-1"
+	if err := s.UpdateWorkAction(ctx, leased); err != nil {
+		t.Fatalf("UpdateWorkAction() error = %v", err)
+	}
+	actions, _, err := s.ListWorkActions(ctx, store.WorkActionFilter{Namespace: "demo", MonitorName: "orka", TaskName: "task-1"})
+	if err != nil {
+		t.Fatalf("ListWorkActions() error = %v", err)
+	}
+	if len(actions) != 1 || actions[0].Status != "running" {
+		t.Fatalf("actions = %#v, want running task action", actions)
+	}
+	retryPending := &store.WorkAction{
+		ID:                "wa-retry",
+		MonitorNamespace:  "demo",
+		MonitorName:       "orka",
+		TargetKind:        "issue",
+		TargetNumber:      123,
+		Intent:            "implement",
+		DesiredAction:     "implement",
+		Status:            store.RepositoryMonitorWorkActionStatusRetryPending,
+		MonitorGeneration: 2,
+	}
+	if err := s.CreateWorkAction(ctx, retryPending); err != nil {
+		t.Fatalf("CreateWorkAction(retry pending) error = %v", err)
+	}
+	cancelled, err := s.CancelWorkActions(ctx, "demo", "orka", "issue", 123, "stopped_by_command")
+	if err != nil {
+		t.Fatalf("CancelWorkActions() error = %v", err)
+	}
+	if cancelled != 2 {
+		t.Fatalf("CancelWorkActions() = %d, want 2", cancelled)
+	}
+	gotAction, err := s.GetWorkAction(ctx, "demo", "wa-1")
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if gotAction.Status != "cancelled" || gotAction.BlockedReason != "stopped_by_command" || gotAction.CompletedAt == nil {
+		t.Fatalf("got action = %#v, want cancelled with reason and completion", gotAction)
+	}
+	gotRetry, err := s.GetWorkAction(ctx, "demo", retryPending.ID)
+	if err != nil {
+		t.Fatalf("GetWorkAction(retry pending) error = %v", err)
+	}
+	if gotRetry.Status != "cancelled" || gotRetry.BlockedReason != "stopped_by_command" || gotRetry.CompletedAt == nil {
+		t.Fatalf("retry action = %#v, want cancelled with reason and completion", gotRetry)
+	}
+
+	job := &store.ImplementationJob{ID: "impl-1", MonitorNamespace: "demo", MonitorName: "orka", Repo: "orka-agents/orka", IssueNumber: 123, PlanID: "act-plan", SnapshotDigest: "sha256:issue", Phase: "implementation_queued", Attempt: 1, Branch: "orka/issue-123", TaskName: "task-1"}
+	if err := s.CreateImplementationJob(ctx, job); err != nil {
+		t.Fatalf("CreateImplementationJob() error = %v", err)
+	}
+	job.Phase = "pr_opened"
+	job.PatchArtifactID = "patch.json"
+	job.PRNumber = 456
+	if err := s.UpdateImplementationJob(ctx, job); err != nil {
+		t.Fatalf("UpdateImplementationJob() error = %v", err)
+	}
+	jobs, _, err := s.ListImplementationJobs(ctx, store.ImplementationJobFilter{Namespace: "demo", MonitorName: "orka", IssueNumber: 123, Phase: "pr_opened"})
+	if err != nil {
+		t.Fatalf("ListImplementationJobs() error = %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].PRNumber != 456 || jobs[0].PatchArtifactID != "patch.json" {
+		t.Fatalf("jobs = %#v, want updated implementation job", jobs)
+	}
+
+	mutation := &store.GitHubMutationRecord{ID: "mut-1", MonitorNamespace: "demo", MonitorName: "orka", Operation: "create_pr", TargetKind: "issue", TargetNumber: 123, Status: "started"}
+	if err := s.CreateGitHubMutationRecord(ctx, mutation); err != nil {
+		t.Fatalf("CreateGitHubMutationRecord() error = %v", err)
+	}
+	mutation.Status = testPhaseSucceeded
+	mutation.ExternalID = "456"
+	mutation.GitHubURL = "https://github.example/pr/456"
+	if err := s.UpdateGitHubMutationRecord(ctx, mutation); err != nil {
+		t.Fatalf("UpdateGitHubMutationRecord() error = %v", err)
+	}
+	updatedMutation, err := s.GetGitHubMutationRecord(ctx, "demo", mutation.ID)
+	if err != nil {
+		t.Fatalf("GetGitHubMutationRecord() error = %v", err)
+	}
+	if updatedMutation.Status != testPhaseSucceeded || updatedMutation.ExternalID != "456" {
+		t.Fatalf("updated mutation = %#v, want succeeded outcome", updatedMutation)
+	}
+	mutations, _, err := s.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: "demo", MonitorName: "orka", Operation: "create_pr", TargetKind: "issue", TargetNumber: 123})
+	if err != nil {
+		t.Fatalf("ListGitHubMutationRecords() error = %v", err)
+	}
+	if len(mutations) != 1 || mutations[0].GitHubURL == "" {
+		t.Fatalf("mutations = %#v, want create_pr mutation", mutations)
 	}
 }

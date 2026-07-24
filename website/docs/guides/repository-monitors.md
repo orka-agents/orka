@@ -6,13 +6,14 @@ slug: /repository-monitors
 
 Repository monitors are durable, Kubernetes-native PR review automation for GitHub repositories. A `RepositoryMonitor` stores the repository scope, review agent, schedule, and safety policy in a CRD. The controller records runs, PR inventory, review results, and audit events in the SQLite store, then exposes that state through the REST API and embedded dashboard.
 
-This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The current implementation supports GitHub pull request inventory, read-only review task creation, structured review ingestion, and optional controller-owned GitHub `COMMENT` review publishing.
+This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The implementation supports GitHub pull request and issue inventory, durable `orka:*` command intake, issue triage/research/planning/implementation, controller-owned issue-to-PR mutation, exact-head PR review, bounded repair, readiness state, mutation auditing, and optional controller-owned GitHub `COMMENT` review publishing. Automerge is available only when explicitly configured and remains disabled by default.
 
 ## What It Does
 
 A repository monitor can:
 
 - list open pull requests for one GitHub repository and base branch
+- inventory open GitHub issues, excluding pull-request-shaped issues
 - skip drafts unless explicitly configured to include them
 - skip PRs blocked by configured protected or pause labels
 - skip PR heads that already have a fresh review result
@@ -20,8 +21,8 @@ A repository monitor can:
 - refetch one pull request for targeted manual and webhook runs before queueing review work
 - queue exact-head monitor runs from GitHub pull request webhook events
 - ingest typed JSON review results from completed review tasks
-- store monitor runs, PR items, review records, and audit events durably
-- show monitor status, recent runs, and the PR queue in the dashboard under **Monitors**
+- store monitor runs, issue/PR items, command events, workflow actions, action records, implementation jobs, mutation records, review records, and audit events durably
+- show monitor status, recent runs, workflow timeline, blocked reasons, implementation jobs, mutation audit, issues, and the PR queue in the dashboard under **Monitors**
 
 The review task is bound to the exact PR head SHA. It runs as a `type: agent` task, uses a Claude runtime Agent, checks out the PR head in a read-only workspace, writes generated PR context under `/workspace/.git/orka/`, and is instructed to return only the structured review result. It does not receive GitHub mutation credentials, post comments, push commits, merge, close, or mutate labels. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review from the structured result.
 
@@ -30,12 +31,12 @@ The review task is bound to the exact PR head SHA. It runs as a `type: agent` ta
 The first implementation is intentionally narrow:
 
 - GitHub is the only supported provider.
-- Pull requests are the only supported target type.
-- `spec.targets.issues.enabled` and `spec.targets.commits.enabled` are rejected.
-- `spec.targets.pullRequests.enabled` must be true or omitted.
-- `spec.review.requireGreenCI` is rejected until CI state collection is available.
+- Pull requests and issues are supported target types; commit monitoring is still rejected.
+- Pull request monitoring is enabled by default when no target is specified.
+- Issue-only monitors can set `spec.targets.pullRequests.enabled: false` and `spec.targets.issues.enabled: true`.
+- `spec.review.requireGreenCI` gates review selection until CI is green.
 - GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
-- Repair, automerge, maintainer command routing, and public review comment updates are represented in the API/store shape but are not active workflows in this slice.
+- Repair, maintainer command routing, issue action workflows, implementation budgets (`maxActive`, `maxAttemptsPerIssue`, `maxChangedFiles`, `allowedPaths`), and optional head-bound automerge are active monitor-owned workflows. Automerge remains disabled by default and requires explicit configuration plus a one-shot command.
 - The reviewer Agent must use `runtime.type: claude` and reference a Secret in the monitor namespace with `ANTHROPIC_API_KEY` or `ANTHROPIC_FOUNDRY_API_KEY`.
 
 ## CI Coverage
@@ -265,3 +266,89 @@ For compatibility, Orka also recognizes legacy markers and markers signed before
 - [GitHub Label Triggers](github-label-triggers.md) create one-off agent tasks from labels such as `agent:review` or `agent:implement`.
 - [Repository Security Scanning](repository-security-scanning.md) scans repository history for security findings and supports patch proposal workflows.
 - `create_pr_monitor` remains available for prompt-orchestrated scheduled PR monitor tasks, but it does not provide the durable per-PR run, item, review, publish, and event records described here.
+
+## Issue Inventory and Label Commands
+
+Repository monitors can also inventory open GitHub issues when `spec.targets.issues.enabled: true`. Issue inventory excludes GitHub issues that represent pull requests, stores the item as `monitor_items.kind = issue`, and records an issue content digest over human-controlled inputs: issue number, title, body, and non-`orka:*` / non-`orka-state:*` labels. Orka-authored command labels and state labels therefore do not stale issue plans or future issue workflow artifacts.
+
+A monitor can be run against one exact issue without retiring unrelated inventory:
+
+```bash
+orka monitor run orka-main --target-kind issue --target-number 123 --namespace default
+orka monitor issues list orka-main --namespace default
+```
+
+Durable `orka:*` label command intake is enabled per monitor:
+
+```yaml
+spec:
+  targets:
+    pullRequests:
+      enabled: false
+    issues:
+      enabled: true
+      maxPerRun: 10
+      excludeLabels:
+        - blocked
+        - waiting-external
+  triggers:
+    github:
+      labels:
+        enabled: true
+        requireActorPermission: write
+        issues:
+          plan: orka:plan
+          implement: orka:implement
+        pullRequests:
+          review: orka:review
+          fix: orka:fix
+          automerge: orka:automerge
+```
+
+When a matching label webhook arrives, Orka verifies the webhook signature, matches the repository monitor by repository and target kind, checks the sender's current GitHub repository permission using `spec.gitSecretRef`, records a durable command event, and queues a targeted monitor run for accepted commands. Replayed deliveries are idempotent. Guard labels from `spec.policy.protectedLabels` and `spec.policy.pauseLabels` record blocked commands and do not queue work.
+
+Inspect command intake with:
+
+```bash
+orka monitor commands list orka-main --namespace default
+orka monitor commands get <command-id> --namespace default
+```
+
+## Issue Triage, Research, Planning, and Implementation
+
+When issue command labels are enabled, accepted issue commands now drive monitor-owned task phases:
+
+- `orka:triage` creates a read-only issue triage task and stores an `issue_triage` action record.
+- `orka:research` creates a read-only issue research task and stores an `issue_research` action record.
+- `orka:plan` creates a read-only planning task and stores an `issue_plan` action record. Plans that require approval move the issue to `approval_required`.
+- `orka:approve-plan` records an approval action and moves the issue to `approved`.
+- `orka:implement` creates an implementation task only when policy permits it. By default, implementation requires an approved plan; otherwise Orka queues planning first.
+
+Issue action tasks are bound to the issue snapshot digest. Result payloads with mismatched issue numbers or stale digests are recorded as stale/failed action records instead of advancing workflow state.
+
+Implementation tasks do not push directly. They return a structured diff that Orka validates and stores as `orka.patch.v1` patch artifacts. After patch validation, the controller creates a separate mutation task with a controller-selected push branch (`spec.issueWorkflow.implementation.branchPrefix`, default `orka/issue`) and a `priorTaskRef` to apply the validated diff in a fresh workspace. When that mutation task pushes successfully, the controller creates or reuses the pull request with a deterministic Orka-rendered body and records mutation action records.
+
+Inspect action records with:
+
+```bash
+orka monitor actions list orka-main --namespace default --kind issue --number 123
+orka monitor actions get <action-id> --namespace default
+```
+
+## PR Repair and Readiness
+
+Pull request command labels can start bounded controller-tracked repair tasks:
+
+- `orka:review` queues an exact-head review run.
+- `orka:fix` queues a repair task on the current same-repository PR head branch.
+- `orka:fix-ci` queues a CI repair task using the same repair path.
+- `orka:update-branch` queues a base-update repair task and allows empty push-branch updates.
+
+Repair jobs are stored durably and linked to monitor items. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready state for humans to merge; Orka only merges automatically when the optional automerge workflow below is explicitly enabled.
+
+
+## Optional Automerge
+
+Automerge is disabled by default. To enable it, set `spec.automerge.enabled: true` and use a one-shot pull request command label such as `orka:automerge`. When `spec.automerge.requireGlobalMergeGate` is omitted or true, the controller also requires the process environment variable `ORKA_REPOSITORY_MONITOR_AUTOMERGE_GATE=true`; set `requireGlobalMergeGate: false` only for tightly scoped test or local deployments.
+
+Before merging, Orka verifies that the command is bound to the current PR head SHA, the actor permission satisfies the automerge policy, the PR has a passed exact-head Orka review, CI checks are green, the PR is mergeable, there are no protected/pause labels, and no repair is active or failed. Every merge attempt writes an action record before or during the attempt, and failures are surfaced in the PR item `automergeState`.

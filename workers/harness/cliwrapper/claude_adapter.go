@@ -13,6 +13,7 @@ import (
 const (
 	defaultClaudePath     = "claude"
 	defaultClaudeMaxTurns = 50
+	claudeEffortEnv       = "ORKA_CLAUDE_EFFORT"
 )
 
 type ClaudeAdapter struct {
@@ -27,6 +28,10 @@ func (a *ClaudeAdapter) Name() string { return RuntimeClaude }
 
 func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*CommandSpec, error) {
 	agentCfg := agentConfigFromTurn(turn)
+	effort, err := claudeEffort(turn.Metadata, turn.Env)
+	if err != nil {
+		return nil, err
+	}
 	dir := firstNonEmpty(turn.WorkDir, a.config.WorkDir)
 	if dir == "" {
 		dir = DefaultWrapperWorkDir
@@ -42,7 +47,7 @@ func (a *ClaudeAdapter) BuildCommand(_ context.Context, turn TurnContext) (*Comm
 
 	return &CommandSpec{
 		Path:  firstNonEmpty(a.config.Path, os.Getenv(workerenv.ClaudeCLIPath), defaultClaudePath),
-		Args:  buildClaudeArgs(agentCfg, turn),
+		Args:  buildClaudeArgs(agentCfg, turn, effort),
 		Env:   buildClaudeEnv(turn.Env),
 		Dir:   dir,
 		Stdin: nil,
@@ -53,13 +58,16 @@ func (a *ClaudeAdapter) ParseResult(_ context.Context, _ TurnContext, run Comman
 	return TurnResult{Result: run.ExactStdout(), Metadata: map[string]string{"adapter": RuntimeClaude}}, nil
 }
 
-func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
+func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext, effort string) []string {
 	if cfg == nil {
 		cfg = &agentEnvConfig{MaxTurns: defaultClaudeMaxTurns}
 	}
 	args := []string{"--print", "--verbose"}
 	if model := strings.TrimSpace(cfg.Model); model != "" {
 		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if systemPrompt := strings.TrimSpace(cfg.SystemPrompt); systemPrompt != "" {
 		args = append(args, "--append-system-prompt", systemPrompt)
@@ -81,21 +89,49 @@ func buildClaudeArgs(cfg *agentEnvConfig, turn TurnContext) []string {
 	if permissionMode := strings.TrimSpace(envEntryValue(turn.Env, workerenv.ClaudePermissionMode)); permissionMode != "" {
 		args = append(args, "--permission-mode", permissionMode)
 	}
-	if tools := claudeAvailableTools(cfg.AllowedTools); len(tools) > 0 {
-		args = append(args, "--tools", strings.Join(tools, ","))
+	readOnly := strings.EqualFold(strings.TrimSpace(turn.Metadata["readOnly"]), "true")
+	allowedTools := cfg.AllowedTools
+	disallowedTools := cfg.DisallowedTools
+	if readOnly {
+		allowedTools = filterClaudeReadOnlyTools(allowedTools)
+		disallowedTools = filterClaudeReadOnlyTools(disallowedTools)
+		args = append(args, "--strict-mcp-config")
 	}
-	for _, tool := range cfg.AllowedTools {
-		if tool = scopedClaudeTool(tool, firstNonEmpty(turn.RootDir, turn.WorkDir)); tool != "" {
+	if tools := claudeAvailableTools(allowedTools); len(tools) > 0 {
+		args = append(args, "--tools", strings.Join(tools, ","))
+	} else if readOnly && cfg.AllowedToolsSet {
+		args = append(args, "--tools", "")
+	}
+	workDir := firstNonEmpty(turn.RootDir, turn.WorkDir)
+	for _, tool := range allowedTools {
+		if tool = scopedClaudeTool(tool, workDir, readOnly); tool != "" {
 			args = append(args, "--allowedTools", tool)
 		}
 	}
-	for _, tool := range cfg.DisallowedTools {
-		if tool = scopedClaudeTool(tool, firstNonEmpty(turn.RootDir, turn.WorkDir)); tool != "" {
+	for _, tool := range disallowedTools {
+		if tool = scopedClaudeTool(tool, workDir, readOnly); tool != "" {
 			args = append(args, "--disallowedTools", tool)
 		}
 	}
 	args = append(args, "-p", turn.Prompt)
 	return args
+}
+
+func claudeEffort(metadata map[string]string, turnEnv []string) (string, error) {
+	effort := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		metadata["reasoningEffort"],
+		envEntryValue(turnEnv, claudeEffortEnv),
+		os.Getenv(claudeEffortEnv),
+	)))
+	if effort == "" {
+		return "", nil
+	}
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+		return effort, nil
+	default:
+		return "", fmt.Errorf("invalid %s %q: expected low, medium, high, xhigh, or max", claudeEffortEnv, effort)
+	}
 }
 
 func buildClaudeEnv(extra []string) []string {
@@ -129,6 +165,19 @@ func claudeToolName(toolSpec string) string {
 	return strings.TrimSpace(toolSpec)
 }
 
+func filterClaudeReadOnlyTools(tools []string) []string {
+	filtered := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		switch claudeToolName(tool) {
+		case "LS", "MultiEdit":
+			continue
+		default:
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
 func envEntryValue(env []string, key string) string {
 	prefix := strings.TrimSpace(key) + "="
 	for i := len(env) - 1; i >= 0; i-- {
@@ -143,11 +192,36 @@ func envEntryIsTrue(env []string, key string) bool {
 	return strings.EqualFold(strings.TrimSpace(envEntryValue(env, key)), "true")
 }
 
-func scopedClaudeTool(tool, workDir string) string {
+func scopedClaudeTool(tool, workDir string, readOnly bool) string {
 	tool = strings.TrimSpace(tool)
 	workDir = strings.TrimSpace(workDir)
-	if tool == "" || workDir == "" {
+	if tool == "" {
+		return ""
+	}
+	workspaceScoped := strings.Contains(tool, "/workspace")
+	if workDir != "" {
+		tool = strings.ReplaceAll(tool, "/workspace", workDir)
+	}
+	if !readOnly || !workspaceScoped {
 		return tool
 	}
-	return strings.ReplaceAll(tool, "/workspace", workDir)
+	return claudeReadOnlyAbsolutePermission(tool)
+}
+
+func claudeReadOnlyAbsolutePermission(tool string) string {
+	name, pattern, ok := strings.Cut(tool, "(")
+	if !ok {
+		return tool
+	}
+	pattern, ok = strings.CutSuffix(pattern, ")")
+	if !ok {
+		return tool
+	}
+	switch strings.TrimSpace(name) {
+	case "Read", "Glob", "Grep":
+		if strings.HasPrefix(pattern, "/") && !strings.HasPrefix(pattern, "//") {
+			pattern = "/" + pattern
+		}
+	}
+	return name + "(" + pattern + ")"
 }

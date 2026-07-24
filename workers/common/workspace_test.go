@@ -7,8 +7,10 @@ MIT License - see LICENSE file for details.
 package common
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -80,23 +82,6 @@ func TestFinalizeResult_NonGitDir(t *testing.T) {
 	}
 	if string(data) != "agent did stuff" {
 		t.Errorf("expected plain text fallback, got %q", string(data))
-	}
-}
-
-func TestParseDiffStatFiles(t *testing.T) {
-	stat := ` auth.go       | 10 +++++++---
- middleware.go | 5 +++++
- 2 files changed, 12 insertions(+), 3 deletions(-)
-`
-	files := parseDiffStatFiles(stat)
-	if len(files) != 2 {
-		t.Fatalf("expected 2 files, got %d", len(files))
-	}
-	if files[0] != "auth.go" {
-		t.Errorf("expected auth.go, got %q", files[0])
-	}
-	if files[1] != "middleware.go" {
-		t.Errorf("expected middleware.go, got %q", files[1])
 	}
 }
 
@@ -1070,5 +1055,34 @@ func TestSafeGitBranchNameRejectsOptionLikeBranch(t *testing.T) {
 func TestSafeGitRemoteRejectsOptionLikeRemote(t *testing.T) {
 	if _, err := safeGitRemote("--upload-pack=/tmp/pwn"); err == nil {
 		t.Fatal("safeGitRemote() error = nil, want option-like remote rejection")
+	}
+}
+
+func TestParseDiffNameStatusPathsIncludesRenameSourceAndDestination(t *testing.T) {
+	raw := "R100\x00docs/pwn.yml\x00.github/workflows/pwn.yml\x00M\x00internal/x.go\x00"
+	got := parseDiffNameStatusPaths(raw)
+	want := []string{"docs/pwn.yml", ".github/workflows/pwn.yml", "internal/x.go"}
+	if len(got) != len(want) {
+		t.Fatalf("paths = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("paths = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestValidatePriorTaskDiffDigest(t *testing.T) {
+	diff := "diff --git a/a b/a\n"
+	t.Setenv(workerenv.PriorTaskDiffSHA256, fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(diff))))
+	if err := validatePriorTaskDiffDigest(diff); err != nil {
+		t.Fatalf("validatePriorTaskDiffDigest(correct) error = %v", err)
+	}
+	t.Setenv(workerenv.PriorTaskDiffSHA256, "sha256:deadbeef")
+	if err := validatePriorTaskDiffDigest(diff); err == nil {
+		t.Fatal("validatePriorTaskDiffDigest accepted mismatched diff")
+	}
+	if err := validatePriorTaskDiffDigest(""); err == nil {
+		t.Fatal("validatePriorTaskDiffDigest accepted a missing diff when a digest was required")
 	}
 }

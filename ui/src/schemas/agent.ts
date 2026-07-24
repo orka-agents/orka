@@ -18,6 +18,7 @@ export const agentCLIRuntimeSchema = z.object({
   defaultMaxTurns: z.number().optional(),
   defaultAllowedTools: z.array(z.string()).optional(),
   defaultAllowBash: z.boolean().optional(),
+  defaultReasoningEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
 })
 
 export const agentSpecSchema = z.object({

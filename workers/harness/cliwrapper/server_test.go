@@ -19,6 +19,8 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
+const wrapperTestShellPath = "/bin/sh"
+
 func TestServerHealthCapabilitiesAndAfterSeq(t *testing.T) {
 	baseURL, cleanup := startWrapperServer(t, NewFakeAdapter(FakeBehaviorSuccess))
 	defer cleanup()
@@ -325,7 +327,7 @@ func TestServerGenericCommandSuccessAndResultFile(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic = GenericAdapterConfig{
-		Command:    "/bin/sh",
+		Command:    wrapperTestShellPath,
 		Args:       []string{"-c", "cat > prompt.txt; printf result-from-file > result.txt"},
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
@@ -357,7 +359,7 @@ func TestServerFailedCommandPreservesAdapterResultFile(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic = GenericAdapterConfig{
-		Command:    "/bin/sh",
+		Command:    wrapperTestShellPath,
 		Args:       []string{"-c", "printf partial-from-file > result.txt; exit 7"},
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
@@ -385,7 +387,7 @@ func TestServerPreservesCompletedResultBytes(t *testing.T) {
 	cfg.AllowUnauthenticated = true
 	sensitiveResult := "Authorization: Bearer " + "token-shaped-result-1234567890"
 	cfg.Generic = GenericAdapterConfig{
-		Command:    "/bin/sh",
+		Command:    wrapperTestShellPath,
 		Args:       []string{"-c", fmt.Sprintf("printf %q > result.txt", sensitiveResult)},
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
@@ -427,7 +429,7 @@ func assertCommandFramesRedacted(t *testing.T, script, label string) {
 	t.Helper()
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	cfg.Generic.Command = "/bin/sh"
+	cfg.Generic.Command = wrapperTestShellPath
 	cfg.Generic.Args = []string{"-c", script}
 	adapter := NewGenericAdapter(cfg.Generic)
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, adapter)
@@ -582,7 +584,7 @@ func TestServerStoresOversizedCompletedResultOutOfBand(t *testing.T) {
 		"PY",
 	}, "\n")
 	cfg.Generic = GenericAdapterConfig{
-		Command:    "/bin/sh",
+		Command:    wrapperTestShellPath,
 		Args:       []string{"-c", largeResultScript},
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
@@ -651,7 +653,7 @@ func TestServerClassifiesCancelBeforeResultFileParsing(t *testing.T) {
 	cfg.AllowUnauthenticated = true
 	cfg.WorkDir = dir
 	cfg.Generic = GenericAdapterConfig{
-		Command:    "/bin/sh",
+		Command:    wrapperTestShellPath,
 		Args:       []string{"-c", "dd if=/dev/zero bs=1024 count=600 2>/dev/null | tr '\\000' x > result.txt; sleep 10"},
 		PromptMode: PromptModeStdin,
 		ResultMode: ResultModeFile,
@@ -739,7 +741,7 @@ func TestServerCreatesWorkspaceArtifactLinkAndEnforcesRequiredArtifacts(t *testi
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
 	cfg.Generic = GenericAdapterConfig{
-		Command: "/bin/sh",
+		Command: wrapperTestShellPath,
 		Args: []string{"-c", strings.Join([]string{
 			"printf 'artifact body' > .orka-artifacts/security-threat-model.md",
 			"printf 'done' > result.txt",
@@ -780,7 +782,7 @@ func redactionLeakMarker() string {
 func TestServerStripsGitCredentialsFromReadOnlyCommandEnv(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowUnauthenticated = true
-	cfg.Generic.Command = "/bin/sh"
+	cfg.Generic.Command = wrapperTestShellPath
 	cfg.Generic.Args = []string{"-c", "printf 'github=%s git=%s' \"$GITHUB_TOKEN\" \"$GIT_TOKEN\""}
 	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
 	defer cleanup()
@@ -863,5 +865,32 @@ func TestServerRunTurnEmitsTaskRunSpanFromTraceparentMetadata(t *testing.T) {
 	}
 	if got := attrs[tracing.AttrAgentName].AsString(); got != "agent-a" {
 		t.Fatalf("%s = %q", tracing.AttrAgentName, got)
+	}
+}
+
+func TestServerRejectsUnsupportedRuntimeAuthOnlyCommand(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	cfg.Generic.Command = wrapperTestShellPath
+	cfg.Generic.Args = []string{"-c", "printf 'github=%s git=%s' \"$GITHUB_TOKEN\" \"$GIT_TOKEN\""}
+	baseURL, cleanup := startWrapperServerWithConfig(t, cfg, NewGenericAdapter(cfg.Generic))
+	defer cleanup()
+	client, err := harness.NewClient(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validWrapperStartTurnRequest()
+	request.Metadata = map[string]string{"runtimeAuthOnly": "true"}
+	request.Input.Env = []harness.TurnEnvVar{
+		{Name: workerenv.GitHubToken, Value: "x"},
+		{Name: workerenv.GitToken, Value: "y"},
+	}
+	if _, err := client.StartTurn(context.Background(), request); err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	frames := collectWrapperFrames(t, client, request.TurnID, 0)
+	last := frames[len(frames)-1]
+	if last.Type != harness.FrameTurnFailed || last.Failed == nil || last.Failed.Reason != "runtime_auth_proxy_failed" {
+		t.Fatalf("last frame = %#v, want runtime auth proxy failure", last)
 	}
 }
