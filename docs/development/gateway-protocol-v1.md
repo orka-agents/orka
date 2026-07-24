@@ -55,6 +55,45 @@ Delivery responses are exactly one of:
 
 The bundled reference adapter and conformance CLI can opt into a non-normative fixture profile with `--reference-fixtures`. In that mode only, delivery metadata `fixture=retryable` and `fixture=permanent` requests deterministic error-classification responses. Third-party adapters are not required to implement these fixture keys.
 
+### Reference adapter and conformance tooling
+
+For local protocol development, run the reference adapter over plain HTTP:
+
+```bash
+ORKA_GATEWAY_BEARER_TOKEN='local-test-token' \
+  go run ./cmd/orka-gateway-reference-adapter --listen :8090
+```
+
+Plain HTTP is only for direct local development. Configured Gateway `endpoint` and `serviceRef` targets require HTTPS. To serve TLS directly, provide the certificate and key together; supplying only one is rejected:
+
+```bash
+ORKA_GATEWAY_BEARER_TOKEN='outbound-bearer-token' \
+  go run ./cmd/orka-gateway-reference-adapter \
+  --listen :8443 \
+  --tls-cert-file /path/to/tls.crt \
+  --tls-key-file /path/to/tls.key
+```
+
+For a `serviceRef`, the server certificate must be valid for `<service>.<namespace>.svc`, and the signing CA must be trusted by the Orka controller. The adapter can also be built as a non-root container image:
+
+```bash
+docker build \
+  -f cmd/orka-gateway-reference-adapter/Dockerfile \
+  -t orka-gateway-reference-adapter:dev .
+```
+
+Run conformance from a network location that can reach the adapter. When a private CA is not already trusted by the host, point `SSL_CERT_FILE` at its certificate:
+
+```bash
+SSL_CERT_FILE=/path/to/ca.crt \
+ORKA_GATEWAY_BEARER_TOKEN='outbound-bearer-token' \
+  go run ./cmd/orka-gateway-conformance \
+  --endpoint https://gateway-adapter.example.com:8443 \
+  --reference-fixtures
+```
+
+`--reference-fixtures` is appropriate only for the bundled reference adapter; omit it for third-party adapters.
+
 ## Inbound Orka endpoint
 
 Adapters call:
@@ -138,7 +177,7 @@ Direct endpoints and `serviceRef` endpoints require HTTPS and reject credentials
 
 Bindings match exact normalized `accountId` and `contextId`, with optional exact thread and sender constraints. Sender policy defaults to `allowlist`; `all` is an explicit trusted-context opt-in. The highest-priority authorized binding wins. Equal-priority overlap fails closed.
 
-Session modes are `ephemeral`, `context`, `thread`, `sender`, `context-sender`, `thread-sender`, and `explicit`. New messages for a busy Session remain FIFO queued. Gateway-created Tasks contain only normalized prompt text, safe correlation, a Gateway-scoped `requestedBy`, the bound Agent, and bounded Task defaults.
+Session modes are `ephemeral`, `context`, `thread`, `sender`, `context-sender`, `thread-sender`, and `explicit`. New messages for a busy Session remain FIFO queued. Gateway-created Tasks keep `spec.prompt` empty so external message text is not copied into the Task CR. They consume bounded canonical Session input through `sessionRef.promptIncluded` and `sessionRef.throughMessageId`, while carrying only safe correlation, a Gateway-scoped `requestedBy`, the bound Agent, and bounded Task defaults.
 
 ## Failure and recovery
 

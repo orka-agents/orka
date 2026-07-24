@@ -55,6 +55,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🔁 **Autonomous Task Loops** — Coordinators can iterate on long-running goals until complete, canceled, or at an iteration limit
 - 🔀 **Multi-Agent Coordination** — Coordinators delegate to specialists with depth and concurrency controls
 - 💬 **Interactive Chat** — Agentic orchestrator with SSE streaming that creates and manages agents and tasks for you
+- 🌐 **Generic Gateways** — Versioned, authenticated ingress and idempotent outbound delivery for external messaging and event systems
 - 🧠 **Durable Memory** — Namespace-scoped recall, transcript search, and reviewable memory proposals that can be applied
 - 🛡️ **Repository Security Scanning** — Scheduled and incremental repository scans with threat models, validated findings, patch generation, and remediation PRs
 - 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
@@ -129,6 +130,8 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [API Reference](website/docs/reference/api-reference.md)                       | REST API endpoints and usage examples                 |
 | [OpenAI Compatibility](website/docs/reference/openai-compat.md)                | OpenAI-compatible chat completions API                |
 | [Anthropic Compatibility](website/docs/reference/anthropic-compat.md)          | Anthropic-compatible Messages API                     |
+| [Gateway API](website/docs/reference/gateway-api.md)                           | Generic Gateway resources, ingress, delivery, and operator APIs |
+| [Operating Gateways](website/docs/operations/gateways.md)                      | Gateway readiness, TLS, recovery, upgrades, and operations |
 | [Web Dashboard](website/docs/guides/ui.md)                                  | Frontend architecture and pages                       |
 | [Security](website/docs/concepts/security.md)                                 | Security model and hardening                          |
 | [Kontxt Quickstart](website/docs/guides/kontxt-quickstart.md)               | Use OIDC identity to call Orka without long-lived tokens |

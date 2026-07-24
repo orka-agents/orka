@@ -37,6 +37,17 @@ A Gateway is Ready only when:
 
 Agent runtime warmth does not affect Gateway readiness. Accepted events remain durable while downstream execution is temporarily unavailable.
 
+### `serviceRef` TLS and private CAs
+
+A `serviceRef` resolves to `https://<service>.<namespace>.svc:<port>`. The adapter certificate must include `<service>.<namespace>.svc` as a DNS subject alternative name; an IP address or a different external hostname does not satisfy controller hostname verification.
+
+For a private CA, mount the CA certificate into the controller and either install it in the container's system trust store or set `SSL_CERT_DIR` to the mounted CA directory. Do not disable certificate verification. Roll the controller after changing its trust configuration, and wait for the rollout before expecting the Gateway to become Ready. For the default Helm release name and namespace:
+
+```bash
+kubectl -n orka-system rollout restart deployment/orka-controller
+kubectl -n orka-system rollout status deployment/orka-controller
+```
+
 ## Task and Session access
 
 Gateway-created Tasks remain ordinary Orka Task objects for controller execution, but their CRs contain no external message text; the prompt is loaded from the bounded, task-owned Session transcript. Public Task list/get/log/result/event/trace/fork surfaces require both the ordinary Task permission and gateway-read authorization for the owning Gateway. Destructive Task actions and approval decisions additionally require gateway-operate authorization. The default Helm and Kustomize installs also create a fail-closed `ValidatingAdmissionPolicy` that permits direct Kubernetes create/update/delete of gateway-owned Tasks only from the owning Orka controller or trusted worker ServiceAccounts. Namespace-isolated Helm releases scope the policy by the immutable Gateway namespace encoded in `requestedBy.issuer`, so multiple releases do not deny one another and coordinated workers can create inherited child Tasks. Canonical gateway Sessions are hidden from generic Session, Session-event, transcript-search, and chat-loading surfaces; gateway event/delivery APIs are the supported operator view.
@@ -45,7 +56,7 @@ Gateway-created Tasks remain ordinary Orka Task objects for controller execution
 
 Create or update Secret data without changing the configured key. Kubernetes Secret watch events trigger reconciliation; status records only the observed resourceVersion. Never put token values in Gateway metadata, status, logs, Tasks, or support bundles.
 
-When an endpoint changes, update the outbound Secret's `gateway.orka.ai/adapter-endpoint` annotation to the exact new resolved HTTPS endpoint. For `serviceRef`, the adapter certificate must be trusted by the controller and valid for `<service>.<namespace>.svc`. The Gateway remains not ready until the binding matches and the authenticated probe succeeds.
+When an endpoint changes, update the outbound Secret's `gateway.orka.ai/adapter-endpoint` annotation to the exact new resolved HTTPS endpoint. The Gateway remains not ready until the binding matches and the authenticated probe succeeds.
 
 ## Dead letters and recovery
 
@@ -92,6 +103,17 @@ Use this rollout order:
 3. Roll the controller and verify store migration, API health, Gateway readiness, queue depth, and dead-letter rate.
 4. Run the gateway conformance CLI against each target adapter build, then roll adapters one at a time.
 5. Confirm observed adapter name/version/capabilities and perform one idempotent test delivery before completing the rollout.
+
+Run conformance from a network location that can reach the target adapter. Set `SSL_CERT_FILE` when the adapter uses a private CA that is not already trusted by the host:
+
+```bash
+SSL_CERT_FILE=/path/to/ca.crt \
+ORKA_GATEWAY_BEARER_TOKEN='<outbound bearer token>' \
+  go run ./cmd/orka-gateway-conformance \
+  --endpoint https://gateway-adapter.example.com:8443
+```
+
+The **Gateway Live E2E** GitHub Actions workflow deploys the TLS reference adapter and a deterministic external AgentRuntime in Kind. It validates private-CA trust, GatewayClass/Gateway/GatewayBinding readiness, invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task execution, completed event state, delivered final output, provider correlation, and duplicate safety. It does not run the conformance CLI and does not replace conformance testing against each adapter build before rollout.
 
 If a future release introduces another wire version, controller and adapter release notes must define an explicit dual-version overlap. Do not infer compatibility from similar payloads or from the adapter's product version.
 
