@@ -9,13 +9,13 @@ metadata:
 rules:
   # Custom Resource permissions
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks", "tools", "agents", "providers", "skills", "repositorymonitors", "repositoryscans"]
+    resources: ["tasks", "tools", "agents", "agentruntimes", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status"]
+    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers"]
     verbs: ["update"]
 
   # Job permissions
@@ -324,7 +324,7 @@ roleRef:
   name: {{ include "orka.aiWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: orka-ai-worker
+    name: {{ include "orka.aiWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
 # Vendor Worker Role (restricted worker for external agent providers)
@@ -418,7 +418,7 @@ roleRef:
   name: {{ include "orka.vendorWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: orka-vendor-worker
+    name: {{ include "orka.vendorWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
 # Container Worker Role (minimal worker for container tasks)
@@ -458,6 +458,6 @@ roleRef:
   name: {{ include "orka.containerWorkerClusterRoleName" . }}
 subjects:
   - kind: ServiceAccount
-    name: orka-container-worker
+    name: {{ include "orka.containerWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}

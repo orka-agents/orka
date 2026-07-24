@@ -74,6 +74,47 @@ jobs:
           helm lint cmd/build/helmify/static
           helm lint manifest_staging/charts/orka
 
+          default_render=$(mktemp)
+          secondary_render=$(mktemp)
+          secondary_rbac=$(mktemp)
+          secondary_serviceaccounts=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}"' EXIT
+          helm template orka manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${default_render}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${secondary_render}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/rbac.yaml \
+            > "${secondary_rbac}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/serviceaccount.yaml \
+            > "${secondary_serviceaccounts}"
+
+          grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
+          grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
+          grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
+          for tier in ai vendor container; do
+            account="secondary-orka-${tier}-worker"
+            grep -Fq -- "--${tier}-worker-service-account-name=${account}" "${secondary_render}"
+            grep -Fq -- "name: ${account}" "${secondary_serviceaccounts}"
+            grep -Fq -- "name: ${account}" "${secondary_rbac}"
+          done
+          chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
+          grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
+          for resource in agentruntimes substrateactorpools; do
+            grep -Eq "resources: \\[.*\"${resource}\"" "${secondary_rbac}"
+            grep -Eq "resources: \\[.*\"${resource}/status\"" "${secondary_rbac}"
+            grep -Eq "resources: \\[.*\"${resource}/finalizers\"" "${secondary_rbac}"
+          done
+
           mkdir -p cr-release-packages
           helm package manifest_staging/charts/orka --destination cr-release-packages
           shopt -s nullglob

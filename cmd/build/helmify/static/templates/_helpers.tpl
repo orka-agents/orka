@@ -62,6 +62,22 @@ Create the name of the service account to use
 {{- end }}
 {{- end }}
 
+{{/*
+Create release-scoped worker ServiceAccount names. Reserve room for each
+suffix so long release names cannot collapse all trust tiers to one name.
+*/}}
+{{- define "orka.aiWorkerServiceAccountName" -}}
+{{- printf "%s-ai-worker" (include "orka.fullname" . | trunc 53 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.vendorWorkerServiceAccountName" -}}
+{{- printf "%s-vendor-worker" (include "orka.fullname" . | trunc 49 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "orka.containerWorkerServiceAccountName" -}}
+{{- printf "%s-container-worker" (include "orka.fullname" . | trunc 46 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 
 {{/*
 Create the namespace for the chart-managed client ServiceAccount.

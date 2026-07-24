@@ -114,6 +114,9 @@ type TaskReconciler struct {
 	SubstrateEnabled                   bool
 	SubstrateConfig                    SubstrateConfig
 	SubstrateExecutorFactory           func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	AIWorkerServiceAccountName         string
+	VendorWorkerServiceAccountName     string
+	ContainerWorkerServiceAccountName  string
 	AIWorkerClusterRoleName            string
 	VendorWorkerClusterRoleName        string
 	ContainerWorkerClusterRoleName     string
@@ -3266,17 +3269,17 @@ type workerRBACSpec struct {
 func (r *TaskReconciler) workerRBACSpecs(namespace string) []workerRBACSpec {
 	return []workerRBACSpec{
 		{
-			serviceAccountName:     AIWorkerServiceAccount,
+			serviceAccountName:     workerServiceAccountName(r.AIWorkerServiceAccountName, AIWorkerServiceAccount),
 			clusterRoleName:        workerClusterRoleName(r.AIWorkerClusterRoleName, DefaultAIWorkerClusterRoleName),
 			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "ai", namespace),
 		},
 		{
-			serviceAccountName:     VendorWorkerServiceAccount,
+			serviceAccountName:     workerServiceAccountName(r.VendorWorkerServiceAccountName, VendorWorkerServiceAccount),
 			clusterRoleName:        workerClusterRoleName(r.VendorWorkerClusterRoleName, DefaultVendorWorkerClusterRoleName),
 			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "vendor", namespace),
 		},
 		{
-			serviceAccountName:     ContainerWorkerServiceAccount,
+			serviceAccountName:     workerServiceAccountName(r.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount),
 			clusterRoleName:        workerClusterRoleName(r.ContainerWorkerClusterRoleName, DefaultContainerWorkerClusterRoleName),
 			clusterRoleBindingName: workerClusterRoleBindingName(r.WorkerClusterRoleBindingNamePrefix, "container", namespace),
 		},

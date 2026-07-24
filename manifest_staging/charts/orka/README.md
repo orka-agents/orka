@@ -19,6 +19,10 @@ CRDs are cluster-scoped and shared by every Orka release. Use `--skip-crds`
 only when a designated platform or GitOps workflow already manages compatible
 Orka CRDs for the cluster.
 
+Controller Services, worker ServiceAccounts, and worker RBAC are scoped to the
+Helm release name. Multiple Orka releases can therefore share a namespace while
+continuing to use the same cluster-scoped CRDs.
+
 ## Upgrade
 
 Helm installs files from `crds/` only during installation. It does not create or
