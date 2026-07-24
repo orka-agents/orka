@@ -1,5 +1,0 @@
-# Feed the same canonical resource graph used by the plain-manifest install to
-# the Gatekeeper-derived splitter. The current fork emits only CRDs from this
-# stream; non-CRD Helm templates remain static inputs until parity is proven.
-resources:
-  - ../../../../config/default

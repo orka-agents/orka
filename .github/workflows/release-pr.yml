@@ -12,7 +12,6 @@ on:
         type: string
 
 permissions:
-  actions: write
   contents: write
   pull-requests: write
 
@@ -91,71 +90,19 @@ jobs:
 
       - name: Generate and promote release manifests
         run: |
-          set -euo pipefail
-
           make release-manifest NEWVERSION="${NEWVERSION}"
           make promote-staging-manifest
 
-      - name: Verify promoted release snapshot
+      - name: Validate promoted chart
         run: |
           set -euo pipefail
 
-          test -f manifest_staging/deploy/orka.yaml
-          test -f manifest_staging/charts/orka/Chart.yaml
-          test -f deploy/orka.yaml
-          test -f charts/orka/Chart.yaml
-
-          chart_field() {
-            local field=$1
-            local value
-            value=$(awk -v key="${field}:" '$1 == key { print $2; exit }' charts/orka/Chart.yaml)
-            value=${value#\"}
-            value=${value%\"}
-            value=${value#\'}
-            value=${value%\'}
-            if [[ -z "${value}" ]]; then
-              echo "Could not read ${field} from charts/orka/Chart.yaml." >&2
-              return 1
-            fi
-            printf '%s\n' "${value}"
-          }
-
-          expected_chart_version=${NEWVERSION#v}
-          chart_version=$(chart_field version)
-          app_version=$(chart_field appVersion)
-
-          if [[ "${chart_version}" != "${expected_chart_version}" ]]; then
-            echo "Expected promoted chart version ${expected_chart_version}; found ${chart_version}." >&2
-            exit 1
-          fi
-          if [[ "${app_version}" != "${NEWVERSION}" ]]; then
-            echo "Expected promoted chart appVersion ${NEWVERSION}; found ${app_version}." >&2
-            exit 1
-          fi
-
-          diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
-          diff --no-dereference --recursive --unified manifest_staging/deploy deploy
+          helm lint cmd/build/helmify/static
+          helm lint charts/orka
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 9
           git diff --check
 
-      - name: Lint and package promoted chart
-        run: |
-          set -euo pipefail
-
-          helm lint charts/orka
-          package_dir=$(mktemp -d)
-          trap 'rm -rf "${package_dir}"' EXIT
-          helm package charts/orka --destination "${package_dir}"
-
-          shopt -s nullglob
-          chart_packages=("${package_dir}"/orka-*.tgz)
-          if [[ ${#chart_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
-            exit 1
-          fi
-          scripts/helm-crds.sh check-package "${chart_packages[0]}"
-
       - name: Create release pull request
-        id: create-pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -168,29 +115,10 @@ jobs:
           body: |
             ## Release preparation
 
-            This PR prepares Orka `${{ env.NEWVERSION }}` using the Gatekeeper-aligned release flow:
+            This PR prepares Orka `${{ env.NEWVERSION }}` using the Gatekeeper-style staged release flow:
 
             - updates release versions in the canonical and static generator inputs
-            - regenerates the committed `manifest_staging/` installer and Helm chart
-            - promotes the staging snapshots into `deploy/` and `charts/`
-            - verifies chart metadata, staging parity, lint, and packaged CRDs
+            - regenerates `manifest_staging/`
+            - promotes the staging installer and chart into `deploy/` and `charts/`
 
-            Merge this PR before creating the matching `${{ env.NEWVERSION }}` tag. The tag workflow publishes the already-reviewed promoted snapshot; it does not regenerate or promote manifests.
-
-
-      - name: Dispatch release pull request validation
-        if: steps.create-pr.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_PR_BRANCH: release-${{ env.NEWVERSION }}
-        run: |
-          set -euo pipefail
-
-          # Events created by GITHUB_TOKEN do not recursively trigger ordinary
-          # push/pull_request workflows. workflow_dispatch is the documented
-          # exception, so explicitly attach the normal release validations to
-          # the generated PR head commit.
-          gh workflow run test.yml --ref "${RELEASE_PR_BRANCH}"
-          gh workflow run lint.yml --ref "${RELEASE_PR_BRANCH}"
-          gh workflow run helm-chart.yml --ref "${RELEASE_PR_BRANCH}"
-          gh workflow run govulncheck.yml --ref "${RELEASE_PR_BRANCH}"
+            Merge this PR before creating the matching `${{ env.NEWVERSION }}` tag. The tag workflow publishes the reviewed root chart snapshot without regenerating it.

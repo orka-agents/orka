@@ -708,18 +708,13 @@ Key configuration values for the Helm chart:
 
 ### Helm CRD lifecycle
 
-CRD behavior is not controlled through chart values. The chart packages nine
-static CRDs under `crds/`; a fresh install creates them unless `--skip-crds` is
-used. Because CRDs are cluster-scoped and shared by all Orka releases, designate
-one platform workflow or release owner for their lifecycle and install every
-other release with `--skip-crds`.
+CRD behavior is not controlled through chart values. A fresh install creates
+the nine CRDs unless `--skip-crds` is used. Because CRDs are cluster-scoped,
+designate one lifecycle owner and use `--skip-crds` for other Orka releases.
 
-Helm does not create or update `crds/` resources during `helm upgrade`. The
-guarded migration from the exact target chart must preflight, replace, and
-verify all nine CRD specs before every controller upgrade. This includes
-releases created from the previous zero-CRD chart: an ordinary upgrade will not
-install the missing definitions.
-Helm retains CRDs and Orka custom resources on uninstall.
+Helm does not update CRDs during `helm upgrade`. Apply the CRDs from the exact
+target chart before upgrading the controller. Helm retains CRDs and Orka custom
+resources on uninstall.
 
 See the
 [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md)

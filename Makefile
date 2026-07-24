@@ -51,54 +51,13 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
-	@set -e; \
-	crd_dir="config/crd/bases"; \
-	crd_parent="$$(dirname "$$crd_dir")"; \
-	tmp_dir="$$(mktemp -d "$$crd_parent/.bases.generate.XXXXXX")"; \
-	backup_dir=""; \
-	installed_new=false; \
-	cleanup() { \
-		status=$$?; \
-		trap - EXIT; \
-		if [ $$status -ne 0 ]; then \
-			if [ "$$installed_new" = true ]; then rm -rf "$$crd_dir"; fi; \
-			if [ -n "$$backup_dir" ] && [ -e "$$backup_dir" ]; then \
-				if [ -e "$$crd_dir" ]; then rm -rf "$$crd_dir"; fi; \
-				mv "$$backup_dir" "$$crd_dir" || true; \
-			fi; \
-		fi; \
-		if [ -n "$$tmp_dir" ]; then rm -rf "$$tmp_dir"; fi; \
-		exit $$status; \
-	}; \
-	trap cleanup EXIT; \
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config="$$tmp_dir"; \
-	if [ -e "$$crd_dir" ]; then \
-		backup_dir="$$crd_parent/.bases.backup.$$$$"; \
-		[ ! -e "$$backup_dir" ] || { echo "temporary backup path already exists: $$backup_dir" >&2; exit 1; }; \
-		mv "$$crd_dir" "$$backup_dir"; \
-	fi; \
-	mv "$$tmp_dir" "$$crd_dir"; \
-	tmp_dir=""; \
-	installed_new=true; \
-	./scripts/generate-manifests.sh sync --kustomize "$(KUSTOMIZE)"; \
-	installed_new=false; \
-	trap - EXIT; \
-	if [ -n "$$backup_dir" ] && ! rm -rf "$$backup_dir"; then \
-		echo "manifests: generated CRDs installed, but backup cleanup failed: $$backup_dir" >&2; \
-		exit 1; \
-	fi
-
-.PHONY: helm-crds-sync
-helm-crds-sync: ## Synchronize generated CRDs into the staging Helm chart.
-	./scripts/helm-crds.sh sync manifest_staging/charts/orka
-
-.PHONY: helm-crds-check
-helm-crds-check: ## Verify the generated CRDs and staging Helm chart mirror are identical.
-	./scripts/helm-crds.sh check manifest_staging/charts/orka
-
-.PHONY: helm-chart-check
-helm-chart-check: kustomize ## Verify committed Gatekeeper-style staging manifests are current.
-	./scripts/generate-manifests.sh check --kustomize "$(KUSTOMIZE)"
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	rm -rf manifest_staging
+	mkdir -p manifest_staging/deploy manifest_staging/charts/orka
+	"$(KUSTOMIZE)" build config/default -o manifest_staging/deploy/orka.yaml
+	"$(KUSTOMIZE)" build \
+		--load-restrictor LoadRestrictionsNone \
+		cmd/build/helmify | go run ./cmd/build/helmify
 
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
@@ -108,7 +67,11 @@ release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc
 
 .PHONY: promote-staging-manifest
 promote-staging-manifest: ## Promote committed staging manifests into release snapshots.
-	./scripts/promote-staging-manifests.sh
+	test -f manifest_staging/deploy/orka.yaml
+	test -f manifest_staging/charts/orka/Chart.yaml
+	rm -rf deploy charts
+	cp -R manifest_staging/deploy .
+	cp -R manifest_staging/charts .
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

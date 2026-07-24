@@ -41,32 +41,31 @@ def main() -> int:
 
     replace_exact(updates, ROOT / "Makefile", r"^VERSION := .*$", f"VERSION := {release_tag}")
 
-    chart = ROOT / "third_party/open-policy-agent/gatekeeper/helmify/static/Chart.yaml"
+    chart = ROOT / "cmd/build/helmify/static/Chart.yaml"
     replace_exact(updates, chart, r"^version: .*$", f"version: {version}")
     replace_exact(updates, chart, r"^appVersion: .*$", f'appVersion: "{release_tag}"')
 
-    values = ROOT / "third_party/open-policy-agent/gatekeeper/helmify/static/values.yaml"
-    replace_exact(updates, values, r"^(\s+tag:)\s*.*$", rf'\1 "{version}"', expected=4)
+    values = ROOT / "cmd/build/helmify/static/values.yaml"
+    replace_exact(updates, values, r"^(\s+tag:)\s*.*$", rf'\1 "{version}"', expected=3)
 
     substitutions = {
         ROOT / "config/manager/manager.yaml": [
-            (r"(ghcr\.io/orka-agents/orka/ai-worker:)[^\s]+", rf"\g<1>{version}"),
-            (r"(ghcr\.io/orka-agents/orka/general-worker:)[^\s]+", rf"\g<1>{version}"),
-            (r"(^\s*image:\s*)controller:[^\s]+$", rf"\g<1>controller:{version}"),
+            (r"(ghcr\.io/orka-agents/orka/ai-worker:)[^\s]+", rf"\g<1>{version}", 1),
+            (r"(ghcr\.io/orka-agents/orka/general-worker:)[^\s]+", rf"\g<1>{version}", 1),
         ],
         ROOT / "config/harness-wrapper/deployment.yaml": [
-            (r"(ghcr\.io/orka-agents/orka/agent-harness-wrapper:)[^\s]+", rf"\g<1>{version}"),
+            (r"(ghcr\.io/orka-agents/orka/agent-harness-wrapper:)[^\s]+", rf"\g<1>{version}", 1),
         ],
         ROOT / "config/manager/kustomization.yaml": [
-            (r"^(\s*newTag:)\s*.*$", rf"\g<1> {version}"),
+            (r"^(\s*newTag:)\s*.*$", rf"\g<1> {version}", 2),
         ],
     }
     for path, replacements in substitutions.items():
-        for pattern, replacement in replacements:
-            replace_exact(updates, path, pattern, replacement)
+        for pattern, replacement, expected in replacements:
+            replace_exact(updates, path, pattern, replacement, expected)
 
-    # Validate every expected replacement before changing any file. Each file is
-    # then replaced atomically so a failed write cannot leave truncated YAML.
+    # Validate every expected replacement before changing any file, then replace
+    # each file atomically so a failed write cannot leave truncated YAML.
     for path, contents in updates.items():
         temporary = path.with_name(f".{path.name}.release-version.tmp")
         temporary.write_text(contents)

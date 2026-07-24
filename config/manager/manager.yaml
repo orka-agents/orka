@@ -86,7 +86,7 @@ spec:
           - --substrate-claim-timeout=2m
           - --substrate-command-timeout=30m
           - --substrate-cleanup-policy=delete
-        image: controller:0.1.1
+        image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager
         env:

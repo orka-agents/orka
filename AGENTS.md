@@ -46,11 +46,11 @@ make deploy IMG=<registry>/orka:tag HARNESS_WRAPPER_IMG=<registry>/agent-harness
 
 ### Helm generation and release snapshots
 
-- Helm generator inputs live under `third_party/open-policy-agent/gatekeeper/helmify/`; canonical Kubernetes inputs remain under `config/`.
+- Helm generator inputs live under `cmd/build/helmify/`; canonical Kubernetes inputs remain under `config/`.
 - `make manifests` regenerates the committed next-release outputs in `manifest_staging/deploy/orka.yaml` and `manifest_staging/charts/orka/`. Edit the source inputs, not generated staging files, and commit both source and regenerated output.
 - Root `deploy/` and `charts/orka/` are promoted release snapshots. Do not edit them directly; only the release-preparation flow runs `make release-manifest` and `make promote-staging-manifest`. Staging may intentionally be ahead of the root snapshots.
 - A pushed `v*` tag packages and publishes the already-reviewed root snapshot. Tag publication must not regenerate or promote manifests.
-- Chart CRDs must remain byte-identical to `config/crd/bases/`. Generation does not replace the guarded CRD-first migration required before `helm upgrade`.
+- Chart CRDs are generated from `config/crd/bases/`. Helm does not update them during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the release.
 
 UI: `cd ui && bun install && bun run dev` (dev server on :5173). See @website/docs/development/development.md for full commands.
 

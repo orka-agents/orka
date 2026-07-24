@@ -13,178 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  validate-release:
-    name: Validate release metadata and Helm chart
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Show Helm version
-        run: helm version
-
-      - name: Validate tag and promoted chart metadata
-        run: |
-          set -euo pipefail
-
-          tag=${GITHUB_REF_NAME}
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
-            echo "Release tag must match vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N; got ${tag}." >&2
-            exit 1
-          fi
-
-          chart_field() {
-            local field=$1
-            local value
-            value=$(awk -v key="${field}:" '$1 == key { print $2; exit }' charts/orka/Chart.yaml)
-            value=${value#\"}
-            value=${value%\"}
-            value=${value#\'}
-            value=${value%\'}
-            if [[ -z "${value}" ]]; then
-              echo "Could not read ${field} from charts/orka/Chart.yaml." >&2
-              return 1
-            fi
-            printf '%s\n' "${value}"
-          }
-
-          expected_chart_version=${tag#v}
-          chart_version=$(chart_field version)
-          app_version=$(chart_field appVersion)
-
-          if [[ "${chart_version}" != "${expected_chart_version}" ]]; then
-            echo "Tag ${tag} requires charts/orka version ${expected_chart_version}; found ${chart_version}." >&2
-            exit 1
-          fi
-          if [[ "${app_version}" != "${tag}" ]]; then
-            echo "Tag ${tag} requires charts/orka appVersion ${tag}; found ${app_version}." >&2
-            exit 1
-          fi
-
-          rendered_chart=$(mktemp)
-          trap 'rm -f "${rendered_chart}"' EXIT
-          helm template release-validation charts/orka \
-            --namespace orka-system \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            > "${rendered_chart}"
-
-          runtime_images=()
-          while IFS= read -r image_line; do
-            image_ref=${image_line#*image: }
-            image_ref=${image_ref#\"}
-            image_ref=${image_ref%\"}
-            runtime_images+=("${image_ref}")
-          done < <(grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}")
-          if [[ ${#runtime_images[@]} -ne 2 ]]; then
-            echo "Expected two rendered runtime images; found ${#runtime_images[@]}." >&2
-            exit 1
-          fi
-          for image_ref in "${runtime_images[@]}"; do
-            if [[ "${image_ref##*:}" != "${expected_chart_version}" ]]; then
-              echo "Tag ${tag} requires runtime image ${image_ref} to use ${expected_chart_version}." >&2
-              exit 1
-            fi
-          done
-
-          for worker in ai general; do
-            worker_refs=()
-            while IFS= read -r worker_line; do
-              worker_refs+=("${worker_line#*=}")
-            done < <(grep -E "^[[:space:]]+- --${worker}-worker-image=" "${rendered_chart}")
-            if [[ ${#worker_refs[@]} -ne 1 || "${worker_refs[0]##*:}" != "${expected_chart_version}" ]]; then
-              echo "Tag ${tag} requires exactly one rendered ${worker} worker image using ${expected_chart_version}." >&2
-              exit 1
-            fi
-          done
-
-      - name: Verify promoted snapshot provenance
-        run: |
-          set -euo pipefail
-
-          diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
-          diff --no-dereference --recursive --unified manifest_staging/deploy deploy
-
-      - name: Check promoted CRD synchronization
-        run: scripts/helm-crds.sh check charts/orka
-
-      - name: Lint promoted chart
-        run: helm lint charts/orka
-
-      - name: Package and verify promoted chart
-        run: |
-          set -euo pipefail
-
-          mkdir -p cr-release-packages
-          helm package charts/orka --destination cr-release-packages
-
-          shopt -s nullglob
-          chart_packages=(cr-release-packages/orka-*.tgz)
-          if [[ ${#chart_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
-            exit 1
-          fi
-          scripts/helm-crds.sh check-package "${chart_packages[0]}"
-
-      - name: Verify immutable chart version
-        run: |
-          set -euo pipefail
-
-          shopt -s nullglob
-          chart_packages=(cr-release-packages/orka-*.tgz)
-          [[ ${#chart_packages[@]} -eq 1 ]]
-          candidate=${chart_packages[0]}
-          package_name=$(basename "${candidate}")
-          comparison_dir=$(mktemp -d)
-          trap 'rm -rf "${comparison_dir}"' EXIT
-
-          set +e
-          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
-          probe_status=$?
-          set -e
-          case "${probe_status}" in
-            0)
-              git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages
-              ;;
-            2)
-              echo "No published Helm repository exists yet."
-              exit 0
-              ;;
-            *)
-              echo "Could not determine whether the gh-pages branch exists." >&2
-              exit "${probe_status}"
-              ;;
-          esac
-
-          for published_path in "charts/${package_name}" "${package_name}"; do
-            if ! git cat-file -e "origin/gh-pages:${published_path}" 2>/dev/null; then
-              continue
-            fi
-            published_archive="${comparison_dir}/$(basename "${published_path}")"
-            git show "origin/gh-pages:${published_path}" > "${published_archive}"
-            if cmp -s "${candidate}" "${published_archive}" || \
-               python3 -I scripts/compare-helm-chart-packages.py "${candidate}" "${published_archive}"; then
-              echo "Published ${published_path} has identical normalized contents."
-            else
-              echo "Chart ${package_name} already exists with different contents." >&2
-              echo "Prepare and promote a new chart version before tagging." >&2
-              exit 1
-            fi
-          done
-
-      - name: Upload validated release chart
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: helm-release-chart-package
-          path: cr-release-packages/orka-*.tgz
-          if-no-files-found: error
-          retention-days: 1
-
   build-and-push:
-    needs: validate-release
     name: Build and Push Images
     runs-on: ubuntu-latest
     permissions:
@@ -228,9 +57,6 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}${{ matrix.image_suffix }}
-          # docker/metadata-action's semver {{version}} output strips the
-          # leading v; release-manifest writes the same bare version into the
-          # chart's image tags while retaining v in appVersion.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -511,11 +337,10 @@ jobs:
           promote_image general-worker "/general-worker"
           promote_image agent-harness-wrapper "/agent-harness-wrapper"
 
+
   publish-helm-chart:
     name: Publish promoted Helm chart
-    needs:
-      - validate-release
-      - promote-release-tags
+    needs: promote-release-tags
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -524,162 +349,14 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Download validated release chart
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Publish Helm chart
+        uses: stefanprodan/helm-gh-pages@0ad2bb377311d61ac04ad9eb6f252fb68e207260 # v1.7.0
         with:
-          name: helm-release-chart-package
-          path: cr-release-packages
-
-      - name: Show Helm version
-        run: helm version
-
-      - name: Publish chart repository
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          rm -rf gh-pages
-          git init gh-pages
-          cd gh-pages
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          set +e
-          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
-          probe_status=$?
-          set -e
-          case "${probe_status}" in
-            0)
-              git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages
-              git checkout -B gh-pages origin/gh-pages
-              ;;
-            2)
-              git checkout --orphan gh-pages
-              git rm -rf . || true
-              ;;
-            *)
-              echo "Could not determine whether the gh-pages branch exists." >&2
-              exit "${probe_status}"
-              ;;
-          esac
-
-          mkdir -p charts
-          refresh_index=false
-
-          # Migrate chart archives and any matching provenance files as atomic pairs
-          # from the previous root-level repository layout while preserving the
-          # website content that shares this branch.
-          shopt -s nullglob
-          for artifact in ./*.tgz; do
-            target="charts/$(basename "${artifact}")"
-            provenance="${artifact}.prov"
-            target_provenance="${target}.prov"
-
-            if [[ -e "${target}" ]]; then
-              if ! cmp -s "${artifact}" "${target}"; then
-                if [[ -e "${provenance}" ]]; then
-                  echo "Refusing to normalize $(basename "${artifact}") because its provenance signs the exact archive bytes." >&2
-                  exit 1
-                fi
-                if ! python3 -I "${GITHUB_WORKSPACE}/scripts/compare-helm-chart-packages.py" "${artifact}" "${target}"; then
-                  echo "Conflicting root and charts/ archives exist for $(basename "${artifact}")." >&2
-                  exit 1
-                fi
-              fi
-              rm -f "${artifact}"
-
-              if [[ -e "${provenance}" ]]; then
-                if [[ -e "${target_provenance}" ]]; then
-                  if ! cmp -s "${provenance}" "${target_provenance}"; then
-                    echo "Conflicting root and charts/ provenance files exist for $(basename "${provenance}")." >&2
-                    exit 1
-                  fi
-                  rm -f "${provenance}"
-                else
-                  mv "${provenance}" "${target_provenance}"
-                fi
-              fi
-            else
-              if [[ -e "${target_provenance}" ]]; then
-                echo "Refusing to pair $(basename "${artifact}") with an orphaned charts/ provenance file." >&2
-                exit 1
-              fi
-              mv "${artifact}" "${target}"
-              if [[ -e "${provenance}" ]]; then
-                mv "${provenance}" "${target_provenance}"
-              fi
-            fi
-            refresh_index=true
-          done
-
-          orphaned_provenance=(./*.prov)
-          if [[ ${#orphaned_provenance[@]} -ne 0 ]]; then
-            echo "Refusing to migrate orphaned root-level provenance files:" >&2
-            printf '  %s\n' "${orphaned_provenance[@]}" >&2
-            exit 1
-          fi
-          if [[ -f index.yaml && ! -f charts/index.yaml ]]; then
-            mv index.yaml charts/index.yaml
-            refresh_index=true
-          elif [[ -f index.yaml ]]; then
-            rm -f index.yaml
-            refresh_index=true
-          fi
-
-          chart_packages=(../cr-release-packages/orka-*.tgz)
-          if [[ ${#chart_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one validated Orka chart, found ${#chart_packages[@]}." >&2
-            exit 1
-          fi
-
-          candidate=${chart_packages[0]}
-          published="charts/$(basename "${candidate}")"
-          if [[ -f "${published}" ]]; then
-            if cmp -s "${candidate}" "${published}"; then
-              echo "Chart $(basename "${candidate}") is already published with identical bytes."
-            elif python3 -I "${GITHUB_WORKSPACE}/scripts/compare-helm-chart-packages.py" "${candidate}" "${published}"; then
-              echo "Chart $(basename "${candidate}") is already published with identical normalized contents."
-              echo "Keeping the existing archive to preserve its immutable bytes."
-            else
-              echo "Refusing to overwrite immutable chart archive $(basename "${candidate}")." >&2
-              echo "Prepare and promote a new chart version before publishing changed chart contents." >&2
-              sha256sum "${published}" "${candidate}" >&2
-              exit 1
-            fi
-          else
-            if [[ -e "${published}.prov" ]]; then
-              echo "Refusing to pair $(basename "${candidate}") with an orphaned provenance file." >&2
-              exit 1
-            fi
-            cp "${candidate}" "${published}"
-            refresh_index=true
-          fi
-
-          if [[ ! -f charts/index.yaml ]]; then
-            refresh_index=true
-          fi
-          if [[ "${refresh_index}" == true ]]; then
-            if [[ -f charts/index.yaml ]]; then
-              helm repo index charts \
-                --url "https://orka-agents.github.io/orka/charts" \
-                --merge charts/index.yaml
-            else
-              helm repo index charts --url "https://orka-agents.github.io/orka/charts"
-            fi
-          fi
-
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No Helm chart changes to publish."
-            exit 0
-          fi
-
-          git commit -m "Publish Helm chart ${GITHUB_REF_NAME}"
-          git push origin HEAD:gh-pages
+          token: ${{ secrets.GITHUB_TOKEN }}
+          charts_dir: charts
+          target_dir: charts
+          linting: off

@@ -25,108 +25,77 @@ var (
 	)
 	staticDir = flag.String(
 		"static-dir",
-		"third_party/open-policy-agent/gatekeeper/helmify/static",
+		"cmd/build/helmify/static",
 		"directory containing static Helm chart inputs",
 	)
 )
 
-var (
-	kindRegex = regexp.MustCompile(`(?m)^kind:[\s]+([^\s]+)[\s]*$`)
-	nameRegex = regexp.MustCompile(`(?m)^  name:[\s]+([^\s]+)[\s]*$`)
-)
-
-const generatedKind = "CustomResourceDefinition"
-
-func extractKind(object string) (string, error) {
-	matches := kindRegex.FindStringSubmatch(object)
-	if len(matches) != 2 {
-		return "", fmt.Errorf("object does not have exactly one kind")
-	}
-	return strings.Trim(matches[1], `"'`), nil
-}
-
-func extractName(object string) (string, error) {
-	matches := nameRegex.FindStringSubmatch(object)
-	if len(matches) != 2 {
-		return "", fmt.Errorf("object does not have a top-level metadata.name")
-	}
-	return strings.Trim(matches[1], `"'`), nil
-}
-
-func extractCRDKind(object string) (string, error) {
-	crd := &apiextensionsv1.CustomResourceDefinition{}
-	if err := yaml.Unmarshal([]byte(object), crd); err != nil {
-		return "", fmt.Errorf("decode CRD: %w", err)
-	}
-	if crd.Spec.Names.Kind == "" {
-		return "", fmt.Errorf("CRD does not define spec.names.kind")
-	}
-	return crd.Spec.Names.Kind, nil
-}
+var kindRegex = regexp.MustCompile(`(?m)^kind:[\s]+([^\s]+)[\s]*$`)
 
 type objectSet struct {
-	byKind map[string][]string
+	crds []string
 }
 
 func (set *objectSet) add(object string) error {
-	kind, err := extractKind(object)
-	if err != nil {
-		return err
+	matches := kindRegex.FindStringSubmatch(object)
+	if len(matches) != 2 {
+		return fmt.Errorf("object does not have exactly one kind")
 	}
-	set.byKind[kind] = append(set.byKind[kind], object)
+	if strings.Trim(matches[1], `"'`) == "CustomResourceDefinition" {
+		set.crds = append(set.crds, object)
+	}
 	return nil
 }
 
+func decodeCRD(object string) (*apiextensionsv1.CustomResourceDefinition, error) {
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := yaml.Unmarshal([]byte(object), crd); err != nil {
+		return nil, fmt.Errorf("decode CRD: %w", err)
+	}
+	if crd.Spec.Group == "" || crd.Spec.Names.Kind == "" || crd.Spec.Names.Plural == "" {
+		return nil, fmt.Errorf("CRD does not define group, kind, and plural names")
+	}
+	return crd, nil
+}
+
 func (set *objectSet) write() error {
-	objects := append([]string(nil), set.byKind[generatedKind]...)
-	sort.Slice(objects, func(i, j int) bool {
-		left, leftErr := extractName(objects[i])
-		right, rightErr := extractName(objects[j])
-		if leftErr != nil || rightErr != nil {
-			return objects[i] < objects[j]
+	type generatedCRD struct {
+		name     string
+		filename string
+		object   string
+	}
+	generated := make([]generatedCRD, 0, len(set.crds))
+	seen := make(map[string]struct{}, len(set.crds))
+
+	for _, object := range set.crds {
+		crd, err := decodeCRD(object)
+		if err != nil {
+			return err
 		}
-		return left < right
-	})
+		filename := fmt.Sprintf("%s-customresourcedefinition.yaml", strings.ToLower(crd.Spec.Names.Kind))
+		if _, exists := seen[filename]; exists {
+			return fmt.Errorf("duplicate generated output filename: %s", filename)
+		}
+		seen[filename] = struct{}{}
+		generated = append(generated, generatedCRD{
+			name:     crd.Spec.Group + "/" + crd.Spec.Names.Plural,
+			filename: filename,
+			object:   object,
+		})
+	}
+	sort.Slice(generated, func(i, j int) bool { return generated[i].name < generated[j].name })
 
 	crdDir := filepath.Join(*outputDir, "crds")
 	if err := os.MkdirAll(crdDir, 0o750); err != nil {
 		return fmt.Errorf("create CRD output directory: %w", err)
 	}
-
-	seen := make(map[string]struct{}, len(objects))
-	for _, object := range objects {
-		name, err := extractCRDKind(object)
-		if err != nil {
-			return err
-		}
-		filename := fmt.Sprintf("%s-customresourcedefinition.yaml", strings.ToLower(name))
-		if _, exists := seen[filename]; exists {
-			return fmt.Errorf("duplicate generated output filename: %s", filename)
-		}
-		seen[filename] = struct{}{}
-
-		object = doReplacements(object)
-		if strings.Contains(object, "HELMSUBST_") {
-			return fmt.Errorf("unresolved Helm substitution in %s", filename)
-		}
-		destination := filepath.Join(crdDir, filename)
-		if err := os.WriteFile(destination, []byte("---\n"+object), 0o600); err != nil {
+	for _, crd := range generated {
+		destination := filepath.Join(crdDir, crd.filename)
+		if err := os.WriteFile(destination, []byte("---\n"+crd.object), 0o600); err != nil {
 			return fmt.Errorf("write %s: %w", destination, err)
 		}
 	}
 	return nil
-}
-
-func doReplacements(object string) string {
-	keys := make([]string, 0, len(replacements))
-	for old := range replacements {
-		keys = append(keys, old)
-	}
-	sort.Strings(keys)
-	for _, old := range keys {
-		object = strings.ReplaceAll(object, old, replacements[old])
-	}
-	return object
 }
 
 func copyStaticFiles(root string, subdirs ...string) error {
@@ -147,9 +116,7 @@ func copyStaticFiles(root string, subdirs ...string) error {
 			}
 			continue
 		}
-		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() {
-			return fmt.Errorf("unsupported static chart entry: %s", filepath.Join(source, entry.Name()))
-		}
+
 		contents, err := os.ReadFile(filepath.Join(source, entry.Name()))
 		if err != nil {
 			return fmt.Errorf("read static chart file %s: %w", entry.Name(), err)
@@ -169,7 +136,7 @@ func main() {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	objects := objectSet{byKind: make(map[string][]string)}
+	objects := objectSet{}
 	var document strings.Builder
 	flush := func() {
 		if strings.TrimSpace(document.String()) == "" {

@@ -78,18 +78,13 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
-`charts/orka` is the promoted, reviewed chart snapshot for the current source
-release. Next-release chart changes are generated and tested under
-`manifest_staging/charts/orka`, promoted in a release-preparation PR, and
-published only when the matching `v*` tag is pushed.
-
 A fresh install creates all nine cluster-scoped Orka CRDs. Use `--skip-crds`
 only when one designated platform or release owner already manages compatible
 Orka CRDs for the cluster.
 
 > [!IMPORTANT]
 > Helm does not create or update files from `crds/` during `helm upgrade`.
-> Run the guarded CRD migration from the exact target chart before
+> Apply the CRDs from the exact target chart before
 > **every** upgrade, including an upgrade from the previous chart that installed
 > zero CRDs. Helm retains CRDs
 > on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).

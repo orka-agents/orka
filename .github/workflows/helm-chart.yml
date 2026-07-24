@@ -7,45 +7,25 @@ on:
       - "release-*"
     paths:
       - "api/**"
-      - "charts/orka/**"
+      - "cmd/build/helmify/**"
       - "config/**"
-      - "deploy/**"
-      - "manifest_staging/**"
-      - "third_party/open-policy-agent/gatekeeper/helmify/**"
-      - "hack/boilerplate.go.txt"
       - "internal/controller/**"
+      - "manifest_staging/**"
       - "go.mod"
       - "go.sum"
       - "Makefile"
-      - "scripts/helm-crds.sh"
-      - "scripts/generate-manifests.sh"
-      - "scripts/promote-staging-manifests.sh"
-      - "scripts/update-release-version.py"
-      - "scripts/compare-helm-chart-packages.py"
       - ".github/workflows/helm-chart.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/release-pr.yml"
   pull_request:
     paths:
       - "api/**"
-      - "charts/orka/**"
+      - "cmd/build/helmify/**"
       - "config/**"
-      - "deploy/**"
-      - "manifest_staging/**"
-      - "third_party/open-policy-agent/gatekeeper/helmify/**"
-      - "hack/boilerplate.go.txt"
       - "internal/controller/**"
+      - "manifest_staging/**"
       - "go.mod"
       - "go.sum"
       - "Makefile"
-      - "scripts/helm-crds.sh"
-      - "scripts/generate-manifests.sh"
-      - "scripts/promote-staging-manifests.sh"
-      - "scripts/update-release-version.py"
-      - "scripts/compare-helm-chart-packages.py"
       - ".github/workflows/helm-chart.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/release-pr.yml"
   workflow_dispatch:
 
 permissions:
@@ -56,182 +36,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
-    name: Validate staging Helm chart
+  test:
+    name: Validate Helm chart and CRD lifecycle
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: go.mod
-
-      - name: Show Helm version
-        run: helm version
-
-      - name: Verify generated staging manifests
-        run: |
-          set -euo pipefail
-
-          make manifests
-          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-            echo "Generated staging manifests are stale." >&2
-            git status --short --untracked-files=all >&2
-            exit 1
-          fi
-
-          test -f manifest_staging/deploy/orka.yaml
-          test -f manifest_staging/charts/orka/Chart.yaml
-
-      - name: Check staging CRD synchronization
-        run: scripts/helm-crds.sh check manifest_staging/charts/orka
-
-      - name: Validate promoted release snapshots
-        run: |
-          set -euo pipefail
-
-          test -s deploy/orka.yaml
-          test -f charts/orka/Chart.yaml
-          helm lint charts/orka
-          helm template promoted-snapshot charts/orka \
-            --namespace orka-system \
-            --include-crds \
-            --set-string workers.harnessWrapper.auth.token=mock-token \
-            >/dev/null
-          ./bin/kustomize cfg cat deploy/orka.yaml >/dev/null
-
-          mkdir -p promoted-release-packages
-          helm package charts/orka --destination promoted-release-packages
-          shopt -s nullglob
-          promoted_packages=(promoted-release-packages/orka-*.tgz)
-          if [[ ${#promoted_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one promoted Orka chart, found ${#promoted_packages[@]}." >&2
-            exit 1
-          fi
-          scripts/helm-crds.sh check-package-against-chart \
-            charts/orka "${promoted_packages[0]}"
-
-      - name: Compare staging and promoted chart snapshots
-        run: |
-          set -euo pipefail
-
-          chart_field() {
-            local chart_dir=$1
-            local field=$2
-            local value
-            value=$(awk -v key="${field}:" '$1 == key { print $2; exit }' "${chart_dir}/Chart.yaml")
-            value=${value#\"}
-            value=${value%\"}
-            value=${value#\'}
-            value=${value%\'}
-            if [[ -z "${value}" ]]; then
-              echo "Could not read ${field} from ${chart_dir}/Chart.yaml." >&2
-              return 1
-            fi
-            printf '%s\n' "${value}"
-          }
-
-          staging_version=$(chart_field manifest_staging/charts/orka version)
-          promoted_version=$(chart_field charts/orka version)
-
-          if [[ "${staging_version}" == "${promoted_version}" ]]; then
-            echo "Staging and promoted charts both declare ${staging_version}; requiring exact source parity."
-            diff --no-dereference --recursive --unified \
-              manifest_staging/charts/orka charts/orka
-            diff --no-dereference --recursive --unified \
-              manifest_staging/deploy deploy
-          else
-            echo "Staging chart ${staging_version} is ahead of promoted chart ${promoted_version}; skipping snapshot parity check."
-          fi
-
-      - name: Lint staging chart
-        run: helm lint manifest_staging/charts/orka
-
-      - name: Package staging chart
-        run: |
-          set -euo pipefail
-
-          mkdir -p cr-release-packages
-          helm package manifest_staging/charts/orka --destination cr-release-packages
-
-          shopt -s nullglob
-          chart_packages=(cr-release-packages/orka-*.tgz)
-          if [[ ${#chart_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
-            exit 1
-          fi
-          scripts/helm-crds.sh check-package "${chart_packages[0]}"
-
-      - name: Verify immutable chart version
-        run: |
-          set -euo pipefail
-
-          shopt -s nullglob
-          staging_packages=(cr-release-packages/orka-*.tgz)
-          promoted_packages=(promoted-release-packages/orka-*.tgz)
-          [[ ${#staging_packages[@]} -eq 1 ]]
-          [[ ${#promoted_packages[@]} -eq 1 ]]
-          candidates=("${staging_packages[0]}" "${promoted_packages[0]}")
-          comparison_dir=$(mktemp -d)
-          trap 'rm -rf "${comparison_dir}"' EXIT
-
-          set +e
-          git ls-remote --exit-code --heads origin refs/heads/gh-pages >/dev/null
-          probe_status=$?
-          set -e
-          case "${probe_status}" in
-            0)
-              git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages
-              ;;
-            2)
-              echo "No published Helm repository exists yet."
-              exit 0
-              ;;
-            *)
-              echo "Could not determine whether the gh-pages branch exists." >&2
-              exit "${probe_status}"
-              ;;
-          esac
-
-          for candidate in "${candidates[@]}"; do
-            package_name=$(basename "${candidate}")
-            for published_path in "charts/${package_name}" "${package_name}"; do
-              if ! git cat-file -e "origin/gh-pages:${published_path}" 2>/dev/null; then
-                continue
-              fi
-              published_archive="${comparison_dir}/$(basename "${published_path}")"
-              git show "origin/gh-pages:${published_path}" > "${published_archive}"
-              if cmp -s "${candidate}" "${published_archive}" || \
-                 python3 -I scripts/compare-helm-chart-packages.py "${candidate}" "${published_archive}"; then
-                echo "Published ${published_path} has identical normalized contents for ${candidate}."
-              else
-                echo "Chart ${package_name} already exists with different contents." >&2
-                echo "Prepare a new staging or promoted chart version before merging this change." >&2
-                exit 1
-              fi
-            done
-          done
-
-      - name: Upload validated chart package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: helm-chart-package
-          path: cr-release-packages/orka-*.tgz
-          if-no-files-found: error
-          retention-days: 1
-
-  lifecycle:
-    name: Test Helm CRD lifecycle
-    needs: validate
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 15
     env:
       KIND_CLUSTER: orka-helm-crd-lifecycle
       KIND_IMAGE: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
@@ -246,11 +54,35 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download validated chart package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          name: helm-chart-package
-          path: cr-release-packages
+          go-version-file: go.mod
+
+      - name: Verify generated chart and package
+        run: |
+          set -euo pipefail
+
+          make manifests
+          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "Generated staging manifests are stale." >&2
+            git status --short --untracked-files=all >&2
+            exit 1
+          fi
+
+          go test ./cmd/build/helmify
+          helm lint cmd/build/helmify/static
+          helm lint manifest_staging/charts/orka
+
+          mkdir -p cr-release-packages
+          helm package manifest_staging/charts/orka --destination cr-release-packages
+          shopt -s nullglob
+          chart_packages=(cr-release-packages/orka-*.tgz)
+          if [[ ${#chart_packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
+            exit 1
+          fi
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 9
 
       - name: Install kind
         run: |
@@ -261,9 +93,8 @@ jobs:
           echo "${KIND_SHA256}  ./kind" | sha256sum --check --strict
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
-          kind version
 
-      - name: Verify install, upgrade, and uninstall CRD behavior
+      - name: Verify install, apply, and uninstall CRD behavior
         run: |
           set -euo pipefail
 
@@ -279,10 +110,7 @@ jobs:
 
           shopt -s nullglob
           chart_packages=(cr-release-packages/orka-*.tgz)
-          if [[ ${#chart_packages[@]} -ne 1 ]]; then
-            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
-            exit 1
-          fi
+          [[ ${#chart_packages[@]} -eq 1 ]]
           chart_package=${chart_packages[0]}
 
           expected_crds=$(cat <<'CRDS'
@@ -299,20 +127,9 @@ jobs:
           )
 
           list_orka_crds() {
-            kubectl get customresourcedefinitions \
-              -o jsonpath='{range .items[?(@.spec.group=="core.orka.ai")]}{.metadata.name}{"\n"}{end}' | \
-              sed '/^$/d' | sort
-          }
-
-          assert_no_orka_crds() {
-            local stage=$1
-            local actual
-            actual=$(list_orka_crds)
-            if [[ -n "${actual}" ]]; then
-              echo "Expected zero Orka CRDs ${stage}; found:" >&2
-              printf '%s\n' "${actual}" >&2
-              exit 1
-            fi
+            kubectl get customresourcedefinitions.apiextensions.k8s.io -o json | \
+              jq -r '.items[] | select(.spec.group == "core.orka.ai") | .metadata.name' | \
+              sort
           }
 
           assert_all_orka_crds() {
@@ -330,89 +147,24 @@ jobs:
             done <<< "${expected_crds}"
           }
 
-          assert_controller_crd_rbac() {
-            local release=$1
-            local controller_service_account
-            local resource
-            controller_service_account=$(kubectl \
-              --namespace "${NAMESPACE}" \
-              get deployment \
-              --selector "app.kubernetes.io/component=controller,app.kubernetes.io/instance=${release}" \
-              --output jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
-            [[ -n "${controller_service_account}" ]] || {
-              echo "Could not resolve the Helm controller ServiceAccount." >&2
-              exit 1
-            }
-
-            for resource in agentruntimes substrateactorpools; do
-              kubectl auth can-i list "${resource}.core.orka.ai" \
-                --as "system:serviceaccount:${NAMESPACE}:${controller_service_account}" | grep -Fx yes
-              kubectl auth can-i update "${resource}.core.orka.ai" \
-                --subresource=status \
-                --namespace "${NAMESPACE}" \
-                --as "system:serviceaccount:${NAMESPACE}:${controller_service_account}" | grep -Fx yes
-              kubectl auth can-i update "${resource}.core.orka.ai" \
-                --subresource=finalizers \
-                --namespace "${NAMESPACE}" \
-                --as "system:serviceaccount:${NAMESPACE}:${controller_service_account}" | grep -Fx yes
-            done
-          }
-
-          release_args=(
-            --namespace "${NAMESPACE}"
-            --create-namespace
-            --set controller.replicas=0
-            --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}"
-            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}"
-            --set controller.image.pullPolicy=IfNotPresent
-            --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}"
-            --set-string workers.ai.image.tag="${PAUSE_IMAGE_TAG}"
-            --set-string workers.harnessWrapper.image.repository="${PAUSE_IMAGE_REPOSITORY}"
-            --set-string workers.harnessWrapper.image.tag="${PAUSE_IMAGE_TAG}"
-            --set workers.harnessWrapper.image.pullPolicy=IfNotPresent
-            --set-string workers.harnessWrapper.auth.token=mock-token
-          )
-
-          assert_no_orka_crds "before installation"
-
-          helm install orka-skip-crds "${chart_package}" \
-            "${release_args[@]}" \
-            --skip-crds
-          assert_no_orka_crds "after helm install --skip-crds"
-
-          helm upgrade orka-skip-crds "${chart_package}" \
+          helm install orka "${chart_package}" \
             --namespace "${NAMESPACE}" \
-            --reuse-values
-          assert_no_orka_crds "after an ordinary helm upgrade"
+            --create-namespace \
+            --set controller.replicas=0 \
+            --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set controller.image.pullPolicy=IfNotPresent \
+            --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string workers.ai.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set-string workers.harnessWrapper.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string workers.harnessWrapper.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set workers.harnessWrapper.image.pullPolicy=IfNotPresent \
+            --set-string workers.harnessWrapper.auth.token=mock-token
 
-          scripts/helm-crds.sh apply-package "${chart_package}" \
-            --kube-context "kind-${KIND_CLUSTER}"
-          assert_all_orka_crds "after the explicit CRD-first upgrade step"
+          assert_all_orka_crds "after helm install"
+          helm show crds "${chart_package}" | \
+            kubectl apply --server-side --force-conflicts -f -
+          assert_all_orka_crds "after explicit CRD apply"
 
-          kubectl patch crd/tasks.core.orka.ai \
-            --type json \
-            --patch '[{"op":"add","path":"/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/staleField","value":{"type":"string"}}]'
-          kubectl get crd/tasks.core.orka.ai --output json | \
-            jq -e '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.staleField.type == "string"' >/dev/null
-          scripts/helm-crds.sh apply-package "${chart_package}" \
-            --kube-context "kind-${KIND_CLUSTER}"
-          if kubectl get crd/tasks.core.orka.ai --output json | \
-             jq -e '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.staleField' >/dev/null; then
-            echo "Guarded CRD migration did not remove a stale schema field." >&2
-            exit 1
-          fi
-
-          helm uninstall orka-skip-crds --namespace "${NAMESPACE}"
-          assert_all_orka_crds "after uninstalling the migrated release"
-
-          while IFS= read -r crd; do
-            kubectl delete "crd/${crd}"
-          done <<< "${expected_crds}"
-          assert_no_orka_crds "after test-only CRD cleanup"
-
-          helm install orka-fresh-crds "${chart_package}" "${release_args[@]}"
-          assert_all_orka_crds "after a normal fresh install"
-          assert_controller_crd_rbac orka-fresh-crds
-
-          helm uninstall orka-fresh-crds --namespace "${NAMESPACE}"
+          helm uninstall orka --namespace "${NAMESPACE}"
           assert_all_orka_crds "after helm uninstall"

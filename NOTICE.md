@@ -11,16 +11,16 @@ base image contents, and platform packages.
 Orka's Helm chart generation flow includes modified source derived from
 Gatekeeper's in-repository `cmd/build/helmify` generator at commit
 `c9b67657102032a460a28e7f3b9c88ec0c193453`. The derived source is under
-`third_party/open-policy-agent/gatekeeper/helmify`.
+`cmd/build/helmify`.
 
 Gatekeeper
 
 Copyright 2018-2020 The Gatekeeper Authors
 
 The derived source is licensed under the Apache License, Version 2.0. See
-`third_party/open-policy-agent/gatekeeper/helmify/LICENSE`,
-`third_party/open-policy-agent/gatekeeper/helmify/NOTICE`, and
-`third_party/open-policy-agent/gatekeeper/helmify/README.md` for the license,
+`cmd/build/helmify/LICENSE`,
+`cmd/build/helmify/NOTICE`, and
+`cmd/build/helmify/README.md` for the license,
 upstream revision, and Orka modification notes.
 
 ## GitHub Copilot CLI

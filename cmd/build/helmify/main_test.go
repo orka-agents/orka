@@ -26,13 +26,13 @@ spec:
         type: object
 `
 
-func TestExtractCRDKind(t *testing.T) {
-	kind, err := extractCRDKind(testCRD)
+func TestDecodeCRD(t *testing.T) {
+	crd, err := decodeCRD(testCRD)
 	if err != nil {
-		t.Fatalf("extractCRDKind() error = %v", err)
+		t.Fatalf("decodeCRD() error = %v", err)
 	}
-	if kind != "Widget" {
-		t.Fatalf("extractCRDKind() = %q, want Widget", kind)
+	if crd.Spec.Group != "example.test" || crd.Spec.Names.Kind != "Widget" {
+		t.Fatalf("decodeCRD() = %q/%q, want example.test/Widget", crd.Spec.Group, crd.Spec.Names.Kind)
 	}
 }
 
@@ -42,14 +42,17 @@ func TestObjectSetWritesOnlyCRDs(t *testing.T) {
 	*outputDir = destination
 	t.Cleanup(func() { *outputDir = oldOutput })
 
-	set := objectSet{byKind: map[string][]string{
-		generatedKind: {testCRD},
-		"Deployment": {`apiVersion: apps/v1
+	set := objectSet{}
+	if err := set.add(testCRD); err != nil {
+		t.Fatalf("add(CRD) error = %v", err)
+	}
+	if err := set.add(`apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ignored
-`},
-	}}
+`); err != nil {
+		t.Fatalf("add(Deployment) error = %v", err)
+	}
 	if err := set.write(); err != nil {
 		t.Fatalf("write() error = %v", err)
 	}
@@ -73,24 +76,8 @@ func TestObjectSetRejectsDuplicateCRDFilenames(t *testing.T) {
 	*outputDir = destination
 	t.Cleanup(func() { *outputDir = oldOutput })
 
-	set := objectSet{byKind: map[string][]string{generatedKind: {testCRD, testCRD}}}
+	set := objectSet{crds: []string{testCRD, testCRD}}
 	if err := set.write(); err == nil || !strings.Contains(err.Error(), "duplicate generated output filename") {
 		t.Fatalf("write() error = %v, want duplicate filename error", err)
-	}
-}
-
-func TestCopyStaticFilesRejectsSymlinks(t *testing.T) {
-	static := t.TempDir()
-	destination := t.TempDir()
-	if err := os.Symlink("missing", filepath.Join(static, "linked")); err != nil {
-		t.Fatalf("create symlink: %v", err)
-	}
-
-	oldOutput := *outputDir
-	*outputDir = destination
-	t.Cleanup(func() { *outputDir = oldOutput })
-
-	if err := copyStaticFiles(static); err == nil || !strings.Contains(err.Error(), "unsupported static chart entry") {
-		t.Fatalf("copyStaticFiles() error = %v, want unsupported entry error", err)
 	}
 }

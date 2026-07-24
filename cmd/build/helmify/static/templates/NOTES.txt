@@ -5,14 +5,11 @@ Namespace:  {{ .Release.Namespace }}
 
 CRD lifecycle:
   - A fresh install creates Orka's nine cluster-scoped CRDs unless --skip-crds is used.
-  - helm upgrade never creates or updates files from crds/. Run the guarded CRD
-    migration from the exact target chart before every upgrade, including upgrades
-    from older charts that installed zero CRDs.
+  - Helm does not update CRDs during helm upgrade. Apply the CRDs from the exact
+    target chart before upgrading the release.
   - helm uninstall retains the CRDs and all Orka custom resources.
-  - Use one designated CRD lifecycle owner per cluster; other releases use
-    --skip-crds.
 
-Detailed commands: helm show readme <the same chart reference or archive>
+Upgrade guidance: helm show readme <the same chart reference or archive>
 
 {{- if not .Values.store.persistence.enabled }}
 
