@@ -495,11 +495,15 @@ func (h *Handlers) ensureSessionReadable(c fiber.Ctx, namespace, sessionName str
 	if h.sessionStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "session store not configured")
 	}
-	if _, err := h.sessionStore.GetSession(c.Context(), namespace, sessionName); err != nil {
+	sessionType, err := transcriptSessionType(c.Context(), h.sessionStore, namespace, sessionName)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session type: %v", err))
+	}
+	if sessionType == store.SessionTypeGateway {
+		return fiber.NewError(fiber.StatusNotFound, "session not found")
 	}
 	return nil
 }

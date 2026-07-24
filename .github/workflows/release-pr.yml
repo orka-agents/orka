@@ -99,7 +99,7 @@ jobs:
 
           helm lint cmd/build/helmify/static
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 9
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 12
           git diff --check
 
       - name: Create release pull request

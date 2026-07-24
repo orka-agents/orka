@@ -44,6 +44,24 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Provider-neutral external gateway plane.
+  gateway:
+    enabled: true
+    # Disposable development only: allow gateways to acknowledge work on an emptyDir-backed store.
+    allowEphemeralStore: false
+    # Set true only when an offline renderer cannot use lookup and CRDs are applied separately.
+    crdsReadyOverride: false
+    pendingPerSession: 100
+    maxRecordsPerGateway: 1000
+    maxRejectedRecordsPerGateway: 250
+    eventExpiry: 24h
+    terminalRetention: 720h
+    deliveryTimeout: 15s
+    deliveryMaxAttempts: 10
+    claimLease: 1m
+    pollInterval: 500ms
+    batchSize: 25
+
   # Experimental agent sandbox workspace support (disabled by default)
   executionWorkspace:
     # Default provider used when Task execution.workspace.provider is omitted.
@@ -134,6 +152,8 @@ controller:
       monitorOperate: ""
       skillRead: ""
       skillWrite: ""
+      gatewayRead: ""
+      gatewayOperate: ""
     tts:
       # kontxt TTS base URL for child/outbound token exchange.
       url: ""
@@ -262,8 +282,8 @@ annotations: {}
 store:
   path: /data/orka.db
   persistence:
-    enabled: false       # default: ephemeral (emptyDir), no PVC
-    size: 1Gi            # only when enabled: true
+    enabled: true        # durable gateway inbox/outbox and Session history require a PVC
+    size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce
 

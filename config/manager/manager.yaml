@@ -20,6 +20,8 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       control-plane: controller-manager
@@ -72,6 +74,14 @@ spec:
           - --controller-url=http://orka-api.orka-system.svc:8080
           - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
           - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
+          - --gateway-enabled=true
+          - --gateway-pending-per-session=100
+          - --gateway-max-records-per-gateway=1000
+          - --gateway-max-rejected-records-per-gateway=250
+          - --gateway-event-expiry=24h
+          - --gateway-terminal-retention=720h
+          - --gateway-delivery-timeout=15s
+          - --gateway-delivery-max-attempts=10
           - --execution-workspace-default-provider=agent-sandbox
           - --agent-sandbox-enabled=false
           - --agent-sandbox-warm-pool-policy=disabled
@@ -134,7 +144,8 @@ spec:
             readOnly: true
       volumes:
         - name: store
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: controller-manager-store
         - name: tmp
           emptyDir: {}
         - name: harness-wrapper-auth

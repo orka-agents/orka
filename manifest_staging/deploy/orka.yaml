@@ -1938,6 +1938,837 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+  name: gatewaybindings.gateway.orka.ai
+spec:
+  group: gateway.orka.ai
+  names:
+    kind: GatewayBinding
+    listKind: GatewayBindingList
+    plural: gatewaybindings
+    shortNames:
+    - gwbind
+    singular: gatewaybinding
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.gatewayRef.name
+      name: Gateway
+      type: string
+    - jsonPath: .spec.agentRef.name
+      name: Agent
+      type: string
+    - jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: GatewayBinding maps one normalized external context to one Agent.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: GatewayBindingSpec maps normalized external identity to one
+              Agent.
+            properties:
+              activeTurnBehavior:
+                description: ActiveTurnBehavior is queue in V1.
+                enum:
+                - queue
+                type: string
+              agentRef:
+                description: AgentRef selects one Agent in this namespace.
+                properties:
+                  name:
+                    description: Name is the object name.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              gatewayRef:
+                description: GatewayRef selects one Gateway in this namespace.
+                properties:
+                  name:
+                    description: Name is the object name.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              match:
+                description: Match selects exact normalized account/context identity
+                  and optional constraints.
+                properties:
+                  accountId:
+                    description: AccountID is the exact normalized external account
+                      identity.
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                  contextId:
+                    description: ContextID is the exact normalized external conversation
+                      or request context.
+                    maxLength: 256
+                    minLength: 1
+                    type: string
+                  senderId:
+                    description: SenderID optionally restricts the binding to one
+                      exact sender before sender policy is evaluated.
+                    maxLength: 256
+                    type: string
+                  threadId:
+                    description: ThreadID optionally restricts the binding to one
+                      exact thread.
+                    maxLength: 256
+                    type: string
+                required:
+                - accountId
+                - contextId
+                type: object
+              priority:
+                description: Priority resolves overlapping matches. Equal-priority
+                  matches fail closed.
+                format: int32
+                maximum: 1000
+                minimum: -1000
+                type: integer
+              senderPolicy:
+                description: SenderPolicy denies unknown senders by default.
+                properties:
+                  allowedSenderIds:
+                    description: AllowedSenderIDs contains exact normalized sender
+                      IDs.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                    x-kubernetes-list-type: set
+                  mode:
+                    description: Mode defaults to allowlist. all is an explicit trusted-context
+                      opt-in.
+                    enum:
+                    - allowlist
+                    - all
+                    type: string
+                type: object
+              session:
+                description: Session controls deterministic Session derivation.
+                properties:
+                  mode:
+                    description: Mode selects the derivation inputs.
+                    enum:
+                    - ephemeral
+                    - context
+                    - thread
+                    - sender
+                    - context-sender
+                    - thread-sender
+                    - explicit
+                    type: string
+                  name:
+                    description: Name is required only for explicit mode.
+                    maxLength: 253
+                    type: string
+                type: object
+              taskDefaults:
+                description: TaskDefaults is the bounded Task configuration applied
+                  to dispatched events.
+                properties:
+                  agentRuntimeMaxTurns:
+                    description: AgentRuntimeMaxTurns is the only runtime-specific
+                      override permitted in V1.
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  priority:
+                    description: Priority is the Task queue priority.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
+                  retryPolicy:
+                    description: RetryPolicy configures bounded Task retries.
+                    properties:
+                      backoffMultiplier:
+                        description: BackoffMultiplier controls exponential Task retry
+                          delay.
+                        maximum: 10
+                        minimum: 1
+                        type: number
+                      initialDelay:
+                        description: InitialDelay is the first Task retry delay.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: initialDelay must be positive and no greater than
+                            1h
+                          rule: '!(duration(self) <= duration(''0s'') || duration(self)
+                            > duration(''1h''))'
+                      maxRetries:
+                        description: MaxRetries is the maximum Task retry count.
+                        format: int32
+                        maximum: 10
+                        minimum: 0
+                        type: integer
+                    type: object
+                  timeout:
+                    description: Timeout is the Task timeout.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: timeout must be positive and no greater than 24h
+                      rule: '!(duration(self) <= duration(''0s'') || duration(self)
+                        > duration(''24h''))'
+                type: object
+            required:
+            - agentRef
+            - gatewayRef
+            - match
+            type: object
+          status:
+            description: GatewayBindingStatus reports routing readiness.
+            properties:
+              accepted:
+                description: Accepted reports spec validation.
+                type: boolean
+              conditions:
+                description: Conditions report Accepted, ResolvedRefs, Programmed,
+                  and Ready state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastInboundActivity:
+                description: LastInboundActivity is the latest accepted inbound event
+                  time.
+                format: date-time
+                type: string
+              lastOutboundActivity:
+                description: LastOutboundActivity is the latest delivered outbound
+                  reply time.
+                format: date-time
+                type: string
+              message:
+                description: Message is sanitized readiness context.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the latest reconciled generation.
+                format: int64
+                type: integer
+              programmed:
+                description: Programmed reports that the binding has no equal-priority
+                  ambiguity.
+                type: boolean
+              ready:
+                description: Ready reports that ingress may route events through this
+                  binding.
+                type: boolean
+              resolvedCapabilities:
+                description: ResolvedCapabilities is the provider-neutral capability
+                  summary used for validation.
+                properties:
+                  explicitSessions:
+                    description: ExplicitSessions indicates that explicit Session
+                      names are supported by bindings.
+                    type: boolean
+                  idempotentDelivery:
+                    description: IdempotentDelivery indicates that repeated delivery
+                      IDs do not create duplicate provider sends.
+                    type: boolean
+                  inboundText:
+                    description: InboundText indicates support for authenticated inbound
+                      text events.
+                    type: boolean
+                  outboundText:
+                    description: OutboundText indicates support for final text and
+                      sanitized error delivery.
+                    type: boolean
+                  senderIdentity:
+                    description: SenderIdentity indicates that stable sender identity
+                      is preserved.
+                    type: boolean
+                  threads:
+                    description: Threads indicates that thread identity is preserved.
+                    type: boolean
+                type: object
+              resolvedRefs:
+                description: ResolvedRefs reports Gateway and Agent resolution.
+                type: boolean
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: gatewayclasses.gateway.orka.ai
+spec:
+  group: gateway.orka.ai
+  names:
+    kind: GatewayClass
+    listKind: GatewayClassList
+    plural: gatewayclasses
+    shortNames:
+    - gwclass
+    singular: gatewayclass
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.accepted
+      name: Accepted
+      type: boolean
+    - jsonPath: .spec.contractVersion
+      name: Contract
+      type: string
+    - jsonPath: .spec.category
+      name: Category
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: GatewayClass is the cluster-scoped registry for gateway adapter
+          profiles.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: GatewayClassSpec defines one administrator-owned adapter
+              profile.
+            properties:
+              allowedMetadataKeys:
+                description: |-
+                  AllowedMetadataKeys is the bounded allowlist of normalized event metadata keys.
+                  Empty means no event metadata is accepted.
+                items:
+                  type: string
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: set
+              capabilities:
+                description: Capabilities are the behaviors every Gateway using this
+                  class must advertise.
+                properties:
+                  explicitSessions:
+                    description: ExplicitSessions indicates that explicit Session
+                      names are supported by bindings.
+                    type: boolean
+                  idempotentDelivery:
+                    description: IdempotentDelivery indicates that repeated delivery
+                      IDs do not create duplicate provider sends.
+                    type: boolean
+                  inboundText:
+                    description: InboundText indicates support for authenticated inbound
+                      text events.
+                    type: boolean
+                  outboundText:
+                    description: OutboundText indicates support for final text and
+                      sanitized error delivery.
+                    type: boolean
+                  senderIdentity:
+                    description: SenderIdentity indicates that stable sender identity
+                      is preserved.
+                    type: boolean
+                  threads:
+                    description: Threads indicates that thread identity is preserved.
+                    type: boolean
+                type: object
+              category:
+                description: Category describes the integration shape without selecting
+                  a provider SDK.
+                enum:
+                - chat
+                - webhook
+                - http
+                - event
+                - internal
+                type: string
+              contractVersion:
+                description: ContractVersion is the adapter protocol implemented by
+                  this class.
+                enum:
+                - orka.gateway.v1
+                type: string
+            required:
+            - category
+            - contractVersion
+            type: object
+          status:
+            description: GatewayClassStatus reports class validation.
+            properties:
+              accepted:
+                description: Accepted reports whether the class is supported by Orka
+                  core.
+                type: boolean
+              conditions:
+                description: Conditions report validation state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              message:
+                description: Message is sanitized validation context.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the latest reconciled generation.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: gateways.gateway.orka.ai
+spec:
+  group: gateway.orka.ai
+  names:
+    kind: Gateway
+    listKind: GatewayList
+    plural: gateways
+    shortNames:
+    - gw
+    singular: gateway
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.gatewayClassName
+      name: Class
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: boolean
+    - jsonPath: .status.connected
+      name: Connected
+      type: boolean
+    - jsonPath: .status.resolvedEndpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Gateway configures one provider-neutral adapter instance.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: GatewaySpec defines one configured adapter instance.
+            properties:
+              adapter:
+                description: Adapter selects an HTTPS endpoint or TLS-authenticated
+                  same-namespace Service.
+                properties:
+                  endpoint:
+                    description: Endpoint is an absolute HTTPS adapter base URL.
+                    pattern: ^https://[^\s@?#]+$
+                    type: string
+                  serviceRef:
+                    description: ServiceRef selects a selector-backed TLS Service
+                      in the Gateway namespace.
+                    properties:
+                      name:
+                        description: Name is the Service name in the Gateway namespace.
+                        minLength: 1
+                        type: string
+                      port:
+                        description: Port is the Service port. Zero selects the first
+                          declared Service port.
+                        format: int32
+                        maximum: 65535
+                        minimum: 0
+                        type: integer
+                    required:
+                    - name
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of endpoint or serviceRef is required
+                  rule: has(self.endpoint) != has(self.serviceRef)
+              gatewayClassName:
+                description: GatewayClassName references a cluster-scoped GatewayClass.
+                minLength: 1
+                type: string
+              inboundAuthRef:
+                description: InboundAuthRef authenticates adapter calls into Orka.
+                properties:
+                  key:
+                    description: Key is the Secret data key.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the Secret name.
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: name must not contain surrounding whitespace
+                      rule: self == self.trim()
+                required:
+                - key
+                - name
+                type: object
+              metadata:
+                additionalProperties:
+                  type: string
+                description: Metadata is bounded, non-secret operator metadata.
+                maxProperties: 32
+                type: object
+              outboundAuthRef:
+                description: OutboundAuthRef authenticates Orka calls to the adapter.
+                properties:
+                  key:
+                    description: Key is the Secret data key.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the Secret name.
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: name must not contain surrounding whitespace
+                      rule: self == self.trim()
+                required:
+                - key
+                - name
+                type: object
+            required:
+            - adapter
+            - gatewayClassName
+            - inboundAuthRef
+            - outboundAuthRef
+            type: object
+            x-kubernetes-validations:
+            - message: inbound and outbound authentication must use separate Secrets
+              rule: self.inboundAuthRef.name.trim() != self.outboundAuthRef.name.trim()
+          status:
+            description: GatewayStatus reports reference resolution and adapter connectivity.
+            properties:
+              accepted:
+                description: Accepted reports spec validation.
+                type: boolean
+              conditions:
+                description: Conditions report Accepted, ResolvedRefs, Connected,
+                  and Ready state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              connected:
+                description: Connected reports a successful authenticated adapter
+                  probe.
+                type: boolean
+              lastSuccessfulProbe:
+                description: LastSuccessfulProbe is the last successful health/capability
+                  probe.
+                format: date-time
+                type: string
+              message:
+                description: Message is sanitized readiness context.
+                type: string
+              observedCapabilities:
+                description: ObservedCapabilities is the sanitized adapter capability
+                  response.
+                properties:
+                  adapterName:
+                    description: AdapterName is the sanitized adapter name.
+                    type: string
+                  adapterVersion:
+                    description: AdapterVersion is the sanitized adapter version.
+                    type: string
+                  capabilities:
+                    description: Capabilities are provider-neutral observed behaviors.
+                    properties:
+                      explicitSessions:
+                        description: ExplicitSessions indicates that explicit Session
+                          names are supported by bindings.
+                        type: boolean
+                      idempotentDelivery:
+                        description: IdempotentDelivery indicates that repeated delivery
+                          IDs do not create duplicate provider sends.
+                        type: boolean
+                      inboundText:
+                        description: InboundText indicates support for authenticated
+                          inbound text events.
+                        type: boolean
+                      outboundText:
+                        description: OutboundText indicates support for final text
+                          and sanitized error delivery.
+                        type: boolean
+                      senderIdentity:
+                        description: SenderIdentity indicates that stable sender identity
+                          is preserved.
+                        type: boolean
+                      threads:
+                        description: Threads indicates that thread identity is preserved.
+                        type: boolean
+                    type: object
+                  contractVersion:
+                    description: ContractVersion is the protocol reported by the adapter.
+                    type: string
+                type: object
+              observedGeneration:
+                description: ObservedGeneration is the latest reconciled generation.
+                format: int64
+                type: integer
+              observedInboundAuthSecretVersion:
+                description: ObservedInboundAuthRefVersion is non-secret Secret resource
+                  metadata.
+                type: string
+              observedOutboundAuthSecretVersion:
+                description: ObservedOutboundAuthRefVersion is non-secret Secret resource
+                  metadata.
+                type: string
+              ready:
+                description: Ready reports that ingress and delivery may use this
+                  Gateway.
+                type: boolean
+              resolvedEndpoint:
+                description: ResolvedEndpoint is a sanitized scheme and host suitable
+                  for operators.
+                type: string
+              resolvedRefs:
+                description: ResolvedRefs reports class, Service, and Secret resolution.
+                type: boolean
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: providers.core.orka.ai
 spec:
   group: core.orka.ai
@@ -3431,6 +4262,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+    gateway.orka.ai/session-cutoff-schema: v1
   name: tasks.core.orka.ai
 spec:
   group: core.orka.ai
@@ -5090,6 +5922,17 @@ spec:
                   name:
                     description: 'Name is the session identifier (ConfigMap: session-<name>)'
                     type: string
+                  promptIncluded:
+                    description: |-
+                      PromptIncluded reports that the current Task prompt is already the final user message in the bounded transcript.
+                      Workers must not append prompt a second time when this is true.
+                    type: boolean
+                  throughMessageId:
+                    description: |-
+                      ThroughMessageID limits transcript loading to the logical history at and before this stable message ID.
+                      Gateway-created Tasks use it so later queued user messages cannot enter an earlier turn.
+                    maxLength: 256
+                    type: string
                 required:
                 - name
                 type: object
@@ -6313,6 +7156,117 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-gateway-admin-role
+rules:
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gateways
+  - gatewaybindings
+  verbs:
+  - '*'
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gateways/status
+  - gatewaybindings/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-gateway-editor-role
+rules:
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gateways
+  - gatewaybindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gateways/status
+  - gatewaybindings/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-gateway-viewer-role
+rules:
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gateways
+  - gatewaybindings
+  - gateways/status
+  - gatewaybindings/status
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-gatewayclass-admin-role
+rules:
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses
+  verbs:
+  - '*'
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-gatewayclass-viewer-role
+rules:
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewayclasses
+  - gatewayclasses/status
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   name: orka-manager-role
 rules:
 - apiGroups:
@@ -6394,6 +7348,17 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - gatewaybindings.gateway.orka.ai
+  - gatewayclasses.gateway.orka.ai
+  - gateways.gateway.orka.ai
+  - tasks.core.orka.ai
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
 - apiGroups:
   - apps
   resources:
@@ -6539,6 +7504,38 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewaybindings
+  - gatewayclasses
+  - gateways
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewaybindings/finalizers
+  - gatewayclasses/finalizers
+  - gateways/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - gateway.orka.ai
+  resources:
+  - gatewaybindings/status
+  - gatewayclasses/status
+  - gateways/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - metrics.k8s.io
   resources:
@@ -7111,6 +8108,18 @@ spec:
     app.kubernetes.io/name: orka
     control-plane: controller-manager
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orka-controller-manager-store
+  namespace: orka-system
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7234,6 +8243,8 @@ spec:
     matchLabels:
       app.kubernetes.io/name: orka
       control-plane: controller-manager
+  strategy:
+    type: Recreate
   template:
     metadata:
       annotations:
@@ -7252,6 +8263,14 @@ spec:
         - --controller-url=http://orka-api.orka-system.svc:8080
         - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
         - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
+        - --gateway-enabled=true
+        - --gateway-pending-per-session=100
+        - --gateway-max-records-per-gateway=1000
+        - --gateway-max-rejected-records-per-gateway=250
+        - --gateway-event-expiry=24h
+        - --gateway-terminal-retention=720h
+        - --gateway-delivery-timeout=15s
+        - --gateway-delivery-max-attempts=10
         - --execution-workspace-default-provider=agent-sandbox
         - --agent-sandbox-enabled=false
         - --agent-sandbox-warm-pool-policy=disabled
@@ -7320,10 +8339,73 @@ spec:
       serviceAccountName: orka-controller-manager
       terminationGracePeriodSeconds: 10
       volumes:
-      - emptyDir: {}
-        name: store
+      - name: store
+        persistentVolumeClaim:
+          claimName: orka-controller-manager-store
       - emptyDir: {}
         name: tmp
       - name: harness-wrapper-auth
         secret:
           secretName: harness-wrapper-auth
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: orka-gateway-task-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: (request.operation == 'CREATE' && has(object.spec.requestedBy) &&
+      object.spec.requestedBy.issuer.startsWith('gateway.orka.ai/')) || ((request.operation
+      == 'UPDATE' || request.operation == 'DELETE') && has(oldObject.spec.requestedBy)
+      && oldObject.spec.requestedBy.issuer.startsWith('gateway.orka.ai/'))
+    name: owned-gateway-task
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - tasks
+      - tasks/status
+  validations:
+  - expression: |-
+      (request.operation == 'DELETE' &&
+
+        (request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' ||
+         request.userInfo.username == 'system:serviceaccount:kube-system:garbage-collector' ||
+         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' ||
+         request.userInfo.username == 'system:kube-controller-manager')) ||
+      request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
+    message: gateway-owned Tasks may only be managed by the owning Orka controller,
+      trusted workers, or Kubernetes cleanup controllers
+  variables:
+  - expression: 'request.operation == ''CREATE'' ? object.spec.requestedBy.issuer
+      : oldObject.spec.requestedBy.issuer'
+    name: gatewayIssuer
+  - expression: variables.gatewayIssuer.split('/')[1]
+    name: gatewayNamespace
+  - expression: '''orka-system'''
+    name: controllerNamespace
+  - expression: '''orka-controller-manager'''
+    name: controllerServiceAccount
+  - expression: '''orka-ai-worker'''
+    name: aiWorkerServiceAccount
+  - expression: '''orka-vendor-worker'''
+    name: vendorWorkerServiceAccount
+  - expression: '''orka-container-worker'''
+    name: containerWorkerServiceAccount
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-gateway-task-protection
+spec:
+  policyName: orka-gateway-task-protection
+  validationActions:
+  - Deny

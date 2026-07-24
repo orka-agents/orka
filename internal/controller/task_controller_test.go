@@ -1436,6 +1436,25 @@ var _ = Describe("Task Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("prompt is required"))
 		})
 
+		It("should allow agent tasks whose prompt is included in a bounded Session transcript", func() {
+			r := newReconciler()
+			task := &corev1alpha1.Task{
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{
+						Name: "gateway-session", PromptIncluded: true, ThroughMessageID: "gateway:event:user",
+					},
+				},
+			}
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-agent"},
+				Spec: corev1alpha1.AgentSpec{
+					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+				},
+			}
+			Expect(r.validateTaskAgentCompatibility(task, agent)).To(Succeed())
+		})
+
 		It("should succeed for valid agent tasks", func() {
 			r := newReconciler()
 			task := &corev1alpha1.Task{

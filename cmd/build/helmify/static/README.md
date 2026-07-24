@@ -2,7 +2,7 @@
 
 This chart is generated from `cmd/build/helmify`; edit the generator inputs and
 run `make manifests` rather than editing generated chart copies directly. It
-packages all nine canonical Orka CRDs under `crds/`.
+packages all twelve canonical Orka CRDs under `crds/`.
 
 ## Fresh install
 
@@ -51,7 +51,7 @@ CRD lifecycle owner. Do not run competing CRD apply workflows for the same
 cluster.
 
 If another system owns the CRDs, perform the CRD-first step through that system,
-wait for all nine CRDs to become `Established`, and then upgrade Orka.
+wait for all twelve CRDs to become `Established`, and then upgrade Orka.
 
 If a previous release was uninstalled, update its retained CRDs first and install
 the replacement release with `--skip-crds`.

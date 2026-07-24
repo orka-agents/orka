@@ -4,6 +4,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+    gateway.orka.ai/session-cutoff-schema: v1
   name: tasks.core.orka.ai
 spec:
   group: core.orka.ai
@@ -1662,6 +1663,17 @@ spec:
                     type: integer
                   name:
                     description: 'Name is the session identifier (ConfigMap: session-<name>)'
+                    type: string
+                  promptIncluded:
+                    description: |-
+                      PromptIncluded reports that the current Task prompt is already the final user message in the bounded transcript.
+                      Workers must not append prompt a second time when this is true.
+                    type: boolean
+                  throughMessageId:
+                    description: |-
+                      ThroughMessageID limits transcript loading to the logical history at and before this stable message ID.
+                      Gateway-created Tasks use it so later queued user messages cannot enter an earlier turn.
+                    maxLength: 256
                     type: string
                 required:
                 - name

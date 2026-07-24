@@ -41,7 +41,7 @@ helm install orka charts/orka \
   --create-namespace
 ```
 
-A normal fresh install creates Orka's nine cluster-scoped CRDs before the
+A normal fresh install creates Orka's twelve cluster-scoped CRDs before the
 controller resources. Use `--skip-crds` only when one designated platform or
 release owner already manages compatible Orka CRDs for the cluster; all other
 Orka releases should use that flag.

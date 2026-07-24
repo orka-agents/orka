@@ -64,7 +64,7 @@ jobs:
           diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
           diff --no-dereference --recursive --unified manifest_staging/deploy deploy
           helm lint charts/orka
-          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 9
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 12
 
           rendered_chart=$(mktemp)
           trap 'rm -f "${rendered_chart}"' EXIT
