@@ -73,7 +73,13 @@ func (r *FakeExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context
 func (r *FakeExecutionWorkspaceProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspaceProvider{}).
-		WithEventFilter(workspaceprovider.ControllerNamePredicate(FakeWorkspaceControllerName)).
+		// Every reconcile writes a fresh LastHeartbeat. Without the generation filter that
+		// status write feeds back as an update event and replaces the timed heartbeat with a
+		// continuous reconcile loop; RequeueAfter still drives the heartbeat.
+		WithEventFilter(predicate.And(
+			workspaceprovider.ControllerNamePredicate(FakeWorkspaceControllerName),
+			predicate.GenerationChangedPredicate{},
+		)).
 		Named("fake-execution-workspace-provider").
 		Complete(r)
 }
@@ -249,7 +255,10 @@ func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ct
 			Message:            chooseMessage(attached, "attachment epoch is active", "no attachment epoch is active"),
 			ObservedGeneration: current.Generation,
 		})
-		return r.Status().Patch(ctx, current, client.MergeFrom(before))
+		// Core writes its own conditions on this workspace. Optimistic locking turns a
+		// concurrent write into a retryable conflict instead of silently replacing the
+		// core-owned entries in the conditions array.
+		return r.Status().Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
 }
 

@@ -232,7 +232,10 @@ func (r *ExecutionWorkspaceReconciler) patchWorkspaceCondition(
 		}
 		before := workspace.DeepCopy()
 		workspaceprovider.SetCondition(&workspace.Status.Conditions, condition)
-		return r.Status().Patch(ctx, workspace, client.MergeFrom(before))
+		// A merge patch replaces the whole conditions array and carries no precondition, so
+		// without the optimistic lock a stale core write silently erases adapter-owned
+		// conditions and RetryOnConflict never sees the race.
+		return r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
 }
 

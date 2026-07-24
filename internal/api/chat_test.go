@@ -79,7 +79,7 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
-func TestChatHandlerHasRunningTasksTreatsOnlyTerminalPhasesAsInactive(t *testing.T) {
+func TestChatHandlerHasRunningTasksExcludesTerminalAndScheduledPhases(t *testing.T) {
 	tests := []struct {
 		name   string
 		phase  corev1alpha1.TaskPhase
@@ -89,6 +89,7 @@ func TestChatHandlerHasRunningTasksTreatsOnlyTerminalPhasesAsInactive(t *testing
 		{name: "pending", phase: corev1alpha1.TaskPhasePending, active: true},
 		{name: "running", phase: corev1alpha1.TaskPhaseRunning, active: true},
 		{name: "finalizing", phase: corev1alpha1.TaskPhaseFinalizing, active: true},
+		{name: "scheduled", phase: corev1alpha1.TaskPhaseScheduled, active: false},
 		{name: "succeeded", phase: corev1alpha1.TaskPhaseSucceeded, active: false},
 		{name: "failed", phase: corev1alpha1.TaskPhaseFailed, active: false},
 		{name: "cancelled", phase: corev1alpha1.TaskPhaseCancelled, active: false},

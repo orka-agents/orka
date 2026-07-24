@@ -979,6 +979,9 @@ func (ch *ChatHandler) hasRunningTasks(ctx context.Context, namespace, sessionID
 		switch taskList.Items[i].Status.Phase {
 		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 			continue
+		case corev1alpha1.TaskPhaseScheduled:
+			// A recurring parent stays Scheduled by design and never completes.
+			continue
 		default:
 			return true
 		}
