@@ -37,6 +37,6 @@ Generic Gateway CRD upgrade:
 
     helm repo add orka https://orka-agents.github.io/orka/charts
     helm repo update orka
-    helm show crds orka/orka --version {{ .Chart.Version }} | kubectl apply -f -
+    helm show crds orka/orka --version {{ .Chart.Version }} | kubectl apply --server-side --force-conflicts -f -
 
   The controller remains gateway-disabled until all three Gateway CRDs and the Task session-cutoff schema are observed.

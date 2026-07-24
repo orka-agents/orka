@@ -20,8 +20,9 @@ only when a designated platform or GitOps workflow already manages compatible
 Orka CRDs for the cluster.
 
 Controller Services, worker ServiceAccounts, and worker RBAC are scoped to the
-Helm release name. Multiple Orka releases can therefore share a namespace while
-continuing to use the same cluster-scoped CRDs.
+Helm release name. Run only one Orka controller release per namespace: leader
+election and gateway admission ownership are namespace-wide. Separate releases
+may share the same cluster-scoped CRDs when installed into different namespaces.
 
 ## Upgrade
 

@@ -78,7 +78,8 @@ jobs:
           secondary_render=$(mktemp)
           secondary_rbac=$(mktemp)
           secondary_serviceaccounts=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}"' EXIT
+          secondary_gateway_policy=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}"' EXIT
           helm template orka manifest_staging/charts/orka \
             --namespace "${NAMESPACE}" \
             --set-string workers.harnessWrapper.auth.token=mock-token \
@@ -97,6 +98,11 @@ jobs:
             --set-string workers.harnessWrapper.auth.token=mock-token \
             --show-only templates/serviceaccount.yaml \
             > "${secondary_serviceaccounts}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/gateway-task-admission-policy.yaml \
+            > "${secondary_gateway_policy}"
 
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
@@ -106,6 +112,7 @@ jobs:
             grep -Fq -- "--${tier}-worker-service-account-name=${account}" "${secondary_render}"
             grep -Fq -- "name: ${account}" "${secondary_serviceaccounts}"
             grep -Fq -- "name: ${account}" "${secondary_rbac}"
+            grep -Fq -- ":${account}'" "${secondary_gateway_policy}"
           done
           chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
           grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
