@@ -11,6 +11,9 @@ resources:
 - bases/core.orka.ai_repositoryscans.yaml
 - bases/core.orka.ai_repositorymonitors.yaml
 - bases/core.orka.ai_substrateactorpools.yaml
+- bases/gateway.orka.ai_gatewayclasses.yaml
+- bases/gateway.orka.ai_gateways.yaml
+- bases/gateway.orka.ai_gatewaybindings.yaml
 - bases/workspace.orka.ai_executionworkspaceproviders.yaml
 - bases/workspace.orka.ai_executionworkspacepools.yaml
 - bases/workspace.orka.ai_executionworkspaceclasses.yaml

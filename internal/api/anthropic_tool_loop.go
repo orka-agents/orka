@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ import (
 // emits "## Progress Summary" mid-workflow, which terminates the SSE stream
 // and skips validation/review/PR.
 const goalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
+
+var errStreamUnavailable = errors.New("stream unavailable before output")
 
 // truncateForLog returns s clipped to max runes, appending "…" if clipped.
 // Used so log lines stay scannable when the model dumps a long progress
@@ -62,17 +65,21 @@ func isStreamingRequiredErr(err error) bool {
 // fallback path when provider.Complete is refused with
 // "streaming is required for operations that may take longer than N minutes".
 // The aggregation is intentionally simple: concatenate text content and append
-// each tool call exactly once. Final stop_reason follows
-// the last chunk's reason or defaults to "end_turn".
+// each tool call exactly once. A terminal chunk with an explicit stop reason
+// is required so truncated streams cannot be mistaken for completion.
 func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	streamCh, err := provider.Stream(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("stream open: %w", err)
+		return nil, fmt.Errorf("%w: open: %w", errStreamUnavailable, err)
 	}
 
 	resp := &llm.CompletionResponse{}
+	terminalSeen := false
 	for chunk := range streamCh {
 		if chunk.Error != nil {
+			if resp.Content == "" && len(resp.ToolCalls) == 0 {
+				return nil, fmt.Errorf("%w: chunk: %w", errStreamUnavailable, chunk.Error)
+			}
 			return nil, fmt.Errorf("stream chunk: %w", chunk.Error)
 		}
 		if chunk.Content != "" {
@@ -94,20 +101,35 @@ func completeViaStream(ctx context.Context, provider llm.Provider, req *llm.Comp
 			resp.Provider = chunk.Provider
 		}
 		if chunk.Done {
-			if chunk.StopReason != "" {
-				resp.StopReason = chunk.StopReason
-			}
+			terminalSeen = true
+			resp.StopReason = chunk.StopReason
 			break
 		}
 	}
-	if resp.StopReason == "" {
-		if len(resp.ToolCalls) > 0 {
-			resp.StopReason = "tool_use"
-		} else {
-			resp.StopReason = "end_turn"
-		}
+	if !terminalSeen {
+		return nil, fmt.Errorf("stream closed without a terminal chunk")
+	}
+	if err := validateToolLoopCompletion(resp); err != nil {
+		return nil, err
 	}
 	return resp, nil
+}
+
+func validateToolLoopCompletion(resp *llm.CompletionResponse) error {
+	outcome := llm.NormalizeCompletionOutcome(resp)
+	switch outcome {
+	case llm.CompletionOutcomeCompleted, llm.CompletionOutcomeToolCalls:
+		return nil
+	default:
+		reason := ""
+		if resp != nil {
+			reason = strings.TrimSpace(resp.StopReason)
+		}
+		if reason == "" {
+			return fmt.Errorf("LLM returned %s completion outcome without a stop reason", outcome)
+		}
+		return fmt.Errorf("LLM returned %s completion outcome with stop reason %q", outcome, reason)
+	}
 }
 
 // toolLoopObserver receives best-effort progress events from the server-side
@@ -152,7 +174,7 @@ func (o *toolLoopObserver) autoPoll() {
 }
 
 func formatToolProgress(tc llm.ToolCall, result string) string {
-	status := "completed"
+	status := completionStatusCompleted
 	var parsed struct {
 		Success *bool `json:"success"`
 		Data    struct {
@@ -262,8 +284,9 @@ CREATE_AGENT INVARIANTS (a rejected Agent config wastes a child task and is
 your bug — read this section before calling create_agent):
 - runtime.type and model.provider are MUTUALLY EXCLUSIVE on the same Agent.
   - For coders/reviewers that need a workspace (git, shell): set
-    runtime.type=codex|claude|copilot, set runtime.secretRef, OMIT model.provider.
-    Optionally set model.name (the runtime picks a sensible default if omitted).
+    runtime.type=codex|claude|copilot|opencode, set runtime.secretRef, OMIT model.provider.
+    OpenCode requires model.name to be the endpoint-specific model ID.
+    For codex, claude, and copilot, model.name is optional because the runtime can select a default.
   - For pure LLM analysis personas (no git, no shell): set model.provider
     + model.name, OMIT runtime.
 - Coder/reviewer Agents you create in chat MUST set resources so the worker pod
@@ -299,10 +322,10 @@ WORKFLOW:
    and run the project's tests; the ai worker has no git workspace and may have no
    upstream LLM credentials in this cluster, so create_ai_task reviewers fail with
    'API key for ... not found' even when the Agent shape is otherwise valid). The
-   reviewer Agent MUST be runtime-backed (runtime.type=codex|claude|copilot), NOT an
+   reviewer Agent MUST be runtime-backed (runtime.type=codex|claude|copilot|opencode), NOT an
    LLM-only analysis Agent. Use the REVIEW PROMPT template below.
    CRITICAL: Set workspace.branch to the implementation push branch. OMIT workspace.pushBranch
-   entirely — reviewers are READ-ONLY. The Codex/Claude/Copilot worker stages and pushes any
+   entirely — reviewers are READ-ONLY. The Codex/Claude/Copilot/OpenCode worker stages and pushes any
    uncommitted diff after the agent finishes; reviewers write no code, so a set pushBranch
    triggers 'failed to finalize result: ORKA_PUSH_BRANCH=... but no workspace diff was produced'
    and the review Task fails even when the review itself was correct.
@@ -499,7 +522,7 @@ CRITICAL RULES:
   - "go: command not found" with a golang:* image → you used ["bash","-lc"] which resets PATH. Re-issue the container task with command=["sh","-c"] (the official images put go on PATH via Dockerfile ENV, which a non-login sh -c preserves).
   - "go.mod requires go >= X.Y" → your validation image's Go is too old. Re-issue the container task with image="golang:<X.Y or newer>". For future tasks against the same repo, always read go.mod first (one-line discovery container task) and pick the image from the toolchain directive.
   - "could not create module cache" / "mkdir /go/pkg: read-only file system" / "mkdir /root/.cache: read-only file system" → the worker FS is read-only outside /tmp, /home/worker, /workspace. Default Go caches (/go/pkg/mod, /root/.cache/go-build) are NOT writable. Re-issue the container task wrapping the WHOLE chain: 'export GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache && go test ./... && go build ./... && go vet ./...'. Inline 'GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache go test && go build' does NOT propagate the env to chained subcommands — the prefix only applies to 'go test', then 'go build' reverts to /go/pkg and crashes the same way. Same pattern for any language with default caches outside writable paths (e.g. npm: 'export npm_config_cache=/tmp/npm-cache'; pip: 'export PIP_CACHE_DIR=/tmp/pip-cache').
-  - "API key for ... not found" / "anthropic api key" / "openai api key" on an ai task → the ai worker tried to call the upstream provider SDK directly but the worker pod has no upstream credentials. This cluster routes through Orka providers; ai workers may have no direct API keys for upstream providers. Recovery: switch the task from create_ai_task to create_agent_task with a runtime-backed Agent (codex/claude/copilot — the runtime carries its own credentials). For reviewer/QA personas this is ALWAYS the right shape; the runtime workspace also gives the reviewer the git access it needs to fetch the branch. Do NOT retry the same ai task with a different LLM-only Agent — the credential gap is in the worker pod, not the Agent shape.
+  - "API key for ... not found" / "anthropic api key" / "openai api key" on an ai task → the ai worker tried to call the upstream provider SDK directly but the worker pod has no upstream credentials. This cluster routes through Orka providers; ai workers may have no direct API keys for upstream providers. Recovery: switch the task from create_ai_task to create_agent_task with a runtime-backed Agent (codex/claude/copilot/opencode — the runtime carries its own credentials). For reviewer/QA personas this is ALWAYS the right shape; the runtime workspace also gives the reviewer the git access it needs to fetch the branch. Do NOT retry the same ai task with a different LLM-only Agent — the credential gap is in the worker pod, not the Agent shape.
   - "git secret ... not found" → omit gitSecretRef on create_agent_task so Orka auto-discovers from the candidate list.
 - A failed Agent shape is YOUR bug — fix the Agent before retrying. The same broken Agent will fail every Task you assign to it.
 - Validation/review→fix cycle continues until validation passes and every reviewer says LGTM or APPROVED, with MAX 6 validation repair tasks and MAX 8 review repair tasks. If still failing after the relevant repair limit, report VALIDATION_BLOCKED or REVIEW_BLOCKED with remaining issues and stop
@@ -660,6 +683,9 @@ func runToolLoopWithObserver(
 				observer.finalContent(resp.Content)
 				return resp, nil
 			}
+			if err := validateToolLoopCompletion(resp); err != nil {
+				return nil, err
+			}
 			observer.finalContent(resp.Content)
 			return resp, nil
 		}
@@ -703,6 +729,9 @@ func runToolLoopWithObserver(
 		}
 		if err != nil {
 			return nil, fmt.Errorf("LLM completion failed: %w", err)
+		}
+		if err := validateToolLoopCompletion(resp); err != nil {
+			return nil, err
 		}
 
 		// No tool calls → potentially final response. Guard against premature

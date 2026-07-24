@@ -47,7 +47,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("orka-agent-harness-wrapper", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&cfg.ListenAddr, "listen-addr", cfg.ListenAddr, "HTTP listen address")
-	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "runtime adapter: generic, codex, claude, copilot, multi")
+	fs.StringVar(&cfg.Runtime, "runtime", cfg.Runtime, "runtime adapter: generic, codex, claude, copilot, opencode, multi")
 	fs.StringVar(&cfg.WorkDir, "workdir", cfg.WorkDir, "default command working directory")
 	fs.StringVar(&cfg.Generic.Command, "command", cfg.Generic.Command, "generic adapter command path")
 	fs.Var(&extraArgs, "arg", "generic adapter command argument (repeatable)")
@@ -93,6 +93,7 @@ func run(args []string) error {
 		cfg.Codex.WorkDir = cfg.WorkDir
 		cfg.Claude.WorkDir = cfg.WorkDir
 		cfg.Copilot.WorkDir = cfg.WorkDir
+		cfg.Opencode.WorkDir = cfg.WorkDir
 	}
 	telemetryEnabled := workerenv.IsTrue(os.Getenv(workerenv.EnableTelemetry))
 	tracingShutdown, err := tracing.Init("orka-agent-harness-wrapper", telemetryEnabled)

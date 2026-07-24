@@ -341,6 +341,39 @@ func TestMapFinishReason(t *testing.T) {
 	}
 }
 
+func TestMapStreamFinishReason(t *testing.T) {
+	tests := []struct {
+		name               string
+		reason             string
+		hasNonBlankContent bool
+		hasToolCalls       bool
+		want               string
+		wantOK             bool
+	}{
+		{name: "completed", reason: "end_turn", hasNonBlankContent: true, want: finishReasonStop, wantOK: true},
+		{name: "blank completed", reason: "end_turn"},
+		{name: "completed with calls", reason: "stop", hasToolCalls: true, want: finishReasonToolCalls, wantOK: true},
+		{name: "empty stop sequence", reason: finishReasonStopSequence, want: finishReasonStop, wantOK: true},
+		{name: "stop sequence with calls", reason: finishReasonStopSequence, hasToolCalls: true, want: finishReasonToolCalls, wantOK: true},
+		{name: "tool calls", reason: "tool_use", hasToolCalls: true, want: finishReasonToolCalls, wantOK: true},
+		{name: "tool reason without calls", reason: "tool_calls"},
+		{name: "length", reason: "max_tokens", want: oaiStopReasonLength, wantOK: true},
+		{name: "content filter", reason: "content_filter", want: "content_filter", wantOK: true},
+		{name: "refusal", reason: "refusal"},
+		{name: "failed", reason: "failed"},
+		{name: "missing reason"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := mapStreamFinishReason(tt.reason, tt.hasNonBlankContent, tt.hasToolCalls)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("mapStreamFinishReason() = (%q, %t), want (%q, %t)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestExtractContent(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -474,6 +507,19 @@ func TestWriteStreamDone(t *testing.T) {
 	got := buf.String()
 	if got != "data: [DONE]\n\n" {
 		t.Errorf("writeStreamDone() = %q, want %q", got, "data: [DONE]\n\n")
+	}
+}
+
+func TestWriteStreamError(t *testing.T) {
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+
+	if err := writeStreamError(w, "refusal"); err != nil {
+		t.Fatalf("writeStreamError() error = %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, `"type":"server_error"`) || !strings.Contains(got, `non-success outcome \"refusal\"`) {
+		t.Fatalf("writeStreamError() = %q", got)
 	}
 }
 
@@ -648,6 +694,48 @@ func TestHandleNonStreamingCompletion_Error(t *testing.T) {
 	}
 }
 
+func TestHandleNonStreamingCompletion_RejectsInvalidOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *llm.CompletionResponse
+	}{
+		{name: "nil response"},
+		{name: "blank completion", resp: &llm.CompletionResponse{StopReason: "end_turn"}},
+		{name: "refusal", resp: &llm.CompletionResponse{StopReason: "refusal"}},
+		{name: "failed", resp: &llm.CompletionResponse{StopReason: "failed"}},
+		{name: "missing reason", resp: &llm.CompletionResponse{Content: "partial"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &oaiMockProvider{resp: tt.resp}
+			handler, app := setupTestOpenAIHandler()
+			app.Post("/test", func(c fiber.Ctx) error {
+				return handler.handleNonStreamingCompletion(
+					c, context.Background(), mock,
+					&llm.CompletionRequest{Model: "gpt-4"},
+					"chatcmpl-invalid", "gpt-4", 1234567890,
+				)
+			})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.StatusCode != fiber.StatusBadGateway {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusBadGateway)
+			}
+			var oaiErr OAIError
+			if err := json.NewDecoder(resp.Body).Decode(&oaiErr); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if oaiErr.Error.Type != "server_error" {
+				t.Fatalf("error type = %q", oaiErr.Error.Type)
+			}
+		})
+	}
+}
+
 // --- Tests: handleStreamingCompletion ---
 
 func TestHandleStreamingCompletion_StreamSuccess(t *testing.T) {
@@ -684,6 +772,176 @@ func TestHandleStreamingCompletion_StreamSuccess(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "[DONE]") {
 		t.Errorf("expected [DONE] in stream, got: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_RejectsNonSuccessOutcome(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 1)
+	ch <- llm.StreamChunk{Done: true, StopReason: "refusal"}
+	close(ch)
+
+	mock := &oaiMockProvider{streamCh: ch}
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-refusal", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"type":"server_error"`) || !strings.Contains(bodyStr, `non-success outcome \"refusal\"`) {
+		t.Fatalf("expected stream error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"finish_reason":"stop"`) || strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("non-success stream was completed successfully: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_RejectsBlankCompletion(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 1)
+	ch <- llm.StreamChunk{Done: true, StopReason: "end_turn"}
+	close(ch)
+
+	mock := &oaiMockProvider{streamCh: ch}
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-blank", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `non-success outcome \"end_turn\"`) {
+		t.Fatalf("expected blank completion error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("blank completion emitted [DONE]: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_FallbackRejectsBlankCompletion(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		resp:      &llm.CompletionResponse{Content: " \n", StopReason: "end_turn"},
+	}
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-blank-fallback", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `non-success outcome \"end_turn\"`) {
+		t.Fatalf("expected blank fallback error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("blank fallback emitted [DONE]: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_FallbackRejectsNilResponse(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+	}
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-nil-fallback", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"type":"server_error"`) || !strings.Contains(bodyStr, "without a successful terminal outcome") {
+		t.Fatalf("expected nil fallback error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("nil fallback emitted [DONE]: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_RejectsMissingTerminalChunk(t *testing.T) {
+	ch := make(chan llm.StreamChunk, 1)
+	ch <- llm.StreamChunk{Content: "partial"}
+	close(ch)
+
+	mock := &oaiMockProvider{streamCh: ch}
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-missing-terminal", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `non-success outcome \"missing_terminal_chunk\"`) {
+		t.Fatalf("expected missing terminal error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("truncated stream emitted [DONE]: %s", bodyStr)
+	}
+}
+
+func TestHandleStreamingCompletion_FallbackRejectsNonSuccessOutcome(t *testing.T) {
+	mock := &oaiMockProvider{
+		streamErr: fmt.Errorf("streaming not supported"),
+		resp:      &llm.CompletionResponse{Content: "partial", StopReason: "failed"},
+	}
+	handler, app := setupTestOpenAIHandler()
+	app.Post("/test", func(c fiber.Ctx) error {
+		return handler.handleStreamingCompletion(
+			c, context.Background(), mock,
+			&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "hi"}}},
+			"chatcmpl-failed", "gpt-4", 1234567890, nil,
+		)
+	})
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"type":"server_error"`) || !strings.Contains(bodyStr, `non-success outcome \"failed\"`) {
+		t.Fatalf("expected fallback stream error, got: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "partial") || strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("non-success fallback emitted completion data: %s", bodyStr)
 	}
 }
 
@@ -747,11 +1005,11 @@ func TestHandleStreamingCompletion_BothFail(t *testing.T) {
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
-	if !strings.Contains(bodyStr, "Error:") {
-		t.Errorf("expected error chunk, got: %s", bodyStr)
+	if !strings.Contains(bodyStr, `"type":"server_error"`) || !strings.Contains(bodyStr, `non-success outcome \"provider_error\"`) {
+		t.Errorf("expected stream error, got: %s", bodyStr)
 	}
-	if !strings.Contains(bodyStr, "[DONE]") {
-		t.Errorf("expected [DONE], got: %s", bodyStr)
+	if strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("failed stream emitted [DONE]: %s", bodyStr)
 	}
 }
 
@@ -985,6 +1243,43 @@ func TestHandleStreamingToolLoop_StreamsProgressAndHidesServerSideToolCalls(t *t
 	}
 	if mock.callIdx != 2 {
 		t.Fatalf("expected 2 LLM calls, got %d", mock.callIdx)
+	}
+}
+
+func TestHandleStreamingToolLoop_RejectsInvalidOutcome(t *testing.T) {
+	tests := []struct {
+		name string
+		mock *oaiMockProvider
+	}{
+		{name: "provider error", mock: &oaiMockProvider{err: fmt.Errorf("provider failed")}},
+		{name: "nil response", mock: &oaiMockProvider{}},
+		{name: "failed outcome", mock: &oaiMockProvider{resp: &llm.CompletionResponse{StopReason: "failed"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler, app := setupTestOpenAIHandler()
+			app.Post("/test", func(c fiber.Ctx) error {
+				return handler.handleStreamingToolLoop(
+					c, context.Background(), tt.mock,
+					&llm.CompletionRequest{Model: "gpt-4", Messages: []llm.Message{{Role: "user", Content: "ship"}}},
+					"chatcmpl-invalid-tool-loop", "gpt-4", 1234567890, nil, nil,
+				)
+			})
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/test", nil))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			bodyStr := string(body)
+			if !strings.Contains(bodyStr, `"type":"server_error"`) {
+				t.Fatalf("expected stream error, got: %s", bodyStr)
+			}
+			if strings.Contains(bodyStr, "[DONE]") || strings.Contains(bodyStr, `"finish_reason":"stop"`) {
+				t.Fatalf("invalid tool loop completed successfully: %s", bodyStr)
+			}
+		})
 	}
 }
 

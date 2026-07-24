@@ -98,7 +98,7 @@ Orka uses eight core CRDs:
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
 | **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in core, coordination, GitHub, agent-management, planning, memory, transcript, chat, session, and task-management tools |
-| **CLI Harness Wrapper** (`workers/harness/cliwrapper/`) | Runs Codex, Claude, Copilot, or generic CLI turns through the `orka.harness.v1` protocol |
+| **CLI Harness Wrapper** (`workers/harness/cliwrapper/`) | Runs Codex, Claude, Copilot, OpenCode, or generic CLI turns through the `orka.harness.v1` protocol |
 
 ## Design Decisions
 
@@ -400,3 +400,16 @@ Copilot-compatible Responses API 403s are handled as a scoped fallback to Chat C
 - The Anthropic SDK appends `v1/messages` to the base URL — strip trailing `/v1` from custom `baseURL` to avoid doubled paths
 - System messages are converted to `tool_result` blocks, not user messages
 - Tool input JSON parsing errors are silently ignored (`_ = json.Unmarshal`)
+
+## Generic external gateway plane
+
+The `gateway.orka.ai/v1alpha1` vertical slice separates four seams:
+
+1. **Transport/adapter:** an out-of-tree `orka.gateway.v1` service normalizes provider traffic and owns provider credentials.
+2. **Semantic routing/governance:** `GatewayBinding` matches normalized account, context, thread, and sender identity to one Agent. Unknown or ambiguous identity fails closed.
+3. **Execution:** durable Session-ordered events create normal Agent Tasks. The bound Agent, not a transport resource, selects the execution runtime.
+4. **Hosting/network:** a Gateway uses either an HTTPS endpoint or a TLS-authenticated selector-backed same-namespace Service. Ingress controllers, meshes, proxies, and external load balancers remain optional deployment choices.
+
+The SQLite gateway inbox/outbox acknowledges inbound traffic independently from execution, deduplicates external event IDs, serializes work per Session, and delivers terminal results with stable idempotency IDs. Canonical conversation history remains in Orka Sessions; adapter and runtime transcripts are replaceable projections.
+
+See [the Generic Gateway API](../reference/gateway-api.md) for the normative envelope, authentication, bounds, state machines, and retry behavior.

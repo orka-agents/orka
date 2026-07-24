@@ -66,6 +66,7 @@ type Config struct {
 	Codex                CodexAdapterConfig
 	Claude               ClaudeAdapterConfig
 	Copilot              CopilotAdapterConfig
+	Opencode             OpencodeAdapterConfig
 }
 
 type GenericAdapterConfig struct {
@@ -95,6 +96,11 @@ type CopilotAdapterConfig struct {
 	Path       string
 	HelperPath string
 	WorkDir    string
+}
+
+type OpencodeAdapterConfig struct {
+	Path    string
+	WorkDir string
 }
 
 func DefaultConfig() Config {
@@ -135,6 +141,7 @@ func LoadConfigFromEnvUnvalidated() (Config, error) {
 		cfg.Generic.WorkDir = v
 		cfg.Codex.WorkDir = v
 		cfg.Claude.WorkDir = v
+		cfg.Opencode.WorkDir = v
 	}
 	if v := strings.TrimSpace(os.Getenv(EnvCommand)); v != "" {
 		cfg.Generic.Command = v
@@ -240,7 +247,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("auth token is required unless %s=true", EnvAllowUnauthenticated)
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Runtime)) {
-	case "", RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeMulti:
+	case "", RuntimeGeneric, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeMulti:
 		return nil
 	default:
 		return fmt.Errorf("unsupported runtime adapter %q", c.Runtime)

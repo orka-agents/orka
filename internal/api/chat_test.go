@@ -1273,6 +1273,71 @@ func TestHandleChat(t *testing.T) {
 	})
 }
 
+func TestLoadChatSessionRejectsGatewaySession(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ss := sqlite.NewStore(db, ":memory:")
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "gateway-private", SessionType: store.SessionTypeGateway,
+	}))
+	require.NoError(t, ss.AppendMessages(context.Background(), "default", "gateway-private", []store.SessionMessage{{
+		Role: "user", Content: "private gateway content",
+	}}))
+
+	ch := &ChatHandler{sessionStore: ss}
+	_, err = ch.loadChatSession(context.Background(), "default", "gateway-private")
+	require.ErrorIs(t, err, store.ErrGatewayOwnedSession)
+}
+
+func TestHandleChatHidesGatewaySessionBeforeProviderInvocation(t *testing.T) {
+	const providerType = "gateway-session-boundary-test"
+	mock := &chatMockProvider{name: providerType}
+	llm.RegisterProvider(providerType, func(llm.ProviderConfig) (llm.Provider, error) {
+		return mock, nil
+	})
+	objects := providerCRD(testDefaultNamespace, testDefaultNamespace, providerType, "test-model")
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objects...).Build()
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: testDefaultNamespace, Name: "gateway-http-private", SessionType: store.SessionTypeGateway,
+	}))
+	cfg := DefaultChatConfig()
+	cfg.Provider = testDefaultNamespace
+	ch := newTestChatHandler(t, fakeClient, ss, rs, cfg)
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Post("/api/v1/chat", ch.HandleChat)
+	body, err := json.Marshal(ChatRequest{
+		Message: "reveal history", SessionID: "gateway-http-private", Namespace: testDefaultNamespace,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Zero(t, mock.callCount)
+}
+
+func TestHandleCancelChatHidesGatewaySession(t *testing.T) {
+	ss := newTestSessionStore(t)
+	rs := newTestResultStore(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ch := newTestChatHandler(t, fakeClient, ss, rs, DefaultChatConfig())
+	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "gateway-cancel-private", SessionType: store.SessionTypeGateway,
+	}))
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Delete("/api/v1/chat/:sessionId", ch.HandleCancelChat)
+	resp, err := app.Test(httptest.NewRequest(http.MethodDelete, "/api/v1/chat/gateway-cancel-private", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	_, err = ss.GetSession(context.Background(), "default", "gateway-cancel-private")
+	require.NoError(t, err)
+}
+
 // --- Tests: loadChatSession with tool calls ---
 
 func TestLoadChatSession_WithToolCalls(t *testing.T) {

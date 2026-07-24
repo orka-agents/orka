@@ -86,11 +86,13 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		panic(err)
 	}
 	ss := sqlite.NewStore(db, ":memory:")
+	sessionManager := NewSessionManager(ss)
+	sessionManager.SetGatewayEventStore(ss)
 	return &TaskReconciler{
 		Client:              fc,
 		Scheme:              scheme,
 		JobBuilder:          NewJobBuilder(fc),
-		SessionManager:      NewSessionManager(ss),
+		SessionManager:      sessionManager,
 		Recorder:            record.NewFakeRecorder(100),
 		ResultStore:         ss,
 		MessageStore:        ss,
@@ -469,6 +471,41 @@ func TestValidateTaskAgentCompatibility_AgentTaskCopilotRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntime(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   &corev1alpha1.ModelConfig{Name: "kimi-k2"},
+		},
+	}
+	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want nil for opencode harness runtime", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_AgentTaskOpencodeRuntimeRequiresModel(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "do stuff"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+		},
+	}
+
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "requires spec.model.name") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want missing OpenCode model rejection", err)
+	}
+}
+
 func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{
@@ -484,6 +521,25 @@ func TestValidateTaskAgentCompatibility_ReadOnlyCopilotRejected(t *testing.T) {
 	err := r.validateTaskAgentCompatibility(task, agent)
 	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support copilot") {
 		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only copilot rejection", err)
+	}
+}
+
+func TestValidateTaskAgentCompatibility_ReadOnlyOpencodeRejected(t *testing.T) {
+	r := &TaskReconciler{}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "review"},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
+		Spec: corev1alpha1.AgentSpec{
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model:   &corev1alpha1.ModelConfig{Name: "kimi-k2"},
+		},
+	}
+	err := r.validateTaskAgentCompatibility(task, agent)
+	if err == nil || !strings.Contains(err.Error(), "read-only agent tasks do not support opencode") {
+		t.Fatalf("validateTaskAgentCompatibility() error = %v, want read-only opencode rejection", err)
 	}
 }
 
@@ -3070,16 +3126,13 @@ func TestHandleDeletion_NoFinalizer(t *testing.T) {
 	}
 }
 
-func TestHandleDeletion_WithResultRef(t *testing.T) {
+func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-result",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
-		},
-		Status: corev1alpha1.TaskStatus{
-			ResultRef: &corev1alpha1.ResultReference{Available: true},
 		},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -4670,6 +4723,158 @@ func TestAcquireSessionLock_SessionNotExist_CreateFalse(t *testing.T) {
 	}
 	if !strings.Contains(updated.Status.Message, "session nonexist-sess not found and create=false") {
 		t.Fatalf("message = %q, want missing session failure", updated.Status.Message)
+	}
+}
+
+func TestAcquireSessionLock_GatewayOwnershipMismatchFailsTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "forked-gateway-task", Namespace: "default", UID: "forked-task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "gateway-session", Create: false, Append: false,
+				MaxMessages:      store.GatewayTranscriptMessageLimit,
+				ThroughMessageID: store.GatewayUserMessageID("gateway-event-pending"),
+				PromptIncluded:   true,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	sqliteStore, ok := r.ResultStore.(*sqlite.Store)
+	if !ok {
+		t.Fatalf("ResultStore = %T, want *sqlite.Store", r.ResultStore)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	_, _, err := sqliteStore.AdmitGatewayEvent(context.Background(), store.GatewayEventAdmission{
+		Event: store.GatewayEvent{
+			ID: "gateway-event", Namespace: "default", NamespaceUID: "namespace-uid", GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat",
+			BindingName: "room", BindingUID: "binding-uid", ExternalEventID: "external-event",
+			ProtocolVersion: "orka.gateway.v1", EventType: "text", AccountID: "acct", ContextID: "room",
+			SenderID: "sender", Text: "hello", ReplyTarget: "room", SessionName: "gateway-session",
+			TaskName: "admitted-gateway-task", ReceivedAt: now, NextAttemptAt: now,
+			ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		},
+		AppendUserMessage: true,
+		PendingLimit:      100,
+	})
+	if err != nil {
+		t.Fatalf("AdmitGatewayEvent: %v", err)
+	}
+
+	_, err, locked := r.acquireSessionLock(context.Background(), task)
+	if !locked {
+		t.Error("expected locked=true after terminal ownership failure")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatalf("Get updated task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "not the admitted owner of gateway session") {
+		t.Fatalf("message = %q, want gateway ownership failure", updated.Status.Message)
+	}
+}
+
+func TestAcquireSessionLock_ModifiedGatewaySessionPolicyFailsTask(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "gateway-policy-task", Namespace: "default", UID: "gateway-policy-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "mutated-session", Create: true, Append: true, MaxMessages: 1,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	sqliteStore := r.ResultStore.(*sqlite.Store)
+	now := time.Now().UTC().Truncate(time.Second)
+	event := store.GatewayEvent{
+		ID: "gateway-policy-event", Namespace: "default", NamespaceUID: "namespace-uid",
+		GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat", BindingName: "room", BindingUID: "binding-uid",
+		ExternalEventID: "gateway-policy-external", ProtocolVersion: "orka.gateway.v1", EventType: "text",
+		State: store.GatewayEventTaskCreated, AccountID: "acct", ContextID: "room", SenderID: "sender",
+		Text: "hello", ReplyTarget: "room", SessionName: "canonical-session", TaskName: task.Name,
+		TaskUID: string(task.UID), ReceivedAt: now, NextAttemptAt: now, ExpiresAt: now.Add(time.Hour),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if _, _, err := sqliteStore.AdmitGatewayEvent(context.Background(), store.GatewayEventAdmission{Event: event}); err != nil {
+		t.Fatal(err)
+	}
+	_, err, locked := r.acquireSessionLock(context.Background(), task)
+	if !locked || err != nil {
+		t.Fatalf("modified gateway policy acquire = (err=%v, locked=%v)", err, locked)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(updated.Status.Message, "session policy was modified") {
+		t.Fatalf("updated task status = %#v", updated.Status)
+	}
+}
+
+func TestAcquireSessionLock_GatewayOwnershipPendingRequeues(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "admitted-gateway-task", Namespace: "default", UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			SessionRef: &corev1alpha1.SessionReference{
+				Name: "gateway-session", Create: false, Append: false,
+				MaxMessages:      store.GatewayTranscriptMessageLimit,
+				ThroughMessageID: store.GatewayUserMessageID("gateway-event-pending"),
+				PromptIncluded:   true,
+			},
+		},
+	}
+	r := newUnitReconciler(scheme, task)
+	sqliteStore, ok := r.ResultStore.(*sqlite.Store)
+	if !ok {
+		t.Fatalf("ResultStore = %T, want *sqlite.Store", r.ResultStore)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	event := store.GatewayEvent{
+		ID: "gateway-event-pending", Namespace: "default", NamespaceUID: "namespace-uid", GatewayUID: "gateway-uid", GatewayGeneration: 1, GatewayName: "chat",
+		BindingName: "room", BindingUID: "binding-uid", ExternalEventID: "external-event-pending",
+		ProtocolVersion: "orka.gateway.v1", EventType: "text", AccountID: "acct", ContextID: "room",
+		SenderID: "sender", Text: "hello", ReplyTarget: "room", SessionName: "gateway-session",
+		TaskName: task.Name, ReceivedAt: now, NextAttemptAt: now,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+	}
+	if _, _, err := sqliteStore.AdmitGatewayEvent(context.Background(), store.GatewayEventAdmission{
+		Event: event, AppendUserMessage: true, PendingLimit: 100,
+	}); err != nil {
+		t.Fatalf("AdmitGatewayEvent: %v", err)
+	}
+	if _, err := sqliteStore.ClaimNextGatewayEvent(context.Background(), "", "dispatcher", now, time.Minute); err != nil {
+		t.Fatalf("ClaimNextGatewayEvent: %v", err)
+	}
+
+	result, err, locked := r.acquireSessionLock(context.Background(), task)
+	if !locked || err != nil || result.RequeueAfter <= 0 {
+		t.Fatalf("pending ownership acquire = (result=%+v, err=%v, locked=%v)", result, err, locked)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, current); err != nil {
+		t.Fatalf("Get current task: %v", err)
+	}
+	if current.Status.Phase == corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("task failed while ownership linkage was pending: %#v", current.Status)
+	}
+	if err := sqliteStore.MarkGatewayEventTaskCreated(
+		context.Background(), event.Namespace, event.ID, event.TaskName, string(task.UID), "dispatcher", now,
+	); err != nil {
+		t.Fatalf("MarkGatewayEventTaskCreated: %v", err)
+	}
+	if result, err, locked := r.acquireSessionLock(context.Background(), task); locked || err != nil {
+		t.Fatalf("linked ownership acquire = (result=%+v, err=%v, locked=%v)", result, err, locked)
 	}
 }
 

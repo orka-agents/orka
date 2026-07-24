@@ -23,6 +23,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -54,6 +55,8 @@ var _ = BeforeSuite(func() {
 	err = corev1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = workspacev1alpha1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = gatewayv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme

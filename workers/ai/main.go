@@ -71,6 +71,19 @@ const (
 var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
 
 const modelLoopEventTimeout = 250 * time.Millisecond
+const maxSessionContextBytes = 96 << 10
+const roleUser = "user"
+
+const finalAnswerRetryPrompt = "Your last response was empty. Return the final answer now using the evidence " +
+	"already gathered. Do not call tools."
+
+type completionDecision int
+
+const (
+	completionDecisionReturn completionDecision = iota
+	completionDecisionToolCalls
+	completionDecisionRetryFinal
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -244,6 +257,8 @@ func run() (err error) {
 	}
 
 	// Autonomous mode: fetch plan state and augment system prompt
+	planPromptContext := ""
+	approvalPromptContext := ""
 	if coordinationEnv.AutonomousMode {
 		iteration := coordinationEnv.AutonomousIteration
 		maxIter := coordinationEnv.AutonomousMaxIterations
@@ -258,12 +273,22 @@ func run() (err error) {
 			return err
 		}
 		resolvedContext := strings.TrimSpace(formatResolvedApprovalsContext(resolvedApprovals))
-		if planContext != "" && resolvedContext != "" {
-			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n%s\n\n## Task\n\n%s", planContext, resolvedContext, prompt)
-		} else if planContext != "" {
-			prompt = fmt.Sprintf("## Previous Plan State\n\n%s\n\n## Task\n\n%s", planContext, prompt)
-		} else if resolvedContext != "" {
-			prompt = prependResolvedApprovalsContext(prompt, resolvedApprovals)
+		if planContext != "" {
+			planPromptContext = "## Previous Plan State\n\n" + planContext
+		}
+		if resolvedContext != "" {
+			approvalPromptContext = resolvedContext
+		}
+		promptSections := make([]string, 0, 2)
+		if planPromptContext != "" {
+			promptSections = append(promptSections, planPromptContext)
+		}
+		if approvalPromptContext != "" {
+			promptSections = append(promptSections, approvalPromptContext)
+		}
+		promptContext := strings.Join(promptSections, "\n\n")
+		if promptContext != "" {
+			prompt = promptContext + "\n\n## Task\n\n" + prompt
 		}
 
 		fmt.Printf("Autonomous mode: iteration %d\n", iteration)
@@ -280,12 +305,8 @@ func run() (err error) {
 	}
 
 	// Build messages
-	messages := make([]llm.Message, 0, len(sessionContext)+1)
-	messages = append(messages, sessionContext...)
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: prompt,
-	})
+	promptIncluded := strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.SessionPromptIncluded)), "true")
+	messages := buildInitialMessages(sessionContext, prompt, promptIncluded, planPromptContext, approvalPromptContext)
 
 	// Build tools for LLM (built-in + custom)
 	llmTools := buildLLMTools(enabledTools, customTools)
@@ -792,6 +813,101 @@ func getAPIKey(provider string) string {
 	return ""
 }
 
+func buildInitialMessages(
+	sessionContext []llm.Message,
+	prompt string,
+	promptIncluded bool,
+	planPromptContext string,
+	approvalPromptContext string,
+) []llm.Message {
+	messages := make([]llm.Message, 0, len(sessionContext)+1)
+	messages = append(messages, sessionContext...)
+	if !promptIncluded || len(sessionContext) == 0 {
+		messages = append(messages, llm.Message{Role: roleUser, Content: prompt})
+		return boundInitialMessages(messages)
+	}
+	planPromptContext = strings.TrimSpace(planPromptContext)
+	approvalPromptContext = strings.TrimSpace(approvalPromptContext)
+	if planPromptContext == "" && approvalPromptContext == "" {
+		return boundInitialMessages(messages)
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != roleUser {
+			continue
+		}
+		messages[i].Content = mergePromptContext(messages[i].Content, planPromptContext, approvalPromptContext)
+		return boundInitialMessages(messages)
+	}
+	messages = append(messages, llm.Message{Role: roleUser, Content: strings.Join(
+		compactPromptSections(planPromptContext, approvalPromptContext), "\n\n",
+	)})
+	return boundInitialMessages(messages)
+}
+
+func mergePromptContext(currentUserMessage, planPromptContext, approvalPromptContext string) string {
+	const separator = "\n\n## Current User Message\n\n"
+	planPromptContext = strings.TrimSpace(planPromptContext)
+	approvalPromptContext = strings.TrimSpace(approvalPromptContext)
+	fixedBytes := initialMessageBytes(llm.Message{Role: roleUser}) + len(currentUserMessage) + len(separator)
+	if approvalPromptContext != "" {
+		fixedBytes += len(approvalPromptContext)
+		if planPromptContext != "" {
+			fixedBytes += 2
+		}
+	}
+	planPromptContext = truncateUTF8(planPromptContext, max(0, maxSessionContextBytes-fixedBytes))
+	sections := compactPromptSections(planPromptContext, approvalPromptContext)
+	if len(sections) == 0 {
+		return currentUserMessage
+	}
+	return strings.Join(sections, "\n\n") + separator + currentUserMessage
+}
+
+func compactPromptSections(sections ...string) []string {
+	result := make([]string, 0, len(sections))
+	for _, section := range sections {
+		if section = strings.TrimSpace(section); section != "" {
+			result = append(result, section)
+		}
+	}
+	return result
+}
+
+func boundInitialMessages(messages []llm.Message) []llm.Message {
+	const maxBytes = maxSessionContextBytes
+	if len(messages) == 0 || maxBytes <= 0 {
+		return nil
+	}
+	mandatory := len(messages) - 1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == roleUser {
+			mandatory = i
+			break
+		}
+	}
+	mandatoryMessage := messages[mandatory]
+	used := initialMessageBytes(mandatoryMessage)
+	start := mandatory
+	for i := mandatory - 1; i >= 0; i-- {
+		size := initialMessageBytes(messages[i])
+		if used+size > maxBytes {
+			break
+		}
+		start = i
+		used += size
+	}
+	for start < mandatory && messages[start].Role != roleUser {
+		start++
+	}
+	bounded := append([]llm.Message(nil), messages[start:mandatory+1]...)
+	bounded[len(bounded)-1] = mandatoryMessage
+	return bounded
+}
+
+func initialMessageBytes(message llm.Message) int {
+	return len(message.Role) + len(message.Content) + len(message.Name) + len(message.ToolCallID) + 16
+}
+
 // loadSessionContext loads messages from the session transcript
 func loadSessionContext() []llm.Message {
 	transcriptPath := "/session/transcript.jsonl"
@@ -799,7 +915,10 @@ func loadSessionContext() []llm.Message {
 	if err != nil {
 		return nil
 	}
+	return parseSessionContext(data)
+}
 
+func parseSessionContext(data []byte) []llm.Message {
 	var messages []llm.Message
 	lines := strings.SplitSeq(string(data), "\n")
 	for line := range lines {
@@ -808,18 +927,15 @@ func loadSessionContext() []llm.Message {
 			continue
 		}
 
-		var msg struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}
+		var msg store.SessionMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
 			continue
 		}
 
-		if msg.Role == "user" || msg.Role == "assistant" {
+		if msg.Role == roleUser || msg.Role == "assistant" {
 			messages = append(messages, llm.Message{
 				Role:    msg.Role,
-				Content: msg.Content,
+				Content: store.RuntimeSessionMessageContent(msg),
 			})
 		}
 	}
@@ -923,19 +1039,9 @@ func executeAgentLoopWithEvents(
 	eventRecorder common.EventRecorder,
 	baseToolCtxOpt ...*tools.ToolContext,
 ) (string, error) {
-	var baseToolCtx *tools.ToolContext
-	if len(baseToolCtxOpt) > 0 {
-		baseToolCtx = baseToolCtxOpt[0]
-	}
-
+	baseToolCtx := optionalToolContext(baseToolCtxOpt)
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
-	maxIterations := 10
-	if coordinationEnv.Enabled {
-		maxIterations = 50
-	}
-	if coordinationEnv.AutonomousMode {
-		maxIterations = 100
-	}
+	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
@@ -946,14 +1052,21 @@ func executeAgentLoopWithEvents(
 		return "", err
 	}
 
-	for iteration := range maxIterations {
-		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, llmTools, baseToolCtx)
+	iterationLimit := maxIterations
+	blankFinalRetried := false
+	finalAnswerRetry := false
+	for iteration := 0; iteration < iterationLimit; iteration++ {
+		requestTools := llmTools
+		if finalAnswerRetry {
+			requestTools = nil
+		}
+		stepCtx, stepSpan := startAgentStepSpan(ctx, iteration, provider, model, requestTools, baseToolCtx)
 		req := &llm.CompletionRequest{
 			Model:        model,
 			Messages:     messages,
 			SystemPrompt: systemPrompt,
 			MaxTokens:    4096,
-			Tools:        llmTools,
+			Tools:        requestTools,
 		}
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
@@ -962,7 +1075,7 @@ func executeAgentLoopWithEvents(
 				"model":        model,
 				"provider":     llm.ProviderTelemetryName(provider),
 				"messageCount": len(messages),
-				"toolCount":    len(llmTools),
+				"toolCount":    len(requestTools),
 			})),
 		)
 
@@ -986,6 +1099,7 @@ func executeAgentLoopWithEvents(
 			)
 			resp, err = provider.Complete(stepCtx, req)
 		}
+		err = completionCallError(resp, err)
 		if err != nil {
 			errType := aiWorkerErrorType(err)
 			stepSpan.SetStatus(codes.Error, errType)
@@ -1026,10 +1140,28 @@ func executeAgentLoopWithEvents(
 			common.WithEventContentText(resp.Content),
 		)
 
-		// If no tool calls, we're done
-		if len(resp.ToolCalls) == 0 {
+		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
+		if completionErr != nil {
+			stepSpan.RecordError(completionErr)
+			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))
+			stepSpan.SetAttributes(attribute.String(genai.AttrErrorType, aiWorkerErrorType(completionErr)))
 			stepSpan.End()
-			return resp.Content, nil
+			return "", completionErr
+		}
+
+		switch decision {
+		case completionDecisionReturn:
+			stepSpan.End()
+			return result, nil
+		case completionDecisionRetryFinal:
+			blankFinalRetried = true
+			finalAnswerRetry = true
+			iterationLimit++
+			messages = append(messages, llm.Message{Role: "user", Content: finalAnswerRetryPrompt})
+			stepSpan.End()
+			continue
+		case completionDecisionToolCalls:
+			finalAnswerRetry = false
 		}
 
 		// Add assistant message with tool calls
@@ -1171,6 +1303,23 @@ func executeAgentLoopWithEvents(
 	return "", fmt.Errorf("max iterations reached without completion")
 }
 
+func optionalToolContext(contexts []*tools.ToolContext) *tools.ToolContext {
+	if len(contexts) == 0 {
+		return nil
+	}
+	return contexts[0]
+}
+
+func agentLoopMaxIterations(coordinationEnv workerenv.CoordinationEnv) int {
+	if coordinationEnv.AutonomousMode {
+		return 100
+	}
+	if coordinationEnv.Enabled {
+		return 50
+	}
+	return 10
+}
+
 func approvalToolingRequested(coordinationEnv workerenv.CoordinationEnv, allowedToolCalls map[string]struct{}) bool {
 	if len(coordinationEnv.ApprovalRequiredTools) > 0 {
 		return true
@@ -1246,6 +1395,56 @@ func firstNonBlankOriginal(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func evaluateCompletionResponse(
+	resp *llm.CompletionResponse,
+	finalAnswerRetry bool,
+	blankFinalRetried bool,
+) (completionDecision, string, error) {
+	outcome := llm.NormalizeCompletionOutcome(resp)
+	if finalAnswerRetry && outcome == llm.CompletionOutcomeToolCalls {
+		return completionDecisionReturn, "", fmt.Errorf(
+			"model returned tool calls during final answer retry with tools disabled",
+		)
+	}
+
+	switch outcome {
+	case llm.CompletionOutcomeCompleted:
+		if strings.TrimSpace(resp.Content) != "" {
+			return completionDecisionReturn, resp.Content, nil
+		}
+		if blankFinalRetried {
+			return completionDecisionReturn, "", fmt.Errorf("model returned an empty final response after one retry")
+		}
+		return completionDecisionRetryFinal, "", nil
+	case llm.CompletionOutcomeToolCalls:
+		return completionDecisionToolCalls, "", nil
+	case llm.CompletionOutcomeIncomplete,
+		llm.CompletionOutcomeRefused,
+		llm.CompletionOutcomeFailed,
+		llm.CompletionOutcomeUnknown:
+		return completionDecisionReturn, "", completionOutcomeError(outcome, resp.StopReason)
+	default:
+		return completionDecisionReturn, "", fmt.Errorf("model returned an unsupported completion outcome")
+	}
+}
+
+func completionCallError(resp *llm.CompletionResponse, err error) error {
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return completionOutcomeError(llm.CompletionOutcomeUnknown, "")
+	}
+	return nil
+}
+
+func completionOutcomeError(outcome llm.CompletionOutcome, stopReason string) error {
+	if strings.TrimSpace(stopReason) == "" {
+		return fmt.Errorf("model returned an unsupported completion outcome")
+	}
+	return fmt.Errorf("model returned %s response with stop reason %q", outcome, stopReason)
 }
 
 // writeResult submits the result to the controller via HTTP POST.

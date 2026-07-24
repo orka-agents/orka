@@ -1,0 +1,18 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: Gateway
+metadata:
+  name: external-chat
+  namespace: default
+spec:
+  gatewayClassName: generic-chat
+  adapter:
+    # This Service must terminate TLS for external-chat-adapter.default.svc.
+    serviceRef:
+      name: external-chat-adapter
+      port: 8090
+  inboundAuthRef:
+    name: external-chat-inbound
+    key: token
+  outboundAuthRef:
+    name: external-chat-outbound
+    key: token

@@ -26,7 +26,7 @@ jobs:
     env:
       COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       KIND_CLUSTER: orka-live-copilot-proxy-e2e
-      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:latest
+      COPILOT_PROXY_IMAGE: ghcr.io/sozercan/vekil:v0.14.0@sha256:9e6ab58b9c27888db34d76422c3520b3bf103742a058572439a1fe0aa35a2ade
     steps:
       - name: Decide whether live e2e can run
         id: gate
@@ -59,7 +59,7 @@ jobs:
 
       - name: Clone Orka
         if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Free disk space for Docker-heavy live E2E
         if: steps.gate.outputs.run == 'true'
@@ -85,7 +85,7 @@ jobs:
 
       - name: Setup Go
         if: steps.gate.outputs.run == 'true'
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 

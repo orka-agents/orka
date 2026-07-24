@@ -38,6 +38,12 @@ const (
 	eventTypeFunctionCall   = "function_call"
 	providerTypeOpenAI      = "openai"
 	providerTypeAzureOpenAI = "azure-openai"
+	stopReasonCompleted     = "completed"
+	stopReasonFunctionCall  = "function_call"
+	stopReasonIncomplete    = "incomplete"
+	stopReasonRefusal       = "refusal"
+	stopReasonStop          = "stop"
+	stopReasonToolCalls     = "tool_calls"
 )
 
 func init() {
@@ -381,12 +387,47 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 			})
 		}
 	}
-	if len(result.ToolCalls) > 0 {
-		result.StopReason = "tool_calls"
-	} else if result.StopReason == "completed" {
-		result.StopReason = "stop"
-	}
+	result.StopReason = normalizeResponsesStopReason(result.StopReason, resp.Output, false)
 	return result, nil
+}
+
+func normalizeResponsesStopReason(
+	status string,
+	output []responses.ResponseOutputItemUnion,
+	blankIsIncomplete bool,
+) string {
+	status = strings.TrimSpace(status)
+	if status != stopReasonCompleted {
+		return status
+	}
+
+	hasToolCalls := false
+	for _, item := range output {
+		if item.Status != "" && item.Status != stopReasonCompleted {
+			return item.Status
+		}
+		if item.Type == "message" {
+			for _, content := range item.Content {
+				if content.Type == stopReasonRefusal {
+					return stopReasonRefusal
+				}
+			}
+		}
+		if item.Type == eventTypeFunctionCall {
+			hasToolCalls = true
+		}
+	}
+	if hasToolCalls {
+		return stopReasonToolCalls
+	}
+	if blankIsIncomplete {
+		// Streaming callers do not have the agent loop's tool-free final-answer retry state.
+		return stopReasonIncomplete
+	}
+	if status == stopReasonCompleted {
+		return stopReasonStop
+	}
+	return status
 }
 
 type streamSender func(llm.StreamChunk) bool
@@ -680,16 +721,21 @@ func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *r
 }
 
 func handleResponseCompleted(evt responses.ResponseStreamEventUnion, tracker *responseFuncCallTracker, providerName string, send streamSender) bool {
-	stopReason := "stop"
-	for i, item := range evt.Response.Output {
-		if item.Type != eventTypeFunctionCall {
-			continue
-		}
-		stopReason = "tool_calls"
-		fc := tracker.get(item.ID, int64(i), true, item.CallID)
-		tracker.mergeItem(fc, item, true)
-		if !tracker.emit(fc, send) {
-			return false
+	stopReason := normalizeResponsesStopReason(
+		string(evt.Response.Status),
+		evt.Response.Output,
+		strings.TrimSpace(evt.Response.OutputText()) == "",
+	)
+	if stopReason == stopReasonToolCalls {
+		for i, item := range evt.Response.Output {
+			if item.Type != eventTypeFunctionCall {
+				continue
+			}
+			fc := tracker.get(item.ID, int64(i), true, item.CallID)
+			tracker.mergeItem(fc, item, true)
+			if !tracker.emit(fc, send) {
+				return false
+			}
 		}
 	}
 	send(llm.StreamChunk{
@@ -856,6 +902,9 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 		choice := resp.Choices[0]
 		result.Content = choice.Message.Content
 		result.StopReason = choice.FinishReason
+		if strings.TrimSpace(choice.Message.Refusal) != "" {
+			result.StopReason = stopReasonRefusal
+		}
 		for _, tc := range choice.Message.ToolCalls {
 			if tc.Type == "function" {
 				result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
@@ -865,6 +914,14 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 				})
 			}
 		}
+		legacyName, legacyArguments := legacyFunctionCallFromJSON(choice.Message.RawJSON())
+		if len(result.ToolCalls) == 0 && strings.TrimSpace(legacyName) != "" {
+			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
+				ID:        legacyFunctionCallID(resp.ID),
+				Name:      legacyName,
+				Arguments: legacyFunctionCallArguments(legacyArguments),
+			})
+		}
 	}
 	return result, nil
 }
@@ -873,7 +930,7 @@ func (p *Provider) streamChatCompletions(ctx context.Context, req *llm.Completio
 	return p.streamChatCompletionsWithUsage(ctx, req, true)
 }
 
-func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.CompletionRequest, includeUsage bool) <-chan llm.StreamChunk {
+func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.CompletionRequest, includeUsage bool) <-chan llm.StreamChunk { //nolint:gocyclo // Handles modern and legacy streaming fields inline.
 	ch := make(chan llm.StreamChunk)
 	go func() {
 		defer close(ch)
@@ -912,6 +969,13 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
 		finishReason := ""
+		hasContent := false
+		hasRefusal := false
+		hasToolCalls := false
+		legacyFunctionCallSeen := false
+		legacyFunctionCallIDValue := ""
+		var legacyFunctionCallName strings.Builder
+		var legacyFunctionCallArgs strings.Builder
 		var inputTokens, outputTokens int
 		streamModel := req.Model
 
@@ -921,14 +985,28 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta
 				if delta.Content != "" {
+					hasContent = hasContent || strings.TrimSpace(delta.Content) != ""
 					if !send(llm.StreamChunk{Content: delta.Content}) {
 						return
 					}
+				}
+				if strings.TrimSpace(delta.Refusal) != "" {
+					hasRefusal = true
+				}
+				legacyName, legacyArguments := legacyFunctionCallFromJSON(delta.RawJSON())
+				if legacyName != "" {
+					legacyFunctionCallSeen = true
+					legacyFunctionCallName.WriteString(legacyName)
+				}
+				if legacyArguments != "" {
+					legacyFunctionCallSeen = true
+					legacyFunctionCallArgs.WriteString(legacyArguments)
 				}
 			}
 
 			if acc.AddChunk(chunk) {
 				if tc, ok := acc.JustFinishedToolCall(); ok {
+					hasToolCalls = true
 					if !send(llm.StreamChunk{
 						ToolCall: &llm.ToolCall{
 							ID:        tc.ID,
@@ -943,6 +1021,9 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 
 			if strings.TrimSpace(chunk.Model) != "" {
 				streamModel = chunk.Model
+			}
+			if strings.TrimSpace(chunk.ID) != "" {
+				legacyFunctionCallIDValue = chunk.ID
 			}
 			if chunk.JSON.Usage.Valid() && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
 				inputTokens = int(chunk.Usage.PromptTokens)
@@ -967,6 +1048,18 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 			send(llm.StreamChunk{Error: providerErr, Done: true})
 			return
 		}
+		legacyName := legacyFunctionCallName.String()
+		if legacyFunctionCallSeen && !hasToolCalls && strings.TrimSpace(legacyName) != "" {
+			hasToolCalls = true
+			if !send(llm.StreamChunk{ToolCall: &llm.ToolCall{
+				ID:        legacyFunctionCallID(legacyFunctionCallIDValue),
+				Name:      legacyName,
+				Arguments: legacyFunctionCallArguments(legacyFunctionCallArgs.String()),
+			}}) {
+				return
+			}
+		}
+		finishReason = normalizeChatStreamStopReason(finishReason, hasContent, hasRefusal, hasToolCalls)
 		send(llm.StreamChunk{
 			Done:         true,
 			StopReason:   finishReason,
@@ -977,6 +1070,58 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		})
 	}()
 	return ch
+}
+
+func legacyFunctionCallID(responseID string) string {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return "legacy_function_call"
+	}
+	return responseID + "_function_call"
+}
+
+func legacyFunctionCallFromJSON(raw string) (string, string) {
+	var payload struct {
+		FunctionCall struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function_call"`
+	}
+	if raw == "" || json.Unmarshal([]byte(raw), &payload) != nil {
+		return "", ""
+	}
+	return payload.FunctionCall.Name, payload.FunctionCall.Arguments
+}
+
+func legacyFunctionCallArguments(arguments string) json.RawMessage {
+	if strings.TrimSpace(arguments) == "" {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(arguments)
+}
+
+func normalizeChatStreamStopReason(finishReason string, hasContent, hasRefusal, hasToolCalls bool) string {
+	if hasRefusal {
+		return stopReasonRefusal
+	}
+	if finishReason == "" {
+		return stopReasonIncomplete
+	}
+	if finishReason == stopReasonStop {
+		if hasToolCalls {
+			return stopReasonToolCalls
+		}
+		if !hasContent {
+			return stopReasonIncomplete
+		}
+	}
+	if finishReason == stopReasonToolCalls || finishReason == stopReasonFunctionCall {
+		if !hasToolCalls {
+			return stopReasonIncomplete
+		}
+		return stopReasonToolCalls
+	}
+	return finishReason
 }
 
 func isUnsupportedStreamOptionsError(err error) bool {

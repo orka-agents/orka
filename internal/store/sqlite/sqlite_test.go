@@ -174,6 +174,22 @@ func TestSessionStore(t *testing.T) {
 		}
 	})
 
+	t.Run("gateway-owned session cannot be deleted", func(t *testing.T) {
+		session := &store.SessionRecord{
+			Namespace: "ns1", Name: "gateway-session", SessionType: store.SessionTypeGateway,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := s.CreateSession(ctx, session); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if err := s.DeleteSession(ctx, "ns1", "gateway-session"); !errors.Is(err, store.ErrGatewayOwnedSession) {
+			t.Fatalf("DeleteSession error = %v, want ErrGatewayOwnedSession", err)
+		}
+		if _, err := s.GetSession(ctx, "ns1", "gateway-session"); err != nil {
+			t.Fatalf("GetSession after rejected delete: %v", err)
+		}
+	})
+
 	t.Run("delete session", func(t *testing.T) {
 		session := &store.SessionRecord{
 			Namespace:   "ns1",
@@ -214,20 +230,20 @@ func TestSessionLocking(t *testing.T) {
 	}
 
 	t.Run("acquire lock", func(t *testing.T) {
-		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-a"); err != nil {
+		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-a", ""); err != nil {
 			t.Fatalf("AcquireLock: %v", err)
 		}
 	})
 
 	t.Run("double acquire fails", func(t *testing.T) {
-		err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b")
+		err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b", "")
 		if err == nil {
 			t.Fatal("expected error on double acquire, got nil")
 		}
 	})
 
 	t.Run("is locked by different task", func(t *testing.T) {
-		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b")
+		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b", "")
 		if err != nil {
 			t.Fatalf("IsLocked: %v", err)
 		}
@@ -237,7 +253,7 @@ func TestSessionLocking(t *testing.T) {
 	})
 
 	t.Run("is not locked for current holder", func(t *testing.T) {
-		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-a")
+		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-a", "")
 		if err != nil {
 			t.Fatalf("IsLocked: %v", err)
 		}
@@ -247,11 +263,11 @@ func TestSessionLocking(t *testing.T) {
 	})
 
 	t.Run("release and re-acquire", func(t *testing.T) {
-		if err := s.ReleaseLock(ctx, "ns1", "lock-session", "task-a"); err != nil {
+		if err := s.ReleaseLock(ctx, "ns1", "lock-session", "task-a", ""); err != nil {
 			t.Fatalf("ReleaseLock: %v", err)
 		}
 
-		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b")
+		locked, err := s.IsLocked(ctx, "ns1", "lock-session", "task-b", "")
 		if err != nil {
 			t.Fatalf("IsLocked: %v", err)
 		}
@@ -259,17 +275,107 @@ func TestSessionLocking(t *testing.T) {
 			t.Error("expected locked=false after release")
 		}
 
-		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b"); err != nil {
+		if err := s.AcquireLock(ctx, "ns1", "lock-session", "task-b", ""); err != nil {
 			t.Fatalf("re-AcquireLock: %v", err)
 		}
 	})
 
 	t.Run("is locked for nonexistent session returns ErrNotFound", func(t *testing.T) {
-		_, err := s.IsLocked(ctx, "ns1", "nonexistent", "task-a")
+		_, err := s.IsLocked(ctx, "ns1", "nonexistent", "task-a", "")
 		if err != store.ErrNotFound {
 			t.Errorf("got %v, want ErrNotFound", err)
 		}
 	})
+}
+
+func TestSessionLockFencesTaskUID(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "uid-lock", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcquireLock(ctx, "ns1", "uid-lock", "task-a", "uid-a"); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := s.IsLocked(ctx, "ns1", "uid-lock", "task-a", "uid-b")
+	if err != nil || !locked {
+		t.Fatalf("replacement Task lock state = (%v, %v), want locked", locked, err)
+	}
+	if err := s.ReleaseLock(ctx, "ns1", "uid-lock", "task-a", "uid-b"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.GetSession(ctx, "ns1", "uid-lock")
+	if err != nil || session.ActiveTask != "task-a" || session.ActiveTaskUID != "uid-a" {
+		t.Fatalf("lock after replacement release = (%+v, %v)", session, err)
+	}
+	if err := s.AcquireLock(ctx, "ns1", "uid-lock", "task-a", "uid-b"); err == nil {
+		t.Fatal("replacement Task acquired the original Task lock")
+	}
+	if err := s.ReleaseLock(ctx, "ns1", "uid-lock", "task-a", "uid-a"); err != nil {
+		t.Fatal(err)
+	}
+	session, err = s.GetSession(ctx, "ns1", "uid-lock")
+	if err != nil || session.ActiveTask != "" || session.ActiveTaskUID != "" {
+		t.Fatalf("lock after exact release = (%+v, %v)", session, err)
+	}
+}
+
+func TestAppendMessagesRejectsStableIDPayloadMismatch(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "stable-message", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := store.SessionMessage{
+		ID: "stable-1", Order: 2, Role: roleUser, Content: "original", SourceType: "task", SourceRef: "task-a",
+		Metadata: map[string]string{"key": "value"}, Timestamp: now,
+	}
+	if err := s.AppendMessages(ctx, "ns1", "stable-message", []store.SessionMessage{message}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendMessages(ctx, "ns1", "stable-message", []store.SessionMessage{message}); err != nil {
+		t.Fatalf("idempotent retry failed: %v", err)
+	}
+	changed := message
+	changed.Content = "different"
+	if err := s.AppendMessages(ctx, "ns1", "stable-message", []store.SessionMessage{changed}); !errors.Is(err, store.ErrDuplicateMismatch) {
+		t.Fatalf("mismatched retry error = %v, want ErrDuplicateMismatch", err)
+	}
+	changed = message
+	changed.Timestamp = message.Timestamp.Add(time.Second)
+	if err := s.AppendMessages(ctx, "ns1", "stable-message", []store.SessionMessage{changed}); !errors.Is(err, store.ErrDuplicateMismatch) {
+		t.Fatalf("timestamp-mismatched retry error = %v, want ErrDuplicateMismatch", err)
+	}
+	session, err := s.GetSession(ctx, "ns1", "stable-message")
+	if err != nil || session.MessageCount != 1 || len(session.Messages) != 1 || session.Messages[0].Content != message.Content {
+		t.Fatalf("session after stable-ID retries = (%+v, %v)", session, err)
+	}
+}
+
+func TestAppendMessagesGeneratesUniqueIDs(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "ns1", Name: "generated-message-ids", SessionType: "task", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendMessages(ctx, "ns1", "generated-message-ids", []store.SessionMessage{
+		{Role: roleUser, Content: "one"}, {Role: roleAssistant, Content: "two"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.LoadTranscript(ctx, "ns1", "generated-message-ids", 0)
+	if err != nil || len(messages) != 2 || messages[0].ID == "" || messages[1].ID == "" || messages[0].ID == messages[1].ID {
+		t.Fatalf("generated message IDs = (%+v, %v)", messages, err)
+	}
 }
 
 func TestSessionMessages(t *testing.T) {
@@ -347,9 +453,9 @@ func TestSessionMessages(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("got %d messages, want 2", len(got))
 		}
-		// Should be first 2 messages (ordered by id)
-		if got[0].Content != contentHello {
-			t.Errorf("first message: got %q, want %q", got[0].Content, contentHello)
+		// Should be the newest 2 messages, restored to conversation order.
+		if got[0].Content != "hi there" || got[1].Content != "follow up" {
+			t.Errorf("limited messages: got %#v", got)
 		}
 	})
 
@@ -830,10 +936,10 @@ func TestClosedDBErrors(t *testing.T) {
 	if _, err := s.ListSessions(ctx, "ns"); err == nil {
 		t.Error("expected error from ListSessions on closed DB")
 	}
-	if err := s.AcquireLock(ctx, "ns", "s", "t"); err == nil {
+	if err := s.AcquireLock(ctx, "ns", "s", "t", ""); err == nil {
 		t.Error("expected error from AcquireLock on closed DB")
 	}
-	if _, err := s.IsLocked(ctx, "ns", "s", "t"); err == nil {
+	if _, err := s.IsLocked(ctx, "ns", "s", "t", ""); err == nil {
 		t.Error("expected error from IsLocked on closed DB")
 	}
 	if err := s.AppendMessages(ctx, "ns", "s", []store.SessionMessage{{Role: "user"}}); err == nil {
@@ -888,7 +994,7 @@ func TestAcquireLockNonexistentSession(t *testing.T) {
 	ctx := context.Background()
 
 	// AcquireLock on a session that doesn't exist should fail (rows affected = 0)
-	err := s.AcquireLock(ctx, "ns1", "no-such-session", "task-x")
+	err := s.AcquireLock(ctx, "ns1", "no-such-session", "task-x", "")
 	if err == nil {
 		t.Fatal("expected error for nonexistent session, got nil")
 	}
@@ -959,7 +1065,7 @@ func TestListSessionsMetadata(t *testing.T) {
 	}
 
 	// Acquire lock so active_task is set
-	if err := s.AcquireLock(ctx, "ns1", "meta-sess", "active-task"); err != nil {
+	if err := s.AcquireLock(ctx, "ns1", "meta-sess", "active-task", ""); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
@@ -1050,11 +1156,11 @@ func TestContextCancellation(t *testing.T) {
 		t.Error("expected error on cancelled context for UpdateTokenCounts")
 	}
 
-	if _, err := s.IsLocked(ctx, "ns1", "s", "t"); err == nil {
+	if _, err := s.IsLocked(ctx, "ns1", "s", "t", ""); err == nil {
 		t.Error("expected error on cancelled context for IsLocked")
 	}
 
-	if err := s.AcquireLock(ctx, "ns1", "s", "t"); err == nil {
+	if err := s.AcquireLock(ctx, "ns1", "s", "t", ""); err == nil {
 		t.Error("expected error on cancelled context for AcquireLock")
 	}
 }

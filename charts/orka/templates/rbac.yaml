@@ -17,6 +17,19 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers"]
     verbs: ["update"]
+  - apiGroups: ["gateway.orka.ai"]
+    resources: ["gatewayclasses", "gateways", "gatewaybindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.orka.ai"]
+    resources: ["gatewayclasses/status", "gateways/status", "gatewaybindings/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.orka.ai"]
+    resources: ["gatewayclasses/finalizers", "gateways/finalizers", "gatewaybindings/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames: ["tasks.core.orka.ai", "gatewayclasses.gateway.orka.ai", "gateways.gateway.orka.ai", "gatewaybindings.gateway.orka.ai"]
+    verbs: ["get"]
 
   # Provider-neutral Execution Workspace control plane
   - apiGroups: ["workspace.orka.ai"]
@@ -217,6 +230,11 @@ rules:
     resources: ["skills"]
     verbs: ["get", "list", "watch"]
 
+  # Generic gateway resource permissions (read-only; durable ledgers use the Orka REST API).
+  - apiGroups: ["gateway.orka.ai"]
+    resources: ["gateways", "gatewaybindings"]
+    verbs: ["get", "list", "watch"]
+
   # ConfigMap permissions (for results and sessions)
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -241,6 +259,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "orka.fullname" . }}-client
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.client.name }}
+    namespace: {{ include "orka.clientNamespace" . }}
+---
+# GatewayClass is cluster-scoped, so isolated clients need a separate ClusterRoleBinding for read access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.fullname" . }}-gatewayclass-viewer
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["gateway.orka.ai"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-gatewayclass-viewer
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "orka.fullname" . }}-gatewayclass-viewer
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.client.name }}

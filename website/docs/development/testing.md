@@ -23,6 +23,14 @@ make ui-test-coverage       # or: cd ui && bun run test:coverage
 # Run E2E tests (requires isolated Kind cluster)
 make test-e2e
 
+# Run only the deterministic Gateway live E2E
+KIND_CLUSTER=orka-gateway-e2e \
+E2E_GATEWAY=true \
+E2E_AGENTRUNTIME_EXTERNAL=true \
+E2E_EPHEMERAL_CLUSTER=true \
+E2E_GINKGO_FOCUS="Gateway live E2E" \
+make test-e2e
+
 # Run Agent Substrate E2E (requires Docker, Go, git, curl, kind, kubectl, ko, jq)
 SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
 
@@ -53,7 +61,7 @@ Tests use **Ginkgo + Gomega** (BDD style) for controller/integration tests and s
 | `internal/worker/` | `tool_executor_test.go` | Custom Tool CRD executor |
 | `workers/ai/` | `main_test.go` | AI worker functions |
 | `workers/general/` | `main_test.go` | General worker functions |
-| `workers/harness/cliwrapper/` | adapter and server tests | CLI harness wrapper, including Codex, Claude, Copilot, generic, conformance, cancellation, and redaction |
+| `workers/harness/cliwrapper/` | adapter and server tests | CLI harness wrapper, including Codex, Claude, Copilot, OpenCode, generic, conformance, cancellation, and redaction |
 
 ### E2E Tests
 
@@ -80,6 +88,8 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/live_chat_api_test.go` | Live chat SSE and JSON transport/session coverage using a proxy-backed Provider |
 | `test/e2e/live_anthropic_compat_test.go` | Live Anthropic-compatible `/anthropic/v1/models` and `/anthropic/v1/messages` coverage with default tools-enabled behavior |
 | `test/e2e/live_agent_runtime_matrix_test.go` | Live Orka runtime matrix: Codex+GPT, Claude Code+Claude, Copilot+Gemini |
+| `test/e2e/gateway_test.go` | Authenticated Gateway ingress through a deterministic external `AgentRuntime`, including TLS adapter readiness, invalid bearer rejection, accepted and duplicate events, Task execution, completed events, delivered replies, idempotency, and Task/delivery correlation |
+| `.github/workflows/gateway-e2e.yml` | Focused, model-free, secret-free Gateway live E2E in Kind using generated bearer tokens, an ephemeral CA, the TLS reference adapter, and the deterministic echo runtime |
 | `.github/workflows/live-agent-sandbox-e2e.yml` / `scripts/live-agent-sandbox-e2e.sh` | Live upstream `agent-sandbox` Kind validation for Orka agent workspace claim, sandbox execution, delete cleanup, retained-session reuse, and token scrubbing using a fake model-free Claude runtime |
 | `.github/workflows/live-github-label-trigger-e2e.yml` / `scripts/live-github-label-trigger-e2e.sh` | Manual model-free GitHub label trigger validation for HMAC rejection, signed webhook Task creation, scoped workspace settings, and duplicate delivery idempotency |
 | `.github/workflows/repository-monitor-smoke.yml` | Focused RepositoryMonitor smoke coverage for store CRUD, API handlers, pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review task job building, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker tooling |
@@ -87,6 +97,8 @@ End-to-end tests run against a dedicated Kind cluster:
 | `test/e2e/tools_test.go` | Built-in tools (including `web_fetch`, `file_write`) and custom Tool CRD |
 | `test/e2e/scheduled_task_test.go` | Cron scheduling, suspend, `concurrencyPolicy: Forbid`, history-limit cleanup |
 | `test/e2e/task_lifecycle_test.go` | Timeout/retry/cancel plus session serialization and lock release |
+
+The Gateway Live E2E workflow (`.github/workflows/gateway-e2e.yml`) runs on manual dispatch and on pull requests or pushes that touch Gateway-relevant source, configuration, E2E, image, or dependency paths. It creates a dedicated Kind cluster, generates disposable TLS and bearer credentials, deploys the TLS reference adapter and deterministic echo `AgentRuntime`, and verifies invalid bearer rejection, accepted and duplicate ingress, runtime-backed Task completion, final delivery, idempotency, and correlation metadata. The workflow is model-free and secret-free; it does not use repository or provider credentials.
 
 The Repository Monitor Smoke workflow runs in GitHub Actions on pull requests and pushes that touch the workflow, API, controller, CRD/config, worker, or Go dependency paths. It creates the UI embed stub and runs focused `go test` selections for the monitor store, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue/review flow, blocked status counts, read-only review job construction, result stdout forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. The workflow is secret-free: exact PR event queueing is tested with synthetic signed webhook payloads and fake GitHub clients rather than live repository credentials. The normal Go Tests workflow runs `make test` for non-doc code changes and covers worker-level PR review diff context generation.
 
@@ -103,6 +115,7 @@ missing or mismatched artifacts staying not ready.
 - `COPILOT_GITHUB_TOKEN`: required by the live `copilot-proxy` workflow for proxy auth
 - The live agent sandbox workflow requires Docker, Kind, kubectl, curl, jq, and network access to install the pinned upstream `agent-sandbox` release. It does not require model credentials.
 - The live GitHub label trigger workflow is manual, model-free, and secret-free. It requires Docker, Kind, kubectl, curl, jq, and Python locally, accepts `GITHUB_LABEL_TRIGGER_TARGET_REPO_URL` and `GITHUB_LABEL_TRIGGER_TARGET_NUMBER` overrides, and sends only synthetic webhook payloads to the local Orka API.
+- Gateway Live E2E is model-free and secret-free. Its focused invocation sets `E2E_GATEWAY=true`, `E2E_AGENTRUNTIME_EXTERNAL=true`, and `E2E_EPHEMERAL_CLUSTER=true`; the last flag skips per-resource suite cleanup because the caller deletes the entire Kind cluster.
 - GitHub Actions `id-token: write` permission: required by the live GitHub OIDC workflow. For local/manual runs of `scripts/live-github-oidc-e2e.sh`, set `ORKA_GITHUB_OIDC_TOKEN` to a valid JWT instead. The same workflow also runs a self-contained `kontxt` TxToken check using an ephemeral key/JWKS fixture, so no external kontxt secret is required.
 - `E2E_LIVE_COPILOT_PROXY_BASE_URL` (or `E2E_COPILOT_PROXY_BASE_URL` / `COPILOT_PROXY_BASE_URL`): enables the focused live copilot-proxy spec against a running proxy
 - `E2E_LIVE_COPILOT_PROXY_SERVICE_NAMESPACE`, `E2E_LIVE_COPILOT_PROXY_SERVICE_NAME`, `E2E_LIVE_COPILOT_PROXY_SERVICE_PORT`: optional overrides for how the live spec reaches the in-cluster proxy service for `/readyz` and `/v1/models` checks

@@ -77,3 +77,33 @@ func kubernetesClientsetIsNil(clientset kubernetes.Interface) bool {
 	value := reflect.ValueOf(clientset)
 	return value.Kind() == reflect.Ptr && value.IsNil()
 }
+
+func authorizeKubernetesResourceAction(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	userInfo *UserInfo,
+	namespace, verb, group, resource, name string,
+) error {
+	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
+		return nil
+	}
+	if kubernetesClientsetIsNil(clientset) {
+		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
+	for key, values := range userInfo.Extra {
+		extra[key] = authorizationv1.ExtraValue(values)
+	}
+	review, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, &authorizationv1.SubjectAccessReview{
+		Spec: authorizationv1.SubjectAccessReviewSpec{
+			User: userInfo.Username, Groups: userInfo.Groups, Extra: extra,
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Namespace: namespace, Verb: verb, Group: group, Resource: resource, Name: name,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil || !review.Status.Allowed {
+		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	return nil
+}
