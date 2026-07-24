@@ -128,11 +128,18 @@ var (
 		"gpt-4.1",
 		"gpt-4.1-2025-04-14",
 	}
+	// Keep this order aligned with the CLI smoke preferences shipped by the
+	// pinned Vekil release so runtime tests do not select retired aliases that
+	// remain visible in the upstream model catalog.
 	liveCopilotProxyClaudeModelPreferences = []string{
-		"claude-sonnet-4.5",
+		"claude-sonnet-5",
+		"claude-opus-4.8",
 		"claude-opus-4.7",
-		"claude-opus-4.5",
+		"claude-opus-4.6",
+		"claude-sonnet-4.6",
+		"claude-sonnet-4.5",
 		"claude-haiku-4.5",
+		"claude-sonnet-4",
 	}
 	liveCopilotProxyClaudeModelPrefixes = []string{
 		"claude-",
@@ -740,6 +747,76 @@ func discoverUsableProxyOpenAIModelViaServiceProxy(serviceNamespace, serviceName
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	return modelID, nil
+}
+
+func firstUsableProxyAnthropicMessagesModel(proxyBaseURL string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, error) {
+	candidates := orderedProxyModelCandidates(catalog, preferredIDs, prefixes...)
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("proxy catalog has no Anthropic Messages model from %v or matching %v", preferredIDs, prefixes)
+	}
+
+	var rejected []string
+	for _, modelID := range candidates {
+		statusCode, body, err := probeProxyAnthropicMessagesModel(proxyBaseURL, modelID)
+		if err != nil {
+			return "", fmt.Errorf("probe live Copilot proxy Anthropic Messages model %q: %w", modelID, err)
+		}
+		if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+			return modelID, nil
+		}
+		if statusCode >= http.StatusInternalServerError {
+			return "", fmt.Errorf(
+				"live Copilot proxy Anthropic Messages probe for %q returned %d: %s",
+				modelID,
+				statusCode,
+				truncateForLog(body, 256),
+			)
+		}
+		rejected = append(rejected, fmt.Sprintf("%s=%d:%s", modelID, statusCode, truncateForLog(body, 128)))
+	}
+
+	return "", fmt.Errorf(
+		"live Copilot proxy Anthropic Messages unavailable for candidate models (%s)",
+		strings.Join(rejected, ", "),
+	)
+}
+
+func probeProxyAnthropicMessagesModel(proxyBaseURL, modelID string) (int, string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"model":      modelID,
+		"max_tokens": 1,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Reply with OK."},
+		},
+	})
+	if err != nil {
+		return 0, "", err
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		strings.TrimRight(proxyBaseURL, "/")+"/v1/messages",
+		strings.NewReader(string(payload)),
+	)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", liveProxyProbeAPIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return 0, "", err
+	}
+	return resp.StatusCode, string(body), nil
 }
 
 func firstLiveCopilotProxyChatCompletionModel(proxyBaseURL, proxyAuthToken string, catalog proxyModelCatalog, preferredIDs []string, prefixes ...string) (string, string, error) {

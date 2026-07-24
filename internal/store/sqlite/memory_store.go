@@ -209,23 +209,25 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 	}
 
 	var query strings.Builder
-	query.WriteString(`SELECT id, session_name, role, COALESCE(name, ''), content, created_at
-		FROM session_messages
-		WHERE namespace = ? AND content <> ''`)
-	args := []any{filter.Namespace}
+	query.WriteString(`SELECT message.id, message.message_id, message.session_name, message.role,
+		COALESCE(message.name, ''), message.content, message.created_at
+		FROM session_messages AS message
+		JOIN sessions AS session ON session.namespace = message.namespace AND session.name = message.session_name
+		WHERE message.namespace = ? AND session.session_type <> ? AND message.content <> ''`)
+	args := []any{filter.Namespace, store.SessionTypeGateway}
 
 	searchTerm := strings.TrimSpace(filter.Query)
 	searchTerms := transcriptSearchTerms(searchTerm)
 	for _, term := range searchTerms {
-		query.WriteString(` AND lower(content) LIKE ?`)
+		query.WriteString(` AND lower(message.content) LIKE ?`)
 		args = append(args, "%"+strings.ToLower(term)+"%")
 	}
 	if filter.SessionName != "" {
-		query.WriteString(` AND session_name = ?`)
+		query.WriteString(` AND message.session_name = ?`)
 		args = append(args, filter.SessionName)
 	}
 	if filter.ExcludeSessionName != "" {
-		query.WriteString(` AND session_name <> ?`)
+		query.WriteString(` AND message.session_name <> ?`)
 		args = append(args, filter.ExcludeSessionName)
 	}
 	roles := compactStrings(filter.Roles)
@@ -235,10 +237,10 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 			placeholders = append(placeholders, "?")
 			args = append(args, role)
 		}
-		query.WriteString(` AND role IN (` + strings.Join(placeholders, ",") + `)`)
+		query.WriteString(` AND message.role IN (` + strings.Join(placeholders, ",") + `)`)
 	}
 
-	query.WriteString(` ORDER BY created_at DESC, id DESC LIMIT ?`)
+	query.WriteString(` ORDER BY message.created_at DESC, message.id DESC LIMIT ?`)
 	args = append(args, boundedLimit(filter.Limit, defaultTranscriptLimit, maxTranscriptLimit))
 
 	rows, err := s.db.QueryContext(ctx, query.String(), args...)
@@ -256,7 +258,7 @@ func (s *Store) SearchTranscript(ctx context.Context, filter store.TranscriptSea
 	for rows.Next() {
 		var result store.TranscriptSearchResult
 		var content string
-		if err := rows.Scan(&result.MessageID, &result.SessionName, &result.Role, &result.Name, &content, &result.CreatedAt); err != nil {
+		if err := rows.Scan(&result.MessageID, &result.StableMessageID, &result.SessionName, &result.Role, &result.Name, &content, &result.CreatedAt); err != nil {
 			return nil, err
 		}
 		result.Snippet = buildSnippet(content, snippetTerm, snippetLen)

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +30,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -507,6 +509,11 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		if !hasFrames {
+			if r.ResultStore != nil {
+				if err := r.ResultStore.DeleteResult(ctx, task.Namespace, task.Name); err != nil {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+			}
 			if err := r.validateHarnessWrapperCapabilities(ctx, client, request); err != nil {
 				if target.RuntimeRefName != "" && harnessWrapperAuthError(err) {
 					if shouldWait, waitErr := r.waitForHarnessWrapperAuthRetry(ctx, task); waitErr != nil {
@@ -1546,6 +1553,59 @@ func (r *TaskReconciler) plannedHarnessWrapperStartTurnRequest(
 	return request, nil
 }
 
+func sessionMessagesPrompt(messages []store.SessionMessage) string {
+	const maxPromptBytes = 96 << 10
+	const header = "Canonical conversation transcript:\n\n"
+	const instruction = "\n\nRespond to the final user message."
+	chunks := make([]string, 0, len(messages))
+	used := len(header) + len(instruction)
+	for i := len(messages) - 1; i >= 0; i-- {
+		role := strings.ToUpper(strings.TrimSpace(messages[i].Role))
+		if role != "USER" && role != "ASSISTANT" {
+			continue
+		}
+		chunk := role + ":\n" + store.RuntimeSessionMessageContent(messages[i])
+		separator := 2
+		if used+separator+len(chunk) > maxPromptBytes && len(chunks) > 0 {
+			break
+		}
+		if used+separator+len(chunk) > maxPromptBytes {
+			remaining := maxPromptBytes - used - separator
+			if remaining <= len(role)+2 {
+				return ""
+			}
+			chunk = truncateHarnessPromptUTF8(chunk, remaining)
+		}
+		chunks = append(chunks, chunk)
+		used += separator + len(chunk)
+	}
+	if len(chunks) == 0 {
+		return ""
+	}
+	slices.Reverse(chunks)
+	for len(chunks) > 0 && strings.HasPrefix(chunks[0], "ASSISTANT:\n") {
+		chunks = chunks[1:]
+	}
+	if len(chunks) == 0 {
+		return ""
+	}
+	return header + strings.Join(chunks, "\n\n") + instruction
+}
+
+func truncateHarnessPromptUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1566,6 +1626,19 @@ func (r *TaskReconciler) harnessWrapperStartTurnRequest(
 	prompt := task.Spec.Prompt
 	if prompt == "" && task.Spec.AI != nil {
 		prompt = task.Spec.AI.Prompt
+	}
+	if task.Spec.SessionRef != nil && task.Spec.SessionRef.PromptIncluded {
+		if r.SessionManager == nil {
+			return harness.StartTurnRequest{}, fmt.Errorf("session manager is required for transcript-backed prompt")
+		}
+		messages, err := r.SessionManager.LoadTranscript(ctx, task)
+		if err != nil {
+			return harness.StartTurnRequest{}, fmt.Errorf("load transcript-backed prompt: %w", err)
+		}
+		prompt = sessionMessagesPrompt(messages)
+		if prompt == "" {
+			return harness.StartTurnRequest{}, fmt.Errorf("transcript-backed prompt is empty")
+		}
 	}
 	metadata, err := r.harnessWrapperTurnMetadata(ctx, task, agent, runtimeName)
 	if err != nil {
@@ -2351,7 +2424,7 @@ func harnessWrapperRuntimeSessionIdentity(task *corev1alpha1.Task, agent *corev1
 		input.TaskUID = string(task.UID)
 		input.ActiveTask = task.Name
 		input.SessionName = ""
-		if task.Spec.SessionRef != nil {
+		if task.Spec.SessionRef != nil && !task.Spec.SessionRef.PromptIncluded {
 			input.SessionName = task.Spec.SessionRef.Name
 		}
 	}

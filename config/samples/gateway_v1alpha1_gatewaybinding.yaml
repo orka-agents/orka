@@ -1,0 +1,26 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayBinding
+metadata:
+  name: support-room
+  namespace: default
+spec:
+  gatewayRef:
+    name: external-chat
+  agentRef:
+    name: assistant
+  match:
+    accountId: example-account
+    contextId: support-room
+  senderPolicy:
+    mode: allowlist
+    allowedSenderIds:
+      - operator-1
+  priority: 100
+  session:
+    mode: context-sender
+  taskDefaults:
+    timeout: 15m
+    retryPolicy:
+      maxRetries: 1
+      backoffMultiplier: 2
+  activeTurnBehavior: queue

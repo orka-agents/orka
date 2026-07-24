@@ -157,6 +157,11 @@ Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `sta
 | `/api/v1/skills/:name` | PUT | Update a skill |
 | `/api/v1/skills/:name` | DELETE | Delete a skill |
 
+
+## Generic Gateways
+
+See [Generic Gateway API](gateway-api.md) for the adapter contract, Kubernetes resources, durable ledger endpoints, filters, and retry workflow.
+
 ## Tools
 
 | Endpoint | Method | Description |

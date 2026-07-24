@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -29,6 +30,8 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 	"github.com/orka-agents/orka/workers/harness/cliwrapper"
 )
+
+const testFalseValue = "false"
 
 func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
@@ -67,6 +70,29 @@ func TestHarnessWrapperTaskRunsThroughTurnRunner(t *testing.T) {
 	}
 	if !hasExecutionEventType(eventsList, events.ExecutionEventTypeAgentRuntimeCompleted) {
 		t.Fatalf("events = %#v, want harness mapped runtime completed", eventsList)
+	}
+}
+
+func TestHarnessWrapperStartClearsStaleResult(t *testing.T) {
+	cfg := cliwrapper.DefaultConfig()
+	cfg.AllowUnauthenticated = true
+	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.Handler())
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task, agent := harnessWrapperTaskAndAgent()
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	if err := r.ResultStore.SaveResult(context.Background(), task.Namespace, task.Name, []byte("stale")); err != nil {
+		t.Fatal(err)
+	}
+	_ = runHarnessWrapperTaskToRunning(t, r, task)
+	if _, err := r.ResultStore.GetResult(context.Background(), task.Namespace, task.Name); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetResult() after new turn start = %v, want ErrNotFound", err)
 	}
 }
 
@@ -1505,7 +1531,7 @@ func TestHarnessWrapperPlannedBuiltInRetryUsesFrozenRuntimeMetadata(t *testing.T
 		harnessWrapperRuntimeAnnotation: string(runtimeID),
 		harnessWrapperCorrelationIDAnno: string(task.UID),
 		harnessWrapperLastFrameSeqAnno:  "0",
-		harnessWrapperStartedAnno:       "false",
+		harnessWrapperStartedAnno:       testFalseValue,
 		harnessWrapperMetadataAnno:      `{"runtime":"codex","wrapper":"cli","contractVersion":"orka.harness.v1"}`,
 	}
 	agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude
@@ -1593,7 +1619,7 @@ func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
 	if taskHasHarnessWrapperTurn(&planned) {
 		t.Fatalf("harness turn marked started during planning: %#v", planned.Annotations)
 	}
-	if got := planned.Annotations[harnessWrapperStartedAnno]; got != "false" {
+	if got := planned.Annotations[harnessWrapperStartedAnno]; got != testFalseValue {
 		t.Fatalf("%s = %q, want false", harnessWrapperStartedAnno, got)
 	}
 
@@ -2284,8 +2310,8 @@ func TestHarnessWrapperTurnRequestFiltersReadOnlyRuntimeSecretEnv(t *testing.T) 
 	task, agent := harnessWrapperTaskAndAgent()
 	task.Annotations = map[string]string{labels.AnnotationAgentReadOnly: scheduledRunLabelValue}
 	task.Spec.Env = []corev1.EnvVar{
-		{Name: workerenv.AgentReadOnly, Value: "false"},
-		{Name: workerenv.ResultStdout, Value: "false"},
+		{Name: workerenv.AgentReadOnly, Value: testFalseValue},
+		{Name: workerenv.ResultStdout, Value: testFalseValue},
 		{Name: workerenv.AllowBash, Value: scheduledRunLabelValue},
 		{Name: workerenv.AllowedTools, Value: "Bash,Write"},
 	}
@@ -2639,7 +2665,7 @@ func TestCancelHarnessWrapperPlannedMissingTurnIsIgnored(t *testing.T) {
 		harnessWrapperTurnIDAnnotation:  string(request.TurnID),
 		harnessWrapperRuntimeAnnotation: string(request.RuntimeSessionID),
 		harnessWrapperCorrelationIDAnno: request.CorrelationID,
-		harnessWrapperStartedAnno:       "false",
+		harnessWrapperStartedAnno:       testFalseValue,
 	}
 	r := newUnitReconciler(newTestScheme(), task, agent)
 	if err := r.cancelHarnessWrapperTurn(context.Background(), task, "test"); err != nil {
@@ -2710,5 +2736,73 @@ func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	}
 	if request.Metadata["maxTurns"] != "50" {
 		t.Fatalf("metadata maxTurns = %q, want 50", request.Metadata["maxTurns"])
+	}
+}
+
+func TestSessionMessagesPromptIncludesCurrentTurnOnce(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "current"},
+	})
+	if strings.Count(prompt, "current") != 1 || !strings.Contains(prompt, "ASSISTANT:\nreply") {
+		t.Fatalf("sessionMessagesPrompt() = %q", prompt)
+	}
+}
+
+func TestSessionMessagesPromptIncludesGatewaySenderProvenance(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{{
+		Role: "user", Content: "current", SourceType: "gateway-event",
+		Metadata: map[string]string{
+			"senderId": "user-1", "senderDisplayName": "User One", "accountId": "acct",
+			"contextId": "room", "threadId": "thread-1",
+		},
+	}})
+	for _, want := range []string{`senderId="user-1"`, `senderDisplayName="User One"`, `contextId="room"`, "current"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("sessionMessagesPrompt() = %q, want %q", prompt, want)
+		}
+	}
+}
+
+func TestHarnessWrapperPromptIncludedUsesTaskScopedRuntimeSession(t *testing.T) {
+	task, agent := harnessWrapperTaskAndAgent()
+	task.Spec.SessionRef = &corev1alpha1.SessionReference{
+		Name: "canonical-session", PromptIncluded: true, ThroughMessageID: "message-1",
+	}
+	identity := harnessWrapperRuntimeSessionIdentity(task, agent, "codex")
+	if identity.Owner.SessionName == "canonical-session" || !strings.Contains(identity.Owner.SessionName, task.Name) {
+		t.Fatalf("runtime session owner = %#v, want task-scoped identity", identity.Owner)
+	}
+}
+
+func TestSessionMessagesPromptStaysBelowExecStringLimit(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{
+		{Role: "user", Content: strings.Repeat("a", 64<<10)},
+		{Role: "assistant", Content: strings.Repeat("b", 64<<10)},
+		{Role: "user", Content: strings.Repeat("c", 64<<10)},
+	})
+	if len(prompt) == 0 || len(prompt) > 96<<10 {
+		t.Fatalf("prompt length = %d, want 1..%d", len(prompt), 96<<10)
+	}
+}
+
+func TestSessionMessagesPromptTruncatesOnUTF8Boundary(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{{
+		Role: "user", Content: strings.Repeat("🙂", 30_000),
+	}})
+	if prompt == "" || !utf8.ValidString(prompt) {
+		t.Fatalf("sessionMessagesPrompt() produced invalid UTF-8")
+	}
+}
+
+func TestSessionMessagesPromptDropsLeadingOrphanAssistant(t *testing.T) {
+	prompt := sessionMessagesPrompt([]store.SessionMessage{
+		{Role: "user", Content: strings.Repeat("q", 64<<10)},
+		{Role: "assistant", Content: "orphaned reply"},
+		{Role: "user", Content: strings.Repeat("c", 64<<10)},
+	})
+	if strings.Contains(prompt, "orphaned reply") || !strings.Contains(prompt, "USER:\n") {
+		t.Fatalf("sessionMessagesPrompt() kept an orphan assistant turn: %q", prompt)
 	}
 }

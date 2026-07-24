@@ -194,7 +194,12 @@ func existingSQLiteTerminalApprovalEvent(
 	return "", approvalID, false, nil
 }
 
-func nextSQLiteSessionExecutionEventSeq(ctx context.Context, conn *sql.Conn, namespace, sessionName string) (int64, error) {
+type sqliteExecutionEventQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func nextSQLiteSessionExecutionEventSeq(ctx context.Context, conn sqliteExecutionEventQuerier, namespace, sessionName string) (int64, error) {
 	if strings.TrimSpace(sessionName) == "" {
 		return 0, nil
 	}

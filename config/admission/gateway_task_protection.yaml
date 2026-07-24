@@ -1,0 +1,52 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gateway-task-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["tasks", "tasks/status"]
+  matchConditions:
+  - name: owned-gateway-task
+    expression: >-
+      (request.operation == 'CREATE' && has(object.spec.requestedBy) && object.spec.requestedBy.issuer.startsWith('gateway.orka.ai/')) ||
+      ((request.operation == 'UPDATE' || request.operation == 'DELETE') && has(oldObject.spec.requestedBy) && oldObject.spec.requestedBy.issuer.startsWith('gateway.orka.ai/'))
+  variables:
+  - name: gatewayIssuer
+    expression: "request.operation == 'CREATE' ? object.spec.requestedBy.issuer : oldObject.spec.requestedBy.issuer"
+  - name: gatewayNamespace
+    expression: "variables.gatewayIssuer.split('/')[1]"
+  - name: controllerNamespace
+    expression: "'ORKA_NAMESPACE'"
+  - name: controllerServiceAccount
+    expression: "'CONTROLLER_SA'"
+  - name: aiWorkerServiceAccount
+    expression: "'AI_WORKER_SA'"
+  - name: vendorWorkerServiceAccount
+    expression: "'VENDOR_WORKER_SA'"
+  - name: containerWorkerServiceAccount
+    expression: "'CONTAINER_WORKER_SA'"
+  validations:
+  - expression: >-
+      (request.operation == 'DELETE' &&
+        (request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector' ||
+         request.userInfo.username == 'system:serviceaccount:kube-system:garbage-collector' ||
+         request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller' ||
+         request.userInfo.username == 'system:kube-controller-manager')) ||
+      request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount ||
+      request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount ||
+      request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount ||
+      request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
+    message: gateway-owned Tasks may only be managed by the owning Orka controller, trusted workers, or Kubernetes cleanup controllers
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gateway-task-protection
+spec:
+  policyName: gateway-task-protection
+  validationActions: [Deny]

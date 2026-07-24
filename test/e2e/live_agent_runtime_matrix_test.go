@@ -39,6 +39,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		claudeAgentName        = "e2e-live-runtime-claude-agent"
 		claudeTaskName         = "e2e-live-runtime-claude-task"
 		claudeExpectedResponse = "ORKA_LIVE_CLAUDE_OK"
+		claudeProxyPFPort      = 18189
 		copilotAgentName       = "e2e-live-runtime-copilot-agent"
 		copilotTaskName        = "e2e-live-runtime-copilot-task"
 	)
@@ -104,12 +105,26 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 				gptModelSkipReason = "no Codex-family GPT model with /responses support exposed"
 			}
 		}
-		claudeModel = firstPreferredProxyModel(
+		By("probing Claude-family models through the live Anthropic Messages endpoint")
+		proxyBaseURL, cancelProxyPF, proxyPFCmd, err := startServicePortForward(
+			liveCopilotProxyServiceNamespace(),
+			liveCopilotProxyServiceName(),
+			claudeProxyPFPort,
+			liveCopilotProxyServicePort(),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			stopPortForward(cancelProxyPF, proxyPFCmd)
+		})
+
+		claudeModel, err = firstUsableProxyAnthropicMessagesModel(
+			proxyBaseURL,
 			runtimeCatalog,
 			liveCopilotProxyClaudeModelPreferences,
 			liveCopilotProxyClaudeModelPrefixes...,
 		)
-		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a Claude-family model")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(claudeModel).NotTo(BeEmpty(), "proxy service should expose a usable Claude-family model")
 		geminiModel = firstPreferredProxyModel(
 			runtimeCatalog,
 			liveCopilotProxyGeminiModelPreferences,
@@ -253,7 +268,7 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("creating a Claude task with sessionRef wiring")
-		err = applyManifestJSON(runtimeAgentTaskManifest(
+		claudeTask := runtimeAgentTaskManifest(
 			claudeTaskName,
 			claudeAgentName,
 			fmt.Sprintf("Reply with exactly %s and nothing else.", claudeExpectedResponse),
@@ -264,7 +279,13 @@ var _ = Describe("Live Agent Runtime Matrix", Ordered, func() {
 			claudeSessionName,
 			boolPtr(true),
 			boolPtr(true),
-		))
+		)
+		claudeTaskSpec, ok := claudeTask["spec"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		claudeTaskSpec["env"] = []map[string]string{
+			{"name": "CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "value": "1"},
+		}
+		err = applyManifestJSON(claudeTask)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("waiting for the Claude task to return the exact sentinel")
