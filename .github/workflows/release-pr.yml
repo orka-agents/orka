@@ -12,6 +12,7 @@ on:
         type: string
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -103,6 +104,7 @@ jobs:
           git diff --check
 
       - name: Create release pull request
+        id: create_release_pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -122,3 +124,16 @@ jobs:
             - promotes the staging installer and chart into `deploy/` and `charts/`
 
             Merge this PR before creating the matching `${{ env.NEWVERSION }}` tag. The tag workflow publishes the reviewed root chart snapshot without regenerating it.
+      - name: Dispatch release pull request validation
+        if: >-
+          steps.create_release_pr.outputs.pull-request-operation == 'created' ||
+          steps.create_release_pr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BRANCH: ${{ steps.create_release_pr.outputs.pull-request-branch }}
+        run: |
+          set -euo pipefail
+
+          for workflow in lint.yml test.yml helm-chart.yml; do
+            gh workflow run "${workflow}" --ref "${RELEASE_BRANCH}"
+          done
