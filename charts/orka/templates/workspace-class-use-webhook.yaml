@@ -1,0 +1,64 @@
+{{- if .Values.controller.workspaceProvider.classUseAdmission.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orka.fullname" . }}-workspace-webhook
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  ports:
+    - name: https
+      port: 443
+      targetPort: webhook-server
+      protocol: TCP
+  selector:
+    {{- include "orka.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "orka.fullname" . }}-workspace-class-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+webhooks:
+  - name: taskworkspaceclassuse.core.orka.ai
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: {{ include "orka.fullname" . }}-workspace-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-task-workspace-class-use
+        port: 443
+      caBundle: {{ .Values.controller.workspaceProvider.classUseAdmission.caBundle | quote }}
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        resources: ["tasks"]
+        scope: Namespaced
+  - name: toolworkspaceclassuse.core.orka.ai
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: {{ include "orka.fullname" . }}-workspace-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-core-orka-ai-v1alpha1-tool-workspace-class-use
+        port: 443
+      caBundle: {{ .Values.controller.workspaceProvider.classUseAdmission.caBundle | quote }}
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["core.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        resources: ["tools"]
+        scope: Namespaced
+{{- end }}

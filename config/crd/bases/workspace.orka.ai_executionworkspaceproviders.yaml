@@ -1,0 +1,292 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: executionworkspaceproviders.workspace.orka.ai
+spec:
+  group: workspace.orka.ai
+  names:
+    categories:
+    - orka
+    kind: ExecutionWorkspaceProvider
+    listKind: ExecutionWorkspaceProviderList
+    plural: executionworkspaceproviders
+    shortNames:
+    - ewp
+    singular: executionworkspaceprovider
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.lifecycleState
+      name: State
+      type: string
+    - jsonPath: .spec.controllerName
+      name: Controller
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ExecutionWorkspaceProvider is a cluster-scoped provider adapter
+          installation.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ExecutionWorkspaceProviderSpec defines a configured provider
+              adapter installation.
+            properties:
+              controllerName:
+                description: ControllerName is the globally unique adapter controller
+                  identity.
+                maxLength: 253
+                minLength: 1
+                type: string
+              lifecycleState:
+                default: Active
+                description: LifecycleState controls new allocations while preserving
+                  cleanup for existing workspaces.
+                enum:
+                - Active
+                - Draining
+                - Disabled
+                type: string
+              parametersRef:
+                description: ParametersRef points at the adapter-owned provider configuration
+                  object.
+                properties:
+                  group:
+                    description: Group is the API group of the referenced object.
+                    minLength: 1
+                    type: string
+                  kind:
+                    description: Kind is the kind of the referenced object.
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name is the name of the referenced object.
+                    minLength: 1
+                    type: string
+                required:
+                - group
+                - kind
+                - name
+                type: object
+              requiredContracts:
+                description: RequiredContracts lists contracts the adapter must advertise
+                  before this provider is usable.
+                items:
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+              usagePolicy:
+                description: UsagePolicy constrains which namespaces may resolve classes
+                  to this provider.
+                properties:
+                  allowedNamespaceSelector:
+                    description: |-
+                      AllowedNamespaceSelector selects namespaces that may resolve classes to this provider.
+                      An empty selector matches all namespaces.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+            required:
+            - controllerName
+            - lifecycleState
+            - parametersRef
+            - requiredContracts
+            type: object
+            x-kubernetes-validations:
+            - message: controllerName is immutable
+              rule: self.controllerName == oldSelf.controllerName
+            - message: parametersRef is immutable
+              rule: self.parametersRef == oldSelf.parametersRef
+            - message: requiredContracts is immutable
+              rule: self.requiredContracts == oldSelf.requiredContracts
+          status:
+            description: |-
+              ExecutionWorkspaceProviderStatus defines the observed provider state. The matching adapter is the
+              sole writer of adapter/backend/features/heartbeat; Orka core owns only generic usability conditions.
+            properties:
+              adapter:
+                description: Adapter reports adapter build identity.
+                properties:
+                  digest:
+                    description: Digest is the immutable adapter image or build digest.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  version:
+                    description: Version is the adapter semantic version.
+                    type: string
+                type: object
+              backend:
+                description: Backend reports safe provider-native compatibility metadata.
+                properties:
+                  apiVersions:
+                    description: APIVersions lists provider-native API versions understood
+                      by the adapter.
+                    items:
+                      type: string
+                    type: array
+                  version:
+                    description: Version is the observed backend version.
+                    type: string
+                type: object
+              conditions:
+                description: Conditions represent generic readiness and compatibility.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastHeartbeat:
+                description: LastHeartbeat is the last successful adapter heartbeat.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent spec generation
+                  observed by the adapter.
+                format: int64
+                type: integer
+              supportedContracts:
+                description: SupportedContracts lists generic control/data-plane contracts
+                  implemented by this adapter.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              supportedFeatures:
+                description: SupportedFeatures lists generic features implemented
+                  by this installation.
+                items:
+                  description: ExecutionWorkspaceFeature names a provider capability
+                    required by a class.
+                  pattern: ^[a-z][a-z0-9.-]{0,62}$
+                  type: string
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

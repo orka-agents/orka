@@ -1154,13 +1154,14 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		agentSandboxEnabled bool
-		substrateEnabled    bool
-		task                *corev1alpha1.Task
-		agentSandboxConfig  AgentSandboxConfig
-		substrateConfig     SubstrateConfig
-		wantErr             string
+		name                        string
+		agentSandboxEnabled         bool
+		substrateEnabled            bool
+		workspaceProviderAPIEnabled bool
+		task                        *corev1alpha1.Task
+		agentSandboxConfig          AgentSandboxConfig
+		substrateConfig             SubstrateConfig
+		wantErr                     string
 	}{
 		{
 			name: "nil execution",
@@ -1176,6 +1177,27 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 					Workspace: &corev1alpha1.ExecutionWorkspaceSpec{Enabled: false},
 				},
 			}},
+		},
+		{
+			name: "classRef workspace provider API disabled",
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
+				}},
+			}},
+			wantErr: "requires the workspace provider API",
+		},
+		{
+			name:                        "classRef controller integration pending",
+			workspaceProviderAPIEnabled: true,
+			task: &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAgent,
+				Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+					ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "coding-v1"},
+				}},
+			}},
+			wantErr: "controller-first Task workspace integration",
 		},
 		{
 			name: "feature gate disabled",
@@ -1408,10 +1430,11 @@ func TestValidateExecutionWorkspace(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &TaskReconciler{
-				AgentSandboxEnabled: tt.agentSandboxEnabled,
-				SubstrateEnabled:    tt.substrateEnabled,
-				AgentSandboxConfig:  tt.agentSandboxConfig,
-				SubstrateConfig:     tt.substrateConfig,
+				AgentSandboxEnabled:         tt.agentSandboxEnabled,
+				SubstrateEnabled:            tt.substrateEnabled,
+				WorkspaceProviderAPIEnabled: tt.workspaceProviderAPIEnabled,
+				AgentSandboxConfig:          tt.agentSandboxConfig,
+				SubstrateConfig:             tt.substrateConfig,
 			}
 
 			err := r.validateExecutionWorkspace(tt.task)
@@ -7411,6 +7434,58 @@ func TestHandleCompletedCleansJobWhenTerminalEventAppendFails(t *testing.T) {
 	}
 }
 
+func TestHandleFinalizingCompletesRecordedOutcome(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing-complete", Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(), Message: "done",
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	if _, err := reconciler.handleFinalizing(context.Background(), task); err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	if err := reconciler.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("get finalizing task: %v", err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("phase = %s, want Succeeded", updated.Status.Phase)
+	}
+}
+
+func TestHandleFinalizingWaitsForAttachmentRevocation(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing-attached", Namespace: defaultNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskExecutionOutcome{
+				Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(), Message: "done",
+			},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{
+				AttachedEpoch: 2,
+				Conditions:    []metav1.Condition{{Type: "Attached", Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	result, err := reconciler.handleFinalizing(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handleFinalizing() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("result = %#v, want requeue", result)
+	}
+}
+
 func TestCompleteTaskRequeuesWhenTerminalEventAppendFails(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -7432,6 +7507,28 @@ func TestCompleteTaskRequeuesWhenTerminalEventAppendFails(t *testing.T) {
 	}
 	if updated.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		t.Fatalf("phase = %s, want Succeeded despite event write failure", updated.Status.Phase)
+	}
+}
+
+func TestCompleteTaskDoesNotRecordOutcomeBeforeExecutionAttempt(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "pre-execution-failure", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	reconciler := newUnitReconciler(scheme, task)
+	if _, err := reconciler.completeTask(
+		context.Background(), task, corev1alpha1.TaskPhaseFailed, "validation failed",
+	); err != nil {
+		t.Fatalf("completeTask() error = %v", err)
+	}
+	updated := &corev1alpha1.Task{}
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	if err := reconciler.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("get completed task: %v", err)
+	}
+	if updated.Status.ExecutionOutcome != nil {
+		t.Fatalf("pre-execution failure recorded outcome %#v", updated.Status.ExecutionOutcome)
 	}
 }
 

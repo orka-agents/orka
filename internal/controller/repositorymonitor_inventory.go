@@ -368,7 +368,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewTaskState(ctx conte
 		return "", err
 	}
 	switch task.Status.Phase {
-	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseScheduled:
+	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing, corev1alpha1.TaskPhaseScheduled:
 		return repositoryMonitorReviewTaskStatePending, nil
 	case corev1alpha1.TaskPhaseSucceeded:
 		return repositoryMonitorReviewTaskStateSucceeded, nil

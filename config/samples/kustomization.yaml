@@ -15,4 +15,10 @@ resources:
 - gateway_v1alpha1_gatewayclass.yaml
 - gateway_v1alpha1_gateway.yaml
 - gateway_v1alpha1_gatewaybinding.yaml
+- workspace_v1alpha1_executionworkspaceprovider.yaml
+- workspace_v1alpha1_executionworkspacepool.yaml
+- workspace_v1alpha1_executionworkspaceclass.yaml
+- workspace_v1alpha1_executionworkspace.yaml
+- fake.workspace_v1alpha1_fakeproviderconfig.yaml
+- fake.workspace_v1alpha1_fakepoolparameters.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

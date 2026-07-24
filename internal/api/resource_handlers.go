@@ -394,6 +394,9 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
 		Spec:       req.Spec,
 	}
+	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
+		return err
+	}
 	if err := h.client.Create(c.Context(), tool); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "tool already exists")
@@ -430,6 +433,9 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 		return err
 	}
 	tool.Spec = req.Spec
+	if err := authorizeToolWorkspaceClassUse(c.Context(), h.clientset, GetUserInfo(c), tool); err != nil {
+		return err
+	}
 	if err := h.client.Update(c.Context(), tool); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update tool: %v", err))
 	}

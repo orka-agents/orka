@@ -1,0 +1,28 @@
+apiVersion: workspace.orka.ai/v1alpha1
+kind: ExecutionWorkspaceClass
+metadata:
+  name: secure-coding-v1
+  namespace: default
+spec:
+  poolRef:
+    name: coding-pool
+  mode: Interactive
+  requiredFeatures:
+    - exec
+    - files
+    - reset
+  allowedReuseScopes:
+    - None
+    - Session
+  lifecycle:
+    defaultOnDetach: Suspend
+    allowedOnDetach:
+      - Suspend
+      - Delete
+    detachTimeout: 2m
+    idleTimeout: 30m
+    maxLifetime: 24h
+    deletionPolicy:
+      providerResources: Delete
+      persistentVolumes: Retain
+      checkpoints: Delete

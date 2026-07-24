@@ -12,6 +12,7 @@ import (
 )
 
 // AgentSpec defines the desired state of Agent
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)",message="execution.workspace.classRef is only supported on Task specs"
 type AgentSpec struct {
 	// ProviderRef references a Provider CRD for LLM configuration
 	// If set, model.provider is optional (inherited from Provider)

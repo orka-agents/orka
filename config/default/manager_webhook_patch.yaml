@@ -1,4 +1,8 @@
-# This patch enables the Task provenance admission webhook server endpoint.
+# This patch exposes the webhook server and enables fail-closed workspace class-use
+# admission plus optional Task provenance protection.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --workspace-class-use-admission-enabled=true
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --task-provenance-admission-enabled=true

@@ -21,7 +21,9 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -33,8 +35,12 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+
+	fakeworkspacev1alpha1 "github.com/orka-agents/orka/api/fake.workspace/v1alpha1"
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/controller"
@@ -46,7 +52,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/workerenv"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -62,6 +67,8 @@ func init() {
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(sandboxextv1beta1.AddToScheme(scheme))
+	utilruntime.Must(workspacev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(fakeworkspacev1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -80,12 +87,37 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
+func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled bool) error {
+	if apiEnabled && !classUseAdmissionEnabled {
+		return fmt.Errorf("workspace provider API requires workspace class use admission")
+	}
+	return nil
+}
+
+func workspaceCleanupAPIsInstalled(mapper meta.RESTMapper) (bool, error) {
+	for _, gvk := range []schema.GroupVersionKind{
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceProvider"),
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspacePool"),
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceClass"),
+		workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"),
+	} {
+		if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			if meta.IsNoMatchError(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("discover %s: %w", gvk.String(), err)
+		}
+	}
+	return true, nil
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var taskProvenanceAdmissionEnabled bool
+	var workspaceClassUseAdmissionEnabled bool
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -175,6 +207,8 @@ func main() {
 	var contextTokenChildTokenTTL string
 	var contextTokenToolTokenTTL string
 	var enableTracing bool
+	var workspaceProviderAPIEnabled bool
+	var fakeWorkspaceProviderEnabled bool
 	var tlsOpts []func(*tls.Config)
 
 	executionWorkspaceDefaultProvider := controller.ExecutionWorkspaceDefaultProviderFromEnv(os.Getenv)
@@ -198,7 +232,7 @@ func main() {
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.BoolVar(&taskProvenanceAdmissionEnabled, "task-provenance-admission-enabled",
-		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED", false),
+		envBool("ORKA_TASK_PROVENANCE_ADMISSION_ENABLED"),
 		"Enable validating admission that rejects untrusted direct Task writes to Orka-managed "+
 			"provenance fields.")
 	flag.StringVar(&taskProvenanceAdmissionTrustedUsers, "task-provenance-admission-trusted-users",
@@ -218,6 +252,15 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&apiPort, "api-port", 8080, "The port the REST API server binds to.")
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to watch for resources. Empty for all namespaces.")
+	flag.BoolVar(&workspaceProviderAPIEnabled, "enable-workspace-provider-api",
+		envBool("ORKA_ENABLE_WORKSPACE_PROVIDER_API"),
+		"Enable workspace.orka.ai provider/class/pool/workspace coordination controllers.")
+	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
+		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
+		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.BoolVar(&fakeWorkspaceProviderEnabled, "enable-fake-workspace-provider",
+		envBool("ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER"),
+		"Enable the development-only fake.workspace.orka.ai/v1 adapter; requires --enable-workspace-provider-api.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -578,6 +621,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := validateWorkspaceProviderSecurityConfig(
+		workspaceProviderAPIEnabled,
+		workspaceClassUseAdmissionEnabled,
+	); err != nil {
+		setupLog.Error(err, "invalid workspace provider security configuration")
+		os.Exit(1)
+	}
+
 	// Initialize OpenTelemetry tracing (noop when disabled)
 	tracingShutdown, err := tracing.Init("orka-controller", enableTracing)
 	if err != nil {
@@ -677,6 +728,15 @@ func main() {
 			setupLog.Error(err, "gateway prerequisites are unavailable; disabling generic gateway")
 			gatewayEnabled = false
 		}
+	}
+
+	if workspaceClassUseAdmissionEnabled {
+		orkaadmission.RegisterWorkspaceClassUseWebhooks(
+			mgr.GetWebhookServer(),
+			mgr.GetScheme(),
+			controller.WorkspaceClassAuthorizer{Client: mgr.GetClient()},
+		)
+		setupLog.Info("registered Task and Tool workspace class use admission")
 	}
 
 	if taskProvenanceAdmissionEnabled {
@@ -802,6 +862,7 @@ func main() {
 		EnforceNamespaceIsolation:          enforceNamespaceIsolation,
 		MaxTasksPerNamespace:               maxTasksPerNamespaceValue,
 		ExecutionWorkspaceDefaultProvider:  executionWorkspaceDefaultProvider,
+		WorkspaceProviderAPIEnabled:        workspaceProviderAPIEnabled,
 		AgentSandboxEnabled:                agentSandboxEnabled,
 		AgentSandboxConfig:                 agentSandboxConfig,
 		SubstrateEnabled:                   substrateEnabled,
@@ -816,11 +877,12 @@ func main() {
 	}
 
 	if err := (&controller.ToolReconciler{
-		Client:                    mgr.GetClient(),
-		Scheme:                    mgr.GetScheme(),
-		SubstrateEnabled:          substrateEnabled,
-		SubstrateConfig:           substrateConfig,
-		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		Client:                      mgr.GetClient(),
+		Scheme:                      mgr.GetScheme(),
+		SubstrateEnabled:            substrateEnabled,
+		SubstrateConfig:             substrateConfig,
+		EnforceNamespaceIsolation:   enforceNamespaceIsolation,
+		WorkspaceProviderAPIEnabled: workspaceProviderAPIEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Tool")
 		os.Exit(1)
@@ -834,6 +896,74 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SubstrateActorPool")
 		os.Exit(1)
+	}
+
+	if fakeWorkspaceProviderEnabled && !workspaceProviderAPIEnabled {
+		setupLog.Error(
+			fmt.Errorf("fake workspace provider requires workspace provider API"),
+			"invalid workspace provider feature gates",
+		)
+		os.Exit(1)
+	}
+	registerWorkspaceCoreControllers := workspaceProviderAPIEnabled
+	if !workspaceProviderAPIEnabled {
+		workspaceAPIsInstalled, err := workspaceCleanupAPIsInstalled(mgr.GetRESTMapper())
+		if err != nil {
+			setupLog.Error(err, "unable to discover workspace cleanup APIs")
+			os.Exit(1)
+		}
+		registerWorkspaceCoreControllers = workspaceAPIsInstalled
+		if !workspaceAPIsInstalled {
+			setupLog.Info("workspace CRDs are not installed; skipping cleanup-only workspace controllers")
+		}
+	}
+	if registerWorkspaceCoreControllers {
+		if err := (&controller.ExecutionWorkspaceProviderReconciler{
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			RESTMapper:  mgr.GetRESTMapper(),
+			CleanupOnly: !workspaceProviderAPIEnabled,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceProviderCore")
+			os.Exit(1)
+		}
+		if err := (&controller.ExecutionWorkspaceReconciler{
+			Client:      mgr.GetClient(),
+			CleanupOnly: !workspaceProviderAPIEnabled,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceCore")
+			os.Exit(1)
+		}
+	}
+	if workspaceProviderAPIEnabled {
+		if err := (&controller.ExecutionWorkspaceClassReconciler{
+			Client:     mgr.GetClient(),
+			APIReader:  mgr.GetAPIReader(),
+			RESTMapper: mgr.GetRESTMapper(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "ExecutionWorkspaceClassCore")
+			os.Exit(1)
+		}
+		if fakeWorkspaceProviderEnabled {
+			if err := (&controller.FakeExecutionWorkspaceProviderReconciler{
+				Client: mgr.GetClient(),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspaceProvider")
+				os.Exit(1)
+			}
+			if err := (&controller.FakeExecutionWorkspacePoolReconciler{
+				Client: mgr.GetClient(),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspacePool")
+				os.Exit(1)
+			}
+			if err := (&controller.FakeExecutionWorkspaceReconciler{
+				Client: mgr.GetClient(),
+			}).SetupWithManager(mgr); err != nil {
+				setupLog.Error(err, "unable to create controller", "controller", "FakeExecutionWorkspace")
+				os.Exit(1)
+			}
+		}
 	}
 
 	if err := (&controller.AgentReconciler{
@@ -985,10 +1115,10 @@ func main() {
 	}
 }
 
-func envBool(name string, fallback bool) bool {
+func envBool(name string) bool {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
-		return fallback
+		return false
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {

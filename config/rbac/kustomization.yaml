@@ -7,6 +7,8 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+- workspace_parameter_reader_role.yaml
+- workspace_parameter_reader_role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect
@@ -22,6 +24,23 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the orka itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- fake.workspace_fakepoolparameters_admin_role.yaml
+- fake.workspace_fakepoolparameters_editor_role.yaml
+- fake.workspace_fakepoolparameters_viewer_role.yaml
+- fake.workspace_fakeproviderconfig_admin_role.yaml
+- fake.workspace_fakeproviderconfig_editor_role.yaml
+- fake.workspace_fakeproviderconfig_viewer_role.yaml
+- fake_workspace_parameter_reader_role.yaml
+- workspace_executionworkspace_viewer_role.yaml
+- workspace_executionworkspaceclass_admin_role.yaml
+- workspace_executionworkspaceclass_editor_role.yaml
+- workspace_executionworkspaceclass_viewer_role.yaml
+- workspace_executionworkspacepool_admin_role.yaml
+- workspace_executionworkspacepool_editor_role.yaml
+- workspace_executionworkspacepool_viewer_role.yaml
+- workspace_executionworkspaceprovider_admin_role.yaml
+- workspace_executionworkspaceprovider_editor_role.yaml
+- workspace_executionworkspaceprovider_viewer_role.yaml
 - agent_admin_role.yaml
 - agent_editor_role.yaml
 - agent_viewer_role.yaml
@@ -40,4 +59,3 @@ resources:
 - task_viewer_role.yaml
 # Worker ServiceAccount and RBAC for task execution
 - worker_role.yaml
-

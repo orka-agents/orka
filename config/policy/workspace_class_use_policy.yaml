@@ -1,0 +1,64 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: task-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["tasks"]
+  validations:
+  - expression: >-
+      !has(object.spec.execution) ||
+      !has(object.spec.execution.workspace) ||
+      !has(object.spec.execution.workspace.classRef) ||
+      authorizer.group('workspace.orka.ai')
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.execution.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: task-workspace-class-use.orka.ai
+spec:
+  policyName: task-workspace-class-use.orka.ai
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tool-workspace-class-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["tools"]
+  validations:
+  - expression: >-
+      !has(object.spec.mcp) ||
+      !has(object.spec.mcp.workspace) ||
+      authorizer.group('workspace.orka.ai')
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.spec.mcp.workspace.classRef.name)
+        .check('use').allowed()
+    message: caller is not authorized to use the selected ExecutionWorkspaceClass
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tool-workspace-class-use.orka.ai
+spec:
+  policyName: tool-workspace-class-use.orka.ai
+  validationActions: [Deny]

@@ -2580,3 +2580,23 @@ func assertToolDeleteRequests(t *testing.T, executor *recordingToolWorkspaceExec
 		}
 	}
 }
+
+func TestToolWorkspaceRequiresWorkspaceProviderAPI(t *testing.T) {
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{
+		Description: "workspace-backed MCP tool",
+		MCP: &corev1alpha1.MCPToolServer{Workspace: &corev1alpha1.MCPWorkspace{
+			ClassRef: corev1alpha1.WorkspaceClassReference{Name: "service-v1"},
+			Port:     8080,
+		}},
+	}}
+	r := &ToolReconciler{}
+	if err := r.validateTool(context.Background(), tool); err == nil ||
+		!strings.Contains(err.Error(), "workspace provider API") {
+		t.Fatalf("disabled workspace API validation error = %v", err)
+	}
+	r.WorkspaceProviderAPIEnabled = true
+	if err := r.validateTool(context.Background(), tool); err == nil ||
+		!strings.Contains(err.Error(), "controller-first Tool workspace integration") {
+		t.Fatalf("enabled workspace API validation error = %v", err)
+	}
+}

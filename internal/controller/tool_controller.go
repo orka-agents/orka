@@ -72,9 +72,10 @@ type ToolReconciler struct {
 	SkipSSRFValidation bool
 
 	// SubstrateEnabled enables durable MCP tool actors.
-	SubstrateEnabled          bool
-	SubstrateConfig           SubstrateConfig
-	EnforceNamespaceIsolation bool
+	SubstrateEnabled            bool
+	SubstrateConfig             SubstrateConfig
+	EnforceNamespaceIsolation   bool
+	WorkspaceProviderAPIEnabled bool
 
 	// SubstrateExecutorFactory is injectable for tests.
 	SubstrateExecutorFactory func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
@@ -139,6 +140,12 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
 		return r.validateSubstrateMCPTool(ctx, tool)
+	}
+	if tool.Spec.MCP != nil && tool.Spec.MCP.Workspace != nil {
+		if !r.WorkspaceProviderAPIEnabled {
+			return fmt.Errorf("mcp.workspace requires the workspace provider API")
+		}
+		return fmt.Errorf("mcp.workspace requires controller-first Tool workspace integration")
 	}
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")

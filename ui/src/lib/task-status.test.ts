@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { phaseStyle, typeStyle } from './task-status'
 
 describe('phaseStyle', () => {
-  it.each(['Pending', 'Running', 'Succeeded', 'Failed'] as const)(
+  it.each(['Pending', 'Running', 'Finalizing', 'Succeeded', 'Failed'] as const)(
     'returns token-based classes for %s (no pastel literals)',
     (phase) => {
       const s = phaseStyle(phase)
@@ -18,7 +18,7 @@ describe('phaseStyle', () => {
 
   it('marks only Running as live', () => {
     expect(phaseStyle('Running').live).toBe(true)
-    for (const phase of ['Pending', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'] as const) {
+    for (const phase of ['Pending', 'Finalizing', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'] as const) {
       expect(phaseStyle(phase).live).toBe(false)
     }
   })

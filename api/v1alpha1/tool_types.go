@@ -12,8 +12,8 @@ import (
 )
 
 // ToolSpec defines the desired state of Tool
-// +kubebuilder:validation:XValidation:rule="has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor))",message="http or mcp.substrateActor is required"
-// +kubebuilder:validation:XValidation:rule="!has(self.http) || (has(self.mcp) && has(self.mcp.substrateActor)) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless mcp.substrateActor is set"
+// +kubebuilder:validation:XValidation:rule="has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor) || has(self.mcp.workspace)))",message="http or an MCP workspace backend is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || (has(self.mcp) && (has(self.mcp.substrateActor) || has(self.mcp.workspace))) || (has(self.http.url) && self.http.url.size() > 0)",message="http.url is required unless an MCP workspace backend is set"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
@@ -94,15 +94,31 @@ type SecretKeySelector struct {
 }
 
 // MCPToolServer configures a Model Context Protocol server backend.
+// +kubebuilder:validation:XValidation:rule="has(self.substrateActor) != has(self.workspace)",message="exactly one of substrateActor or workspace is required"
 type MCPToolServer struct {
 	// Path is the HTTP path exposed by the MCP server inside the actor.
 	// Defaults to /mcp.
 	// +optional
 	Path string `json:"path,omitempty"`
 
-	// SubstrateActor configures a durable Substrate actor that hosts the MCP server.
-	// +kubebuilder:validation:Required
-	SubstrateActor *SubstrateMCPActor `json:"substrateActor"`
+	// Workspace configures a provider-neutral Service-mode ExecutionWorkspace.
+	// +optional
+	Workspace *MCPWorkspace `json:"workspace,omitempty"`
+
+	// SubstrateActor configures the legacy durable Substrate actor backend.
+	// +optional
+	SubstrateActor *SubstrateMCPActor `json:"substrateActor,omitempty"`
+}
+
+// MCPWorkspace selects a Service-mode ExecutionWorkspaceClass for hosting an MCP server.
+type MCPWorkspace struct {
+	// ClassRef references a class in the Tool namespace.
+	ClassRef WorkspaceClassReference `json:"classRef"`
+
+	// Port is the service port exposed by the MCP server.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
 }
 
 // SubstrateMCPActor selects the durable actor that hosts an MCP server.
@@ -137,11 +153,35 @@ type ToolStatus struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// Workspace reports the provider-neutral Service workspace backing this Tool.
+	// +optional
+	Workspace *ToolWorkspaceStatus `json:"workspace,omitempty"`
+
 	// Actor reports durable actor metadata when this tool is MCP actor-backed.
 	// +optional
 	Actor *ToolActorStatus `json:"actor,omitempty"`
 
 	// Conditions represent the current state of the Tool
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ToolWorkspaceStatus reports safe generic workspace metadata for a Tool.
+type ToolWorkspaceStatus struct {
+	// ClassRef is the selected Service workspace class.
+	ClassRef WorkspaceClassReference `json:"classRef"`
+
+	// WorkspaceRef identifies the owned concrete workspace.
+	// +optional
+	WorkspaceRef *WorkspaceObjectReference `json:"workspaceRef,omitempty"`
+
+	// State is the provider-neutral workspace state.
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// Conditions project generic readiness and cleanup state.
 	// +listType=map
 	// +listMapKey=type
 	// +optional

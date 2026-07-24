@@ -690,6 +690,11 @@ Key configuration values for the Helm chart:
 | `controller.metricsPort` | `8081` | Metrics endpoint port |
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
+| `controller.workspaceProvider.apiEnabled` | `false` | Enable provider-neutral `workspace.orka.ai` coordination controllers |
+| `controller.workspaceProvider.fakeProviderEnabled` | `false` | Enable the development-only fake workspace adapter |
+| `controller.workspaceProvider.classUseAdmission.enabled` | `false` | Install and enable fail-closed Task/Tool class-use admission; required when `apiEnabled=true` |
+| `controller.workspaceProvider.classUseAdmission.existingSecret` | `""` | Existing TLS Secret containing `tls.crt` and `tls.key` for the chart webhook Service DNS name |
+| `controller.workspaceProvider.classUseAdmission.caBundle` | `""` | Base64-encoded PEM CA bundle for the class-use ValidatingWebhookConfiguration |
 | `controller.agentSandbox.enabled` | `false` | Enable experimental workspace-backed execution for agent Tasks that set `execution.workspace` |
 | `controller.agentSandbox.routerUrl` | `""` | Optional upstream agent-sandbox router base URL used for workspace claims |
 | `controller.agentSandbox.defaultTemplate` | `""` | Default agent-sandbox `SandboxWarmPool` name when a Task omits `templateRef.name` |
@@ -846,6 +851,14 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
+
+### Provider-neutral Workspace Controller Settings
+
+The `workspace.orka.ai/v1alpha1` control plane is installed additively and its controllers are disabled by default during rollout. Enable the generic provider, class, pool, and workspace reconcilers with `--enable-workspace-provider-api` (or `ORKA_ENABLE_WORKSPACE_PROVIDER_API=true`). The development-only fake adapter additionally requires `--enable-fake-workspace-provider` (or `ORKA_ENABLE_FAKE_WORKSPACE_PROVIDER=true`). In Helm these map to `controller.workspaceProvider.apiEnabled` and `controller.workspaceProvider.fakeProviderEnabled`.
+
+Task and Tool `classRef` selection is always protected by shipped `ValidatingAdmissionPolicy` resources that perform a live Kubernetes `use` authorization check, even while workspace execution gates are disabled. When the workspace provider API is enabled, the manager also requires the TLS-backed `--workspace-class-use-admission-enabled` webhook as defense in depth. The webhooks submit a Kubernetes `SubjectAccessReview` for the live admission caller using verb `use` on the selected namespaced `ExecutionWorkspaceClass`; requests are denied when the SAR is denied or unavailable. Kustomize users enable `config/webhook` plus `manager_webhook_patch.yaml` after provisioning TLS and CA injection. Helm users set `controller.workspaceProvider.classUseAdmission.enabled=true`, provide an existing TLS Secret, and supply the base64-encoded CA bundle; the chart installs the Service and fail-closed ValidatingWebhookConfiguration.
+
+Task and Tool users select namespaced `ExecutionWorkspaceClass` objects. Provider identity, provider-specific parameters, pool implementation, and provider versions remain operator-owned. The legacy direct Agent Sandbox and Substrate settings below remain available during migration.
 
 ### Agent Sandbox Controller Settings
 

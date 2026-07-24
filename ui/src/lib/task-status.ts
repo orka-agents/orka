@@ -49,6 +49,14 @@ const PHASE_STYLES: Record<TaskPhase, PhaseStyle> = {
     bgClass: 'bg-status-running-bg',
     live: true,
   },
+  Finalizing: {
+    label: 'Finalizing',
+    dotClass: 'bg-status-finalizing',
+    railClass: 'border-status-finalizing',
+    textClass: 'text-status-finalizing',
+    bgClass: 'bg-status-finalizing-bg',
+    live: false,
+  },
   Succeeded: {
     label: 'Succeeded',
     dotClass: 'bg-status-succeeded',

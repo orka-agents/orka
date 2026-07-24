@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -57,6 +58,120 @@ func TestHandlers_CreateTaskKubernetesRBACFailsClosed(t *testing.T) {
 			created := &corev1alpha1.Task{}
 			err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "fail-closed-task", Namespace: "default"}, created)
 			require.True(t, apierrors.IsNotFound(err), "failed authorization must not create a task")
+		})
+	}
+}
+
+func TestHandlers_CreateTaskWorkspaceClassUseChecksContextTokenCaller(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	kubeClient := denyingSubjectAccessReviewClient(t, nil, func(review *authorizationv1.SubjectAccessReview) {
+		require.Equal(t, "kontxt-user", review.Spec.User)
+		require.Equal(t, []string{"workspace-users"}, review.Spec.Groups)
+		require.NotNil(t, review.Spec.ResourceAttributes)
+		require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+		require.Equal(t, "use", review.Spec.ResourceAttributes.Verb)
+		require.Equal(t, workspacev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+		require.Equal(t, workspacev1alpha1.GroupVersion.Version, review.Spec.ResourceAttributes.Version)
+		require.Equal(t, "executionworkspaceclasses", review.Spec.ResourceAttributes.Resource)
+		require.Equal(t, "coding-v1", review.Spec.ResourceAttributes.Name)
+	})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: kubeClient})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username: "kontxt-user",
+			Groups:   []string{"workspace-users"},
+			AuthType: AuthTypeContextToken,
+			ContextToken: &ContextToken{
+				Subject: "kontxt-user",
+			},
+		})
+		return c.Next()
+	})
+	app.Post("/tasks", handlers.CreateTask)
+
+	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", map[string]any{
+		"name": "class-task",
+		"spec": map[string]any{
+			"type":  "container",
+			"image": "alpine:3.20",
+			"execution": map[string]any{
+				"workspace": map[string]any{
+					"classRef": map[string]any{"name": "coding-v1"},
+				},
+			},
+		},
+	})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	created := &corev1alpha1.Task{}
+	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "class-task", Namespace: "default"}, created)
+	require.True(t, apierrors.IsNotFound(err), "denied workspace class use must not create a task")
+}
+
+func TestHandlers_ToolWorkspaceClassUseChecksProxyCallerOnCreateAndUpdate(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		objects  []runtime.Object
+		response int
+	}{
+		{name: "create", method: http.MethodPost, path: "/tools", response: http.StatusForbidden},
+		{
+			name:   "update",
+			method: http.MethodPut,
+			path:   "/tools/workspace-tool",
+			objects: []runtime.Object{&corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Name: "workspace-tool", Namespace: "default"},
+				Spec: corev1alpha1.ToolSpec{
+					Description: "existing",
+					HTTP:        &corev1alpha1.HTTPExecution{URL: "https://example.test/tool"},
+				},
+			}},
+			response: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...).Build()
+			kubeClient := denyingSubjectAccessReviewClient(t, nil, func(review *authorizationv1.SubjectAccessReview) {
+				require.Equal(t, "oidc-user", review.Spec.User)
+				require.NotNil(t, review.Spec.ResourceAttributes)
+				require.Equal(t, "default", review.Spec.ResourceAttributes.Namespace)
+				require.Equal(t, "use", review.Spec.ResourceAttributes.Verb)
+				require.Equal(t, workspacev1alpha1.GroupVersion.Group, review.Spec.ResourceAttributes.Group)
+				require.Equal(t, "executionworkspaceclasses", review.Spec.ResourceAttributes.Resource)
+				require.Equal(t, "service-v1", review.Spec.ResourceAttributes.Name)
+			})
+			handlers := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: kubeClient})
+			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{Username: "oidc-user", AuthType: AuthTypeOIDC})
+				return c.Next()
+			})
+			app.Post("/tools", handlers.CreateTool)
+			app.Put("/tools/:name", handlers.UpdateTool)
+
+			resp := testJSONRequest(t, app, tt.method, tt.path, map[string]any{
+				"name": "workspace-tool",
+				"spec": map[string]any{
+					"description": "workspace service",
+					"mcp": map[string]any{
+						"workspace": map[string]any{
+							"classRef": map[string]any{"name": "service-v1"},
+							"port":     8080,
+						},
+					},
+				},
+			})
+			require.Equal(t, tt.response, resp.StatusCode)
 		})
 	}
 }
