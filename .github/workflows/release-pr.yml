@@ -1,0 +1,139 @@
+name: Prepare Release Pull Request
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.0"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Release version to prepare (vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N)
+        required: true
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-pr-${{ github.event.inputs.release_version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  create-release-pull-request:
+    name: Prepare release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set next development version after a stable minor release
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+
+          tag=${GITHUB_REF_NAME#v}
+          major=${tag%%.*}
+          remainder=${tag#*.}
+          minor=${remainder%%.*}
+
+          echo "NEWVERSION=v${major}.$((minor + 1)).0-beta.0" >> "${GITHUB_ENV}"
+          echo "TARGET_BRANCH=main" >> "${GITHUB_ENV}"
+
+      - name: Set requested release version and target branch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${REQUESTED_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+            echo "release_version must match vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N." >&2
+            exit 1
+          fi
+
+          version_without_v=${REQUESTED_VERSION#v}
+          major=${version_without_v%%.*}
+          remainder=${version_without_v#*.}
+          minor=${remainder%%.*}
+
+          echo "NEWVERSION=${REQUESTED_VERSION}" >> "${GITHUB_ENV}"
+          if [[ "${REQUESTED_VERSION}" == *-beta.* ]]; then
+            echo "TARGET_BRANCH=main" >> "${GITHUB_ENV}"
+          else
+            echo "TARGET_BRANCH=release-${major}.${minor}" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Create release branch if needed
+        run: |
+          set -euo pipefail
+
+          if git checkout "${TARGET_BRANCH}"; then
+            exit 0
+          fi
+          git fetch origin main:refs/remotes/origin/main
+          git checkout -b "${TARGET_BRANCH}" origin/main
+          git push --set-upstream origin "${TARGET_BRANCH}"
+
+      - name: Generate and promote release manifests
+        run: |
+          make release-manifest NEWVERSION="${NEWVERSION}"
+          make promote-staging-manifest
+
+      - name: Validate promoted chart
+        run: |
+          set -euo pipefail
+
+          helm lint cmd/build/helmify/static
+          helm lint charts/orka
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 12
+          git diff --check
+
+      - name: Create release pull request
+        id: create_release_pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(release): prepare ${{ env.NEWVERSION }}"
+          title: "chore(release): prepare ${{ env.NEWVERSION }}"
+          branch: "release-${{ env.NEWVERSION }}"
+          base: ${{ env.TARGET_BRANCH }}
+          signoff: true
+          delete-branch: true
+          body: |
+            ## Release preparation
+
+            This PR prepares Orka `${{ env.NEWVERSION }}` using the Gatekeeper-style staged release flow:
+
+            - updates release versions in the canonical and static generator inputs
+            - regenerates `manifest_staging/`
+            - promotes the staging installer and chart into `deploy/` and `charts/`
+
+            Merge this PR before creating the matching `${{ env.NEWVERSION }}` tag. The tag workflow publishes the reviewed root chart snapshot without regenerating it.
+      - name: Dispatch release pull request validation
+        if: >-
+          steps.create_release_pr.outputs.pull-request-operation == 'created' ||
+          steps.create_release_pr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BRANCH: ${{ steps.create_release_pr.outputs.pull-request-branch }}
+        run: |
+          set -euo pipefail
+
+          for workflow in lint.yml test.yml helm-chart.yml; do
+            gh workflow run "${workflow}" --ref "${RELEASE_BRANCH}"
+          done

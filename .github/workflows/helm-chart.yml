@@ -4,12 +4,27 @@ on:
   push:
     branches:
       - main
+      - "release-*"
     paths:
-      - "charts/orka/**"
+      - "api/**"
+      - "cmd/build/helmify/**"
+      - "config/**"
+      - "internal/controller/**"
+      - "manifest_staging/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
       - ".github/workflows/helm-chart.yml"
   pull_request:
     paths:
-      - "charts/orka/**"
+      - "api/**"
+      - "cmd/build/helmify/**"
+      - "config/**"
+      - "internal/controller/**"
+      - "manifest_staging/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:
 
@@ -17,103 +32,190 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('helm-chart-pr-{0}', github.event.pull_request.number) || 'gh-pages' }}
+  group: ${{ github.event_name == 'pull_request' && format('helm-chart-pr-{0}', github.event.pull_request.number) || format('helm-chart-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
-  validate:
-    name: Lint and package Helm chart
+  test:
+    name: Validate Helm chart and CRD lifecycle
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 15
+    env:
+      KIND_CLUSTER: orka-helm-crd-lifecycle
+      KIND_IMAGE: kindest/node:v1.33.7@sha256:d26ef333bdb2cbe9862a0f7c3803ecc7b4303d8cea8e814b481b09949d353040
+      KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+      KIND_VERSION: v0.31.0
+      NAMESPACE: orka-helm-crd-lifecycle
+      PAUSE_IMAGE_REPOSITORY: registry.k8s.io/pause
+      PAUSE_IMAGE_TAG: 3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Show Helm version
-        run: helm version
-
-      - name: Lint chart
-        run: helm lint charts/orka
-
-      - name: Package chart
-        run: |
-          mkdir -p .cr-release-packages
-          helm package charts/orka --destination .cr-release-packages
-
-  publish:
-    name: Publish Helm chart repository
-    needs: validate
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          persist-credentials: false
+          go-version-file: go.mod
 
-      - name: Show Helm version
-        run: helm version
-
-      - name: Lint chart
-        run: helm lint charts/orka
-
-      - name: Package chart
-        run: |
-          mkdir -p .cr-release-packages
-          helm package charts/orka --destination .cr-release-packages
-
-      - name: Publish chart repository
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify generated chart and package
         run: |
           set -euo pipefail
 
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          rm -rf gh-pages
-          git init gh-pages
-          cd gh-pages
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-          if git fetch --depth=1 origin gh-pages:refs/remotes/origin/gh-pages; then
-            git checkout -B gh-pages origin/gh-pages
-          else
-            git checkout --orphan gh-pages
-            git rm -rf . || true
+          make manifests
+          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "Generated staging manifests are stale." >&2
+            git status --short --untracked-files=all >&2
+            exit 1
           fi
 
-          mkdir -p charts
+          go test ./cmd/build/helmify
+          helm lint cmd/build/helmify/static
+          helm lint manifest_staging/charts/orka
 
-          # Migrate chart artifacts from the previous root-level repository layout.
-          shopt -s nullglob
-          for artifact in ./*.tgz ./*.prov; do
-            mv "$artifact" charts/
+          default_render=$(mktemp)
+          secondary_render=$(mktemp)
+          secondary_rbac=$(mktemp)
+          secondary_serviceaccounts=$(mktemp)
+          secondary_gateway_policy=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}"' EXIT
+          helm template orka manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${default_render}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${secondary_render}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/rbac.yaml \
+            > "${secondary_rbac}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/serviceaccount.yaml \
+            > "${secondary_serviceaccounts}"
+          helm template secondary manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/gateway-task-admission-policy.yaml \
+            > "${secondary_gateway_policy}"
+
+          grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
+          grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
+          grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
+          for tier in ai vendor container; do
+            account="secondary-orka-${tier}-worker"
+            grep -Fq -- "--${tier}-worker-service-account-name=${account}" "${secondary_render}"
+            grep -Fq -- "name: ${account}" "${secondary_serviceaccounts}"
+            grep -Fq -- "name: ${account}" "${secondary_rbac}"
+            grep -Fq -- ":${account}'" "${secondary_gateway_policy}"
           done
-          if [ -f index.yaml ] && [ ! -f charts/index.yaml ]; then
-            mv index.yaml charts/index.yaml
-          else
-            rm -f index.yaml
+          chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
+          grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
+          for resource in agentruntimes substrateactorpools; do
+            grep -Eq "resources: \\[.*\"${resource}\"" "${secondary_rbac}"
+            grep -Eq "resources: \\[.*\"${resource}/status\"" "${secondary_rbac}"
+            grep -Eq "resources: \\[.*\"${resource}/finalizers\"" "${secondary_rbac}"
+          done
+
+          mkdir -p cr-release-packages
+          helm package manifest_staging/charts/orka --destination cr-release-packages
+          shopt -s nullglob
+          chart_packages=(cr-release-packages/orka-*.tgz)
+          if [[ ${#chart_packages[@]} -ne 1 ]]; then
+            echo "Expected exactly one packaged Orka chart, found ${#chart_packages[@]}." >&2
+            exit 1
           fi
+          test "$(helm show crds "${chart_packages[0]}" | grep -c '^kind: CustomResourceDefinition$')" -eq 12
 
-          cp ../.cr-release-packages/*.tgz charts/
+      - name: Install kind
+        run: |
+          set -euo pipefail
 
-          if [ -f charts/index.yaml ]; then
-            helm repo index charts --url "https://orka-agents.github.io/orka/charts" --merge charts/index.yaml
-          else
-            helm repo index charts --url "https://orka-agents.github.io/orka/charts"
-          fi
+          curl -fsSL --retry 3 --retry-delay 2 -o ./kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  ./kind" | sha256sum --check --strict
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
 
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No Helm chart changes to publish."
-            exit 0
-          fi
+      - name: Verify install, apply, and uninstall CRD behavior
+        run: |
+          set -euo pipefail
 
-          git commit -m "Publish Helm chart"
-          git push origin HEAD:gh-pages
+          cleanup() {
+            kind delete cluster --name "${KIND_CLUSTER}" || true
+          }
+          trap cleanup EXIT
+
+          kind create cluster \
+            --name "${KIND_CLUSTER}" \
+            --image "${KIND_IMAGE}" \
+            --wait 90s
+
+          shopt -s nullglob
+          chart_packages=(cr-release-packages/orka-*.tgz)
+          [[ ${#chart_packages[@]} -eq 1 ]]
+          chart_package=${chart_packages[0]}
+
+          expected_crds=$(cat <<'CRDS'
+          agentruntimes.core.orka.ai
+          agents.core.orka.ai
+          gatewaybindings.gateway.orka.ai
+          gatewayclasses.gateway.orka.ai
+          gateways.gateway.orka.ai
+          providers.core.orka.ai
+          repositorymonitors.core.orka.ai
+          repositoryscans.core.orka.ai
+          skills.core.orka.ai
+          substrateactorpools.core.orka.ai
+          tasks.core.orka.ai
+          tools.core.orka.ai
+          CRDS
+          )
+
+          list_orka_crds() {
+            kubectl get customresourcedefinitions.apiextensions.k8s.io -o json | \
+              jq -r '.items[] | select(.spec.group == "core.orka.ai" or .spec.group == "gateway.orka.ai") | .metadata.name' | \
+              sort
+          }
+
+          assert_all_orka_crds() {
+            local stage=$1
+            local actual
+            local crd
+            actual=$(list_orka_crds)
+            if [[ "${actual}" != "${expected_crds}" ]]; then
+              echo "Orka CRD set mismatch ${stage}." >&2
+              diff -u <(printf '%s\n' "${expected_crds}") <(printf '%s\n' "${actual}") >&2 || true
+              exit 1
+            fi
+            while IFS= read -r crd; do
+              kubectl wait --for=condition=Established --timeout=60s "crd/${crd}"
+            done <<< "${expected_crds}"
+          }
+
+          helm install orka "${chart_package}" \
+            --namespace "${NAMESPACE}" \
+            --create-namespace \
+            --set controller.replicas=0 \
+            --set-string controller.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string controller.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set controller.image.pullPolicy=IfNotPresent \
+            --set-string workers.ai.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string workers.ai.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set-string workers.harnessWrapper.image.repository="${PAUSE_IMAGE_REPOSITORY}" \
+            --set-string workers.harnessWrapper.image.tag="${PAUSE_IMAGE_TAG}" \
+            --set workers.harnessWrapper.image.pullPolicy=IfNotPresent \
+            --set-string workers.harnessWrapper.auth.token=mock-token
+
+          assert_all_orka_crds "after helm install"
+          helm show crds "${chart_package}" | \
+            kubectl apply --server-side --force-conflicts -f -
+          assert_all_orka_crds "after explicit CRD apply"
+
+          helm uninstall orka --namespace "${NAMESPACE}"
+          assert_all_orka_crds "after helm uninstall"

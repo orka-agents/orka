@@ -1,4 +1,4 @@
-name: Release Images
+name: Release
 
 on:
   push:
@@ -13,8 +13,98 @@ permissions:
   contents: read
 
 jobs:
+  validate-release:
+    name: Validate release metadata and Helm chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and promoted chart
+        run: |
+          set -euo pipefail
+
+          tag=${GITHUB_REF_NAME}
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+            echo "Release tag must match vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N; got ${tag}." >&2
+            exit 1
+          fi
+
+          chart_field() {
+            local field=$1
+            local value
+            value=$(awk -v key="${field}:" '$1 == key { print $2; exit }' charts/orka/Chart.yaml)
+            value=${value#\"}
+            value=${value%\"}
+            value=${value#\'}
+            value=${value%\'}
+            if [[ -z "${value}" ]]; then
+              echo "Could not read ${field} from charts/orka/Chart.yaml." >&2
+              return 1
+            fi
+            printf '%s\n' "${value}"
+          }
+
+          expected_version=${tag#v}
+          chart_version=$(chart_field version)
+          app_version=$(chart_field appVersion)
+          if [[ "${chart_version}" != "${expected_version}" ]]; then
+            echo "Tag ${tag} requires charts/orka version ${expected_version}; found ${chart_version}." >&2
+            exit 1
+          fi
+          if [[ "${app_version}" != "${tag}" ]]; then
+            echo "Tag ${tag} requires charts/orka appVersion ${tag}; found ${app_version}." >&2
+            exit 1
+          fi
+
+          diff --no-dereference --recursive --unified manifest_staging/charts/orka charts/orka
+          diff --no-dereference --recursive --unified manifest_staging/deploy deploy
+          helm lint charts/orka
+          test "$(helm show crds charts/orka | grep -c '^kind: CustomResourceDefinition$')" -eq 12
+
+          rendered_chart=$(mktemp)
+          trap 'rm -f "${rendered_chart}"' EXIT
+          helm template release-validation charts/orka \
+            --namespace orka-system \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${rendered_chart}"
+
+          runtime_images=()
+          while IFS= read -r image_line; do
+            image_ref=${image_line#*image: }
+            image_ref=${image_ref#\"}
+            image_ref=${image_ref%\"}
+            runtime_images+=("${image_ref}")
+          done < <(grep -E '^[[:space:]]+image:[[:space:]]+' "${rendered_chart}")
+          if [[ ${#runtime_images[@]} -ne 2 ]]; then
+            echo "Expected two rendered runtime images; found ${#runtime_images[@]}." >&2
+            exit 1
+          fi
+          for image_ref in "${runtime_images[@]}"; do
+            if [[ "${image_ref##*:}" != "${expected_version}" ]]; then
+              echo "Tag ${tag} requires runtime image ${image_ref} to use ${expected_version}." >&2
+              exit 1
+            fi
+          done
+
+          for worker in ai general; do
+            worker_refs=()
+            while IFS= read -r worker_line; do
+              worker_refs+=("${worker_line#*=}")
+            done < <(grep -E "^[[:space:]]+- --${worker}-worker-image=" "${rendered_chart}")
+            if [[ ${#worker_refs[@]} -ne 1 || "${worker_refs[0]##*:}" != "${expected_version}" ]]; then
+              echo "Tag ${tag} requires exactly one rendered ${worker} worker image using ${expected_version}." >&2
+              exit 1
+            fi
+          done
+
   build-and-push:
     name: Build and Push Images
+    needs: validate-release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -336,3 +426,27 @@ jobs:
           promote_image ai-worker "/ai-worker"
           promote_image general-worker "/general-worker"
           promote_image agent-harness-wrapper "/agent-harness-wrapper"
+
+
+  publish-helm-chart:
+    name: Publish promoted Helm chart
+    needs: promote-release-tags
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Publish Helm chart
+        uses: stefanprodan/helm-gh-pages@0ad2bb377311d61ac04ad9eb6f252fb68e207260 # v1.7.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          charts_dir: charts
+          target_dir: charts
+          linting: off

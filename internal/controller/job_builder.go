@@ -92,21 +92,24 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage                string
-	GeneralWorkerImage           string
-	InitImage                    string
-	ControllerURL                string // e.g. http://orka-controller.orka-system.svc:8080
-	ContextTokenTTSURL           string
-	ContextTokenTTSAudience      string
-	ContextTokenTTSTimeout       string
-	ContextTokenTTSTokenSource   string
-	ContextTokenSubjectTokenType string
-	ContextTokenChildScope       string
-	ContextTokenOutboundScope    string
-	ContextTokenChildTokenTTL    string
-	ContextTokenToolTokenTTL     string
-	EnableTelemetry              bool
-	directSecrets                directRuntimeSecretPolicy
+	AIWorkerImage                     string
+	GeneralWorkerImage                string
+	InitImage                         string
+	AIWorkerServiceAccountName        string
+	VendorWorkerServiceAccountName    string
+	ContainerWorkerServiceAccountName string
+	ControllerURL                     string // e.g. http://orka-controller.orka-system.svc:8080
+	ContextTokenTTSURL                string
+	ContextTokenTTSAudience           string
+	ContextTokenTTSTimeout            string
+	ContextTokenTTSTokenSource        string
+	ContextTokenSubjectTokenType      string
+	ContextTokenChildScope            string
+	ContextTokenOutboundScope         string
+	ContextTokenChildTokenTTL         string
+	ContextTokenToolTokenTTL          string
+	EnableTelemetry                   bool
+	directSecrets                     directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -118,10 +121,13 @@ type directRuntimeSecretPolicy struct {
 // NewJobBuilder creates a new JobBuilder
 func NewJobBuilder(c client.Client) *JobBuilder {
 	return &JobBuilder{
-		Client:             c,
-		AIWorkerImage:      DefaultAIWorkerImage,
-		GeneralWorkerImage: DefaultGeneralWorkerImage,
-		InitImage:          DefaultInitImage,
+		Client:                            c,
+		AIWorkerImage:                     DefaultAIWorkerImage,
+		GeneralWorkerImage:                DefaultGeneralWorkerImage,
+		InitImage:                         DefaultInitImage,
+		AIWorkerServiceAccountName:        AIWorkerServiceAccount,
+		VendorWorkerServiceAccountName:    VendorWorkerServiceAccount,
+		ContainerWorkerServiceAccountName: ContainerWorkerServiceAccount,
 		directSecrets: directRuntimeSecretPolicy{
 			providerSecrets: envFlagEnabled(directProviderSecretsEnvVar),
 			secretMounts:    envFlagEnabled(directSecretMountsEnvVar),
@@ -130,20 +136,27 @@ func NewJobBuilder(c client.Client) *JobBuilder {
 	}
 }
 
-func workerServiceAccountForTask(task *corev1alpha1.Task) string {
+func workerServiceAccountName(configured, fallback string) string {
+	if configured != "" {
+		return configured
+	}
+	return fallback
+}
+
+func (b *JobBuilder) workerServiceAccountForTask(task *corev1alpha1.Task) string {
 	if task == nil {
-		return ContainerWorkerServiceAccount
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	}
 
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return AIWorkerServiceAccount
+		return workerServiceAccountName(b.AIWorkerServiceAccountName, AIWorkerServiceAccount)
 	case corev1alpha1.TaskTypeAgent:
-		return VendorWorkerServiceAccount
+		return workerServiceAccountName(b.VendorWorkerServiceAccountName, VendorWorkerServiceAccount)
 	case corev1alpha1.TaskTypeContainer:
-		return ContainerWorkerServiceAccount
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	default:
-		return ContainerWorkerServiceAccount
+		return workerServiceAccountName(b.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
 	}
 }
 
@@ -341,7 +354,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                corev1.RestartPolicyNever,
-					ServiceAccountName:           workerServiceAccountForTask(task),
+					ServiceAccountName:           b.workerServiceAccountForTask(task),
 					AutomountServiceAccountToken: workerAutomountServiceAccountTokenWithOptions(task, opts),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{

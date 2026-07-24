@@ -2423,6 +2423,54 @@ func TestEnsureWorkerRBAC_CreatesResources(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkerRBAC_UsesConfiguredServiceAccountNames(t *testing.T) {
+	scheme := newTestScheme()
+	r := newUnitReconciler(scheme)
+	r.AIWorkerServiceAccountName = "release-ai-worker"
+	r.VendorWorkerServiceAccountName = "release-vendor-worker"
+	r.ContainerWorkerServiceAccountName = "release-container-worker"
+
+	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
+		t.Fatalf("ensureWorkerRBAC() error = %v", err)
+	}
+
+	expected := []struct {
+		serviceAccount     string
+		clusterRoleBinding string
+	}{
+		{serviceAccount: "release-ai-worker", clusterRoleBinding: "orka-ai-worker-test-ns"},
+		{serviceAccount: "release-vendor-worker", clusterRoleBinding: "orka-vendor-worker-test-ns"},
+		{serviceAccount: "release-container-worker", clusterRoleBinding: "orka-container-worker-test-ns"},
+	}
+
+	for _, tt := range expected {
+		t.Run(tt.serviceAccount, func(t *testing.T) {
+			sa := &corev1.ServiceAccount{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.serviceAccount, Namespace: testNS}, sa); err != nil {
+				t.Fatalf("expected ServiceAccount %s/%s to exist: %v", testNS, tt.serviceAccount, err)
+			}
+
+			crb := &rbacv1.ClusterRoleBinding{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: tt.clusterRoleBinding}, crb); err != nil {
+				t.Fatalf("expected ClusterRoleBinding %s to exist: %v", tt.clusterRoleBinding, err)
+			}
+			if len(crb.Subjects) != 1 {
+				t.Fatalf("ClusterRoleBinding %s subjects = %#v, want one subject", tt.clusterRoleBinding, crb.Subjects)
+			}
+			if got := crb.Subjects[0]; got.Kind != rbacv1.ServiceAccountKind || got.Name != tt.serviceAccount || got.Namespace != testNS {
+				t.Fatalf("ClusterRoleBinding %s subject = %#v, want ServiceAccount %s/%s", tt.clusterRoleBinding, got, testNS, tt.serviceAccount)
+			}
+		})
+	}
+
+	for _, name := range []string{AIWorkerServiceAccount, VendorWorkerServiceAccount, ContainerWorkerServiceAccount} {
+		sa := &corev1.ServiceAccount{}
+		if err := r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: testNS}, sa); !apierrors.IsNotFound(err) {
+			t.Fatalf("default ServiceAccount %s/%s should not be created when a custom name is configured; err = %v", testNS, name, err)
+		}
+	}
+}
+
 func TestEnsureWorkerRBAC_UsesNamespacedRoleBindingsWhenIsolationEnforced(t *testing.T) {
 	scheme := newTestScheme()
 	r := newUnitReconciler(scheme)

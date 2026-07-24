@@ -15,7 +15,7 @@ slug: /development
 ## Build Commands
 
 ```bash
-# Generate CRD manifests and Go types
+# Generate Go types, the installer manifest, and the Helm staging chart
 make generate
 make manifests
 
@@ -28,6 +28,37 @@ make build-cli
 # Run locally
 make run
 ```
+
+## Helm Chart Generation and Releases
+
+Orka follows Gatekeeper's staged chart flow. The editable Helm generator and static chart inputs live under `cmd/build/helmify/`; canonical Kubernetes resources live under `config/`. Generated and promoted outputs are committed so pull requests and release preparation review the exact manifests that will ship.
+
+| Path | Purpose | Edit directly? |
+| --- | --- | --- |
+| `cmd/build/helmify/` | Helm generator, Kustomize input, and static chart files | Yes |
+| `manifest_staging/deploy/orka.yaml` | Generated next-release installer manifest | No |
+| `manifest_staging/charts/orka/` | Generated next-release Helm chart used by CI and upgrade tests | No |
+| `deploy/` and `charts/orka/` | Promoted release snapshots | No |
+
+For a normal manifest or chart contribution:
+
+1. Edit `config/` and/or the generator inputs under `cmd/build/helmify/`.
+2. Run `make manifests`.
+3. Review and commit the source changes together with all changes under `manifest_staging/`.
+4. Do not promote the chart in an ordinary feature PR. The root snapshots may intentionally remain at the current release while staging contains the next release.
+
+`make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make manifests` and inspect `git diff` for the same drift check locally.
+
+Release preparation runs the same targets as Gatekeeper's flow:
+
+```bash
+make release-manifest NEWVERSION=vX.Y.Z[-beta.N|-rc.N]
+make promote-staging-manifest
+```
+
+The first target updates release inputs and regenerates staging. The second copies the reviewed staging installer and chart into `deploy/` and `charts/orka/`. Normally `.github/workflows/release-pr.yml` runs both and opens the release-preparation PR. A matching `v*` tag packages and publishes those committed root snapshots; tag workflows do not regenerate or promote manifests.
+
+CRDs are generated from the canonical definitions in `config/crd/bases/`. Chart generation makes them available on fresh install, but Helm does not update them during upgrades. Apply the CRDs from the exact target chart before upgrading the controller, as documented in `charts/orka/README.md`.
 
 ## Testing
 

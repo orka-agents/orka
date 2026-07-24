@@ -1,3 +1,8 @@
+# Current application release version. Chart.yaml has its own version and may
+# advance independently for chart-only changes. Release preparation aligns both
+# versions for a tagged application release.
+VERSION := v0.1.1
+
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
@@ -45,11 +50,28 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	rm -rf charts/orka/crds
-	mkdir -p charts/orka/crds
-	cp config/crd/bases/*.yaml charts/orka/crds/
+	rm -rf manifest_staging
+	mkdir -p manifest_staging/deploy manifest_staging/charts/orka
+	"$(KUSTOMIZE)" build config/default -o manifest_staging/deploy/orka.yaml
+	"$(KUSTOMIZE)" build \
+		--load-restrictor LoadRestrictionsNone \
+		cmd/build/helmify | go run ./cmd/build/helmify
+
+.PHONY: release-manifest
+release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
+	@test -n "$(NEWVERSION)" || { echo "NEWVERSION is required" >&2; exit 2; }
+	python3 scripts/update-release-version.py "$(NEWVERSION)"
+	$(MAKE) manifests
+
+.PHONY: promote-staging-manifest
+promote-staging-manifest: ## Promote committed staging manifests into release snapshots.
+	test -f manifest_staging/deploy/orka.yaml
+	test -f manifest_staging/charts/orka/Chart.yaml
+	rm -rf deploy charts
+	cp -R manifest_staging/deploy .
+	cp -R manifest_staging/charts .
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -290,7 +312,11 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
 		"$(KUBECTL)" -n orka-system create secret generic harness-wrapper-auth --from-literal=token="$$token"; \
 	fi
-	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
+	"$(KUSTOMIZE)" build config/default | \
+		sed -E \
+			-e 's|^([[:space:]]*- --ai-worker-image=).*$$|\1$(AI_WORKER_IMG)|' \
+			-e 's|^([[:space:]]*- --general-worker-image=).*$$|\1$(GENERAL_WORKER_IMG)|' | \
+		"$(KUBECTL)" apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

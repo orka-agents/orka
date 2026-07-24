@@ -95,6 +95,9 @@ func main() {
 	var apiPort int
 	var watchNamespace string
 	var generalWorkerImage string
+	var aiWorkerServiceAccountName string
+	var vendorWorkerServiceAccountName string
+	var containerWorkerServiceAccountName string
 	var aiWorkerClusterRoleName string
 	var vendorWorkerClusterRoleName string
 	var containerWorkerClusterRoleName string
@@ -209,7 +212,7 @@ func main() {
 		"task-provenance-admission-trusted-service-accounts",
 		os.Getenv("ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS"),
 		"Comma-separated ServiceAccount names trusted in the target Task namespace to set "+
-			"Orka-managed Task provenance fields. Defaults to orka-ai-worker.")
+			"Orka-managed Task provenance fields. Defaults to the configured AI and vendor worker ServiceAccounts.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
@@ -222,6 +225,12 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
+		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
+	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
+		controller.VendorWorkerServiceAccount, "ServiceAccount name for vendor worker tasks.")
+	flag.StringVar(&containerWorkerServiceAccountName, "container-worker-service-account-name",
+		controller.ContainerWorkerServiceAccount, "ServiceAccount name for container worker tasks.")
 	flag.StringVar(&aiWorkerClusterRoleName, "ai-worker-cluster-role-name",
 		controller.DefaultAIWorkerClusterRoleName, "ClusterRole name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerClusterRoleName, "vendor-worker-cluster-role-name",
@@ -488,6 +497,27 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Empty worker ServiceAccount flags retain the package defaults for callers that
+	// explicitly clear a flag, matching the zero-value fallback in the controller.
+	if aiWorkerServiceAccountName == "" {
+		aiWorkerServiceAccountName = controller.AIWorkerServiceAccount
+	}
+	if vendorWorkerServiceAccountName == "" {
+		vendorWorkerServiceAccountName = controller.VendorWorkerServiceAccount
+	}
+	if containerWorkerServiceAccountName == "" {
+		containerWorkerServiceAccountName = controller.ContainerWorkerServiceAccount
+	}
+	// Preserve explicit admission overrides, but keep its empty default aligned
+	// with the configured trusted worker ServiceAccounts. Container workers remain
+	// excluded, matching the existing admission default.
+	if len(workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts)) == 0 {
+		taskProvenanceAdmissionTrustedServiceAccounts = strings.Join([]string{
+			aiWorkerServiceAccountName,
+			vendorWorkerServiceAccountName,
+		}, ",")
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	executionWorkspaceDefaultProvider = corev1alpha1.WorkspaceProvider(executionWorkspaceDefaultProviderFlag)
@@ -745,6 +775,9 @@ func main() {
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
+	jobBuilder.VendorWorkerServiceAccountName = vendorWorkerServiceAccountName
+	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
 		jobBuilder.ContextTokenTTSURL = contextTokenTTSConfig.URL
 		jobBuilder.ContextTokenTTSAudience = contextTokenTTSConfig.Audience
@@ -806,6 +839,9 @@ func main() {
 		AgentSandboxConfig:                 agentSandboxConfig,
 		SubstrateEnabled:                   substrateEnabled,
 		SubstrateConfig:                    substrateConfig,
+		AIWorkerServiceAccountName:         aiWorkerServiceAccountName,
+		VendorWorkerServiceAccountName:     vendorWorkerServiceAccountName,
+		ContainerWorkerServiceAccountName:  containerWorkerServiceAccountName,
 		AIWorkerClusterRoleName:            aiWorkerClusterRoleName,
 		VendorWorkerClusterRoleName:        vendorWorkerClusterRoleName,
 		ContainerWorkerClusterRoleName:     containerWorkerClusterRoleName,

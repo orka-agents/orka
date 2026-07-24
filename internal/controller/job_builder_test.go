@@ -137,6 +137,99 @@ func TestNewJobBuilder(t *testing.T) {
 	if builder.GeneralWorkerImage != DefaultGeneralWorkerImage {
 		t.Errorf("GeneralWorkerImage = %s, want %s", builder.GeneralWorkerImage, DefaultGeneralWorkerImage)
 	}
+	if builder.AIWorkerServiceAccountName != AIWorkerServiceAccount {
+		t.Errorf("AIWorkerServiceAccountName = %s, want %s", builder.AIWorkerServiceAccountName, AIWorkerServiceAccount)
+	}
+	if builder.VendorWorkerServiceAccountName != VendorWorkerServiceAccount {
+		t.Errorf("VendorWorkerServiceAccountName = %s, want %s", builder.VendorWorkerServiceAccountName, VendorWorkerServiceAccount)
+	}
+	if builder.ContainerWorkerServiceAccountName != ContainerWorkerServiceAccount {
+		t.Errorf("ContainerWorkerServiceAccountName = %s, want %s", builder.ContainerWorkerServiceAccountName, ContainerWorkerServiceAccount)
+	}
+}
+
+func TestJobBuilder_Build_UsesConfiguredWorkerServiceAccountNames(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.AIWorkerServiceAccountName = "release-ai-worker"
+	builder.VendorWorkerServiceAccountName = "release-vendor-worker"
+	builder.ContainerWorkerServiceAccountName = "release-container-worker"
+
+	tests := []struct {
+		name string
+		task *corev1alpha1.Task
+		want string
+	}{
+		{
+			name: "ai",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "ai-task", Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI,
+					AI: &corev1alpha1.AISpec{
+						Provider: "anthropic",
+						Model:    "test-model",
+						Prompt:   "test prompt",
+					},
+				},
+			},
+			want: "release-ai-worker",
+		},
+		{
+			name: "agent",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent-task", Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "test prompt"},
+			},
+			want: "release-vendor-worker",
+		},
+		{
+			name: "container",
+			task: &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "container-task", Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:  corev1alpha1.TaskTypeContainer,
+					Image: testBusyboxImage,
+				},
+			},
+			want: "release-container-worker",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job, err := builder.Build(context.Background(), tt.task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			assertServiceAccountName(t, job.Spec.Template.Spec.ServiceAccountName, tt.want)
+		})
+	}
+}
+
+func TestJobBuilder_WorkerServiceAccountForTask_EmptyNamesUseDefaults(t *testing.T) {
+	builder := setupJobBuilder()
+	builder.AIWorkerServiceAccountName = ""
+	builder.VendorWorkerServiceAccountName = ""
+	builder.ContainerWorkerServiceAccountName = ""
+
+	tests := []struct {
+		name     string
+		taskType corev1alpha1.TaskType
+		want     string
+	}{
+		{name: "ai", taskType: corev1alpha1.TaskTypeAI, want: AIWorkerServiceAccount},
+		{name: "agent", taskType: corev1alpha1.TaskTypeAgent, want: VendorWorkerServiceAccount},
+		{name: "container", taskType: corev1alpha1.TaskTypeContainer, want: ContainerWorkerServiceAccount},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: tt.taskType}}
+			if got := builder.workerServiceAccountForTask(task); got != tt.want {
+				t.Fatalf("workerServiceAccountForTask() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestJobBuilder_Build_AgentTaskForExplicitJobBackend(t *testing.T) {

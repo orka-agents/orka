@@ -61,7 +61,7 @@ One `helm install`, one LLM secret, and you're chatting with an orchestrator tha
 - 🔎 **Repository Monitors** — Durable GitHub PR review queues with scheduled and webhook-triggered review runs
 - 🧰 **Agent Sandbox Workspaces** — Experimental durable, reusable coding workspaces through `agent-sandbox`
 - 🖥️ **Web Dashboard** — Built-in React UI embedded in the controller binary — zero extra deployments
-- 📦 **Declarative CRDs** — Task, Agent, Tool, Provider, Skill, RepositoryScan, and RepositoryMonitor custom resources for GitOps workflows
+- 📦 **Declarative CRDs** — Task, Agent, AgentRuntime, Tool, Provider, Skill, RepositoryScan, RepositoryMonitor, and SubstrateActorPool custom resources for GitOps workflows
 - ⏰ **Scheduled Tasks** — Cron-based recurring execution with concurrency policies
 - 🔌 **REST & OpenAI-Compatible API** — Full CRUD + `/openai/v1/chat/completions` endpoint for Continue, Cursor, and any OpenAI-compatible client
 - 🔐 **Kubernetes, OIDC & Kontxt TxToken Auth** — ServiceAccount tokens by default, with optional OIDC and scoped `kontxt` transaction-token flows
@@ -78,6 +78,17 @@ helm install orka charts/orka \
   --namespace orka-system \
   --create-namespace
 ```
+
+A fresh install creates all twelve cluster-scoped Orka CRDs. Use `--skip-crds`
+only when one designated platform or release owner already manages compatible
+Orka CRDs for the cluster.
+
+> [!IMPORTANT]
+> Helm does not create or update files from `crds/` during `helm upgrade`.
+> Apply the CRDs from the exact target chart before
+> **every** upgrade, including an upgrade from the previous chart that installed
+> zero CRDs. Helm retains CRDs
+> on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).
 
 ### Set Up a Provider
 
@@ -139,5 +150,5 @@ The built-in orchestrator creates agents, runs tasks, monitors progress, and ret
 | [Repository Security Scanning](website/docs/guides/repository-security-scanning.md) | Repository scan workflow, threat models, findings, and remediation |
 | [Repository Monitors](website/docs/guides/repository-monitors.md) | Durable GitHub pull request monitor runs, review tasks, and dashboard state |
 | [GitHub Label Triggers](website/docs/guides/github-label-triggers.md) | Trigger Orka agent tasks from GitHub labels such as `agent:implement` and `agent:review` |
-| [Development](website/docs/development/development.md)                           | Building, testing, and contributing                   |
+| [Development](website/docs/development/development.md)                           | Building, generated charts, releases, and contributing |
 | [Testing](website/docs/development/testing.md)                                   | Test structure, patterns, and commands                |

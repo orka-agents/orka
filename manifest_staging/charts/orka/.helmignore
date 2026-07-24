@@ -1,0 +1,5 @@
+# Source-control and local build files
+.DS_Store
+.git/
+.gitignore
+*.tgz

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orka.fullname" . }}-agent-harness-wrapper
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper
+spec:
+  selector:
+    {{- include "orka.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-harness-wrapper
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
