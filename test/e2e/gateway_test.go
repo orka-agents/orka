@@ -90,13 +90,16 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			return
 		}
 
+		if taskName != "" && apiBaseURL != "" && apiToken != "" {
+			By("deleting the Gateway-owned Task through the controller API")
+			if err := gatewayE2EDeleteTaskViaAPI(apiBaseURL, apiToken, taskName); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "failed to delete Gateway E2E Task through the controller API: %v\n", err)
+			} else if err := gatewayE2EWaitForTaskDeletion(taskName, 2*time.Minute); err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "Gateway E2E Task deletion did not complete: %v\n", err)
+			}
+		}
 		stopPortForward(cancelAPIPortForward, apiPortForwardCmd)
 
-		if eventID != "" {
-			gatewayE2EDelete("task", "-l", gatewayruntime.TaskGatewayEventLabel+"="+eventID)
-		} else if taskName != "" {
-			gatewayE2EDelete("task", taskName)
-		}
 		for _, resource := range []struct {
 			kind string
 			name string
@@ -827,6 +830,32 @@ func gatewayE2EGetTask(name string) (*corev1alpha1.Task, error) {
 		return nil, err
 	}
 	return task, nil
+}
+
+func gatewayE2EDeleteTaskViaAPI(apiBaseURL, bearer, taskName string) error {
+	endpoint := fmt.Sprintf(
+		"%s/api/v1/tasks/%s?namespace=%s",
+		strings.TrimRight(apiBaseURL, "/"),
+		url.PathEscape(taskName),
+		url.QueryEscape(namespace),
+	)
+	body, statusCode, err := doAuthorizedJSONRequest(http.MethodDelete, endpoint, bearer, "", "")
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusNoContent && statusCode != http.StatusNotFound {
+		return fmt.Errorf("delete Gateway Task API returned %d: %s", statusCode, strings.TrimSpace(body))
+	}
+	return nil
+}
+
+func gatewayE2EWaitForTaskDeletion(taskName string, timeout time.Duration) error {
+	cmd := exec.Command(
+		"kubectl", "wait", "--for=delete", "task/"+taskName,
+		"-n", namespace, "--timeout="+timeout.String(),
+	)
+	_, err := utils.Run(cmd)
+	return err
 }
 
 func waitForGatewayE2ECompletedEvent(apiBaseURL, token, eventID string, timeout time.Duration) store.GatewayEvent {

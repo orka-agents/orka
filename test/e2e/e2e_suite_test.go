@@ -39,6 +39,7 @@ var (
 	gatewayReferenceAdapterImage     = "ghcr.io/orka-agents/orka/gateway-reference-adapter:e2e"
 	agentRuntimeExternalE2EEnvVar    = "E2E_AGENTRUNTIME_EXTERNAL"
 	gatewayE2EEnvVar                 = "E2E_GATEWAY"
+	e2eEphemeralClusterEnvVar        = "E2E_EPHEMERAL_CLUSTER"
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
@@ -221,6 +222,11 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	if e2eEphemeralClusterEnabled() {
+		By("skipping resource cleanup for the ephemeral E2E cluster")
+		return
+	}
+
 	By("cleaning up the curl pod for metrics")
 	cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found")
 	_, _ = utils.Run(cmd)
@@ -338,6 +344,10 @@ func agentRuntimeExternalE2EEnabled() bool {
 
 func gatewayE2EEnabled() bool {
 	return e2eFlagEnabled(gatewayE2EEnvVar)
+}
+
+func e2eEphemeralClusterEnabled() bool {
+	return e2eFlagEnabled(e2eEphemeralClusterEnvVar)
 }
 
 func e2eFlagEnabled(name string) bool {
