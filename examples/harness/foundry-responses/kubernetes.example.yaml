@@ -1,0 +1,118 @@
+# Example Kubernetes deployment for the Foundry hosted Responses adapter.
+# Replace REDACTED placeholders through your secret-management flow before use.
+# Do not commit real Foundry credentials or adapter bearer values.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sample-foundry-responses-runtime-token
+  annotations:
+    orka.ai/agent-runtime-endpoint: http://sample-foundry-responses-runtime.default.svc.cluster.local:8080
+  labels:
+    orka.ai/agent-runtime-auth: "true"
+    orka.ai/agent-runtime-name: sample-foundry-responses-runtime
+stringData:
+  harness-bearer: REDACTED
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sample-foundry-responses-adapter-config
+stringData:
+  foundry-auth: REDACTED
+  continuation-proof: REDACTED
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-foundry-responses-runtime
+  labels:
+    app.kubernetes.io/name: sample-foundry-responses-runtime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sample-foundry-responses-runtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sample-foundry-responses-runtime
+    spec:
+      containers:
+      - name: adapter
+        # Build and load/publish examples/harness/foundry-responses/Dockerfile first.
+        image: foundry-responses-harness-adapter:local
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: ORKA_FOUNDRY_RESPONSES_ADAPTER_ADDR
+          value: :8090
+        - name: ORKA_FOUNDRY_RESPONSES_RUNTIME_NAME
+          value: sample-foundry-responses-runtime
+        - name: ORKA_FOUNDRY_RESPONSES_ADAPTER_BEARER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sample-foundry-responses-runtime-token
+              key: harness-bearer
+        # Use ORKA_FOUNDRY_RESPONSES_PROJECT_ENDPOINT plus AGENT_NAME instead of
+        # the full endpoint when you want the adapter to compose the hosted URL.
+        - name: ORKA_FOUNDRY_RESPONSES_ENDPOINT
+          value: https://example.services.ai.azure.com/agents/sample-agent/endpoint/protocols/openai/responses
+        - name: ORKA_FOUNDRY_RESPONSES_API_VERSION
+          value: v1
+        - name: ORKA_FOUNDRY_RESPONSES_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: sample-foundry-responses-adapter-config
+              key: foundry-auth
+        - name: ORKA_FOUNDRY_RESPONSES_BROKERED_CONTINUATION_PROOF
+          valueFrom:
+            secretKeyRef:
+              name: sample-foundry-responses-adapter-config
+              key: continuation-proof
+        # The hosted agent must statically expose probe-only conformance_read
+        # before read can pass AgentRuntime readiness. Advertise only classes
+        # whose live brokered conformance passed.
+        - name: ORKA_FOUNDRY_RESPONSES_BROKERED_TOOL_CLASSES
+          value: read
+        ports:
+        - name: http
+          containerPort: 8090
+        readinessProbe:
+          httpGet:
+            path: /v1/ready
+            port: http
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-foundry-responses-runtime
+spec:
+  selector:
+    app.kubernetes.io/name: sample-foundry-responses-runtime
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: sample-foundry-responses-runtime
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://sample-foundry-responses-runtime.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: sample-foundry-responses-runtime-token
+      key: harness-bearer
+  capabilities:
+    toolExecutionModes:
+    - observed
+    - brokered
+    brokeredToolClasses:
+    - read
+    supportsCancel: true
+    supportsRuntimeSessions: true
+    supportsContinuation: true

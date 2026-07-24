@@ -84,6 +84,38 @@ metadata:
     orka.ai/agent-runtime-endpoint: http://support-http-runtime.default.svc.cluster.local:8080
 ```
 
+
+## Foundry hosted AgentKit over Responses
+
+For AgentKit agents deployed as Foundry hosted agents, use the `examples/harness/foundry-responses` adapter rather than the Assistants/threads adapter. Hosted Responses requests are endpoint-scoped and must not include request-level `tools`; AgentKit must be statically configured with the safe function schemas it may request. Orka still validates every `function_call` against Task policy and Tool CRDs, performs approval/idempotency, executes the tool, and resumes the hosted response with `function_call_output` plus `previous_response_id`.
+
+Advertise only the brokered classes that the hosted AgentKit deployment is statically configured and conformance-tested to request:
+
+Readiness deep-probes each advertised class. Since hosted Responses requests do not carry request-level tools, the AgentKit deployment must also statically expose the probe-only `conformance_read` and/or `conformance_write` schema for those classes. Leave a class unadvertised until that live probe succeeds; local fake-server conformance alone does not satisfy the readiness gate.
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: foundry-agentkit-responses
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://foundry-agentkit-responses.default.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: foundry-agentkit-responses-token
+      key: token
+  capabilities:
+    toolExecutionModes: [observed, brokered]
+    brokeredToolClasses: [read]
+    supportsRuntimeSessions: true
+    supportsContinuation: true
+```
+
+Add `write` only after the hosted AgentKit static write schema and brokered-write conformance pass. The adapter's MVP state is in-memory and fail-safe: duplicate identical continuations are no-ops, conflicting duplicates are rejected, and a restart while waiting for approval returns `turn not found` without sending a hosted continuation.
+
 ## Expose a brokered tool
 
 ```yaml

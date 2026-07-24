@@ -1,0 +1,108 @@
+{
+  "events": [
+    {
+      "seq": 1,
+      "eventType": "ToolCallStarted",
+      "toolName": "check-network-telemetry",
+      "toolCallID": "read-call-1",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
+    },
+    {
+      "seq": 2,
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "toolCallID": "dispatch-call-1",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
+    },
+    {
+      "seq": 3,
+      "eventType": "ApprovalRequested",
+      "toolName": "dispatch-work-order",
+      "toolCallID": "approval-dispatch",
+      "content": {
+        "approvalID": "approval-dispatch",
+        "targetTool": "dispatch-work-order",
+        "toolCallID": "dispatch-call-1"
+      }
+    },
+    {
+      "seq": 4,
+      "eventType": "ApprovalApproved",
+      "toolCallID": "approval-dispatch",
+      "content": {
+        "approvalID": "approval-dispatch",
+        "decision": "approve"
+      }
+    },
+    {
+      "seq": 5,
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "toolCallID": "dispatch-call-1",
+      "content": {
+        "approvalID": "approval-dispatch",
+        "brokeredClass": "write",
+        "executionState": "started",
+        "idempotencyKey": "approval-dispatch"
+      }
+    },
+    {
+      "seq": 6,
+      "eventType": "ToolCallStarted",
+      "toolName": "escalate-incident",
+      "toolCallID": "escalate-call-1",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
+    },
+    {
+      "seq": 7,
+      "eventType": "ApprovalRequested",
+      "toolName": "escalate-incident",
+      "toolCallID": "approval-escalate",
+      "content": {
+        "approvalID": "approval-escalate",
+        "targetTool": "escalate-incident",
+        "toolCallID": "escalate-call-1"
+      }
+    },
+    {
+      "seq": 8,
+      "eventType": "ApprovalApproved",
+      "toolCallID": "approval-escalate",
+      "content": {
+        "approvalID": "approval-escalate",
+        "decision": "approve"
+      }
+    },
+    {
+      "seq": 9,
+      "eventType": "ToolCallStarted",
+      "toolName": "escalate-incident",
+      "toolCallID": "escalate-call-1",
+      "content": {
+        "approvalID": "approval-escalate",
+        "brokeredClass": "write",
+        "executionState": "started"
+      }
+    },
+    {
+      "seq": 10,
+      "eventType": "AgentRuntimeCompleted"
+    },
+    {
+      "seq": 11,
+      "eventType": "TaskSucceeded"
+    }
+  ]
+}

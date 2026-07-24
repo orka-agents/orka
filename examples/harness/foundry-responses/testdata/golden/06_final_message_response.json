@@ -1,0 +1,14 @@
+{
+  "id": "resp-2",
+  "status": "completed",
+  "agent_session_id": "session-1",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {"type":"output_text","text":"foundry final answer"}
+      ]
+    }
+  ]
+}

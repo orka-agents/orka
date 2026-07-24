@@ -1,0 +1,20 @@
+# Optional Foundry hosted AgentKit Responses task that exposes the Fibey brokered
+# read/write tools. Apply with tools-foundry-responses.yaml and the Foundry
+# Responses facade manifests after deploying the downstream mock/real services.
+apiVersion: core.orka.ai/v1alpha1
+kind: Task
+metadata:
+  name: fibey-foundry-responses-quincy-north-alert
+spec:
+  type: agent
+  agentRef:
+    name: fibey-remote-foundry
+  agentRuntime:
+    allowedTools:
+    - check-network-telemetry
+    - get-active-incidents
+    - dispatch-work-order
+    - escalate-incident
+  prompt: |
+    Quincy North alert: pump telemetry is anomalous after overnight maintenance.
+    Investigate likely cause with brokered read tools, summarize evidence, and request approval before dispatching any work order.

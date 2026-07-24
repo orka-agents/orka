@@ -133,7 +133,7 @@ func TestPatchHarnessWrapperStartedPreservesPlannedTurnAnnotationsFromLocalTask(
 	local.Annotations[harnessWrapperOutputFetchRetriesAnno] = "1"
 	r := newUnitReconciler(newTestScheme(), task)
 
-	if err := r.patchHarnessWrapperStarted(context.Background(), local); err != nil {
+	if err := r.patchHarnessWrapperStarted(context.Background(), local, false); err != nil {
 		t.Fatalf("patchHarnessWrapperStarted: %v", err)
 	}
 
@@ -1641,6 +1641,119 @@ func TestHarnessWrapperPendingFirstOnlyPlansTurn(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperStartTurnAttemptIsPersistedBeforeSubmission(t *testing.T) {
+	startCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == harness.CapabilitiesPath:
+			harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
+				Version:                 harness.ProtocolVersion,
+				ProtocolVersion:         harness.ProtocolVersion,
+				Transport:               harness.HTTPTransport,
+				RuntimeName:             "codex",
+				ProviderKind:            harness.ProviderKindKubernetesService,
+				ToolExecutionModes:      []harness.ToolExecutionMode{harness.ToolExecutionModeObserved},
+				SupportsCancel:          true,
+				SupportsRuntimeSessions: true,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == harness.TurnsPath:
+			startCalls++
+			harness.WriteError(w, http.StatusInternalServerError, "submission outcome unknown")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv(harnessWrapperEndpointEnv, srv.URL)
+
+	task, agent := harnessWrapperTaskAndAgent()
+	secret := attachHarnessWrapperRuntimeSecret(task, agent)
+	r := newUnitReconciler(newTestScheme(), task, agent, secret)
+	if _, err := r.handlePending(context.Background(), task); err != nil {
+		t.Fatalf("planning handlePending: %v", err)
+	}
+	var planned corev1alpha1.Task
+	key := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+	if err := r.Get(context.Background(), key, &planned); err != nil {
+		t.Fatalf("get planned task: %v", err)
+	}
+
+	result, err := r.handlePending(context.Background(), &planned)
+	if err != nil {
+		t.Fatalf("submission handlePending: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("submission requeue = %s, want positive delay", result.RequeueAfter)
+	}
+	if startCalls != 1 {
+		t.Fatalf("StartTurn calls after uncertain submission = %d, want 1", startCalls)
+	}
+	var attempted corev1alpha1.Task
+	if err := r.Get(context.Background(), key, &attempted); err != nil {
+		t.Fatalf("get attempted task: %v", err)
+	}
+	if !taskHasHarnessWrapperSubmissionAttempt(&attempted) || taskHasHarnessWrapperTurn(&attempted) {
+		t.Fatalf("submission annotations = %#v, want attempted but not started", attempted.Annotations)
+	}
+
+	if _, err := r.handlePending(context.Background(), &attempted); err != nil {
+		t.Fatalf("recovery handlePending: %v", err)
+	}
+	if startCalls != 1 {
+		t.Fatalf("StartTurn calls after recovery = %d, want no duplicate", startCalls)
+	}
+	var running corev1alpha1.Task
+	if err := r.Get(context.Background(), key, &running); err != nil {
+		t.Fatalf("get running task: %v", err)
+	}
+	if running.Status.Phase != corev1alpha1.TaskPhaseRunning || !taskHasHarnessWrapperTurn(&running) {
+		t.Fatalf("recovered task phase=%s annotations=%#v, want Running started turn", running.Status.Phase, running.Annotations)
+	}
+	if !taskHasHarnessWrapperSubmissionAttempt(&running) {
+		t.Fatal("unknown submission marker was not preserved through Running recovery")
+	}
+	if _, err := r.handleRunning(context.Background(), &running); err != nil {
+		t.Fatalf("handleRunning after lost submission: %v", err)
+	}
+	if startCalls != 1 {
+		t.Fatalf("StartTurn calls after missing-turn failure = %d, want no duplicate", startCalls)
+	}
+	var failed corev1alpha1.Task
+	if err := r.Get(context.Background(), key, &failed); err != nil {
+		t.Fatalf("get failed task: %v", err)
+	}
+	if failed.Status.Phase != corev1alpha1.TaskPhaseFailed ||
+		!strings.Contains(failed.Status.Message, "submission outcome became unknown") {
+		t.Fatalf("failed task phase=%s message=%q", failed.Status.Phase, failed.Status.Message)
+	}
+}
+
+func TestHarnessWrapperAuthRetryClearsSubmissionAttemptAtomically(t *testing.T) {
+	task, _ := harnessWrapperTaskAndAgent()
+	task.Annotations = map[string]string{
+		harnessWrapperSubmissionAttemptedAnno: scheduledRunLabelValue,
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	wait, err := r.waitForHarnessWrapperAuthRetry(context.Background(), task, true)
+	if err != nil {
+		t.Fatalf("waitForHarnessWrapperAuthRetry: %v", err)
+	}
+	if !wait {
+		t.Fatal("auth retry did not request a wait")
+	}
+	var updated corev1alpha1.Task
+	key := types.NamespacedName{Name: task.Name, Namespace: task.Namespace}
+	if err := r.Get(context.Background(), key, &updated); err != nil {
+		t.Fatalf("get updated task: %v", err)
+	}
+	if got := harnessWrapperAuthRetries(&updated); got != 1 {
+		t.Fatalf("auth retries = %d, want 1", got)
+	}
+	if taskHasHarnessWrapperSubmissionAttempt(&updated) {
+		t.Fatal("submission-attempt marker remained after definite auth rejection")
+	}
+}
+
 func TestHarnessRuntimeRunningTaskFinishesAfterStart(t *testing.T) {
 	cfg := cliwrapper.DefaultConfig()
 	cfg.AllowUnauthenticated = true
@@ -2600,18 +2713,51 @@ func TestHarnessWrapperCapabilitiesReadErrorRetryable(t *testing.T) {
 }
 
 func TestHarnessWrapperStreamMissingTurnErrorClassification(t *testing.T) {
-	for _, message := range []string{"stream_frames failed (404): turn not found", "stream_frames failed (410): gone"} {
-		if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
-			t.Fatalf("%q should be classified as missing turn", message)
+	if !harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (404): turn not found")) {
+		t.Fatal("404 turn-not-found stream error should be classified as retryable missing turn")
+	}
+	if harnessWrapperStreamErrorIsMissingTurn(harness.ClientError{
+		Op:         "stream_frames",
+		StatusCode: http.StatusGone,
+		Message:    "turn not found",
+	}) {
+		t.Fatal("typed 410 turn-not-found stream error should remain terminal")
+	}
+	for _, message := range []string{
+		"stream_frames failed (410): terminal turn expired from runtime retention",
+		"stream_frames failed (410): turn not found",
+		"stream_frames failed (401): unauthorized",
+	} {
+		if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should not be classified as retryable missing turn", message)
 		}
 	}
-	if harnessWrapperStreamErrorIsMissingTurn(fmt.Errorf("stream_frames failed (401): unauthorized")) {
-		t.Fatal("unauthorized stream error should not be classified as missing turn")
+}
+
+func TestHarnessWrapperCancelMissingTurnErrorClassification(t *testing.T) {
+	for _, message := range []string{
+		"cancel_turn failed (404): turn not found",
+		"cancel_turn failed (410): terminal turn expired from runtime retention",
+	} {
+		if !harnessWrapperCancelErrorIsMissingTurn(fmt.Errorf("%s", message)) {
+			t.Fatalf("%q should be ignored during cancellation", message)
+		}
+	}
+}
+
+func TestHarnessWrapperBrokeredPauseExcludesTerminalGone(t *testing.T) {
+	err := fmt.Errorf("continue brokered tool call \"call-1\": stream_frames failed (410): gone")
+	if harnessWrapperStreamErrorIsBrokeredPause(err) {
+		t.Fatal("terminal 410 continuation error should not be classified as a brokered pause")
+	}
+	if !harnessWrapperStreamErrorIsBrokeredPause(fmt.Errorf("continue brokered tool call \"call-1\": approval pending")) {
+		t.Fatal("ordinary continuation pause should remain classified as brokered pause")
 	}
 }
 
 func TestHarnessWrapperStreamTerminalErrorClassification(t *testing.T) {
 	for _, message := range []string{
+		"stream_frames failed (410): terminal turn expired from runtime retention",
 		"harness frame identity does not match running turn",
 		"invalid harness frame: turn completed payload is required",
 		"stream_frames failed: decode harness frame: invalid character",
@@ -2724,6 +2870,11 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 	}
 	if harnessWrapperStartTurnErrorIsRetryable(fmt.Errorf("start_turn failed (401): unauthorized")) {
 		t.Fatal("expected auth start error to remain terminal")
+	}
+	if harnessWrapperStartTurnErrorIsRetryable(
+		fmt.Errorf("start_turn failed (410): runtime session unavailable after unconfirmed hosted cancellation"),
+	) {
+		t.Fatal("expected quarantined runtime session error to remain terminal")
 	}
 }
 

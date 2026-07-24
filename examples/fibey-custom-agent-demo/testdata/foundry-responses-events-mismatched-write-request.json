@@ -1,0 +1,66 @@
+{
+  "events": [
+    {
+      "seq": 1,
+      "eventType": "ToolCallStarted",
+      "toolName": "check-network-telemetry",
+      "toolCallID": "read-call-1",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
+    },
+    {
+      "seq": 2,
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "toolCallID": "dispatch-call-1",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      }
+    },
+    {
+      "seq": 3,
+      "eventType": "ApprovalRequested",
+      "toolName": "escalate-incident",
+      "toolCallID": "approval-1",
+      "content": {
+        "approvalID": "approval-1",
+        "targetTool": "escalate-incident",
+        "toolCallID": "escalate-call-1"
+      }
+    },
+    {
+      "seq": 4,
+      "eventType": "ApprovalApproved",
+      "toolCallID": "approval-1",
+      "content": {
+        "approvalID": "approval-1",
+        "decision": "approve"
+      }
+    },
+    {
+      "seq": 5,
+      "eventType": "ToolCallStarted",
+      "toolName": "escalate-incident",
+      "toolCallID": "escalate-call-1",
+      "content": {
+        "approvalID": "approval-1",
+        "brokeredClass": "write",
+        "executionState": "started",
+        "idempotencyKey": "approval-1"
+      }
+    },
+    {
+      "seq": 6,
+      "eventType": "AgentRuntimeCompleted"
+    },
+    {
+      "seq": 7,
+      "eventType": "TaskSucceeded"
+    }
+  ]
+}

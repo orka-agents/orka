@@ -1,0 +1,7 @@
+{
+  "approved": false,
+  "error": {
+    "code": "approval_declined",
+    "message": "tool call was not approved"
+  }
+}

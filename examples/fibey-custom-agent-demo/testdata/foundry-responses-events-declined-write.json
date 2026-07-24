@@ -1,0 +1,66 @@
+{
+  "events": [
+    {
+      "seq": 1,
+      "eventType": "ToolCallStarted",
+      "toolName": "check-network-telemetry",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      },
+      "toolCallID": "read-call-1"
+    },
+    {
+      "seq": 2,
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "content": {
+        "harness": {
+          "frameType": "ToolCallRequested"
+        }
+      },
+      "toolCallID": "write-call-1"
+    },
+    {
+      "seq": 3,
+      "eventType": "ApprovalRequested",
+      "toolName": "dispatch-work-order",
+      "toolCallID": "approval-1",
+      "content": {
+        "approvalID": "approval-1",
+        "targetTool": "dispatch-work-order",
+        "toolCallID": "write-call-1"
+      }
+    },
+    {
+      "seq": 4,
+      "eventType": "ApprovalDeclined",
+      "toolCallID": "approval-1",
+      "content": {
+        "approvalID": "approval-1",
+        "decision": "decline"
+      }
+    },
+    {
+      "seq": 5,
+      "eventType": "ToolCallStarted",
+      "toolName": "dispatch-work-order",
+      "content": {
+        "approvalID": "approval-1",
+        "brokeredClass": "write",
+        "executionState": "started",
+        "idempotencyKey": "approval-1"
+      },
+      "toolCallID": "write-call-1"
+    },
+    {
+      "seq": 6,
+      "eventType": "AgentRuntimeCompleted"
+    },
+    {
+      "seq": 7,
+      "eventType": "TaskSucceeded"
+    }
+  ]
+}

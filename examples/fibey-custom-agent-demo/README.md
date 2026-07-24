@@ -2,7 +2,7 @@
 
 This demo exercises the first bring-your-own agent runtime slice: Orka registers a namespace-local `AgentRuntime` facade for a remote execution backend, then an `Agent` routes `type: agent` work to it with `spec.runtime.runtimeRef`.
 
-The checked-in backend is a deterministic generic HTTP harness fixture. It advertises `runtimeName: fibey-http-runtime`, supports `orka.harness.v1`, and runs in `observed` tool mode by default. AgentKit Serve and Foundry should plug in by swapping only the backend Service/adapter endpoint and `AgentRuntime` facade, not the Orka workflow.
+The checked-in backend is a deterministic generic HTTP harness fixture. It advertises `runtimeName: fibey-http-runtime`, supports `orka.harness.v1`, and runs in `observed` tool mode by default. AgentKit Serve, Foundry Assistants, and Foundry hosted AgentKit Responses should plug in by swapping only the backend Service/adapter endpoint and `AgentRuntime` facade, not the Orka workflow.
 
 ## Backend facades
 
@@ -10,7 +10,7 @@ The checked-in backend is a deterministic generic HTTP harness fixture. It adver
 | --- | --- | --- |
 | `fibey-http-runtime` | Generic mock/self-hosted HTTP runtime | Harness bearer token only |
 | `fibey-agentkit-runtime` | AgentKit Serve adapter | Adapter/runtime config only |
-| `fibey-foundry-runtime` | Foundry adapter | Adapter Secret; no Orka Tool production credentials |
+| `fibey-agentkit-foundry-responses` | Foundry hosted AgentKit Responses adapter | Adapter Secret; no Orka Tool production credentials |
 
 `fibey-agentkit-runtime` is intentionally observed-only in the checked-in demo: it should show `toolExecutionModes: [observed]`, `supportsCancel: true`, and `supportsRuntimeSessions: true`, with no `brokeredToolClasses` or `supportsContinuation`. AgentKit brokered read/write/coordination exist only for deployments that explicitly enable those conformance-gated profiles.
 
@@ -106,12 +106,21 @@ kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-agentkit.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-agentkit.yaml
 kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-runtime --timeout=60s
 
-# Foundry adapter facade; requires a Service named fibey-foundry-runtime.
-# Build/deploy examples/harness/foundry with ORKA_FOUNDRY_* credentials first.
+# Foundry hosted AgentKit Responses facade; requires a Service named fibey-agentkit-foundry-responses.
+# Build/deploy examples/harness/foundry-responses with ORKA_FOUNDRY_RESPONSES_* credentials first.
 kubectl apply -f examples/fibey-custom-agent-demo/secret-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agentruntime-foundry.yaml
 kubectl apply -f examples/fibey-custom-agent-demo/agent-foundry.yaml
-kubectl wait --for=condition=Ready agentruntime/fibey-foundry-runtime --timeout=60s
+kubectl wait --for=condition=Ready agentruntime/fibey-agentkit-foundry-responses --timeout=60s
+
+# Optional literal brokered Fibey read/write scenario once downstream services exist.
+kubectl apply -f examples/fibey-custom-agent-demo/tools-foundry-responses.yaml
+kubectl apply -f examples/fibey-custom-agent-demo/task-foundry-responses.yaml
+
+# After the task runs through read, write approval, and completion, verify evidence.
+examples/fibey-custom-agent-demo/verify-foundry-responses.sh \
+  --task fibey-foundry-responses-quincy-north-alert \
+  --namespace default
 ```
 
 Run the same task against another backend by changing only `spec.agentRef.name`, for example:
@@ -125,4 +134,4 @@ examples/fibey-custom-agent-demo/switch-backend.sh http
 The script validates the selected `AgentRuntime` and `Agent`, then patches only
 the Task's `spec.agentRef.name`.
 
-Brokered mode is used only when the selected runtime advertises brokered capabilities and the task/agent exposes allowed tools. Current AgentKit Serve facades do not advertise brokered mode, so AgentKit-owned tools remain internal to AgentKit and Orka observes only lifecycle/output frames. Orka-owned side-effect tools stay behind Orka brokered governance; production tool credentials are not handed to the remote backend.
+Brokered mode is used only when the selected runtime advertises brokered capabilities and the task/agent exposes allowed tools. Current AgentKit Serve facades do not advertise brokered mode, so AgentKit-owned tools remain internal to AgentKit and Orka observes only lifecycle/output frames. The Foundry hosted Responses facade must advertise only the brokered classes statically configured in AgentKit and verified by conformance. Orka-owned side-effect tools stay behind Orka brokered governance; production tool credentials are not handed to the remote backend, and hosted Responses requests do not include request-level `tools`.
