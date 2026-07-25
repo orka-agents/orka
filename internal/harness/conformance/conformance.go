@@ -146,13 +146,11 @@ func validateBearerCapabilityConflicts(caps *harness.CapabilitiesResponse, beare
 		"protocolVersion": caps.ProtocolVersion,
 		"transport":       caps.Transport,
 		"providerKind":    string(caps.ProviderKind),
+		"runtimeName":     caps.RuntimeName,
 	} {
 		if strings.Contains(value, bearer) {
 			return fmt.Errorf("configured bearer overlaps required capability field %s", name)
 		}
-	}
-	if strings.Contains(events.ExecutionEventRedactedValue, bearer) && strings.Contains(caps.RuntimeName, bearer) {
-		return fmt.Errorf("configured bearer overlaps required capability field runtimeName")
 	}
 	for _, mode := range caps.ToolExecutionModes {
 		if strings.Contains(string(mode), bearer) {

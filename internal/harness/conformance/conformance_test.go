@@ -54,7 +54,8 @@ func TestCheckRedactsExactBearerFromObservedCapabilities(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	value := strings.ToLower(t.Name())
 	server.authValue = value
-	server.runtimeName = "runtime-" + value + "-name"
+	server.runtimeName = "runtime-safe"
+	server.runtimeVersion = value
 	defer server.Close()
 
 	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: value})
@@ -64,7 +65,7 @@ func TestCheckRedactsExactBearerFromObservedCapabilities(t *testing.T) {
 	if result.ObservedCapabilities == nil {
 		t.Fatal("ObservedCapabilities = nil")
 	}
-	if strings.Contains(result.ObservedCapabilities.RuntimeName, value) || strings.Contains(result.Message, value) {
+	if strings.Contains(result.ObservedCapabilities.RuntimeVersion, value) || strings.Contains(result.Message, value) {
 		t.Fatalf("result leaked configured bearer: %#v", result)
 	}
 }
@@ -145,9 +146,9 @@ func TestCheckRejectsBearerThatOverlapsProtocolCapabilities(t *testing.T) {
 
 func TestCheckRejectsBearerThatMatchesRuntimeName(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
-	value := strings.Trim("[REDACTED]", "[]")
+	value := "fibey"
 	server.authValue = value
-	server.runtimeName = value
+	server.runtimeName = value + "-agentkit"
 	defer server.Close()
 
 	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: value})
@@ -166,15 +167,16 @@ func TestCheckNormalizesBearerBeforeSanitizingResult(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	value := strings.ToLower(t.Name())
 	server.authValue = value
-	server.runtimeName = "runtime-" + value + "-name"
+	server.runtimeName = "runtime-safe"
+	server.runtimeVersion = value
 	defer server.Close()
 
 	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "  " + value + "\n"})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
-	if strings.Contains(result.ObservedCapabilities.RuntimeName, value) {
-		t.Fatalf("RuntimeName = %q, normalized configured bearer leaked", result.ObservedCapabilities.RuntimeName)
+	if strings.Contains(result.ObservedCapabilities.RuntimeVersion, value) {
+		t.Fatalf("RuntimeVersion = %q, normalized configured bearer leaked", result.ObservedCapabilities.RuntimeVersion)
 	}
 }
 
@@ -419,6 +421,7 @@ func TestCheckBrokeredReadFailsWhenRuntimeRequestsWrongToolClass(t *testing.T) {
 type agentKitOrkaFixture struct {
 	*httptest.Server
 	runtimeName                      string
+	runtimeVersion                   string
 	authValue                        string
 	omitEventStreamPath              bool
 	startResponseVersion             string
@@ -491,12 +494,16 @@ func (f *agentKitOrkaFixture) capabilities(w http.ResponseWriter, r *http.Reques
 	if len(classes) > 0 {
 		modes = append(modes, harness.ToolExecutionModeBrokered)
 	}
+	runtimeVersion := f.runtimeVersion
+	if runtimeVersion == "" {
+		runtimeVersion = "agentkit-fixture"
+	}
 	harness.WriteJSON(w, http.StatusOK, harness.CapabilitiesResponse{
 		Version:                 harness.ProtocolVersion,
 		ProtocolVersion:         harness.ProtocolVersion,
 		Transport:               harness.HTTPTransport,
 		RuntimeName:             f.runtimeName,
-		RuntimeVersion:          "agentkit-fixture",
+		RuntimeVersion:          runtimeVersion,
 		ProviderKind:            harness.ProviderKindKubernetesService,
 		ToolExecutionModes:      modes,
 		BrokeredToolClasses:     classes,
