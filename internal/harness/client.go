@@ -81,7 +81,8 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
+func (c *Client) Health(ctx context.Context) (_ *HealthResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
 	var response HealthResponse
 	if err := c.getJSON(ctx, HealthPath, &response); err != nil {
 		return nil, err
@@ -92,7 +93,8 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	return &response, nil
 }
 
-func (c *Client) Capabilities(ctx context.Context) (*CapabilitiesResponse, error) {
+func (c *Client) Capabilities(ctx context.Context) (_ *CapabilitiesResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
 	var response CapabilitiesResponse
 	if err := c.getJSON(ctx, CapabilitiesPath, &response); err != nil {
 		return nil, err
@@ -108,7 +110,8 @@ type startTurnResponseWire struct {
 	Accepted *bool `json:"accepted"`
 }
 
-func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (*StartTurnResponse, error) {
+func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (_ *StartTurnResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
 		return nil, safeClientError("start_turn", 0, err.Error())
 	}
@@ -142,7 +145,8 @@ func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (*Star
 	return &response, nil
 }
 
-func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*CancelTurnResponse, error) {
+func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (_ *CancelTurnResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
 		return nil, safeClientError("cancel_turn", 0, err.Error())
 	}
@@ -180,7 +184,8 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (*Ca
 	return &response, nil
 }
 
-func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) (*ContinueTurnResponse, error) {
+func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) (_ *ContinueTurnResponse, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
 	if err := request.Validate(); err != nil {
 		return nil, safeClientError("continue_turn", 0, err.Error())
 	}
@@ -198,7 +203,8 @@ func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) 
 	return &response, nil
 }
 
-func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outputRef string) ([]byte, error) {
+func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outputRef string) (_ []byte, err error) {
+	defer func() { err = c.sanitizeClientError(err) }()
 	ctx, cancel := c.controlContext(ctx)
 	defer cancel()
 	rel, err := OutputTurnPath(turnID)
@@ -239,10 +245,10 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSeq int64, emit func(HarnessEventFrame) error) error {
 	rel, err := EventStreamPath(turnID)
 	if err != nil {
-		return safeClientError("stream_frames", 0, err.Error())
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error()))
 	}
 	if emit == nil {
-		return safeClientError("stream_frames", 0, "emit callback is required")
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, "emit callback is required"))
 	}
 	u := c.resolve(rel)
 	q := u.Query()
@@ -252,19 +258,19 @@ func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSe
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return safeClientError("stream_frames", 0, err.Error())
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error()))
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	c.setAuthHeader(req)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return safeClientError("stream_frames", 0, err.Error())
+		return c.sanitizeClientError(safeClientError("stream_frames", 0, err.Error()))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.statusError("stream_frames", resp)
+		return c.sanitizeClientError(c.statusError("stream_frames", resp))
 	}
-	return readSSEFrames(resp.Body, emit)
+	return readSSEFramesWithSanitizer(resp.Body, emit, c.sanitizeClientError)
 }
 
 func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
@@ -329,6 +335,60 @@ func decodeBoundedJSON(op string, status int, body io.Reader, out any) error {
 	return nil
 }
 
+func (c *Client) sanitizeClientMessage(message string) string {
+	message = events.RedactExecutionEventText(message)
+	if c != nil {
+		message = redactExactBearerValue(message, c.authBearerValue)
+	}
+	return message
+}
+
+func (c *Client) sanitizeClientError(err error) error {
+	if err == nil {
+		return nil
+	}
+	sanitize := func(clientErr ClientError) ClientError {
+		clientErr.sanitizedDisplay = ""
+		clientErr.sanitizedDisplaySet = false
+		clientErr.Message = c.sanitizeClientMessage(clientErr.Message)
+		clientErr.sanitizedDisplay = c.sanitizeClientMessage(clientErr.render())
+		clientErr.sanitizedDisplaySet = true
+		return clientErr
+	}
+	switch clientErr := err.(type) {
+	case ClientError:
+		return sanitize(clientErr)
+	case *ClientError:
+		sanitized := sanitize(*clientErr)
+		return &sanitized
+	default:
+		// Stream callbacks are caller-owned and must retain their dynamic error
+		// types and trees. Client-generated remote, transport, and decode errors
+		// are always ClientError values and are scrubbed above.
+		return err
+	}
+}
+
+func redactExactBearerValue(message, token string) string {
+	if message == "" || token == "" {
+		return message
+	}
+	replacement := events.ExecutionEventRedactedValue
+	if strings.Contains(replacement, token) {
+		replacement = ""
+	}
+	message = strings.ReplaceAll(message, token, replacement)
+	for range 16 {
+		if !strings.Contains(message, token) {
+			return message
+		}
+		message = strings.ReplaceAll(message, token, "")
+	}
+	// A crafted overlapping value must not escape even if the bounded cleanup
+	// above cannot converge quickly enough.
+	return ""
+}
+
 func (c *Client) setAuthHeader(req *http.Request) {
 	if c == nil || req == nil || c.authBearerValue == "" {
 		return
@@ -369,13 +429,17 @@ func (c *Client) resolve(rel string) *url.URL {
 }
 
 func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
+	return readSSEFramesWithSanitizer(r, emit, nil)
+}
+
+func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSELineBytes)
 	var data strings.Builder
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			if err := emitSSEData(data.String(), emit); err != nil {
+			if err := emitSSEData(data.String(), emit, sanitize); err != nil {
 				if errors.Is(err, errSSEDone) {
 					return nil
 				}
@@ -389,15 +453,15 @@ func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
 		}
 		if after, ok := strings.CutPrefix(line, "data:"); ok {
 			if err := appendSSEData(&data, strings.TrimSpace(after)); err != nil {
-				return err
+				return sanitizeSSEClientError(sanitize, err)
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return safeClientError("stream_frames", 0, err.Error())
+		return sanitizeSSEClientError(sanitize, safeClientError("stream_frames", 0, err.Error()))
 	}
 	if data.Len() > 0 {
-		if err := emitSSEData(data.String(), emit); err != nil {
+		if err := emitSSEData(data.String(), emit, sanitize); err != nil {
 			if errors.Is(err, errSSEDone) {
 				return nil
 			}
@@ -422,7 +486,14 @@ func appendSSEData(data *strings.Builder, value string) error {
 	return nil
 }
 
-func emitSSEData(raw string, emit func(HarnessEventFrame) error) error {
+func sanitizeSSEClientError(sanitize func(error) error, err error) error {
+	if sanitize != nil {
+		return sanitize(err)
+	}
+	return err
+}
+
+func emitSSEData(raw string, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
@@ -432,7 +503,10 @@ func emitSSEData(raw string, emit func(HarnessEventFrame) error) error {
 	}
 	var frame HarnessEventFrame
 	if err := json.Unmarshal([]byte(raw), &frame); err != nil {
-		return safeClientError("stream_frames", 0, fmt.Sprintf("decode harness frame: %v", err))
+		return sanitizeSSEClientError(
+			sanitize,
+			safeClientError("stream_frames", 0, fmt.Sprintf("decode harness frame: %v", err)),
+		)
 	}
 	if err := emit(frame); err != nil {
 		return err
@@ -446,9 +520,18 @@ type ClientError struct {
 	Message                 string
 	RemoteAccepted          bool
 	RemoteAcceptanceUnknown bool
+	sanitizedDisplay        string
+	sanitizedDisplaySet     bool
 }
 
 func (e ClientError) Error() string {
+	if e.sanitizedDisplaySet {
+		return e.sanitizedDisplay
+	}
+	return e.render()
+}
+
+func (e ClientError) render() string {
 	if e.StatusCode > 0 {
 		return fmt.Sprintf("harness %s failed (%d): %s", e.Op, e.StatusCode, e.Message)
 	}

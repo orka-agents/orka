@@ -946,7 +946,7 @@ func TestHarnessWrapperBrokeredCoordinationMessagingToolsUseMessageStore(t *test
 }
 
 func TestHarnessWrapperBrokeredRunningTaskFailsClosedWhenAgentMissing(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "mock-token"})
 	defer server.Close()
 	task, agent := harnessWrapperTaskAndAgent()
 	agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-agentkit"}}
@@ -1949,7 +1949,7 @@ func harnessWrapperReadyAgentRuntime(namespace, endpoint string) (*corev1alpha1.
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-token", Namespace: namespace, ResourceVersion: "1", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: name}, Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint}},
-		Data:       map[string][]byte{"token": []byte("x")},
+		Data:       map[string][]byte{"token": []byte("mock-token")},
 	}
 	return runtime, secret
 }

@@ -19,10 +19,10 @@ import (
 )
 
 func TestCheckReadinessPassesForFakeHarness(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fake-runtime", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fake-runtime", AuthToken: "mock-token"})
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL(), BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL(), BearerToken: "mock-token"})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -35,7 +35,7 @@ func TestCheckReadinessPassesForAgentKitOrkaFixture(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -51,10 +51,10 @@ func TestCheckReadinessPassesForAgentKitOrkaFixture(t *testing.T) {
 }
 
 func TestCheckReadinessFailsUnsupportedProtocolVersion(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "mock-token"})
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL(), BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL(), BearerToken: "mock-token"})
 	if result.Passed {
 		t.Fatalf("Passed = true, want false")
 	}
@@ -109,7 +109,7 @@ func TestCheckFailsWhenDuplicateStartAccepted(t *testing.T) {
 	server.duplicateStartMismatch = true
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -123,7 +123,7 @@ func TestCheckFailsWhenProbeFrameLimitExceeded(t *testing.T) {
 	server.outputFrames = maxProbeFrames + 1
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -138,7 +138,7 @@ func TestCheckFailsWhenProbeFrameByteLimitExceeded(t *testing.T) {
 	server.outputText = strings.Repeat("x", maxProbeFrameBytes/(maxProbeFrames/2)+1024)
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -152,7 +152,7 @@ func TestCheckFailsWhenStartTurnResponseOmitsEventStreamPath(t *testing.T) {
 	server.omitEventStreamPath = true
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -166,7 +166,7 @@ func TestCheckFailsWhenFrameTypeUnknown(t *testing.T) {
 	server.frameType = harness.FrameType("AgentKitProgress")
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -180,7 +180,7 @@ func TestCheckPassesBrokeredReadProfile(t *testing.T) {
 	server.brokeredClass = harness.BrokeredToolClassRead
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredRead: true})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -191,7 +191,7 @@ func TestCheckPassesBrokeredWriteProfile(t *testing.T) {
 	server.brokeredClass = harness.BrokeredToolClassWrite
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredWrite: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredWrite: true})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -202,7 +202,7 @@ func TestCheckPassesBrokeredCoordinationProfile(t *testing.T) {
 	server.brokeredClass = harness.BrokeredToolClassCoordination
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredCoordination: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredCoordination: true})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -213,7 +213,7 @@ func TestCheckBrokeredProbeUsesFoundryCompatibleObjectSchema(t *testing.T) {
 	server.brokeredClass = harness.BrokeredToolClassRead
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredRead: true})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -249,7 +249,7 @@ func TestCheckBrokeredReadFailsWhenClassNotAdvertised(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredRead: true})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -264,7 +264,7 @@ func TestCheckBrokeredReadFailsWhenRuntimeDoesNotWaitForContinue(t *testing.T) {
 	server.brokeredEagerResult = true
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredRead: true})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -279,7 +279,7 @@ func TestCheckBrokeredReadFailsWhenRuntimeRequestsWrongToolClass(t *testing.T) {
 	server.brokeredToolNameOverride = "conformance_write"
 	defer server.Close()
 
-	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "x", RequireAuth: true, ProbeBrokeredRead: true})
+	result := Check(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token", RequireAuth: true, ProbeBrokeredRead: true})
 	if result.Passed {
 		t.Fatal("Passed = true, want false")
 	}
@@ -318,7 +318,7 @@ func newAgentKitOrkaFixture(t *testing.T) *agentKitOrkaFixture {
 	t.Helper()
 	fixture := &agentKitOrkaFixture{
 		runtimeName:  "fibey-agentkit",
-		authValue:    "x",
+		authValue:    "mock-token",
 		frameType:    harness.FrameRuntimeOutput,
 		outputFrames: 1,
 		turns:        map[harness.HarnessTurnID]harness.StartTurnRequest{},
@@ -728,7 +728,7 @@ func TestCheckReadinessSelectsBrokeredProbeForBrokeredOnlyRuntime(t *testing.T) 
 	server.brokeredClass = harness.BrokeredToolClassRead
 	server.brokeredOnly = true
 	defer server.Close()
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -752,7 +752,7 @@ func TestBrokeredProbeCancelsAfterInvalidTerminalIdentity(t *testing.T) {
 	defer server.Close()
 	result := Check(context.Background(), Target{
 		BaseURL:           server.URL,
-		BearerToken:       "x",
+		BearerToken:       "mock-token",
 		RequireAuth:       true,
 		ProbeBrokeredRead: true,
 	})
@@ -774,7 +774,7 @@ func TestBrokeredProbeRejectsPostTerminalFrames(t *testing.T) {
 	defer server.Close()
 	result := Check(context.Background(), Target{
 		BaseURL:           server.URL,
-		BearerToken:       "x",
+		BearerToken:       "mock-token",
 		RequireAuth:       true,
 		ProbeBrokeredRead: true,
 	})
@@ -791,7 +791,7 @@ func TestCheckReadinessProbesEveryBrokeredOnlyClass(t *testing.T) {
 		harness.BrokeredToolClassWrite,
 	}
 	defer server.Close()
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -810,7 +810,7 @@ func TestCheckReadinessProbesObservedAndEveryBrokeredClass(t *testing.T) {
 		harness.BrokeredToolClassWrite,
 	}
 	defer server.Close()
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "x"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
 	if !result.Passed {
 		t.Fatalf("Passed = false, failures=%v", result.Failures)
 	}
@@ -833,7 +833,7 @@ func TestBrokeredProbeCancelsAfterInvalidStartResponse(t *testing.T) {
 	defer server.Close()
 	result := Check(context.Background(), Target{
 		BaseURL:           server.URL,
-		BearerToken:       "x",
+		BearerToken:       "mock-token",
 		RequireAuth:       true,
 		ProbeBrokeredRead: true,
 	})
@@ -869,7 +869,7 @@ func TestTurnProbeCancelsAfterLostStartResponse(t *testing.T) {
 	})
 	result := Check(context.Background(), Target{
 		BaseURL:     server.URL,
-		BearerToken: "x",
+		BearerToken: "mock-token",
 		HTTPClient:  httpClient,
 		ProbeTurn:   true,
 	})
@@ -896,7 +896,7 @@ func TestBrokeredProbeDoesNotCancelRejectedInvalidStartResponse(t *testing.T) {
 	defer server.Close()
 	result := Check(context.Background(), Target{
 		BaseURL:           server.URL,
-		BearerToken:       "x",
+		BearerToken:       "mock-token",
 		RequireAuth:       true,
 		ProbeBrokeredRead: true,
 	})
@@ -924,7 +924,7 @@ func TestBrokeredReadinessPreservesCustomProbeTemplate(t *testing.T) {
 	request.AuthIdentity = harness.AuthIdentity{Subject: "custom:subject"}
 	result := CheckReadiness(context.Background(), Target{
 		BaseURL:          server.URL,
-		BearerToken:      "x",
+		BearerToken:      "mock-token",
 		StartTurnRequest: &request,
 	})
 	if !result.Passed {

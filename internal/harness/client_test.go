@@ -28,6 +28,186 @@ func TestClientSanitizesTransportErrors(t *testing.T) {
 	}
 }
 
+func TestClientSanitizesConfiguredBearerFromErrors(t *testing.T) {
+	token := strings.ToLower(t.Name())
+	assertRedacted := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("error = nil, want sanitized client error")
+		}
+		if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "[REDACTED]") {
+			t.Fatalf("error = %v, want configured bearer redacted", err)
+		}
+	}
+
+	t.Run("status", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			WriteError(w, http.StatusBadRequest, "remote reflected "+token)
+		}))
+		defer server.Close()
+		client, err := NewClient(server.URL, WithBearerToken(token))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.Health(context.Background())
+		assertRedacted(t, err)
+	})
+
+	t.Run("transport", func(t *testing.T) {
+		httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("transport reflected " + token)
+		})}
+		client, err := NewClient("https://adapter.example", WithHTTPClient(httpClient), WithBearerToken(token))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.Health(context.Background())
+		assertRedacted(t, err)
+	})
+
+	t.Run("decode", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			WriteJSON(w, http.StatusOK, map[string]any{
+				"version":   ProtocolVersion,
+				"status":    HealthStatusOK,
+				"ready":     true,
+				"checkedAt": token,
+			})
+		}))
+		defer server.Close()
+		client, err := NewClient(server.URL, WithBearerToken(token))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.Health(context.Background())
+		assertRedacted(t, err)
+	})
+
+	t.Run("validation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			WriteJSON(w, http.StatusOK, HealthResponse{
+				Version:   token,
+				Status:    HealthStatusOK,
+				Ready:     true,
+				CheckedAt: time.Now().UTC(),
+			})
+		}))
+		defer server.Close()
+		client, err := NewClient(server.URL, WithBearerToken(token))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.Health(context.Background())
+		assertRedacted(t, err)
+	})
+}
+
+func TestClientErrorSanitizesRenderedFields(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		configuredValue string
+		op              string
+		status          int
+	}{
+		{name: "operation", configuredValue: "stream_frames", op: "stream_frames", status: http.StatusBadGateway},
+		{name: "status", configuredValue: "401", op: "get", status: http.StatusUnauthorized},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{authBearerValue: tt.configuredValue}
+			err := client.sanitizeClientError(ClientError{
+				Op:         tt.op,
+				StatusCode: tt.status,
+				Message:    "remote failure",
+			})
+			if strings.Contains(err.Error(), tt.configuredValue) {
+				t.Fatalf("sanitized error = %q, configured bearer leaked from rendered fields", err.Error())
+			}
+			var clientErr ClientError
+			if !errors.As(err, &clientErr) {
+				t.Fatalf("sanitized error = %T, want ClientError", err)
+			}
+			if clientErr.Op != tt.op || clientErr.StatusCode != tt.status {
+				t.Fatalf("structured fields = op:%q status:%d, want op:%q status:%d", clientErr.Op, clientErr.StatusCode, tt.op, tt.status)
+			}
+		})
+	}
+}
+
+func TestClientStreamFramesPreservesCallbackClientError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_ = WriteSSEFrame(w, HarnessEventFrame{
+			Version:          ProtocolVersion,
+			Type:             FrameTurnStarted,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+			Seq:              1,
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken("mock-token"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	callbackErr := &ClientError{Op: "callback", Message: "caller-owned error"}
+	err = client.StreamFrames(context.Background(), "turn-a", 0, func(HarnessEventFrame) error {
+		return callbackErr
+	})
+	if err != callbackErr {
+		t.Fatalf("StreamFrames() error = %#v, want original callback error %#v", err, callbackErr)
+	}
+}
+
+func TestRedactExactBearerValue(t *testing.T) {
+	t.Run("redacts embedded short token text", func(t *testing.T) {
+		got := redactExactBearerValue("turn already exists; reflected x", "x")
+		want := "turn already e[REDACTED]ists; reflected [REDACTED]"
+		if got != want {
+			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+		}
+	})
+	t.Run("redacts key value assignment", func(t *testing.T) {
+		token := strings.ToLower(t.Name())
+		got := redactExactBearerValue("id="+token, token)
+		want := "id=[REDACTED]"
+		if got != want {
+			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+		}
+	})
+	t.Run("redacts sentence punctuation", func(t *testing.T) {
+		token := strings.ToLower(t.Name())
+		got := redactExactBearerValue("remote reflected "+token+".", token)
+		want := "remote reflected [REDACTED]."
+		if got != want {
+			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+		}
+	})
+	t.Run("redacts path adjacency", func(t *testing.T) {
+		token := strings.ToLower(t.Name())
+		got := redactExactBearerValue("/runtime/"+token+"/events", token)
+		want := "/runtime/[REDACTED]/events"
+		if got != want {
+			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+		}
+	})
+	t.Run("avoids marker collision", func(t *testing.T) {
+		token := strings.Trim("[REDACTED]", "[]")
+		client := &Client{authBearerValue: token}
+		got := client.sanitizeClientMessage("Authorization: Bearer placeholder")
+		if strings.Contains(got, token) {
+			t.Fatalf("sanitizeClientMessage() = %q, configured bearer reproduced by marker", got)
+		}
+	})
+	t.Run("removes reconstructed collision", func(t *testing.T) {
+		token := strings.Trim("[REDACTED]", "[]")
+		got := redactExactBearerValue("RED"+token+"ACTED", token)
+		if strings.Contains(got, token) {
+			t.Fatalf("redactExactBearerValue() = %q, configured bearer reconstructed across replacement", got)
+		}
+	})
+}
+
 func TestClientStartTurnMismatchedResponseIsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusAccepted, StartTurnResponse{
@@ -416,6 +596,15 @@ func TestReadSSEFramesRejectsOversizedMultiLineEvent(t *testing.T) {
 	err := readSSEFrames(strings.NewReader(payload), func(HarnessEventFrame) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "exceeds harness frame limit") {
 		t.Fatalf("readSSEFrames() error = %v, want cumulative size rejection", err)
+	}
+	client := &Client{authBearerValue: "stream_frames"}
+	err = readSSEFramesWithSanitizer(
+		strings.NewReader(payload),
+		func(HarnessEventFrame) error { return nil },
+		client.sanitizeClientError,
+	)
+	if err == nil || strings.Contains(err.Error(), client.authBearerValue) {
+		t.Fatalf("sanitized readSSEFrames() error = %v, want operation bearer redacted", err)
 	}
 }
 

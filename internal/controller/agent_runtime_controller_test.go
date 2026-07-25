@@ -21,8 +21,10 @@ import (
 	"github.com/orka-agents/orka/internal/harness/harnesstest"
 )
 
+const agentRuntimeTestBearer = "mock-token"
+
 func TestAgentRuntimeReconcilerMarksReadyForFakeHarness(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -109,7 +111,7 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConforma
 		})
 	})
 	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -123,7 +125,7 @@ func TestAgentRuntimeReconcilerMarksBrokeredOnlyRuntimeReadyWhenBrokeredConforma
 		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, EventStreamPath: eventsPath})
 	})
 	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -209,7 +211,7 @@ func TestAgentRuntimeReconcilerRequiresBrokeredReadConformanceWhenCapabilityRequ
 		})
 	})
 	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -227,7 +229,7 @@ func TestAgentRuntimeReconcilerRequiresBrokeredReadConformanceWhenCapabilityRequ
 		harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: harness.ProtocolVersion, Accepted: true, RuntimeSessionID: request.RuntimeSessionID, TurnID: request.TurnID, CorrelationID: request.CorrelationID, EventStreamPath: eventsPath})
 	})
 	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+		if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -277,7 +279,7 @@ func TestAgentRuntimeReconcilerRequiresBrokeredReadConformanceWhenCapabilityRequ
 }
 
 func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{RuntimeName: "fibey-agentkit", AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -341,7 +343,7 @@ func TestAgentRuntimeReconcilerRechecksUnauthenticatedMutationOnReadyRuntime(t *
 		})
 	})
 	mux.HandleFunc(harness.TurnsPath, func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -366,7 +368,7 @@ func TestAgentRuntimeReconcilerRechecksUnauthenticatedMutationOnReadyRuntime(t *
 		})
 	})
 	mux.HandleFunc(harness.TurnsPath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != "x" {
+		if requireAuth && strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") != agentRuntimeTestBearer {
 			harness.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -423,7 +425,7 @@ func TestAgentRuntimeReconcilerRechecksUnauthenticatedMutationOnReadyRuntime(t *
 }
 
 func TestAgentRuntimeReconcilerMarksNotReadyForBadProtocol(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -444,7 +446,7 @@ func TestAgentRuntimeReconcilerMarksNotReadyForBadProtocol(t *testing.T) {
 }
 
 func TestAgentRuntimeReconcilerRejectsUnlabeledBearerSecret(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -466,7 +468,7 @@ func TestAgentRuntimeReconcilerRejectsUnlabeledBearerSecret(t *testing.T) {
 }
 
 func TestAgentRuntimeReconcilerRejectsBearerSecretWithoutEndpointBinding(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -488,7 +490,7 @@ func TestAgentRuntimeReconcilerRejectsBearerSecretWithoutEndpointBinding(t *test
 }
 
 func TestAgentRuntimeReconcilerRejectsBearerSecretEndpointMismatch(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -510,7 +512,7 @@ func TestAgentRuntimeReconcilerRejectsBearerSecretEndpointMismatch(t *testing.T)
 }
 
 func TestAgentRuntimeReconcilerReportsMissingBearerSecret(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, _ := testAgentRuntimeAndSecret(server.URL())
@@ -531,7 +533,7 @@ func TestAgentRuntimeReconcilerReportsMissingBearerSecret(t *testing.T) {
 }
 
 func TestAgentRuntimeReconcilerReportsMissingBearerSecretKey(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -553,7 +555,7 @@ func TestAgentRuntimeReconcilerReportsMissingBearerSecretKey(t *testing.T) {
 }
 
 func TestAgentRuntimeReconcilerRequiresCapabilitySubset(t *testing.T) {
-	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: "x"})
+	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{AuthToken: agentRuntimeTestBearer})
 	defer server.Close()
 
 	runtime, secret := testAgentRuntimeAndSecret(server.URL())
@@ -616,7 +618,7 @@ func testAgentRuntimeAndSecret(endpoint string) (*corev1alpha1.AgentRuntime, *co
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "fibey-agentkit-harness-token", Namespace: "default", Labels: map[string]string{agentRuntimeAuthUseLabel: scheduledRunLabelValue, agentRuntimeAuthRefNameLabel: "fibey-agentkit"}, Annotations: map[string]string{agentRuntimeAuthEndpointAnnotation: endpoint}},
-		Data:       map[string][]byte{"token": []byte("x")},
+		Data:       map[string][]byte{"token": []byte(agentRuntimeTestBearer)},
 	}
 	return runtime, secret
 }
