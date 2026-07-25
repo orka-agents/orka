@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: controller-manager-store
+  namespace: system
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: store
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

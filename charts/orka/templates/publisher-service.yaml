@@ -1,16 +1,17 @@
+{{- if .Values.publisher.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "orka.fullname" . }}-agent-harness-wrapper
+  name: {{ include "orka.fullname" . }}-workspace-publisher
   labels:
     {{- include "orka.labels" . | nindent 4 }}
-    app.kubernetes.io/component: agent-harness-wrapper
+    app.kubernetes.io/component: workspace-publisher
 spec:
   selector:
     {{- include "orka.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: agent-harness-wrapper
+    app.kubernetes.io/component: workspace-publisher
   ports:
     - name: http
       port: 8080
       targetPort: http
-      protocol: TCP
+{{- end }}

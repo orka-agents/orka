@@ -1,0 +1,17 @@
+{{- if .Values.publisher.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "orka.fullname" . }}-workspace-publisher
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workspace-publisher
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.publisher.persistence.storageClass }}
+  storageClassName: {{ .Values.publisher.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.publisher.persistence.size }}
+{{- end }}

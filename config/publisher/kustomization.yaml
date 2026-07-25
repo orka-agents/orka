@@ -1,0 +1,10 @@
+resources:
+  - serviceaccount.yaml
+  - service.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - networkpolicy.yaml
+images:
+  - name: docker.io/sozercan/orka-workspace-publisher
+    newName: docker.io/sozercan/orka-workspace-publisher
+    newTag: latest

@@ -2,7 +2,9 @@
 IMG ?= controller:latest
 AI_WORKER_IMG ?= ghcr.io/orka-agents/orka/ai-worker:latest
 GENERAL_WORKER_IMG ?= ghcr.io/orka-agents/orka/general-worker:latest
-HARNESS_WRAPPER_IMG ?= ghcr.io/orka-agents/orka/agent-harness-wrapper:latest
+ACP_CODEX_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-codex-runtime:latest
+ACP_CLAUDE_RUNTIME_IMG ?= ghcr.io/orka-agents/orka/acp-claude-runtime:latest
+WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -106,7 +108,9 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(AI_WORKER_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GENERAL_WORKER_IMG) --name $(KIND_CLUSTER)
-	$(KIND) load docker-image $(HARNESS_WRAPPER_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(ACP_CODEX_RUNTIME_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(ACP_CLAUDE_RUNTIME_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(WORKSPACE_PUBLISHER_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e-run-only
 test-e2e-run-only: manifests generate fmt vet ## Run e2e tests without rebuilding images (for fast iteration).
@@ -236,31 +240,47 @@ docker-push: ## Push docker image with the manager.
 docker-build-ai-worker: ## Build docker image for the AI worker.
 	$(CONTAINER_TOOL) build -t ${AI_WORKER_IMG} -f workers/ai/Dockerfile .
 
-.PHONY: docker-build-harness-wrapper
-docker-build-harness-wrapper: ## Build docker image for the agent harness wrapper.
-	$(CONTAINER_TOOL) build -t ${HARNESS_WRAPPER_IMG} -f workers/harness/Dockerfile .
-
 .PHONY: docker-build-general-worker
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
+
+.PHONY: docker-build-acp-codex-runtime
+docker-build-acp-codex-runtime: ## Build the immutable Codex ACP runtime image.
+	$(CONTAINER_TOOL) build -t ${ACP_CODEX_RUNTIME_IMG} -f workers/acp/images/codex/Dockerfile .
+
+.PHONY: docker-build-acp-claude-runtime
+docker-build-acp-claude-runtime: ## Build the immutable Claude ACP runtime image.
+	$(CONTAINER_TOOL) build -t ${ACP_CLAUDE_RUNTIME_IMG} -f workers/acp/images/claude/Dockerfile .
+
+.PHONY: docker-build-workspace-publisher
+docker-build-workspace-publisher: ## Build the clean-room workspace publisher image.
+	$(CONTAINER_TOOL) build -t ${WORKSPACE_PUBLISHER_IMG} -f workers/publisher/Dockerfile .
 
 .PHONY: docker-push-ai-worker
 docker-push-ai-worker: ## Push docker image for the AI worker.
 	$(CONTAINER_TOOL) push ${AI_WORKER_IMG}
 
-.PHONY: docker-push-harness-wrapper
-docker-push-harness-wrapper: ## Push docker image for the agent harness wrapper.
-	$(CONTAINER_TOOL) push ${HARNESS_WRAPPER_IMG}
-
 .PHONY: docker-push-general-worker
 docker-push-general-worker: ## Push docker image for the general worker.
 	$(CONTAINER_TOOL) push ${GENERAL_WORKER_IMG}
 
+.PHONY: docker-push-acp-codex-runtime
+docker-push-acp-codex-runtime: ## Push the immutable Codex ACP runtime image.
+	$(CONTAINER_TOOL) push ${ACP_CODEX_RUNTIME_IMG}
+
+.PHONY: docker-push-acp-claude-runtime
+docker-push-acp-claude-runtime: ## Push the immutable Claude ACP runtime image.
+	$(CONTAINER_TOOL) push ${ACP_CLAUDE_RUNTIME_IMG}
+
+.PHONY: docker-push-workspace-publisher
+docker-push-workspace-publisher: ## Push the clean-room workspace publisher image.
+	$(CONTAINER_TOOL) push ${WORKSPACE_PUBLISHER_IMG}
+
 .PHONY: docker-build-all
-docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-harness-wrapper ## Build all docker images.
+docker-build-all: docker-build docker-build-ai-worker docker-build-general-worker docker-build-acp-codex-runtime docker-build-acp-claude-runtime docker-build-workspace-publisher ## Build all docker images.
 
 .PHONY: docker-push-all
-docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-harness-wrapper ## Push all docker images.
+docker-push-all: docker-push docker-push-ai-worker docker-push-general-worker docker-push-acp-codex-runtime docker-push-acp-claude-runtime docker-push-workspace-publisher ## Push all docker images.
 
 ##@ Deployment
 
@@ -278,14 +298,35 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -; else echo "No CRDs to delete; skipping."; fi
 
+.PHONY: verify-acp-runtime-images
+verify-acp-runtime-images: ## Require digest-pinned ACP runtime images for supported deployments.
+	@for entry in \
+		"ACP_CODEX_RUNTIME_IMG=$(ACP_CODEX_RUNTIME_IMG)" \
+		"ACP_CLAUDE_RUNTIME_IMG=$(ACP_CLAUDE_RUNTIME_IMG)"; do \
+		name="$${entry%%=*}"; ref="$${entry#*=}"; \
+		if [[ ! "$${ref}" =~ ^.+@sha256:[0-9a-f]{64}$$ ]]; then \
+			echo "$$name must be an immutable image reference ending in @sha256:<64 lowercase hex characters>; got '$$ref'" >&2; \
+			exit 1; \
+		fi; \
+	done
+
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: verify-acp-runtime-images manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	cd config/harness-wrapper && "$(KUSTOMIZE)" edit set image ghcr.io/orka-agents/orka/agent-harness-wrapper=${HARNESS_WRAPPER_IMG}
+	cd config/publisher && "$(KUSTOMIZE)" edit set image docker.io/sozercan/orka-workspace-publisher=${WORKSPACE_PUBLISHER_IMG}
 	@"$(KUBECTL)" create namespace orka-system --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
-	@if ! "$(KUBECTL)" -n orka-system get secret harness-wrapper-auth >/dev/null 2>&1; then \
-		token="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
-		"$(KUBECTL)" -n orka-system create secret generic harness-wrapper-auth --from-literal=token="$$token"; \
+	@"$(KUBECTL)" -n orka-system create configmap acp-runtime-images \
+		--from-literal=ORKA_ACP_CODEX_RUNTIME_IMAGE="${ACP_CODEX_RUNTIME_IMG}" \
+		--from-literal=ORKA_ACP_CLAUDE_RUNTIME_IMAGE="${ACP_CLAUDE_RUNTIME_IMG}" \
+		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	@if ! "$(KUBECTL)" -n orka-system get secret acp-artifact-capability >/dev/null 2>&1; then \
+		secret="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
+		"$(KUBECTL)" -n orka-system create secret generic acp-artifact-capability --from-literal=capability-secret="$$secret"; \
+	fi
+	@if ! "$(KUBECTL)" -n orka-system get secret workspace-publisher-auth >/dev/null 2>&1; then \
+		bearer="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
+		capability="$$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '\n')"; \
+		"$(KUBECTL)" -n orka-system create secret generic workspace-publisher-auth --from-literal=controller-token="$$bearer" --from-literal=operation-capability-secret="$$capability"; \
 	fi
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" apply -f -
 

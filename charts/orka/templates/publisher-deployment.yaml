@@ -1,0 +1,88 @@
+{{- if .Values.publisher.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orka.fullname" . }}-workspace-publisher
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workspace-publisher
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "orka.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: workspace-publisher
+  template:
+    metadata:
+      labels:
+        {{- include "orka.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: workspace-publisher
+        orka.ai/network-role: workspace-publisher
+    spec:
+      serviceAccountName: {{ include "orka.publisherServiceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: publisher
+          image: "{{ .Values.publisher.image.repository }}:{{ .Values.publisher.image.tag }}"
+          imagePullPolicy: {{ .Values.publisher.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: ORKA_PUBLISHER_LISTEN_ADDRESS, value: ":8080"}
+            - {name: ORKA_PUBLISHER_CONTROLLER_TOKEN_FILE, value: /var/run/orka/publisher-auth/controller-token}
+            - {name: ORKA_PUBLISHER_OPERATION_CAPABILITY_SECRET_FILE, value: /var/run/orka/publisher-auth/operation-capability-secret}
+            - {name: ORKA_PUBLISHER_ARTIFACT_CAPABILITY_SECRET_FILE, value: /var/run/orka/artifact-auth/capability-secret}
+            - name: ORKA_PUBLISHER_ARTIFACT_API_URL
+              value: http://{{ include "orka.fullname" . }}:{{ .Values.controller.apiPort }}
+            - {name: ORKA_PUBLISHER_ALLOWED_SCM_HOSTS, value: {{ .Values.publisher.allowedSCMHosts | quote }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            {{- toYaml .Values.publisher.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp/orka-workspace-publisher}
+            - {name: publisher-auth, mountPath: /var/run/orka/publisher-auth, readOnly: true}
+            - {name: artifact-auth, mountPath: /var/run/orka/artifact-auth, readOnly: true}
+            - {name: credentials, mountPath: /var/run/secrets/orka-publisher/credentials, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /v1/health, port: http}
+          livenessProbe:
+            httpGet: {path: /v1/health, port: http}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "orka.fullname" . }}-workspace-publisher
+        - name: tmp
+          emptyDir: {sizeLimit: 1Gi}
+        - name: publisher-auth
+          secret:
+            secretName: {{ .Values.publisher.auth.existingSecret | default (printf "%s-workspace-publisher-auth" (include "orka.fullname" .)) }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.publisher.auth.controllerTokenKey | default "controller-token" }}
+                path: controller-token
+              - key: {{ .Values.publisher.auth.capabilitySecretKey | default "operation-capability-secret" }}
+                path: operation-capability-secret
+        - name: artifact-auth
+          secret:
+            secretName: {{ .Values.controller.acpArtifact.existingSecret | default (printf "%s-acp-artifact-capability" (include "orka.fullname" .)) }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.controller.acpArtifact.secretKey | default "capability-secret" }}
+                path: capability-secret
+        - name: credentials
+          secret:
+            secretName: {{ .Values.publisher.credentials.existingSecret | default (printf "%s-workspace-publisher-credentials" (include "orka.fullname" .)) }}
+            optional: true
+            defaultMode: 0400
+{{- end }}

@@ -34,9 +34,17 @@ jobs:
             image_suffix: "/general-worker"
             dockerfile: workers/general/Dockerfile
             context: .
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            dockerfile: workers/harness/Dockerfile
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
+            dockerfile: workers/acp/images/codex/Dockerfile
+            context: .
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+            dockerfile: workers/acp/images/claude/Dockerfile
+            context: .
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
+            dockerfile: workers/publisher/Dockerfile
             context: .
     steps:
       - name: Checkout
@@ -152,12 +160,28 @@ jobs:
             image_suffix: "/general-worker"
             platform: linux/arm64
             platform_slug: linux-arm64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
             platform: linux/amd64
             platform_slug: linux-amd64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+            platform: linux/arm64
+            platform_slug: linux-arm64
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
             platform: linux/arm64
             platform_slug: linux-arm64
     steps:
@@ -216,8 +240,12 @@ jobs:
             image_suffix: "/ai-worker"
           - image: general-worker
             image_suffix: "/general-worker"
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
+          - image: acp-codex-runtime
+            image_suffix: "/acp-codex-runtime"
+          - image: acp-claude-runtime
+            image_suffix: "/acp-claude-runtime"
+          - image: workspace-publisher
+            image_suffix: "/workspace-publisher"
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -335,4 +363,6 @@ jobs:
           promote_image controller ""
           promote_image ai-worker "/ai-worker"
           promote_image general-worker "/general-worker"
-          promote_image agent-harness-wrapper "/agent-harness-wrapper"
+          promote_image acp-codex-runtime "/acp-codex-runtime"
+          promote_image acp-claude-runtime "/acp-claude-runtime"
+          promote_image workspace-publisher "/workspace-publisher"

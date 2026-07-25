@@ -44,6 +44,26 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Operation-scoped ACP artifact transport stored on the controller PVC.
+  acpArtifact:
+    existingSecret: ""
+    secretKey: capability-secret
+    secret: ""
+    maxBytes: 104857600
+
+  # Managed ACP core RuntimePools for built-in agent Tasks.
+  acpRuntime:
+    # The supported agent execution path is ACP-only; there is no legacy fallback.
+    enabled: true
+    namespace: orka-runtimes
+    providerProxyNamespace: vekil-system
+    # Configure each provider that should be available with an immutable
+    # repository@sha256:<digest> reference. Empty providers remain unavailable
+    # and Tasks selecting them fail closed.
+    codexImage: ""
+    claudeImage: ""
+    copilotImage: ""
+
   # Experimental agent sandbox workspace support (disabled by default)
   executionWorkspace:
     # Default provider used when Task execution.workspace.provider is omitted.
@@ -153,6 +173,39 @@ controller:
       childTokenTTL: ""
       toolTokenTTL: ""
 
+# Clean-room Workspace/Publisher service.
+publisher:
+  enabled: true
+  image:
+    repository: ghcr.io/orka-agents/orka/workspace-publisher
+    tag: latest
+    pullPolicy: IfNotPresent
+  allowedSCMHosts: github.com
+  auth:
+    existingSecret: ""
+    controllerTokenKey: controller-token
+    capabilitySecretKey: operation-capability-secret
+    controllerToken: ""
+    capabilitySecret: ""
+  credentials:
+    existingSecret: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  persistence:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+      ephemeral-storage: 2Gi
+
 # Worker configuration
 workers:
   ai:
@@ -160,21 +213,6 @@ workers:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: latest
       pullPolicy: IfNotPresent
-
-  harnessWrapper:
-    image:
-      repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-      tag: latest
-      pullPolicy: IfNotPresent
-    auth:
-      # Existing Secret containing the shared wrapper bearer token.
-      # When existingSecret and token are both empty, Helm generates a release-local token.
-      existingSecret: ""
-      tokenKey: token
-      token: ""
-    # Optional Codex CLI sandbox mode for the Codex adapter.
-    codexSandboxMode: ""
-    resources: {}
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
@@ -259,7 +297,7 @@ annotations: {}
 store:
   path: /data/orka.db
   persistence:
-    enabled: false       # default: ephemeral (emptyDir), no PVC
+    enabled: true        # first supported release requires durable RWO storage
     size: 1Gi            # only when enabled: true
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce

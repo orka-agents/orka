@@ -62,6 +62,30 @@ Create the name of the service account to use
 {{- end }}
 {{- end }}
 
+{{/*
+Create the name of the workspace publisher ServiceAccount to use.
+*/}}
+{{- define "orka.publisherServiceAccountName" -}}
+{{- if .Values.publisher.serviceAccount.create }}
+{{- default (printf "%s-workspace-publisher" (include "orka.fullname" .)) .Values.publisher.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.publisher.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Reject mutable ACP runtime image references when a provider image is configured.
+An empty provider image leaves that provider unavailable; Tasks still fail closed
+because the ACP runtime remains enabled and has no legacy fallback.
+*/}}
+{{- define "orka.validateACPRuntimeImage" -}}
+{{- $name := .name -}}
+{{- $ref := default "" .ref -}}
+{{- if and $ref (not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $ref)) -}}
+{{- fail (printf "%s must be an immutable image reference ending in @sha256:<64 lowercase hex characters>; got %q" $name $ref) -}}
+{{- end -}}
+{{- end }}
+
 
 {{/*
 Create the namespace for the chart-managed client ServiceAccount.

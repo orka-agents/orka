@@ -1,3 +1,8 @@
+{{- if .Values.controller.acpRuntime.enabled }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.codexImage" "ref" .Values.controller.acpRuntime.codexImage) }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.claudeImage" "ref" .Values.controller.acpRuntime.claudeImage) }}
+{{- include "orka.validateACPRuntimeImage" (dict "name" "controller.acpRuntime.copilotImage" "ref" .Values.controller.acpRuntime.copilotImage) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,6 +48,18 @@ spec:
             - --watch-namespace={{ .Values.controller.watchNamespace }}
             {{- end }}
             - --leader-elect={{ .Values.controller.leaderElect }}
+            - --acp-runtime-enabled={{ .Values.controller.acpRuntime.enabled }}
+            - --acp-runtime-namespace={{ .Values.controller.acpRuntime.namespace }}
+            - --acp-provider-proxy-namespace={{ .Values.controller.acpRuntime.providerProxyNamespace }}
+            {{- if .Values.controller.acpRuntime.codexImage }}
+            - {{ printf "--acp-codex-runtime-image=%s" .Values.controller.acpRuntime.codexImage | quote }}
+            {{- end }}
+            {{- if .Values.controller.acpRuntime.claudeImage }}
+            - {{ printf "--acp-claude-runtime-image=%s" .Values.controller.acpRuntime.claudeImage | quote }}
+            {{- end }}
+            {{- if .Values.controller.acpRuntime.copilotImage }}
+            - {{ printf "--acp-copilot-runtime-image=%s" .Values.controller.acpRuntime.copilotImage | quote }}
+            {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
@@ -244,12 +261,20 @@ spec:
               value: {{ include "orka.vendorWorkerClusterRoleName" . | quote }}
             - name: ORKA_CONTAINER_WORKER_CLUSTER_ROLE_NAME
               value: {{ include "orka.containerWorkerClusterRoleName" . | quote }}
-            - name: ORKA_HARNESS_WRAPPER_ENDPOINT
-              value: http://{{ include "orka.fullname" . }}-agent-harness-wrapper:8080
-            - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
-              value: /var/run/orka/harness-wrapper/token
-            - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
-              value: {{ printf "%s-agent-harness-wrapper" (include "orka.fullname" .) | quote }}
+            - name: ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE
+              value: /var/run/orka/acp-artifacts/capability-secret
+            - name: ORKA_ACP_ARTIFACT_ROOT
+              value: /data/acp-artifacts
+            - name: ORKA_ACP_ARTIFACT_MAX_BYTES
+              value: {{ .Values.controller.acpArtifact.maxBytes | quote }}
+            {{- if .Values.publisher.enabled }}
+            - name: ORKA_WORKSPACE_PUBLISHER_URL
+              value: http://{{ include "orka.fullname" . }}-workspace-publisher:8080
+            - name: ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE
+              value: /var/run/orka/publisher-auth/controller-token
+            - name: ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE
+              value: /var/run/orka/publisher-auth/operation-capability-secret
+            {{- end }}
             {{- if .Values.github.webhook.secretName }}
             - name: ORKA_GITHUB_WEBHOOK_SECRET
               valueFrom:
@@ -322,18 +347,24 @@ spec:
               mountPath: /tmp
             - name: store
               mountPath: /data
-            - name: harness-wrapper-auth
-              mountPath: /var/run/orka/harness-wrapper
+            - name: acp-artifact-capability
+              mountPath: /var/run/orka/acp-artifacts
               readOnly: true
+            {{- if .Values.publisher.enabled }}
+            - name: workspace-publisher-auth
+              mountPath: /var/run/orka/publisher-auth
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: harness-wrapper-auth
+        - name: acp-artifact-capability
           secret:
-            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            secretName: {{ .Values.controller.acpArtifact.existingSecret | default (printf "%s-acp-artifact-capability" (include "orka.fullname" .)) }}
+            defaultMode: 0400
             items:
-              - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}
-                path: token
+              - key: {{ .Values.controller.acpArtifact.secretKey | default "capability-secret" }}
+                path: capability-secret
         - name: store
           {{- if .Values.store.persistence.enabled }}
           persistentVolumeClaim:
@@ -341,6 +372,17 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if .Values.publisher.enabled }}
+        - name: workspace-publisher-auth
+          secret:
+            secretName: {{ .Values.publisher.auth.existingSecret | default (printf "%s-workspace-publisher-auth" (include "orka.fullname" .)) }}
+            defaultMode: 0400
+            items:
+              - key: {{ .Values.publisher.auth.controllerTokenKey | default "controller-token" }}
+                path: controller-token
+              - key: {{ .Values.publisher.auth.capabilitySecretKey | default "operation-capability-secret" }}
+                path: operation-capability-secret
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

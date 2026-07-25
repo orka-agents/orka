@@ -20,6 +20,8 @@ metadata:
     app.kubernetes.io/name: orka
     app.kubernetes.io/managed-by: kustomize
 spec:
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       control-plane: controller-manager
@@ -70,6 +72,7 @@ spec:
           - --store-backend=sqlite
           - --store-path=/data/orka.db
           - --controller-url=http://orka-api.orka-system.svc:8080
+          - --acp-runtime-enabled=true
           - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:latest
           - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:latest
           - --execution-workspace-default-provider=agent-sandbox
@@ -90,12 +93,26 @@ spec:
         imagePullPolicy: IfNotPresent
         name: manager
         env:
-          - name: ORKA_HARNESS_WRAPPER_ENDPOINT
-            value: http://orka-agent-harness-wrapper:8080
-          - name: ORKA_HARNESS_WRAPPER_BEARER_TOKEN_FILE
-            value: /var/run/orka/harness-wrapper/token
-          - name: ORKA_HARNESS_WRAPPER_SERVICE_ACCOUNT_NAME
-            value: orka-agent-harness-wrapper
+          - name: ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE
+            value: /var/run/orka/acp-artifacts/capability-secret
+          - name: ORKA_ACP_ARTIFACT_ROOT
+            value: /data/acp-artifacts
+          - name: ORKA_ACP_CODEX_RUNTIME_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: acp-runtime-images
+                key: ORKA_ACP_CODEX_RUNTIME_IMAGE
+          - name: ORKA_ACP_CLAUDE_RUNTIME_IMAGE
+            valueFrom:
+              configMapKeyRef:
+                name: acp-runtime-images
+                key: ORKA_ACP_CLAUDE_RUNTIME_IMAGE
+          - name: ORKA_WORKSPACE_PUBLISHER_URL
+            value: http://orka-workspace-publisher.orka-system.svc:8080
+          - name: ORKA_WORKSPACE_PUBLISHER_CONTROLLER_TOKEN_FILE
+            value: /var/run/orka/publisher-auth/controller-token
+          - name: ORKA_WORKSPACE_PUBLISHER_CAPABILITY_SECRET_FILE
+            value: /var/run/orka/publisher-auth/operation-capability-secret
         ports: []
         securityContext:
           readOnlyRootFilesystem: true
@@ -129,16 +146,28 @@ spec:
             mountPath: /data
           - name: tmp
             mountPath: /tmp
-          - name: harness-wrapper-auth
-            mountPath: /var/run/orka/harness-wrapper
+          - name: acp-artifact-capability
+            mountPath: /var/run/orka/acp-artifacts
+            readOnly: true
+          - name: workspace-publisher-auth
+            mountPath: /var/run/orka/publisher-auth
             readOnly: true
       volumes:
         - name: store
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: controller-manager-store
         - name: tmp
           emptyDir: {}
-        - name: harness-wrapper-auth
+        - name: acp-artifact-capability
           secret:
-            secretName: harness-wrapper-auth
+            secretName: acp-artifact-capability
+            defaultMode: 0400
+            items:
+              - key: capability-secret
+                path: capability-secret
+        - name: workspace-publisher-auth
+          secret:
+            secretName: workspace-publisher-auth
+            defaultMode: 0400
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
