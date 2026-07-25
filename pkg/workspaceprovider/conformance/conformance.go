@@ -857,60 +857,14 @@ func validDeletedDisposition(
 	disposition *workspacev1alpha1.ExecutionWorkspaceDisposition,
 	policy workspacev1alpha1.ExecutionWorkspaceDeletionPolicy,
 ) bool {
-	if disposition == nil {
-		return false
-	}
-	terminal := func(
-		state workspacev1alpha1.ExecutionWorkspaceDispositionState,
-		allowed ...workspacev1alpha1.ExecutionWorkspaceDispositionState,
-	) bool {
-		return slices.Contains(allowed, state)
-	}
-	policySatisfied := func(
-		state workspacev1alpha1.ExecutionWorkspaceDispositionState,
-		action workspacev1alpha1.WorkspaceDeletionAction,
-	) bool {
-		if state == workspacev1alpha1.DispositionNotApplicable {
-			return true
-		}
-		if action == workspacev1alpha1.WorkspaceDeletionActionRetain {
-			return state == workspacev1alpha1.DispositionRetained
-		}
-		return action == workspacev1alpha1.WorkspaceDeletionActionDelete &&
-			state == workspacev1alpha1.DispositionDeleted
-	}
-	return terminal(
-		disposition.Compute,
-		workspacev1alpha1.DispositionDeleted,
-		workspacev1alpha1.DispositionNotApplicable,
-	) && terminal(
-		disposition.AccessCredentials,
-		workspacev1alpha1.DispositionRevoked,
-		workspacev1alpha1.DispositionDeleted,
-		workspacev1alpha1.DispositionNotApplicable,
-	) && terminal(
-		disposition.EphemeralSecrets,
-		workspacev1alpha1.DispositionDeleted,
-		workspacev1alpha1.DispositionNotApplicable,
-	) && terminal(
-		disposition.WorkspaceData,
-		workspacev1alpha1.DispositionDeleted,
-		workspacev1alpha1.DispositionRetained,
-		workspacev1alpha1.DispositionNotApplicable,
-	) && policySatisfied(disposition.PersistentVolumes, policy.PersistentVolumes) &&
-		policySatisfied(disposition.Checkpoints, policy.Checkpoints) &&
-		policySatisfied(disposition.ProviderResources, policy.ProviderResources)
+	return workspaceprovider.ValidateDeletedDisposition(disposition, policy) == nil
 }
 
 func validInteractiveDeletedDisposition(
 	disposition *workspacev1alpha1.ExecutionWorkspaceDisposition,
 	policy workspacev1alpha1.ExecutionWorkspaceDeletionPolicy,
 ) bool {
-	if !validDeletedDisposition(disposition, policy) {
-		return false
-	}
-	return disposition.AccessCredentials == workspacev1alpha1.DispositionRevoked ||
-		disposition.AccessCredentials == workspacev1alpha1.DispositionDeleted
+	return workspaceprovider.ValidateInteractiveDeletedDisposition(disposition, policy) == nil
 }
 
 func contains(values []string, want string) bool {

@@ -92,6 +92,7 @@ type ExecutionWorkspaceServiceSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.sessionRef) == has(oldSelf.sessionRef) && (!has(self.sessionRef) || self.sessionRef == oldSelf.sessionRef)",message="sessionRef is immutable"
 // +kubebuilder:validation:XValidation:rule="self.slot == oldSelf.slot",message="slot is immutable"
 // +kubebuilder:validation:XValidation:rule="self.lifecycle == oldSelf.lifecycle",message="lifecycle is immutable"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.attachmentEpoch) || (has(self.attachmentEpoch) && self.attachmentEpoch >= oldSelf.attachmentEpoch)",message="attachmentEpoch must not decrease"
 // +kubebuilder:validation:XValidation:rule="!has(self.attachment) || self.mode == 'Interactive'",message="attachments are only valid for Interactive workspaces"
 // +kubebuilder:validation:XValidation:rule="!has(self.service) || self.mode == 'Service'",message="service ports are only valid for Service workspaces"
 // +kubebuilder:validation:XValidation:rule="self.mode != 'Service' || has(self.service)",message="Service workspaces require service configuration"
@@ -123,6 +124,13 @@ type ExecutionWorkspaceSpec struct {
 
 	// Lifecycle is the class policy resolved at creation time.
 	Lifecycle ExecutionWorkspaceLifecycle `json:"lifecycle"`
+
+	// AttachmentEpoch is the highest attachment epoch allocated by Orka core.
+	// It remains after Attachment is cleared and only increases atomically with
+	// a new attachment intent.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	AttachmentEpoch int64 `json:"attachmentEpoch,omitempty"`
 
 	// Attachment grants exclusive Task access for Interactive mode.
 	// +optional

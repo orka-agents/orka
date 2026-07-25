@@ -1996,53 +1996,73 @@ func TestValidateCoordinationConstraints_DynamicallyCreatedAgent(t *testing.T) {
 }
 
 func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
-	scheme := newTestScheme()
-	parentTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAI,
-			AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
-		},
-	}
-	parentAgent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: "default"},
-		Spec: corev1alpha1.AgentSpec{
-			Coordination: &corev1alpha1.CoordinationConfig{
-				Enabled:               true,
-				MaxConcurrentChildren: 1,
-			},
-		},
-	}
-	// An active sibling
-	sibling := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sibling",
-			Namespace: "default",
-			Labels:    map[string]string{labels.LabelParentTask: "parent"},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
-	}
-	childTask := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "child",
-			Namespace: "default",
-			Annotations: map[string]string{
-				labels.AnnotationCoordinationDepth: "1",
-			},
-			Labels: map[string]string{
-				labels.LabelParentTask: "parent",
-			},
-		},
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+	tests := []struct {
+		phase       corev1alpha1.TaskPhase
+		wantLimited bool
+	}{
+		{phase: corev1alpha1.TaskPhaseRunning, wantLimited: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, wantLimited: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, wantLimited: false},
+		{phase: corev1alpha1.TaskPhaseFailed, wantLimited: false},
+		{phase: corev1alpha1.TaskPhaseCancelled, wantLimited: false},
 	}
 
-	r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, childTask)
-	result, _, done := r.validateCoordinationConstraints(context.Background(), childTask)
-	if !done {
-		t.Error("expected done=true when concurrency limit reached")
-	}
-	if result.RequeueAfter != 10*time.Second {
-		t.Errorf("expected 10s requeue, got %v", result.RequeueAfter)
+	for _, tt := range tests {
+		t.Run(string(tt.phase), func(t *testing.T) {
+			scheme := newTestScheme()
+			parentTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeAI,
+					AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
+				},
+			}
+			parentAgent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: "default"},
+				Spec: corev1alpha1.AgentSpec{
+					Coordination: &corev1alpha1.CoordinationConfig{
+						Enabled:               true,
+						MaxConcurrentChildren: 1,
+					},
+				},
+			}
+			sibling := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sibling",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelParentTask: "parent"},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
+			}
+			childTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "child",
+					Namespace: "default",
+					Annotations: map[string]string{
+						labels.AnnotationCoordinationDepth: "1",
+					},
+					Labels: map[string]string{
+						labels.LabelParentTask: "parent",
+					},
+				},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+			}
+
+			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, childTask)
+			result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+			if err != nil {
+				t.Fatalf("validateCoordinationConstraints() error = %v", err)
+			}
+			if done != tt.wantLimited {
+				t.Fatalf("done = %t, want %t", done, tt.wantLimited)
+			}
+			if tt.wantLimited && result.RequeueAfter != 10*time.Second {
+				t.Errorf("expected 10s requeue, got %v", result.RequeueAfter)
+			}
+			if !tt.wantLimited && result.RequeueAfter != 0 {
+				t.Errorf("unexpected requeue for terminal sibling: %v", result.RequeueAfter)
+			}
+		})
 	}
 }
 
@@ -5040,39 +5060,69 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 }
 
 func TestHandleScheduled_ConcurrencyForbid(t *testing.T) {
-	scheme := newTestScheme()
-	// Create a parent task that is due and has an active child
-	activeChild := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "active-child",
-			Namespace: "default",
-			Labels:    map[string]string{labels.LabelParentTask: "sched-concur"},
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	tests := []struct {
+		phase       corev1alpha1.TaskPhase
+		wantBlocked bool
+	}{
+		{phase: corev1alpha1.TaskPhaseRunning, wantBlocked: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, wantBlocked: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, wantBlocked: false},
 	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "sched-concur",
-			Namespace:         "default",
-			CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:              corev1alpha1.TaskTypeContainer,
-			Schedule:          "* * * * *",
-			ConcurrencyPolicy: corev1alpha1.ForbidConcurrent,
-		},
-		Status: corev1alpha1.TaskStatus{
-			Phase:            corev1alpha1.TaskPhaseScheduled,
-			LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
-		},
-	}
-	r := newUnitReconciler(scheme, task, activeChild)
-	result, err := r.handleScheduled(context.Background(), task)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter <= 0 {
-		t.Error("expected positive RequeueAfter when concurrency is forbidden")
+
+	for _, tt := range tests {
+		t.Run(string(tt.phase), func(t *testing.T) {
+			scheme := newTestScheme()
+			parentName := "sched-concur-" + strings.ToLower(string(tt.phase))
+			activeChild := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      parentName + "-child",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelParentTask: parentName},
+				},
+				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              parentName,
+					Namespace:         "default",
+					UID:               types.UID("uid-" + strings.ToLower(string(tt.phase))),
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:                    corev1alpha1.TaskTypeContainer,
+					Schedule:                "* * * * *",
+					ConcurrencyPolicy:       corev1alpha1.ForbidConcurrent,
+					StartingDeadlineSeconds: new(int64(300)),
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:            corev1alpha1.TaskPhaseScheduled,
+					LastScheduleTime: new(metav1.NewTime(time.Now().Add(-2 * time.Minute))),
+				},
+			}
+			r := newUnitReconciler(scheme, task, activeChild)
+			result, err := r.handleScheduled(context.Background(), task)
+			if err != nil {
+				t.Fatalf("handleScheduled() error = %v", err)
+			}
+			if result.RequeueAfter <= 0 {
+				t.Error("expected positive RequeueAfter")
+			}
+
+			children := &corev1alpha1.TaskList{}
+			if err := r.List(context.Background(), children,
+				client.InNamespace(task.Namespace),
+				client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(task.Name)},
+			); err != nil {
+				t.Fatalf("list scheduled children: %v", err)
+			}
+			wantChildren := 2
+			if tt.wantBlocked {
+				wantChildren = 1
+			}
+			if len(children.Items) != wantChildren {
+				t.Fatalf("scheduled children = %d, want %d", len(children.Items), wantChildren)
+			}
+		})
 	}
 }
 
@@ -5984,6 +6034,34 @@ func assertNoJobsForTask(t *testing.T, r *TaskReconciler, task *corev1alpha1.Tas
 // handlePending — namespace task limit
 // ---------------------------------------------------------------------------
 
+func TestTaskPhaseCountsTowardConcurrency(t *testing.T) {
+	tests := []struct {
+		phase corev1alpha1.TaskPhase
+		want  bool
+	}{
+		{phase: "", want: false},
+		{phase: corev1alpha1.TaskPhasePending, want: true},
+		{phase: corev1alpha1.TaskPhaseScheduled, want: false},
+		{phase: corev1alpha1.TaskPhaseRunning, want: true},
+		{phase: corev1alpha1.TaskPhaseFinalizing, want: true},
+		{phase: corev1alpha1.TaskPhaseSucceeded, want: false},
+		{phase: corev1alpha1.TaskPhaseFailed, want: false},
+		{phase: corev1alpha1.TaskPhaseCancelled, want: false},
+	}
+
+	for _, tt := range tests {
+		name := string(tt.phase)
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			if got := taskPhaseCountsTowardConcurrency(tt.phase); got != tt.want {
+				t.Fatalf("taskPhaseCountsTowardConcurrency(%q) = %t, want %t", tt.phase, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	scheme := newTestScheme()
 	// Create active tasks to hit the limit
@@ -6015,6 +6093,35 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	if result.RequeueAfter != 10*time.Second {
 		t.Errorf("expected 10s requeue at limit, got %v", result.RequeueAfter)
 	}
+}
+
+func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
+	scheme := newTestScheme()
+	finalizing := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "pending-finalizing-limit",
+			Namespace:  "default",
+			Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(scheme, task, finalizing)
+	r.MaxTasksPerNamespace = 1
+
+	result, err := r.handlePending(context.Background(), task)
+	if err != nil {
+		t.Fatalf("handlePending() error = %v", err)
+	}
+	if result.RequeueAfter != 10*time.Second {
+		t.Fatalf("RequeueAfter = %v, want 10s", result.RequeueAfter)
+	}
+	assertNoJobsForTask(t, r, task)
 }
 
 // ---------------------------------------------------------------------------

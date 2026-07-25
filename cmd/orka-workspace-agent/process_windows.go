@@ -17,6 +17,14 @@ func configureCommandCancellation(cmd *exec.Cmd, _ bool, _, _ uint32) {
 	}
 }
 
+func startCommand(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
+
+func waitCommand(cmd *exec.Cmd) error {
+	return cmd.Wait()
+}
+
 func commandProcessGroupID(cmd *exec.Cmd) int {
 	if cmd == nil || cmd.Process == nil {
 		return 0

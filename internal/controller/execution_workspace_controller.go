@@ -13,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
@@ -78,7 +79,9 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.patchWorkspaceCondition(ctx, req.NamespacedName, condition); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !admitted {
+	maintenanceIntent := workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted ||
+		workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
+	if !admitted && !maintenanceIntent {
 		if err := r.quarantineWorkspace(ctx, workspace, message); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -102,20 +105,34 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceBindings(
 	}
 	profileHash := class.Status.ProfileHash
 	if profileHash == "" {
-		var err error
-		profileHash, err = workspaceprovider.ClassProfileHash(class.Spec)
-		if err != nil {
-			return "", "", fmt.Errorf("hash workspace class profile: %w", err)
-		}
+		return "ClassNotReady", "bound workspace class has no ready profile hash", nil
 	}
 	if profileHash != workspace.Spec.ClassBinding.ProfileHash {
 		return "ClassProfileMismatch", "workspace class profile hash does not match the bound class", nil
 	}
+	workspaceProvisioned := workspace.Status.State != ""
+	if !workspaceProvisioned {
+		readyCondition := workspaceprovider.FindCondition(
+			class.Status.Conditions,
+			string(workspacev1alpha1.ConditionClassReady),
+		)
+		classReady := class.Status.ObservedGeneration == class.Generation &&
+			readyCondition != nil &&
+			readyCondition.ObservedGeneration == class.Generation &&
+			readyCondition.Status == metav1.ConditionTrue
+		if !classReady {
+			return "ClassNotReady", "bound workspace class is not ready for new workspaces", nil
+		}
+	}
 	if workspace.Spec.Mode != class.Spec.Mode || !reflect.DeepEqual(workspace.Spec.Lifecycle, class.Spec.Lifecycle) {
 		return "ClassPolicyMismatch", "workspace mode or lifecycle does not match the bound class", nil
 	}
-	if workspace.Spec.SessionRef != nil && !slices.Contains(class.Spec.AllowedReuseScopes, workspacev1alpha1.WorkspaceReuseScopeSession) {
-		return "ReuseScopeNotAllowed", "class does not allow Session reuse", nil
+	reuseScope := workspacev1alpha1.WorkspaceReuseScopeNone
+	if workspace.Spec.SessionRef != nil {
+		reuseScope = workspacev1alpha1.WorkspaceReuseScopeSession
+	}
+	if !slices.Contains(class.Spec.AllowedReuseScopes, reuseScope) {
+		return "ReuseScopeNotAllowed", fmt.Sprintf("class does not allow %s reuse", reuseScope), nil
 	}
 
 	providerName, err := r.classProviderName(ctx, class)
@@ -135,7 +152,10 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceBindings(
 	if provider.UID != workspace.Spec.ProviderBinding.UID || provider.Generation < workspace.Spec.ProviderBinding.Generation {
 		return "ProviderBindingMismatch", "workspace provider binding does not match the referenced provider identity", nil
 	}
-	if workspace.Status.State == "" && provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
+	if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDisabled {
+		return string(workspacev1alpha1.ReasonProviderDisabled), "provider is disabled", nil
+	}
+	if !workspaceProvisioned && provider.Spec.LifecycleState != workspacev1alpha1.ExecutionWorkspaceProviderActive {
 		return string(workspacev1alpha1.ReasonProviderDraining), "provider does not accept new workspaces", nil
 	}
 	return string(workspacev1alpha1.ReasonReady), "workspace bindings are valid", nil
@@ -175,6 +195,29 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateDeleted {
+		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
+	}
+	if workspace.Status.ObservedGeneration != workspace.Generation {
+		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
+	}
+	var dispositionErr error
+	if workspace.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeInteractive {
+		dispositionErr = workspaceprovider.ValidateInteractiveDeletedDisposition(
+			workspace.Status.Disposition,
+			workspace.Spec.Lifecycle.DeletionPolicy,
+		)
+	} else {
+		dispositionErr = workspaceprovider.ValidateDeletedDisposition(
+			workspace.Status.Disposition,
+			workspace.Spec.Lifecycle.DeletionPolicy,
+		)
+	}
+	if dispositionErr != nil {
+		log.FromContext(ctx).Info(
+			"waiting for policy-compliant terminal workspace cleanup disposition",
+			"workspace", client.ObjectKeyFromObject(workspace),
+			"error", dispositionErr,
+		)
 		return ctrl.Result{RequeueAfter: workspaceRequeueInterval}, nil
 	}
 	if controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {

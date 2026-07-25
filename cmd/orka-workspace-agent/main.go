@@ -1356,11 +1356,11 @@ func (s *workspaceAgentServer) runExec(
 	if err == nil {
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
-		err = cmd.Start()
+		err = startCommand(cmd)
 	}
 	groupID := commandProcessGroupID(cmd)
 	if err == nil {
-		err = cmd.Wait()
+		err = waitCommand(cmd)
 	}
 	groupCtx, groupCancel := context.WithTimeout(context.Background(), processGroupDrainTimeout)
 	groupErr := terminateAndWaitForProcessGroup(groupCtx, groupID)

@@ -1250,12 +1250,12 @@ func TestWorkspaceAgentStaleTokenCannotUseAnyDataOperation(t *testing.T) {
 }
 
 func TestWorkspaceAgentDuplicateOperationIDExecutesOnce(t *testing.T) {
-	dir := t.TempDir()
+	server := newFencedWorkspaceAgentServer()
+	dir := commandTestWorkspace(t, server)
 	previousAllowedRoots := allowedRoots
 	allowedRoots = []string{dir}
 	t.Cleanup(func() { allowedRoots = previousAllowedRoots })
 
-	server := newFencedWorkspaceAgentServer()
 	activateWorkspaceAttachment(t, server, "task", 1, "token", time.Now().Add(time.Minute))
 	output := filepath.Join(dir, "count")
 	request := execRequest{
@@ -1373,6 +1373,27 @@ func TestWorkspaceAgentPrivilegedScrubRequiresRevocation(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("scrub left file: %v", err)
 	}
+}
+
+func commandTestWorkspace(t *testing.T, server *workspaceAgentServer) string {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp("/tmp", "orka-workspace-agent-command-test-*")
+	if err != nil {
+		t.Fatalf("create command test workspace: %v", err)
+	}
+	if err := os.Chown(dir, int(server.commandUID), int(server.commandGID)); err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("own command test workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove command test workspace: %v", err)
+		}
+	})
+	return dir
 }
 
 func newFencedWorkspaceAgentServer() *workspaceAgentServer {
@@ -1746,12 +1767,12 @@ func TestWorkspaceAgentSecuredOperationsSerialize(t *testing.T) {
 }
 
 func TestWorkspaceAgentBackgroundDescendantPreservesSuccessfulRootOutcome(t *testing.T) {
-	dir := t.TempDir()
+	server := newFencedWorkspaceAgentServer()
+	dir := commandTestWorkspace(t, server)
 	previousAllowedRoots := allowedRoots
 	allowedRoots = []string{dir}
 	t.Cleanup(func() { allowedRoots = previousAllowedRoots })
 	output := filepath.Join(dir, "late-background-write")
-	server := newFencedWorkspaceAgentServer()
 	response := server.runExec(
 		context.Background(),
 		execRequest{Command: []string{

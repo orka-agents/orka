@@ -33,6 +33,31 @@ specific read grant without changing Orka core RBAC. Provider configuration and
 pool parameter CRDs remain adapter-owned and are not granted through this class
 profile reader unless the adapter explicitly requires them for class resolution.
 
+## Workspace-agent process identity and capability contract
+
+Providers that run the workspace agent as a root supervisor must let it launch
+task commands as the configured unprivileged identity. For the standard Orka
+workspace-agent image, the supervisor runs as UID/GID 0 and task commands run as
+UID/GID 1000. The provider runtime must grant the supervisor `CAP_SETUID` and
+`CAP_SETGID` in its OCI bounding, permitted, and effective capability sets. A
+runtime that mirrors capabilities into the inheritable set must include them
+there as well.
+
+These capabilities belong only to the supervisor. Providers must not replace a
+failed credential transition by running the task command as root. If the
+runtime cannot perform the UID/GID drop, command startup must fail closed. The
+unprivileged command must not retain the supervisor's capabilities after the
+credential transition and exec.
+
+The local Agent Substrate integration currently applies a reviewed compatibility
+patch to the pinned upstream OCI generator because that revision omits these two
+capabilities. The patch grants them only to the explicit
+`/orka-workspace-agent` entrypoint; other Actor containers keep the pinned
+Substrate capability set. The installer verifies the exact upstream source blob
+before applying the patch. Re-pinning Substrate therefore requires an explicit
+review of the upstream OCI capability contract rather than silently carrying
+the patch onto changed code.
+
 ## Workspace-agent connection Secret contract
 
 A ready workspace that exposes the workspace-agent data plane sets

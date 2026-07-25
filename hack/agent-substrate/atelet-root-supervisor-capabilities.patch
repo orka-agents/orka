@@ -1,0 +1,53 @@
+diff --git a/cmd/servers/atelet/oci.go b/cmd/servers/atelet/oci.go
+index a2ae14c0..7f5a2fa3 100644
+--- a/cmd/servers/atelet/oci.go
++++ b/cmd/servers/atelet/oci.go
+@@ -66,6 +66,17 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+ 	}
+ 	envVars = append(envVars, env...)
+ 
++	processCapabilities := []string{
++		"CAP_AUDIT_WRITE",
++		"CAP_KILL",
++		"CAP_NET_BIND_SERVICE",
++	}
++	if len(args) > 0 && args[0] == "/orka-workspace-agent" {
++		// Orka keeps the agent privileged only as a supervisor; task commands
++		// are launched as UID/GID 1000 and must fail if that drop is unavailable.
++		processCapabilities = append(processCapabilities, "CAP_SETGID", "CAP_SETUID")
++	}
++
+ 	ociSpec := &specs.Spec{
+ 		Process: &specs.Process{
+ 			User: specs.User{
+@@ -76,26 +87,10 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+ 			Env:  envVars,
+ 			Cwd:  "/",
+ 			Capabilities: &specs.LinuxCapabilities{
+-				Bounding: []string{
+-					"CAP_AUDIT_WRITE",
+-					"CAP_KILL",
+-					"CAP_NET_BIND_SERVICE",
+-				},
+-				Effective: []string{
+-					"CAP_AUDIT_WRITE",
+-					"CAP_KILL",
+-					"CAP_NET_BIND_SERVICE",
+-				},
+-				Inheritable: []string{
+-					"CAP_AUDIT_WRITE",
+-					"CAP_KILL",
+-					"CAP_NET_BIND_SERVICE",
+-				},
+-				Permitted: []string{
+-					"CAP_AUDIT_WRITE",
+-					"CAP_KILL",
+-					"CAP_NET_BIND_SERVICE",
+-				},
++				Bounding:    processCapabilities,
++				Effective:   processCapabilities,
++				Inheritable: processCapabilities,
++				Permitted:   processCapabilities,
+ 				// TODO(gvisor.dev/issue/3166): support ambient capabilities
+ 			},
+ 			Rlimits: []specs.POSIXRlimit{

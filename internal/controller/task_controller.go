@@ -197,6 +197,15 @@ func canStartTaskJob(phase corev1alpha1.TaskPhase) bool {
 	}
 }
 
+func taskPhaseCountsTowardConcurrency(phase corev1alpha1.TaskPhase) bool {
+	switch phase {
+	case corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
+		return true
+	default:
+		return false
+	}
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -578,7 +587,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 		active := int32(0)
 		for _, t := range namespaceTasks.Items {
-			if t.Name != task.Name && (t.Status.Phase == corev1alpha1.TaskPhasePending || t.Status.Phase == corev1alpha1.TaskPhaseRunning) {
+			if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
 				active++
 			}
 		}
@@ -880,7 +889,7 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		}
 		active := int32(0)
 		for _, s := range siblings.Items {
-			if s.Name != task.Name && (s.Status.Phase == corev1alpha1.TaskPhasePending || s.Status.Phase == corev1alpha1.TaskPhaseRunning) {
+			if s.Name != task.Name && taskPhaseCountsTowardConcurrency(s.Status.Phase) {
 				active++
 			}
 		}
@@ -3194,8 +3203,7 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
 		for i := range childList.Items {
-			if childList.Items[i].Status.Phase == corev1alpha1.TaskPhasePending ||
-				childList.Items[i].Status.Phase == corev1alpha1.TaskPhaseRunning {
+			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
 				nextSchedule := metav1.NewTime(next)

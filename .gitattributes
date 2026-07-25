@@ -1,0 +1,2 @@
+# Unified diff context lines intentionally contain a leading space before source indentation.
+hack/agent-substrate/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

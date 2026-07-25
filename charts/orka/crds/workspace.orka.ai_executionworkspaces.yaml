@@ -118,6 +118,14 @@ spec:
                 - tokenSHA256
                 - tokenSecretRef
                 type: object
+              attachmentEpoch:
+                description: |-
+                  AttachmentEpoch is the highest attachment epoch allocated by Orka core.
+                  It remains after Attachment is cleared and only increases atomically with
+                  a new attachment intent.
+                format: int64
+                minimum: 1
+                type: integer
               classBinding:
                 description: ClassBinding pins the immutable class revision used to
                   create this workspace.
@@ -368,6 +376,9 @@ spec:
               rule: self.slot == oldSelf.slot
             - message: lifecycle is immutable
               rule: self.lifecycle == oldSelf.lifecycle
+            - message: attachmentEpoch must not decrease
+              rule: '!has(oldSelf.attachmentEpoch) || (has(self.attachmentEpoch) &&
+                self.attachmentEpoch >= oldSelf.attachmentEpoch)'
             - message: attachments are only valid for Interactive workspaces
               rule: '!has(self.attachment) || self.mode == ''Interactive'''
             - message: service ports are only valid for Service workspaces
