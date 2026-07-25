@@ -385,12 +385,24 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 		result.addFailure("bearer token is required for authenticated harness conformance")
 		return
 	}
+	if result.ObservedCapabilities == nil ||
+		!capabilitiesHaveToolMode(result.ObservedCapabilities, harness.ToolExecutionModeObserved) {
+		result.addFailure("runtime does not advertise required observed tool execution mode")
+		return
+	}
 	request := defaultStartTurnRequest("conformance-turn")
 	if result.ObservedCapabilities != nil && strings.TrimSpace(result.ObservedCapabilities.RuntimeName) != "" {
 		request.Metadata["runtime"] = strings.TrimSpace(result.ObservedCapabilities.RuntimeName)
 	}
 	if target.StartTurnRequest != nil {
 		request = cloneStartTurnRequest(*target.StartTurnRequest)
+	}
+	if request.ToolExecutionMode == "" {
+		request.ToolExecutionMode = harness.ToolExecutionModeObserved
+	}
+	if request.ToolExecutionMode != harness.ToolExecutionModeObserved {
+		result.addFailure("observed conformance probe request must use observed tool execution mode")
+		return
 	}
 	if target.RequireAuth && !assertUnauthenticatedStartRejected(ctx, target, result, baseURL, controlTimeout, request) {
 		return

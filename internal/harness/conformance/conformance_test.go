@@ -262,6 +262,37 @@ func TestCheckReadinessFailsUnsupportedProtocolVersion(t *testing.T) {
 	}
 }
 
+func TestCheckProbeTurnRequiresObservedCapability(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.brokeredOnly = true
+	defer server.Close()
+	result := Check(context.Background(), Target{
+		BaseURL:     server.URL,
+		BearerToken: "mock-token",
+		ProbeTurn:   true,
+	})
+	if result.Passed || !strings.Contains(result.Message, "observed") {
+		t.Fatalf("result = %#v, want observed capability failure", result)
+	}
+}
+
+func TestCheckProbeTurnRejectsBrokeredCustomRequest(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	defer server.Close()
+	request := defaultStartTurnRequest("custom-brokered-request")
+	request.ToolExecutionMode = harness.ToolExecutionModeBrokered
+	result := Check(context.Background(), Target{
+		BaseURL:          server.URL,
+		BearerToken:      "mock-token",
+		ProbeTurn:        true,
+		StartTurnRequest: &request,
+	})
+	if result.Passed || !strings.Contains(result.Message, "must use observed") {
+		t.Fatalf("result = %#v, want observed request-mode failure", result)
+	}
+}
+
 func TestCheckFailsWhenProbeTurnFails(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{Behavior: harnesstest.BehaviorFailure})
 	defer server.Close()
