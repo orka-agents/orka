@@ -33,16 +33,37 @@ Helm installs files from `crds/` only during installation. It does not create or
 update them during `helm upgrade`, including when upgrading from an older Orka
 chart that installed no CRDs.
 
-Apply the CRDs from the exact target chart before upgrading the controller:
+Apply the exact CRD specs from the target chart before upgrading the
+controller. The first apply creates missing CRDs and transfers ownership of
+present fields; the guarded JSON Patch then replaces each `spec` so fields
+removed by the target version do not remain from an older Helm manager:
 
 ```bash
 set -euo pipefail
 
 TARGET_CHART=/absolute/path/to/orka-<version>.tgz
 TARGET_CONTEXT=replace-with-context
+TARGET_CRDS="$(mktemp)"
+trap 'rm -f "$TARGET_CRDS"' EXIT
 
-helm show crds "$TARGET_CHART" | \
-  kubectl --context "$TARGET_CONTEXT" apply --server-side --force-conflicts -f -
+helm show crds "$TARGET_CHART" > "$TARGET_CRDS"
+kubectl --context "$TARGET_CONTEXT" apply \
+  --server-side \
+  --force-conflicts \
+  --field-manager=orka-crd-lifecycle \
+  -f "$TARGET_CRDS"
+
+kubectl create --dry-run=client -f "$TARGET_CRDS" -o json | \
+  jq -c '{name: .metadata.name, spec: .spec}' | \
+  while IFS= read -r target; do
+    name="$(jq -er '.name' <<< "$target")"
+    spec="$(jq -ec '.spec' <<< "$target")"
+    resource_version="$(kubectl --context "$TARGET_CONTEXT" get crd "$name" -o jsonpath='{.metadata.resourceVersion}')"
+    patch="$(jq -cn --arg rv "$resource_version" --argjson spec "$spec" \
+      '[{"op":"test","path":"/metadata/resourceVersion","value":$rv},{"op":"replace","path":"/spec","value":$spec}]')"
+    kubectl --context "$TARGET_CONTEXT" patch crd "$name" --type=json -p "$patch"
+    kubectl --context "$TARGET_CONTEXT" wait --for=condition=Established --timeout=60s "crd/$name"
+  done
 
 helm upgrade orka "$TARGET_CHART" \
   --namespace orka-system \
@@ -50,9 +71,9 @@ helm upgrade orka "$TARGET_CHART" \
   --wait
 ```
 
-`--force-conflicts` transfers managed-field ownership from Helm to the designated
-CRD lifecycle owner. Do not run competing CRD apply workflows for the same
-cluster.
+A matching Orka source checkout provides the same guarded flow as
+`scripts/apply-helm-crds.sh "$TARGET_CHART" "$TARGET_CONTEXT"`. Do not run
+competing CRD apply workflows for the same cluster.
 
 If another system owns the CRDs, perform the CRD-first step through that system,
 wait for all twelve CRDs to become `Established`, and then upgrade Orka.

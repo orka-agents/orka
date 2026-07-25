@@ -70,6 +70,7 @@ jobs:
             exit 1
           fi
 
+          grep -Fq 'get secret harness-wrapper-auth' config/harness-wrapper/README.md
           grep -Fq 'create secret generic harness-wrapper-auth' config/harness-wrapper/README.md
           test "$(grep -c 'secretName: harness-wrapper-auth' manifest_staging/deploy/orka.yaml)" -eq 2
           if awk '
@@ -253,9 +254,20 @@ jobs:
             --set-string workers.harnessWrapper.auth.token=mock-token
 
           assert_all_orka_crds "after helm install"
-          helm show crds "${chart_package}" | \
-            kubectl apply --server-side --force-conflicts -f -
-          assert_all_orka_crds "after explicit CRD apply"
+
+          kubectl patch crd tasks.core.orka.ai --type=json -p='[
+            {"op":"add","path":"/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/staleReviewField","value":{"type":"string"}}
+          ]'
+          kubectl get crd tasks.core.orka.ai -o json | \
+            jq -e '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties | has("staleReviewField")' >/dev/null
+
+          scripts/apply-helm-crds.sh "${chart_package}"
+          assert_all_orka_crds "after guarded exact-spec CRD apply"
+          if kubectl get crd tasks.core.orka.ai -o json | \
+            jq -e '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties | has("staleReviewField")' >/dev/null; then
+            echo "Guarded CRD apply retained a schema field omitted by the target chart." >&2
+            exit 1
+          fi
 
           helm uninstall orka --namespace "${NAMESPACE}"
           assert_all_orka_crds "after helm uninstall"
