@@ -800,6 +800,23 @@ func TestClientStartTurnTransportFailureMarksAcceptanceUnknown(t *testing.T) {
 	}
 }
 
+func TestClientFetchTurnOutputRejectsConfiguredBearer(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("result contains " + value))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken(value))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	data, err := client.FetchTurnOutput(context.Background(), "turn-a", "result")
+	if err == nil || data != nil || strings.Contains(err.Error(), value) {
+		t.Fatalf("FetchTurnOutput() = %q, %v, want sanitized bearer rejection", data, err)
+	}
+}
+
 func TestClientStreamFramesRejectsUnsafeTurnID(t *testing.T) {
 	client, err := NewClient("http://127.0.0.1:8080")
 	if err != nil {

@@ -307,6 +307,9 @@ func (c *Client) FetchTurnOutput(ctx context.Context, turnID HarnessTurnID, outp
 	if len(data) > maxFetchTurnOutputBytes {
 		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output exceeds harness fetch limit")
 	}
+	if c.authBearerValue != "" && bytes.Contains(data, []byte(c.authBearerValue)) {
+		return nil, safeClientError("fetch_turn_output", resp.StatusCode, "output contains configured bearer")
+	}
 	return data, nil
 }
 
