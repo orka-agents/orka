@@ -52,12 +52,31 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen kustomize ## Generate canonical and Gatekeeper-style staging manifests.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-	rm -rf manifest_staging
-	mkdir -p manifest_staging/deploy manifest_staging/charts/orka
-	"$(KUSTOMIZE)" build config/default -o manifest_staging/deploy/orka.yaml
-	"$(KUSTOMIZE)" build \
-		--load-restrictor LoadRestrictionsNone \
-		cmd/build/helmify | go run ./cmd/build/helmify
+	@set -euo pipefail; \
+		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
+		backup=""; \
+		cleanup() { \
+			rc=$$?; \
+			trap - EXIT; \
+			[[ -z "$$tmp" ]] || rm -rf "$$tmp"; \
+			if [[ -n "$$backup" && -e "$$backup" && ! -e manifest_staging ]]; then mv "$$backup" manifest_staging; fi; \
+			exit $$rc; \
+		}; \
+		trap cleanup EXIT; \
+		mkdir -p "$$tmp/deploy" "$$tmp/charts/orka"; \
+		"$(KUSTOMIZE)" build config/default -o "$$tmp/deploy/orka.yaml"; \
+		"$(KUSTOMIZE)" build \
+			--load-restrictor LoadRestrictionsNone \
+			cmd/build/helmify | go run ./cmd/build/helmify -output-dir "$$tmp/charts/orka"; \
+		if [[ -e manifest_staging ]]; then \
+			backup="$$(mktemp -d .manifest_staging.backup.XXXXXX)"; \
+			rmdir "$$backup"; \
+			mv manifest_staging "$$backup"; \
+		fi; \
+		mv "$$tmp" manifest_staging; \
+		tmp=""; \
+		trap - EXIT; \
+		if [[ -n "$$backup" ]]; then rm -rf "$$backup"; fi
 
 .PHONY: release-manifest
 release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc.N].
@@ -69,9 +88,30 @@ release-manifest: ## Prepare staging manifests for NEWVERSION=vX.Y.Z[-beta.N|-rc
 promote-staging-manifest: ## Promote committed staging manifests into release snapshots.
 	test -f manifest_staging/deploy/orka.yaml
 	test -f manifest_staging/charts/orka/Chart.yaml
-	rm -rf deploy charts
-	cp -R manifest_staging/deploy .
-	cp -R manifest_staging/charts .
+	@set -euo pipefail; \
+		stage="$$(mktemp -d .promote-staging.tmp.XXXXXX)"; \
+		backup="$$(mktemp -d .promote-staging.backup.XXXXXX)"; \
+		installed_deploy=0; \
+		installed_charts=0; \
+		rollback() { \
+			rc=$$?; \
+			trap - EXIT; \
+			if [[ $$installed_deploy -eq 1 ]]; then rm -rf deploy; fi; \
+			if [[ $$installed_charts -eq 1 ]]; then rm -rf charts; fi; \
+			if [[ -e "$$backup/deploy" ]]; then mv "$$backup/deploy" deploy; fi; \
+			if [[ -e "$$backup/charts" ]]; then mv "$$backup/charts" charts; fi; \
+			rm -rf "$$stage" "$$backup"; \
+			exit $$rc; \
+		}; \
+		trap rollback EXIT; \
+		cp -R manifest_staging/deploy "$$stage/deploy"; \
+		cp -R manifest_staging/charts "$$stage/charts"; \
+		if [[ -e deploy ]]; then mv deploy "$$backup/deploy"; fi; \
+		if [[ -e charts ]]; then mv charts "$$backup/charts"; fi; \
+		mv "$$stage/deploy" deploy; installed_deploy=1; \
+		mv "$$stage/charts" charts; installed_charts=1; \
+		trap - EXIT; \
+		rm -rf "$$stage" "$$backup"
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
