@@ -117,3 +117,4 @@ env GEMINI_API_KEY=dummy \
 - If `/healthz` works but `/readyz` fails, focus on provider auth, provider config model ownership, upstream reachability, or missing secret env vars.
 - If clients cannot connect, verify the base URL path: Anthropic/Gemini use `http://host:1337`; OpenAI/Codex use `http://host:1337/v1`.
 - Do not paste secrets into prompts, commit provider files with inline credentials, or expose a public service without confirming the user's intended security boundary.
+- When zero-config mode falls back to GitHub Copilot device-code login, surface the login code and URL to the user and wait for their confirmation before continuing. Never complete the login on their behalf.

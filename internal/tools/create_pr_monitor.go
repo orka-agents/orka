@@ -76,11 +76,16 @@ func (t *CreatePRMonitorTool) Parameters() json.RawMessage {
 			},
 			perPageField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeInteger,
-				jsonSchemaDescriptionField: "Maximum open PRs to scan per run. Defaults to 30, maximum 100.",
+				jsonSchemaDescriptionField: "Maximum open PRs to scan per run.",
+				jsonSchemaDefaultField:     30,
+				jsonSchemaMinimumField:     1,
+				jsonSchemaMaximumField:     100,
 			},
 			"review_event": map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,
-				jsonSchemaDescriptionField: "Review event to post after analysis: COMMENT, APPROVE, or REQUEST_CHANGES. Defaults to COMMENT.",
+				jsonSchemaDescriptionField: "Review event to post after analysis.",
+				jsonSchemaEnumField:        []string{reviewEventComment, reviewEventApprove, reviewEventRequestChanges},
+				jsonSchemaDefaultField:     reviewEventComment,
 			},
 			promptField: map[string]any{
 				jsonSchemaTypeField:        jsonSchemaTypeString,

@@ -169,97 +169,8 @@ is a larger task; confirm scope before attempting it.
    ```
 
    For a model-free validation, stay on `AGENTIC=0` and rely on the built-in
-   smoke exercises (next section) instead of standing up vekil.
-
-## Validate
-
-> **Known gate (verified live 2026-06): agent Tasks with an execution workspace
-> are rejected by the current service-backed harness runtime.** A
-> `provider: substrate` (or `agent-sandbox`) agent Task fails immediately with
-> `status.executionWorkspace.reason=WorkspaceValidationFailed` and message
-> `execution workspace is not supported by harness runtime yet`. This is an
-> unconditional gate in `internal/controller/harness_wrapper.go`
-> (`runHarnessWrapperTask`), not a misconfiguration — the agent CLI runtimes now
-> run through the long-lived `agent-harness-wrapper` service, and the
-> Task→workspace path for agents is not wired through it yet. The bundled e2e
-> reflects this: it prints `Skipping agent Task execution-workspace checks:
-> harness-wrapper runtime is service-backed`. What IS validated end-to-end today
-> is the **direct** Substrate path (actor create/resume/router/daemon exec/
-> suspend/delete) plus Substrate-backed MCP tool create/reconcile/cleanup,
-> exercised during standup. After clearing the e2e's fake `CODEX_CLI_PATH`
-> override as shown above, a **plain** agent Task (no `execution.workspace`)
-> runs through the harness + model proxy. Treat the
-> Task YAML below as the intended API once the harness wires workspaces; until
-> then, validate via the e2e's direct-actor exercises.
-
-The installer leaves a fully wired cluster. During standup it smoke-tests direct
-actor create/resume/exec/suspend/delete and Substrate-backed MCP tool lifecycle.
-It does **not** currently smoke-test retained workspace reuse for Orka agent
-Tasks because those execution-workspace checks are skipped by the harness gate.
-
-If you skipped the kubeconfig export in the workflow above, do it before any
-manual `kubectl` commands — the e2e standup uses an isolated kubeconfig and does
-**not** leave `kind-<KIND_CLUSTER>` in your default one. Keep using the scoped
-`KUBECONFIG` in that shell:
-
-```bash
-cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
-ctx="kind-${cluster}"
-export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
-kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
-```
-
-To drive an Orka Task yourself (intended shape; currently gated as noted above):
-
-```bash
-cluster="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
-ctx="kind-${cluster}"
-export KUBECONFIG="$(mktemp -t orka-substrate-kubeconfig.XXXXXX)"
-kind export kubeconfig --name "${cluster}" --kubeconfig "${KUBECONFIG}"
-kubectl --context "$ctx" -n default apply -f - <<'YAML'
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: substrate-smoke
-  namespace: default
-spec:
-  type: agent
-  agentRef:
-    name: codex-substrate-ci
-  prompt: "Run make test and summarize the result."
-  sessionRef:
-    name: substrate-demo
-    create: true
-  execution:
-    workspace:
-      enabled: true
-      provider: substrate
-      templateRef:
-        name: orka-codex-ci
-        namespace: ate-demo
-      reusePolicy: session
-      cleanupPolicy: retain
-YAML
-
-kubectl --context "$ctx" -n default get task substrate-smoke -o yaml
-```
-
-Check the provider-neutral workspace lifecycle in
-`status.executionWorkspace` (`phase`, `placement`, `density`, `resumeLatency`).
-Status is intentionally sanitized — it must not expose actor IDs, snapshot URIs,
-worker pod IPs, daemon URLs, or tokens.
-
-### CI parity
-
-`scripts/agent-substrate-e2e.sh` (the `Agent Substrate E2E` workflow) runs the
-same path end-to-end and is secret-free. Run it directly when you want a clean,
-self-contained validation with its own cluster lifecycle:
-
-```bash
-PATH="$(go env GOPATH)/bin:$PATH" SUBSTRATE_E2E_EXTENDED=1 bash scripts/agent-substrate-e2e.sh
-```
-
-Set `KEEP_CLUSTER=1` to inspect the cluster after a failure.
+   smoke exercises documented in `references/validate.md` instead of standing
+   up vekil.
 
 ## Guardrails
 
@@ -286,26 +197,18 @@ Set `KEEP_CLUSTER=1` to inspect the cluster after a failure.
   local/CI exception to document and audit, not a production pattern. Prefer
   `valueFrom.secretKeyRef` for any production template.
 
+## Validate
+
+Read `references/validate.md` before treating anything as proven. What is
+validated end-to-end today is the **direct** Substrate path (actor
+create/resume/router/daemon exec/suspend/delete), Substrate-backed MCP tool
+lifecycle, and a **plain** agent Task with no `execution.workspace`.
+
+Agent Tasks that set `spec.execution.workspace` are still rejected by an
+unconditional harness-runtime gate, and the e2e skips those checks. Do not use
+a workspace-backed Task as a success criterion; `references/validate.md` covers
+it only as an expected-failure/future-API check.
+
 ## Troubleshooting
 
-- `... requires substrate to be enabled`: controller missing
-  `--substrate-enabled=true`.
-- `bootstrap token secret name is required`: set
-  `--substrate-bootstrap-token-secret-name` and create that Secret in the Task
-  namespace **and** the `ActorTemplate` namespace.
-- `ActorTemplate ... missing label/annotation` / `not Orka-compatible`: the
-  template needs `orka.ai/execution-workspace: "true"`,
-  `orka.ai/workspace-provider: substrate`, the daemon-port/protocol/staging-root
-  annotations, and must run `/orka-workspace-agent` from the agent harness
-  wrapper image. See the ActorTemplate contract in the concept doc.
-- `ActorTemplate ... is not Ready`: inspect Substrate `WorkerPool`, snapshot
-  config, image pulls, and `runsc` configuration.
-- Task `Failed` with `WorkspaceCleanupFailed` after `resultRef.available=true`:
-  command + result succeeded but Substrate failed to checkpoint/delete the actor
-  (a known pinned-revision `runsc delete` flake in GitHub-hosted kind). Inspect
-  `atelet` / `ateom-gvisor` logs.
-- Inspect Substrate directly:
-  `kubectl --context "$ctx" -n ate-system get pods`,
-  `kubectl --context "$ctx" -n ate-demo get workerpool,actortemplate`,
-  `kubectl --context "$ctx" -n ate-system logs deployment/atenet-router`.
-- Full troubleshooting matrix: `website/docs/concepts/substrate.md`.
+Read `references/troubleshooting.md` when a step fails.

@@ -241,11 +241,82 @@ func TestCodeExecTool_Execute_TimeoutExceedsMax(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := newInProcessCodeExecTestTool(tmpDir, 30*time.Second, nil)
 
-	// Timeout > 60 should use default
+	// An over-max timeout must not fail the call.
 	args := json.RawMessage(`{"language": "bash", "code": "echo test", "timeout": 120}`)
 	_, err := tool.Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+// An over-max timeout clamps to maxCodeExecTimeoutSeconds. It must not silently
+// fall back to the 30s default, which would give the caller less time than the
+// 60s they were entitled to ask for.
+func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
+	t.Setenv(codeExecBackendEnv, "")
+
+	tests := []struct {
+		name      string
+		requested int
+		want      time.Duration
+	}{
+		{name: "over max clamps down", requested: 120, want: time.Duration(maxCodeExecTimeoutSeconds) * time.Second},
+		{name: "at max is honored", requested: maxCodeExecTimeoutSeconds, want: time.Duration(maxCodeExecTimeoutSeconds) * time.Second},
+		{name: "under max is honored", requested: 5, want: 5 * time.Second},
+		{name: "unset uses default", requested: 0, want: defaultCodeExecTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &recordingSandboxClient{result: SandboxRunResult{Output: "ok"}}
+			tool := &CodeExecTool{
+				workDir:          t.TempDir(),
+				timeout:          defaultCodeExecTimeout,
+				allowedLangs:     defaultCodeExecAllowedLangs(),
+				denyPatterns:     defaultDenyPatterns,
+				sandboxClient:    sandbox,
+				backend:          codeExecBackendKubernetes,
+				outputLimitBytes: defaultCodeExecOutputLimitBytes,
+			}
+
+			args := fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, tt.requested)
+			if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if sandbox.req.Timeout != tt.want {
+				t.Errorf("effective timeout = %s, want %s", sandbox.req.Timeout, tt.want)
+			}
+		})
+	}
+}
+
+// The advertised bound must match the enforced one, so a caller reading the
+// schema never has to discover the limit by being silently clamped.
+func TestCodeExecTool_Schema_AdvertisesTimeoutBounds(t *testing.T) {
+	tool := newInProcessCodeExecTestTool(t.TempDir(), 30*time.Second, nil)
+
+	var schema struct {
+		Properties struct {
+			Timeout struct {
+				Maximum *int `json:"maximum"`
+				Minimum *int `json:"minimum"`
+				Default *int `json:"default"`
+			} `json:"timeout"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+		t.Fatalf("failed to unmarshal schema: %v", err)
+	}
+
+	timeout := schema.Properties.Timeout
+	if timeout.Maximum == nil || *timeout.Maximum != maxCodeExecTimeoutSeconds {
+		t.Errorf("schema maximum = %v, want %d", timeout.Maximum, maxCodeExecTimeoutSeconds)
+	}
+	if timeout.Minimum == nil || *timeout.Minimum != 1 {
+		t.Errorf("schema minimum = %v, want 1", timeout.Minimum)
+	}
+	if want := int(defaultCodeExecTimeout.Seconds()); timeout.Default == nil || *timeout.Default != want {
+		t.Errorf("schema default = %v, want %d", timeout.Default, want)
 	}
 }
 

@@ -478,7 +478,7 @@ func (t *CodeExecTool) Parameters() json.RawMessage {
 		"properties": {
 			"language": {
 				"type": "string",
-				"description": "Programming language (python, javascript, bash)",
+				"description": "Programming language to execute the code with",
 				"enum": ["python", "python3", "javascript", "node", "bash", "sh"]
 			},
 			"code": {
@@ -487,8 +487,10 @@ func (t *CodeExecTool) Parameters() json.RawMessage {
 			},
 			"timeout": {
 				"type": "integer",
-				"description": "Execution timeout in seconds (default: 30, max: 60)",
-				"default": 30
+				"description": "Execution timeout in seconds",
+				"default": 30,
+				"minimum": 1,
+				"maximum": 60
 			}
 		},
 		"required": ["language", "code"]
@@ -515,8 +517,8 @@ func (t *CodeExecTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if timeout <= 0 {
 		timeout = defaultCodeExecTimeout
 	}
-	if execArgs.Timeout > 0 && execArgs.Timeout <= maxCodeExecTimeoutSeconds {
-		timeout = time.Duration(execArgs.Timeout) * time.Second
+	if execArgs.Timeout > 0 {
+		timeout = time.Duration(min(execArgs.Timeout, maxCodeExecTimeoutSeconds)) * time.Second
 	}
 
 	tenant, provider, providerType := codeExecScopeFromContext(ctx)

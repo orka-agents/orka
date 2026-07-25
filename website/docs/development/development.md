@@ -87,6 +87,11 @@ bash scripts/agent-substrate-e2e.sh
 ```
 
 
+## Harness wrapper real-world validation
+
+When changing the agent-harness-wrapper, validate it against a live cluster, not
+only unit tests. Follow the canonical [Live validation checklist](../guides/cli-harness-wrapper.md#live-validation-checklist).
+
 ## OpenTelemetry development
 
 Telemetry is enabled with `--enable-telemetry` (or the legacy alias
