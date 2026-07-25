@@ -14,6 +14,7 @@ on:
       - "go.mod"
       - "go.sum"
       - "Makefile"
+      - "scripts/apply-helm-crds.sh"
       - ".github/workflows/helm-chart.yml"
   pull_request:
     paths:
@@ -25,6 +26,7 @@ on:
       - "go.mod"
       - "go.sum"
       - "Makefile"
+      - "scripts/apply-helm-crds.sh"
       - ".github/workflows/helm-chart.yml"
   workflow_dispatch:
 
