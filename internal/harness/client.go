@@ -90,7 +90,11 @@ func (c *Client) Health(ctx context.Context) (_ *HealthResponse, err error) {
 	if err := response.Validate(); err != nil {
 		return nil, safeClientError("health", 0, err.Error(), err)
 	}
-	return &response, nil
+	sanitized, err := c.sanitizeHealthResponse(response)
+	if err != nil {
+		return nil, safeClientError("health", 0, err.Error(), err)
+	}
+	return &sanitized, nil
 }
 
 func (c *Client) Capabilities(ctx context.Context) (_ *CapabilitiesResponse, err error) {
@@ -102,7 +106,66 @@ func (c *Client) Capabilities(ctx context.Context) (_ *CapabilitiesResponse, err
 	if err := response.Validate(); err != nil {
 		return nil, safeClientError("capabilities", 0, err.Error(), err)
 	}
-	return &response, nil
+	sanitized, err := c.sanitizeCapabilitiesResponse(response)
+	if err != nil {
+		return nil, safeClientError("capabilities", 0, err.Error(), err)
+	}
+	return &sanitized, nil
+}
+
+func (c *Client) sanitizeHealthResponse(response HealthResponse) (HealthResponse, error) {
+	for name, value := range map[string]string{
+		"version":          response.Version,
+		"status":           string(response.Status),
+		"runtimeSessionID": string(response.RuntimeSessionID),
+		"ready":            strconv.FormatBool(response.Ready),
+		"checkedAt":        response.CheckedAt.Format(time.RFC3339Nano),
+	} {
+		if c.structuralValueContainsSensitiveData(value) {
+			return HealthResponse{}, fmt.Errorf("harness health structural field %s contains sensitive data", name)
+		}
+	}
+	response.Message = c.sanitizeClientMessage(response.Message)
+	response.Metadata = sanitizeHarnessStringMap(response.Metadata, c.sanitizeClientMessage)
+	return response, nil
+}
+
+func (c *Client) sanitizeCapabilitiesResponse(response CapabilitiesResponse) (CapabilitiesResponse, error) {
+	for name, value := range map[string]string{
+		"version":           response.Version,
+		"protocolVersion":   response.ProtocolVersion,
+		"transport":         response.Transport,
+		"runtimeName":       response.RuntimeName,
+		"providerKind":      string(response.ProviderKind),
+		"supportsCancel":    strconv.FormatBool(response.SupportsCancel),
+		"supportsSessions":  strconv.FormatBool(response.SupportsRuntimeSessions),
+		"supportsContinue":  strconv.FormatBool(response.SupportsContinuation),
+		"supportsArtifacts": strconv.FormatBool(response.SupportsArtifacts),
+		"supportsSuspend":   strconv.FormatBool(response.SupportsSuspend),
+		"supportsSnapshot":  strconv.FormatBool(response.SupportsWorkspaceSnapshot),
+		"maxConcurrent":     strconv.Itoa(response.MaxConcurrentTurns),
+		"maxTurnSeconds":    strconv.Itoa(response.MaxTurnSeconds),
+		"maxOutputBytes":    strconv.FormatInt(response.MaxOutputBytes, 10),
+	} {
+		if c.structuralValueContainsSensitiveData(value) {
+			return CapabilitiesResponse{}, fmt.Errorf("harness capabilities structural field %s contains sensitive data", name)
+		}
+	}
+	for _, mode := range response.ToolExecutionModes {
+		if c.structuralValueContainsSensitiveData(string(mode)) {
+			return CapabilitiesResponse{}, fmt.Errorf("harness capabilities structural field toolExecutionModes contains sensitive data")
+		}
+	}
+	for _, class := range response.BrokeredToolClasses {
+		if c.structuralValueContainsSensitiveData(string(class)) {
+			return CapabilitiesResponse{}, fmt.Errorf("harness capabilities structural field brokeredToolClasses contains sensitive data")
+		}
+	}
+	response.ToolExecutionModes = append([]ToolExecutionMode(nil), response.ToolExecutionModes...)
+	response.BrokeredToolClasses = append([]BrokeredToolClass(nil), response.BrokeredToolClasses...)
+	response.RuntimeVersion = c.sanitizeClientMessage(response.RuntimeVersion)
+	response.Metadata = sanitizeHarnessStringMap(response.Metadata, c.sanitizeClientMessage)
+	return response, nil
 }
 
 type startTurnResponseWire struct {
@@ -390,14 +453,16 @@ func (c *Client) sanitizeHarnessFrame(frame HarnessEventFrame) (HarnessEventFram
 	return frame, nil
 }
 
+func (c *Client) structuralValueContainsSensitiveData(value string) bool {
+	if events.RedactExecutionEventText(value) != value {
+		return true
+	}
+	return c != nil && StructuredValueContainsBearer(value, c.authBearerValue)
+}
+
 func (c *Client) validateHarnessFrameStructure(frame HarnessEventFrame) error {
 	check := func(name, value string) error {
-		generic := events.RedactExecutionEventText(value)
-		bearer := ""
-		if c != nil {
-			bearer = c.authBearerValue
-		}
-		if generic != value || StructuredValueContainsBearer(value, bearer) {
+		if c.structuralValueContainsSensitiveData(value) {
 			return fmt.Errorf("harness frame structural field %s contains sensitive data", name)
 		}
 		return nil
@@ -997,6 +1062,7 @@ func classifyClientError(clientErr ClientError, message string) ClientError {
 	clientErr.turnNotFound = strings.Contains(lower, "turn not found")
 	clientErr.protocolViolation = strings.Contains(lower, "harness frame identity does not match") ||
 		strings.Contains(lower, "harness frame structural field") || strings.Contains(lower, "harness frame brokered tool content") ||
+		strings.Contains(lower, "harness health structural field") || strings.Contains(lower, "harness capabilities structural field") ||
 		strings.Contains(lower, "invalid harness frame") ||
 		strings.Contains(lower, "invalid harness frame content json") || strings.Contains(lower, "decode harness frame")
 	return clientErr

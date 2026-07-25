@@ -104,6 +104,89 @@ func TestClientSanitizesConfiguredBearerFromErrors(t *testing.T) {
 	})
 }
 
+func TestClientCapabilitiesRejectsBearerInStructuralField(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusOK, CapabilitiesResponse{
+			Version:                 ProtocolVersion,
+			ProtocolVersion:         ProtocolVersion,
+			Transport:               HTTPTransport,
+			RuntimeName:             "runtime-" + value,
+			ProviderKind:            ProviderKindRemote,
+			ToolExecutionModes:      []ToolExecutionMode{ToolExecutionModeObserved},
+			SupportsCancel:          true,
+			SupportsRuntimeSessions: true,
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken(value))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.Capabilities(context.Background())
+	if err == nil || strings.Contains(err.Error(), value) {
+		t.Fatalf("Capabilities() error = %v, want sanitized structural collision", err)
+	}
+}
+
+func TestClientCapabilitiesSanitizesPresentationFields(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusOK, CapabilitiesResponse{
+			Version:                 ProtocolVersion,
+			ProtocolVersion:         ProtocolVersion,
+			Transport:               HTTPTransport,
+			RuntimeName:             "runtime-safe",
+			RuntimeVersion:          value,
+			ProviderKind:            ProviderKindRemote,
+			ToolExecutionModes:      []ToolExecutionMode{ToolExecutionModeObserved},
+			SupportsCancel:          true,
+			SupportsRuntimeSessions: true,
+			Metadata:                map[string]string{"reflected": value, "api_key": "opaque"},
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken(value))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	caps, err := client.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities() error = %v", err)
+	}
+	encoded, _ := json.Marshal(caps)
+	if strings.Contains(string(encoded), value) || strings.Contains(string(encoded), "opaque") {
+		t.Fatalf("Capabilities() leaked sensitive data: %s", encoded)
+	}
+}
+
+func TestClientHealthSanitizesPresentationFields(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusOK, HealthResponse{
+			Version:   ProtocolVersion,
+			Status:    HealthStatusOK,
+			Ready:     true,
+			Message:   value,
+			CheckedAt: time.Now().UTC(),
+			Metadata:  map[string]string{"reflected": value, "api_key": "opaque"},
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken(value))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	health, err := client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() error = %v", err)
+	}
+	encoded, _ := json.Marshal(health)
+	if strings.Contains(string(encoded), value) || strings.Contains(string(encoded), "opaque") {
+		t.Fatalf("Health() leaked sensitive data: %s", encoded)
+	}
+}
+
 func TestSanitizeHarnessFrameRedactsConfiguredBearer(t *testing.T) {
 	value := strings.ToLower(t.Name())
 	client := &Client{authBearerValue: value}

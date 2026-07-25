@@ -1446,7 +1446,7 @@ func harnessWrapperCapabilitiesErrorIsRetryable(err error) bool {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
 			return false
 		}
-		return !clientErr.IsUnsupportedVersion()
+		return !clientErr.IsUnsupportedVersion() && !clientErr.IsProtocolViolation()
 	}
 	message := strings.ToLower(err.Error())
 	if !strings.Contains(message, "read harness runtime capabilities") {
