@@ -47,16 +47,20 @@ These capabilities belong only to the supervisor. Providers must not replace a
 failed credential transition by running the task command as root. If the
 runtime cannot perform the UID/GID drop, command startup must fail closed. The
 unprivileged command must not retain the supervisor's capabilities after the
-credential transition and exec.
+credential transition and exec. The container root and every executable path
+used by task commands must also remain traversable by the configured command
+identity; a provider-owned `0700` rootfs directory makes every post-drop exec
+fail even when the capability set is correct.
 
 The local Agent Substrate integration currently applies a reviewed compatibility
 patch to the pinned upstream OCI generator because that revision omits these two
-capabilities. The patch grants them only to the explicit
-`/orka-workspace-agent` entrypoint; other Actor containers keep the pinned
-Substrate capability set. The installer verifies the exact upstream source blob
-before applying the patch. Re-pinning Substrate therefore requires an explicit
-review of the upstream OCI capability contract rather than silently carrying
-the patch onto changed code.
+capabilities and creates every extracted rootfs with mode `0700`. For the
+explicit `/orka-workspace-agent` entrypoint only, the patch grants the set-ID
+capabilities and changes the extracted rootfs directory to `0755`; other Actor
+containers keep the pinned Substrate capability and rootfs policy. The installer
+verifies the exact upstream source blob before applying the patch. Re-pinning
+Substrate therefore requires an explicit review of the upstream OCI runtime
+contract rather than silently carrying the patch onto changed code.
 
 ## Workspace-agent connection Secret contract
 

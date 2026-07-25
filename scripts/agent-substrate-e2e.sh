@@ -446,6 +446,10 @@ apply_substrate_workspace_agent_capability_patch() {
       exit 1
     fi
   done
+  if [[ "$(grep -Fc 'os.Chmod(rootPath, 0o755)' "${SUBSTRATE_DIR}/${target}" || true)" -ne 1 ]]; then
+    echo "Substrate capability patch did not make the workspace-agent rootfs traversable after credential drop" >&2
+    exit 1
+  fi
 
   log "Applied reviewed Substrate root-supervisor capability compatibility patch"
 }

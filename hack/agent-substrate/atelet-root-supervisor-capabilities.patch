@@ -1,8 +1,21 @@
 diff --git a/cmd/servers/atelet/oci.go b/cmd/servers/atelet/oci.go
-index a2ae14c0..7f5a2fa3 100644
+index a2ae14c0..e057dfbe 100644
 --- a/cmd/servers/atelet/oci.go
 +++ b/cmd/servers/atelet/oci.go
-@@ -66,6 +66,17 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+@@ -60,12 +60,30 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+ 	if err := untar(ctx, tarData, rootPath); err != nil {
+ 		return fmt.Errorf("in untar: %w", err)
+ 	}
++	if len(args) > 0 && args[0] == "/orka-workspace-agent" {
++		// The root supervisor drops task commands to UID/GID 1000. The
++		// extracted root must therefore remain traversable after that drop.
++		if err := os.Chmod(rootPath, 0o755); err != nil {
++			return fmt.Errorf("while making workspace-agent rootfs traversable: %w", err)
++		}
++	}
+ 
+ 	envVars := []string{
+ 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
  	}
  	envVars = append(envVars, env...)
  
@@ -20,7 +33,7 @@ index a2ae14c0..7f5a2fa3 100644
  	ociSpec := &specs.Spec{
  		Process: &specs.Process{
  			User: specs.User{
-@@ -76,26 +87,10 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
+@@ -76,26 +94,10 @@ func prepareOCIDirectory(ctx context.Context, pullCache *memorypullcache.MemoryP
  			Env:  envVars,
  			Cwd:  "/",
  			Capabilities: &specs.LinuxCapabilities{
