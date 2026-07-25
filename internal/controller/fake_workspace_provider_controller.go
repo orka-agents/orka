@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	fakeworkspacev1alpha1 "github.com/orka-agents/orka/api/fake.workspace/v1alpha1"
 	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
@@ -19,6 +22,7 @@ import (
 const (
 	FakeWorkspaceControllerName = "fake.workspace.orka.ai/v1"
 	fakeWorkspaceAdapterVersion = "0.1.0-dev"
+	fakeProviderConfigKind      = "FakeProviderConfig"
 	fakeProviderHeartbeatPeriod = 20 * time.Second
 )
 
@@ -36,6 +40,16 @@ func (r *FakeExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context
 	}
 	if provider.Spec.ControllerName != FakeWorkspaceControllerName || !provider.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
+	}
+	configured, err := r.providerConfigAvailable(ctx, provider)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !configured {
+		if err := r.clearProviderAdvertisement(ctx, provider); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: fakeProviderHeartbeatPeriod}, nil
 	}
 	now := time.Now().UTC()
 	if r.Now != nil {
@@ -68,6 +82,48 @@ func (r *FakeExecutionWorkspaceProviderReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: fakeProviderHeartbeatPeriod}, nil
+}
+
+func (r *FakeExecutionWorkspaceProviderReconciler) clearProviderAdvertisement(
+	ctx context.Context,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+) error {
+	before := provider.DeepCopy()
+	provider.Status.ObservedGeneration = 0
+	provider.Status.Adapter = nil
+	provider.Status.Backend = nil
+	provider.Status.SupportedContracts = nil
+	provider.Status.SupportedFeatures = nil
+	provider.Status.LastHeartbeat = nil
+
+	conditions := provider.Status.Conditions[:0]
+	for _, condition := range provider.Status.Conditions {
+		if condition.Type != string(workspacev1alpha1.ConditionProviderCompatible) {
+			conditions = append(conditions, condition)
+		}
+	}
+	provider.Status.Conditions = conditions
+	return r.Status().Patch(ctx, provider, client.MergeFrom(before))
+}
+
+func (r *FakeExecutionWorkspaceProviderReconciler) providerConfigAvailable(
+	ctx context.Context,
+	provider *workspacev1alpha1.ExecutionWorkspaceProvider,
+) (bool, error) {
+	ref := provider.Spec.ParametersRef
+	if ref.Group != fakeworkspacev1alpha1.GroupVersion.Group || ref.Kind != fakeProviderConfigKind || ref.Name == "" {
+		return false, nil
+	}
+
+	config := &unstructured.Unstructured{}
+	config.SetGroupVersionKind(fakeworkspacev1alpha1.GroupVersion.WithKind(fakeProviderConfigKind))
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, config); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get fake provider config %q: %w", ref.Name, err)
+	}
+	return config.GetNamespace() == "" && config.GetDeletionTimestamp() == nil, nil
 }
 
 func (r *FakeExecutionWorkspaceProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -229,8 +285,11 @@ func (r *FakeExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ct
 		if current.Spec.Mode == workspacev1alpha1.ExecutionWorkspaceModeService && current.Spec.Service != nil && current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateDeleted {
 			for _, port := range current.Spec.Service.Ports {
 				scheme := "http"
-				if port.Protocol == "HTTPS" {
+				switch port.Protocol {
+				case "HTTPS":
 					scheme = "https"
+				case "TCP":
+					scheme = "tcp"
 				}
 				current.Status.Endpoints = append(current.Status.Endpoints, workspacev1alpha1.ExecutionWorkspaceEndpoint{
 					Name:     port.Name,

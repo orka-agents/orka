@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,5 +242,85 @@ func TestSecureRemoveAllClearsAllowedRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(child); !os.IsNotExist(err) {
 		t.Fatalf("root child remains: %v", err)
+	}
+}
+
+func TestSecureWriteFileConcurrentReplacementsAreSerialized(t *testing.T) {
+	root := t.TempDir()
+	previousAllowedRoots := allowedRoots
+	allowedRoots = []string{root}
+	t.Cleanup(func() { allowedRoots = previousAllowedRoots })
+
+	path := filepath.Join(root, "artifact")
+	const writers = 24
+	payloads := make([][]byte, writers)
+	for i := range payloads {
+		payloads[i] = bytes.Repeat([]byte{byte(i + 1)}, 256*1024)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := range payloads {
+		wg.Add(1)
+		go func(payload []byte) {
+			defer wg.Done()
+			<-start
+			_, err := secureWriteFile(path, payload, 0o600, false, 0, 0, time.Time{})
+			errs <- err
+		}(payloads[i])
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent secureWriteFile: %v", err)
+		}
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read final artifact: %v", err)
+	}
+	for _, payload := range payloads {
+		if bytes.Equal(got, payload) {
+			return
+		}
+	}
+	t.Fatalf("final artifact is an interleaved payload of %d bytes", len(got))
+}
+
+func TestSecureWriteLockNormalizesAndSerializesEquivalentPaths(t *testing.T) {
+	registry := secureWriteLockRegistry{entries: make(map[string]*secureWriteLockEntry)}
+	key := secureWriteLockKey("/workspace/dir/../artifact")
+	alias := secureWriteLockKey("/workspace/artifact")
+	if key != alias {
+		t.Fatalf("lock keys differ: %q != %q", key, alias)
+	}
+
+	unlockFirst := registry.lock(key)
+	acquired := make(chan func(), 1)
+	go func() { acquired <- registry.lock(alias) }()
+	select {
+	case unlockSecond := <-acquired:
+		unlockSecond()
+		t.Fatal("equivalent path acquired its lock concurrently")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	unlockFirst()
+	var unlockSecond func()
+	select {
+	case unlockSecond = <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("equivalent path did not acquire the released lock")
+	}
+	unlockSecond()
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.entries) != 0 {
+		t.Fatalf("idle lock entries = %d, want 0", len(registry.entries))
 	}
 }

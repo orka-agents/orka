@@ -6,12 +6,12 @@ import type { Task, ExecutionEvent } from '@/schemas/task'
 const steps = ['Pending', 'Running', 'Completed'] as const
 
 // Map a task phase onto the coarse Pending → Running → Completed stepper.
-// Scheduled hasn't started yet, so it sits at the start (step 0) rather than
-// being mistaken for Completed. Terminal phases (Succeeded/Failed/Cancelled)
-// land on the final step — the run has ended.
+// Scheduled hasn't started yet, so it sits at the start (step 0). Running and
+// Finalizing are both in progress. Only terminal phases
+// (Succeeded/Failed/Cancelled) land on the final step.
 function stepIndex(phase?: string): number {
   if (!phase || phase === 'Pending' || phase === 'Scheduled') return 0
-  if (phase === 'Running') return 1
+  if (phase === 'Running' || phase === 'Finalizing') return 1
   return 2
 }
 

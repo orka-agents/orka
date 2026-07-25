@@ -32,6 +32,8 @@ func secureWriteFile(
 	uid, gid uint32,
 	modTime time.Time,
 ) (secureFileMetadata, error) {
+	unlock := lockSecureWritePath(requested)
+	defer unlock()
 	parentFD, name, err := secureParentFD(requested, true, setOwner, uid, gid)
 	if err != nil {
 		return secureFileMetadata{}, err

@@ -79,6 +79,25 @@ describe('TaskExecutionPanel', () => {
     expect(elapsed.textContent).toMatch(/\d+s/)
   })
 
+  it('keeps a Finalizing task on the in-progress Running step', () => {
+    const { container } = render(
+      <TaskExecutionPanel
+        task={makeTask({ status: { phase: 'Finalizing', attempts: 1 } })}
+      />,
+    )
+    const progressSteps = container.querySelector(
+      '[data-testid="progress-steps"]',
+    ) as HTMLElement
+    const circles = progressSteps.querySelectorAll('.rounded-full')
+
+    expect(circles).toHaveLength(3)
+    expect(circles[0].textContent).toBe('✓')
+    expect(circles[1].className).toContain('bg-status-running-bg')
+    expect(circles[1].textContent).toBe('2')
+    expect(circles[2].className).toContain('bg-muted')
+    expect(circles[2].textContent).toBe('3')
+  })
+
   it('renders with Succeeded phase', () => {
     const start = new Date(Date.now() - 120000).toISOString()
     const end = new Date().toISOString()

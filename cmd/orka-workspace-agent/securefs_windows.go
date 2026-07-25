@@ -28,6 +28,8 @@ func secureWriteFile(
 	_, _ uint32,
 	modTime time.Time,
 ) (secureFileMetadata, error) {
+	unlock := lockSecureWritePath(requested)
+	defer unlock()
 	path, err := safePath(requested)
 	if err != nil {
 		return secureFileMetadata{}, err
