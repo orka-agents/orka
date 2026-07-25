@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "orka.fullname" . }}-agent-harness-wrapper
+  name: {{ include "orka.harnessWrapperName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper
@@ -19,7 +19,7 @@ spec:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: agent-harness-wrapper
     spec:
-      serviceAccountName: {{ include "orka.fullname" . }}-agent-harness-wrapper
+      serviceAccountName: {{ include "orka.harnessWrapperName" . }}
       automountServiceAccountToken: false
       securityContext:
         runAsUser: 0
@@ -101,7 +101,7 @@ spec:
                   path: token
         - name: auth
           secret:
-            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (printf "%s-harness-wrapper-auth" (include "orka.fullname" .)) }}
+            secretName: {{ .Values.workers.harnessWrapper.auth.existingSecret | default (include "orka.harnessWrapperAuthSecretName" .) }}
             defaultMode: 0400
             items:
               - key: {{ .Values.workers.harnessWrapper.auth.tokenKey | default "token" }}

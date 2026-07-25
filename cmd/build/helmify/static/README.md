@@ -20,10 +20,12 @@ only when a designated platform or GitOps workflow already manages compatible
 Orka CRDs for the cluster.
 
 Controller Services, worker ServiceAccounts, and worker RBAC are scoped to the
-Helm release name. Run only one Orka controller release per namespace. Additional
-releases must use separate controller namespaces and distinct, non-empty
-`controller.watchNamespace` values so leader election and gateway admission
-ownership do not overlap. All releases share the same cluster-scoped CRDs.
+Helm release name. Run only one Orka controller release per namespace. If a
+cluster has multiple releases, every release (including the first) must use a
+cluster-unique release name or `fullnameOverride`, a separate controller
+namespace, and a distinct, non-empty `controller.watchNamespace`. Do not mix a
+cluster-wide watcher with namespace-scoped releases: gateway admission policies
+would overlap. All releases share the same cluster-scoped CRDs.
 
 ## Upgrade
 

@@ -185,7 +185,6 @@ workers:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.1.1"
-      pullPolicy: IfNotPresent
 
   harnessWrapper:
     image:

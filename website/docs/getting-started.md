@@ -58,12 +58,30 @@ Follow the complete commands and ownership guidance in
 
 ### Using kubectl
 
+The development target creates the required harness-wrapper authentication
+Secret without replacing an existing value:
+
 ```bash
 # Install CRDs
 make install
 
 # Deploy controller
 make deploy IMG=ghcr.io/orka-agents/orka:latest
+```
+
+When applying the promoted installer directly, pre-create that Secret because
+raw manifests cannot safely contain a shared bearer token:
+
+```bash
+set -euo pipefail
+
+kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+openssl rand -hex 32 | \
+  kubectl -n orka-system create secret generic harness-wrapper-auth \
+    --from-file=token=/dev/stdin \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f deploy/orka.yaml
 ```
 
 ## Quick Start

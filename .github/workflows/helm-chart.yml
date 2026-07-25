@@ -70,6 +70,19 @@ jobs:
             exit 1
           fi
 
+          grep -Fq 'create secret generic harness-wrapper-auth' config/harness-wrapper/README.md
+          test "$(grep -c 'secretName: harness-wrapper-auth' manifest_staging/deploy/orka.yaml)" -eq 2
+          if awk '
+            /^---$/ { kind = ""; name = "" }
+            /^kind: / { kind = $2 }
+            /^  name: / { name = $2 }
+            kind == "Secret" && name == "harness-wrapper-auth" { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' manifest_staging/deploy/orka.yaml; then
+            echo "The raw installer must require a pre-created harness-wrapper-auth Secret, not embed one." >&2
+            exit 1
+          fi
+
           go test ./cmd/build/helmify
           helm lint cmd/build/helmify/static
           helm lint manifest_staging/charts/orka
@@ -79,7 +92,10 @@ jobs:
           secondary_rbac=$(mktemp)
           secondary_serviceaccounts=$(mktemp)
           secondary_gateway_policy=$(mktemp)
-          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}"' EXIT
+          long_render=$(mktemp)
+          long_wrapper_service=$(mktemp)
+          long_wrapper_secret=$(mktemp)
+          trap 'rm -f "${default_render}" "${secondary_render}" "${secondary_rbac}" "${secondary_serviceaccounts}" "${secondary_gateway_policy}" "${long_render}" "${long_wrapper_service}" "${long_wrapper_secret}"' EXIT
           helm template orka manifest_staging/charts/orka \
             --namespace "${NAMESPACE}" \
             --set-string workers.harnessWrapper.auth.token=mock-token \
@@ -104,6 +120,22 @@ jobs:
             --show-only templates/gateway-task-admission-policy.yaml \
             > "${secondary_gateway_policy}"
 
+          long_release=$(printf 'r%.0s' {1..53})
+          helm template "${long_release}" manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            > "${long_render}"
+          helm template "${long_release}" manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/harness-wrapper-service.yaml \
+            > "${long_wrapper_service}"
+          helm template "${long_release}" manifest_staging/charts/orka \
+            --namespace "${NAMESPACE}" \
+            --set-string workers.harnessWrapper.auth.token=mock-token \
+            --show-only templates/harness-wrapper-secret.yaml \
+            > "${long_wrapper_secret}"
+
           grep -Fq -- "--controller-url=http://orka.${NAMESPACE}.svc:8080" "${default_render}"
           grep -Fq -- "--controller-url=http://secondary-orka.${NAMESPACE}.svc:8080" "${secondary_render}"
           grep -Fq -- "--ai-worker-service-account-name=orka-ai-worker" "${default_render}"
@@ -114,6 +146,14 @@ jobs:
             grep -Fq -- "name: ${account}" "${secondary_rbac}"
             grep -Fq -- ":${account}'" "${secondary_gateway_policy}"
           done
+          wrapper_name=$(awk '$1 == "name:" { print $2; exit }' "${long_wrapper_service}")
+          wrapper_secret_name=$(awk '$1 == "name:" { print $2; exit }' "${long_wrapper_secret}")
+          [[ -n "${wrapper_name}" && ${#wrapper_name} -le 63 ]]
+          [[ -n "${wrapper_secret_name}" && ${#wrapper_secret_name} -le 63 ]]
+          grep -Fq -- "http://${wrapper_name}:8080" "${long_render}"
+          grep -Fq -- "serviceAccountName: ${wrapper_name}" "${long_render}"
+          grep -Fq -- "secretName: ${wrapper_secret_name}" "${long_render}"
+
           chart_version=$(awk '$1 == "version:" { print $2; exit }' manifest_staging/charts/orka/Chart.yaml)
           grep -Fq -- "--general-worker-image=ghcr.io/orka-agents/orka/general-worker:${chart_version}" "${secondary_render}"
           for resource in agentruntimes substrateactorpools; do

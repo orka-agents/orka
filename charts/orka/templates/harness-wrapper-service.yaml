@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "orka.fullname" . }}-agent-harness-wrapper
+  name: {{ include "orka.harnessWrapperName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent-harness-wrapper

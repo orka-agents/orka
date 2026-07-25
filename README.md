@@ -90,6 +90,24 @@ Orka CRDs for the cluster.
 > zero CRDs. Helm retains CRDs
 > on uninstall. See the [Helm CRD lifecycle guide](charts/orka/README.md).
 
+For the promoted raw installer, pre-create the harness-wrapper authentication
+Secret before applying the manifest; the token is intentionally not committed:
+
+```bash
+set -euo pipefail
+
+kubectl create namespace orka-system --dry-run=client -o yaml | kubectl apply -f -
+openssl rand -hex 32 | \
+  kubectl -n orka-system create secret generic harness-wrapper-auth \
+    --from-file=token=/dev/stdin \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f deploy/orka.yaml
+```
+
+See [`config/harness-wrapper/README.md`](config/harness-wrapper/README.md) for
+the canonical installer prerequisite.
+
 ### Set Up a Provider
 
 ```bash
