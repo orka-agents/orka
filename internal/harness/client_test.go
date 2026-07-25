@@ -1,7 +1,9 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -102,6 +104,239 @@ func TestClientSanitizesConfiguredBearerFromErrors(t *testing.T) {
 	})
 }
 
+func TestSanitizeHarnessFrameRedactsConfiguredBearer(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	client := &Client{authBearerValue: value}
+	frame := HarnessEventFrame{
+		Version:          ProtocolVersion,
+		Type:             FrameTurnCompleted,
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Seq:              1,
+		Severity:         value,
+		Summary:          "summary " + value,
+		Content:          json.RawMessage(`{"` + value + `":{"nested":["` + value + `"]}}`),
+		ContentText:      "content " + value,
+		ToolName:         "tool-safe",
+		ToolCallID:       "call-safe",
+		ApprovalID:       "approval-safe",
+		Metadata:         map[string]string{"reflected": "metadata-" + value, "api_key": "opaque"},
+		Completed: &TurnCompleted{
+			Result:    "result " + value,
+			Data:      map[string]any{value: []any{value}},
+			OutputRef: "output-safe",
+			Artifacts: []ArtifactRef{{Filename: "result.txt", ContentType: "text/plain", Description: value}},
+		},
+		Failed: &TurnFailed{
+			Reason:    "failed_reason",
+			Message:   "failed " + value,
+			Result:    value,
+			Data:      map[string]any{value: value},
+			OutputRef: "failed-output",
+			Artifacts: []ArtifactRef{{Filename: "failed.txt", ContentType: "text/plain", Description: value}},
+		},
+		Error: &ErrorInfo{Code: "remote_error", Message: value},
+	}
+	sanitized, err := client.sanitizeHarnessFrame(frame)
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), value) {
+		t.Fatalf("sanitized frame leaked configured bearer: %s", encoded)
+	}
+	if !strings.Contains(frame.Summary, value) {
+		t.Fatal("sanitizeHarnessFrame mutated the input summary")
+	}
+	if !strings.Contains(frame.Metadata["reflected"], value) || frame.Metadata["api_key"] != "opaque" {
+		t.Fatal("sanitizeHarnessFrame mutated the input metadata")
+	}
+}
+
+func TestClientStreamFramesSanitizesConfiguredBearerFromFrame(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_ = WriteSSEFrame(w, HarnessEventFrame{
+			Version:          ProtocolVersion,
+			Type:             FrameRuntimeOutput,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+			Seq:              1,
+			Summary:          value,
+			Content:          json.RawMessage(`{"message":"` + value + `"}`),
+			ContentText:      value,
+			Metadata:         map[string]string{"reflected": value},
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken(value))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	var got HarnessEventFrame
+	err = client.StreamFrames(context.Background(), "turn-a", 0, func(frame HarnessEventFrame) error {
+		got = frame
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamFrames() error = %v", err)
+	}
+	encoded, _ := json.Marshal(got)
+	if strings.Contains(string(encoded), value) {
+		t.Fatalf("callback frame leaked configured bearer: %s", encoded)
+	}
+}
+
+func TestSanitizeHarnessFramePreservesBrokeredToolArguments(t *testing.T) {
+	client := &Client{authBearerValue: "mock-token"}
+	original := json.RawMessage(` {"password":"keep-me", "pageToken":"cursor"} `)
+	sanitized, err := client.sanitizeHarnessFrame(HarnessEventFrame{
+		Type:    FrameToolCallRequested,
+		Content: original,
+	})
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	if !bytes.Equal(sanitized.Content, original) {
+		t.Fatalf("brokered tool Content = %q, want original bytes %q", sanitized.Content, original)
+	}
+}
+
+func TestSanitizeHarnessFrameRejectsBearerInBrokeredToolArguments(t *testing.T) {
+	client := &Client{authBearerValue: "opaque-bearer"}
+	_, err := client.sanitizeHarnessFrame(HarnessEventFrame{
+		Type:    FrameToolCallRequested,
+		Content: json.RawMessage(`{"value":"opaque-bearer"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "brokered tool content") {
+		t.Fatalf("sanitizeHarnessFrame() error = %v, want bearer rejection", err)
+	}
+}
+
+func TestSanitizeHarnessFrameSanitizesSensitiveMetadataMarkerCollision(t *testing.T) {
+	value := strings.Trim("[REDACTED]", "[]")
+	client := &Client{authBearerValue: value}
+	sanitized, err := client.sanitizeHarnessFrame(HarnessEventFrame{
+		Metadata: map[string]string{"api_key": "opaque"},
+	})
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	encoded, _ := json.Marshal(sanitized)
+	if strings.Contains(string(encoded), value) || strings.Contains(string(encoded), "opaque") {
+		t.Fatalf("sanitized metadata leaked marker collision or secret: %s", encoded)
+	}
+}
+
+func TestSanitizeHarnessFramePreservesUnchangedRawContent(t *testing.T) {
+	client := &Client{authBearerValue: "mock-token"}
+	original := json.RawMessage(` {"b":1, "a":2} `)
+	sanitized, err := client.sanitizeHarnessFrame(HarnessEventFrame{Content: original})
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	if !bytes.Equal(sanitized.Content, original) {
+		t.Fatalf("Content = %q, want original bytes %q", sanitized.Content, original)
+	}
+}
+
+func TestSanitizeHarnessFramePreservesSensitiveKeyNameUsedAsJSONValue(t *testing.T) {
+	client := &Client{authBearerValue: "mock-token"}
+	original := json.RawMessage(` {"kind":"api_key"} `)
+	sanitized, err := client.sanitizeHarnessFrame(HarnessEventFrame{Content: original})
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	if !bytes.Equal(sanitized.Content, original) {
+		t.Fatalf("Content = %q, want original bytes %q", sanitized.Content, original)
+	}
+}
+
+func TestSanitizeHarnessFrameSanitizesDuplicateAndSensitiveJSONKeys(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	client := &Client{authBearerValue: value}
+	content := json.RawMessage(`{"duplicate":"` + value + `","duplicate":"safe","api_key":"opaque"}`)
+	sanitized, err := client.sanitizeHarnessFrame(HarnessEventFrame{Content: content})
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	if strings.Contains(string(sanitized.Content), value) || strings.Contains(string(sanitized.Content), "opaque") {
+		t.Fatalf("Content leaked configured or sensitive value: %s", sanitized.Content)
+	}
+}
+
+func TestSanitizeHarnessFrameRejectsBearerInStructuralField(t *testing.T) {
+	client := &Client{authBearerValue: "turn-a"}
+	_, err := client.sanitizeHarnessFrame(HarnessEventFrame{TurnID: "turn-a"})
+	if err == nil || !strings.Contains(err.Error(), "structural field") {
+		t.Fatalf("sanitizeHarnessFrame() error = %v, want structural bearer conflict", err)
+	}
+}
+
+func TestSanitizeHarnessFrameRejectsGenericSecretInStructuralField(t *testing.T) {
+	client := &Client{}
+	_, err := client.sanitizeHarnessFrame(HarnessEventFrame{
+		CorrelationID: "Authorization: Bearer mock-token",
+	})
+	if err == nil || !strings.Contains(err.Error(), "structural field") {
+		t.Fatalf("sanitizeHarnessFrame() error = %v, want generic secret rejection", err)
+	}
+}
+
+func TestSanitizeHarnessFrameRejectsNumericBearerInStructuralFields(t *testing.T) {
+	client := &Client{authBearerValue: "12345678"}
+	for name, frame := range map[string]HarnessEventFrame{
+		"seq":      {Seq: 12345678},
+		"finalSeq": {Completed: &TurnCompleted{FinalEventSeq: 12345678}},
+		"size":     {Completed: &TurnCompleted{Artifacts: []ArtifactRef{{Size: 12345678}}}},
+	} {
+		if _, err := client.sanitizeHarnessFrame(frame); err == nil {
+			t.Fatalf("%s structural numeric bearer was not rejected", name)
+		}
+	}
+}
+
+func TestSanitizeHarnessFrameSanitizesNumericBearer(t *testing.T) {
+	client := &Client{authBearerValue: "12345678"}
+	frame := HarnessEventFrame{
+		Content:   json.RawMessage(`{"value":12345678}`),
+		Completed: &TurnCompleted{Data: map[string]any{"value": float64(12345678)}},
+	}
+	sanitized, err := client.sanitizeHarnessFrame(frame)
+	if err != nil {
+		t.Fatalf("sanitizeHarnessFrame() error = %v", err)
+	}
+	encoded, _ := json.Marshal(sanitized)
+	if strings.Contains(string(encoded), "12345678") {
+		t.Fatalf("sanitized frame leaked numeric bearer: %s", encoded)
+	}
+}
+
+func TestSanitizeHarnessFrameRejectsRawEscapeBearerBypass(t *testing.T) {
+	client := &Client{authBearerValue: "token123"}
+	content := json.RawMessage(`{"value":"\token123"}`)
+	if _, err := client.sanitizeHarnessFrame(HarnessEventFrame{Content: content}); err == nil {
+		t.Fatal("sanitizeHarnessFrame() error = nil, want raw bearer postcondition failure")
+	}
+	if _, err := client.sanitizeHarnessFrame(HarnessEventFrame{Type: FrameToolCallRequested, Content: content}); err == nil {
+		t.Fatal("brokered sanitizeHarnessFrame() error = nil, want raw bearer rejection")
+	}
+}
+
+func TestSanitizeHarnessFrameRejectsInvalidContentJSON(t *testing.T) {
+	client := &Client{authBearerValue: "mock-token"}
+	_, err := client.sanitizeHarnessFrame(HarnessEventFrame{Content: json.RawMessage(`{"invalid"`)})
+	if err == nil || !strings.Contains(err.Error(), "invalid harness frame content JSON") {
+		t.Fatalf("sanitizeHarnessFrame() error = %v, want invalid content JSON", err)
+	}
+}
+
 func TestClientErrorSanitizesRenderedFields(t *testing.T) {
 	for _, tt := range []struct {
 		name            string
@@ -140,7 +375,7 @@ func TestClientStreamFramesPreservesContextCancellationCause(t *testing.T) {
 	client, err := NewClient(
 		"https://adapter.example",
 		WithHTTPClient(httpClient),
-		WithBearerToken("context"),
+		WithBearerToken("context canceled"),
 	)
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
@@ -152,7 +387,7 @@ func TestClientStreamFramesPreservesContextCancellationCause(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("StreamFrames() error = %v, want context.Canceled cause", err)
 	}
-	if strings.Contains(err.Error(), "context") {
+	if strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("StreamFrames() error = %v, configured bearer leaked", err)
 	}
 }

@@ -129,14 +129,14 @@ func TestSanitizeResultClonesAndRedactsCapabilities(t *testing.T) {
 
 func TestCheckRejectsBearerThatOverlapsProtocolCapabilities(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
-	server.authValue = "e"
+	server.authValue = "observed"
 	defer server.Close()
 
-	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "e"})
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "observed"})
 	if result.Passed {
 		t.Fatal("Passed = true, want bearer overlap rejection")
 	}
-	if strings.Contains(result.Message, "e") {
+	if strings.Contains(result.Message, "observed") {
 		t.Fatalf("Message = %q, configured bearer leaked", result.Message)
 	}
 	if result.ObservedCapabilities != nil {
@@ -146,7 +146,7 @@ func TestCheckRejectsBearerThatOverlapsProtocolCapabilities(t *testing.T) {
 
 func TestCheckRejectsBearerThatMatchesRuntimeName(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
-	value := "fibey"
+	value := "fibey-agent"
 	server.authValue = value
 	server.runtimeName = value + "-agentkit"
 	defer server.Close()
@@ -817,7 +817,7 @@ func TestDuplicateStartClassificationUsesTypedClientReason(t *testing.T) {
 		harness.WriteError(w, http.StatusConflict, "turn already exists")
 	}))
 	defer server.Close()
-	client, err := harness.NewClient(server.URL, harness.WithBearerToken("x"))
+	client, err := harness.NewClient(server.URL, harness.WithBearerToken("turn already"))
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -825,8 +825,8 @@ func TestDuplicateStartClassificationUsesTypedClientReason(t *testing.T) {
 	if err == nil {
 		t.Fatal("StartTurn() error = nil, want conflict")
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "exists") {
-		t.Fatalf("StartTurn() error = %v, want exact bearer redaction to alter display text", err)
+	if strings.Contains(strings.ToLower(err.Error()), "turn already") {
+		t.Fatalf("StartTurn() error = %v, configured bearer leaked", err)
 	}
 	if !isDuplicateStartRejectedError(err) {
 		t.Fatal("sanitized duplicate rejection was not classified from typed client reason")

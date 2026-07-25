@@ -148,17 +148,17 @@ func validateBearerCapabilityConflicts(caps *harness.CapabilitiesResponse, beare
 		"providerKind":    string(caps.ProviderKind),
 		"runtimeName":     caps.RuntimeName,
 	} {
-		if strings.Contains(value, bearer) {
+		if harness.StructuredValueContainsBearer(value, bearer) {
 			return fmt.Errorf("configured bearer overlaps required capability field %s", name)
 		}
 	}
 	for _, mode := range caps.ToolExecutionModes {
-		if strings.Contains(string(mode), bearer) {
+		if harness.StructuredValueContainsBearer(string(mode), bearer) {
 			return fmt.Errorf("configured bearer overlaps required capability field toolExecutionModes")
 		}
 	}
 	for _, class := range caps.BrokeredToolClasses {
-		if strings.Contains(string(class), bearer) {
+		if harness.StructuredValueContainsBearer(string(class), bearer) {
 			return fmt.Errorf("configured bearer overlaps required capability field brokeredToolClasses")
 		}
 	}
@@ -187,6 +187,10 @@ func sanitizeResult(result Result, bearer string) Result {
 		value = events.RedactExecutionEventText(value)
 		return harness.RedactExactBearerValue(value, bearer)
 	}
+	sanitizeStructured := func(value string) string {
+		value = events.RedactExecutionEventText(value)
+		return harness.RedactStructuredBearerValue(value, bearer)
+	}
 	result.Message = sanitize(result.Message)
 	if result.Failures != nil {
 		failures := make([]string, len(result.Failures))
@@ -199,23 +203,23 @@ func sanitizeResult(result Result, bearer string) Result {
 		return result
 	}
 	caps := cloneCapabilitiesResponse(result.ObservedCapabilities)
-	caps.Version = sanitize(caps.Version)
-	caps.ProtocolVersion = sanitize(caps.ProtocolVersion)
-	caps.Transport = sanitize(caps.Transport)
-	caps.RuntimeName = sanitize(caps.RuntimeName)
+	caps.Version = sanitizeStructured(caps.Version)
+	caps.ProtocolVersion = sanitizeStructured(caps.ProtocolVersion)
+	caps.Transport = sanitizeStructured(caps.Transport)
+	caps.RuntimeName = sanitizeStructured(caps.RuntimeName)
 	caps.RuntimeVersion = sanitize(caps.RuntimeVersion)
-	caps.ProviderKind = harness.ProviderKind(sanitize(string(caps.ProviderKind)))
+	caps.ProviderKind = harness.ProviderKind(sanitizeStructured(string(caps.ProviderKind)))
 	if caps.ToolExecutionModes != nil {
 		modes := make([]harness.ToolExecutionMode, len(caps.ToolExecutionModes))
 		for i, mode := range caps.ToolExecutionModes {
-			modes[i] = harness.ToolExecutionMode(sanitize(string(mode)))
+			modes[i] = harness.ToolExecutionMode(sanitizeStructured(string(mode)))
 		}
 		caps.ToolExecutionModes = modes
 	}
 	if caps.BrokeredToolClasses != nil {
 		classes := make([]harness.BrokeredToolClass, len(caps.BrokeredToolClasses))
 		for i, class := range caps.BrokeredToolClasses {
-			classes[i] = harness.BrokeredToolClass(sanitize(string(class)))
+			classes[i] = harness.BrokeredToolClass(sanitizeStructured(string(class)))
 		}
 		caps.BrokeredToolClasses = classes
 	}

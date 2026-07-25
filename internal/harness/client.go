@@ -270,7 +270,7 @@ func (c *Client) StreamFrames(ctx context.Context, turnID HarnessTurnID, afterSe
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return c.sanitizeClientError(c.statusError("stream_frames", resp))
 	}
-	return readSSEFramesWithSanitizer(resp.Body, emit, c.sanitizeClientError)
+	return readSSEFramesWithSanitizers(resp.Body, emit, c.sanitizeClientError, c.sanitizeHarnessFrame)
 }
 
 func (c *Client) getJSON(ctx context.Context, rel string, out any) error {
@@ -343,6 +343,370 @@ func (c *Client) sanitizeClientMessage(message string) string {
 	return message
 }
 
+func (c *Client) sanitizeHarnessFrame(frame HarnessEventFrame) (HarnessEventFrame, error) {
+	if err := c.validateHarnessFrameStructure(frame); err != nil {
+		return HarnessEventFrame{}, err
+	}
+	sanitize := c.sanitizeClientMessage
+	frame.Severity = sanitize(frame.Severity)
+	frame.Summary = sanitize(frame.Summary)
+	frame.ContentText = sanitize(frame.ContentText)
+	frame.Metadata = sanitizeHarnessStringMap(frame.Metadata, sanitize)
+	if frame.Type == FrameToolCallRequested {
+		containsBearer, err := harnessJSONContainsBearer(frame.Content, c.authBearerValue)
+		if err != nil {
+			return HarnessEventFrame{}, fmt.Errorf("invalid harness frame content JSON: %w", err)
+		}
+		if containsBearer {
+			return HarnessEventFrame{}, fmt.Errorf("harness frame brokered tool content contains configured bearer")
+		}
+	} else {
+		content, err := sanitizeHarnessJSON(frame.Content, c.authBearerValue, sanitize)
+		if err != nil {
+			return HarnessEventFrame{}, fmt.Errorf("invalid harness frame content JSON: %w", err)
+		}
+		frame.Content = content
+	}
+	if frame.Completed != nil {
+		completed := *frame.Completed
+		completed.Result = sanitize(completed.Result)
+		completed.Data = sanitizeHarnessAnyMap(completed.Data, sanitize)
+		completed.Artifacts = sanitizeHarnessArtifacts(completed.Artifacts, sanitize)
+		frame.Completed = &completed
+	}
+	if frame.Failed != nil {
+		failed := *frame.Failed
+		failed.Message = sanitize(failed.Message)
+		failed.Result = sanitize(failed.Result)
+		failed.Data = sanitizeHarnessAnyMap(failed.Data, sanitize)
+		failed.Artifacts = sanitizeHarnessArtifacts(failed.Artifacts, sanitize)
+		frame.Failed = &failed
+	}
+	if frame.Error != nil {
+		info := *frame.Error
+		info.Message = sanitize(info.Message)
+		frame.Error = &info
+	}
+	return frame, nil
+}
+
+func (c *Client) validateHarnessFrameStructure(frame HarnessEventFrame) error {
+	check := func(name, value string) error {
+		generic := events.RedactExecutionEventText(value)
+		bearer := ""
+		if c != nil {
+			bearer = c.authBearerValue
+		}
+		if generic != value || StructuredValueContainsBearer(value, bearer) {
+			return fmt.Errorf("harness frame structural field %s contains sensitive data", name)
+		}
+		return nil
+	}
+	for name, value := range map[string]string{
+		"version":          frame.Version,
+		"type":             string(frame.Type),
+		"runtimeSessionID": string(frame.RuntimeSessionID),
+		"turnID":           string(frame.TurnID),
+		"correlationID":    frame.CorrelationID,
+		"toolName":         frame.ToolName,
+		"toolCallID":       frame.ToolCallID,
+		"approvalID":       frame.ApprovalID,
+	} {
+		if err := check(name, value); err != nil {
+			return err
+		}
+	}
+	for key := range frame.Metadata {
+		if err := check("metadata key", key); err != nil {
+			return err
+		}
+	}
+	if err := check("seq", strconv.FormatInt(frame.Seq, 10)); err != nil {
+		return err
+	}
+	if !frame.CreatedAt.IsZero() {
+		if err := check("createdAt", frame.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	if frame.Completed != nil {
+		if err := check("completed.outputRef", frame.Completed.OutputRef); err != nil {
+			return err
+		}
+		if err := check("completed.finalEventSeq", strconv.FormatInt(frame.Completed.FinalEventSeq, 10)); err != nil {
+			return err
+		}
+		if err := check("completed.retainSession", strconv.FormatBool(frame.Completed.RetainSession)); err != nil {
+			return err
+		}
+		for _, artifact := range frame.Completed.Artifacts {
+			if err := validateHarnessArtifactStructure(artifact, check); err != nil {
+				return err
+			}
+		}
+	}
+	if frame.Failed != nil {
+		if err := check("failed.reason", frame.Failed.Reason); err != nil {
+			return err
+		}
+		if err := check("failed.outputRef", frame.Failed.OutputRef); err != nil {
+			return err
+		}
+		if err := check("failed.retryable", strconv.FormatBool(frame.Failed.Retryable)); err != nil {
+			return err
+		}
+		for _, artifact := range frame.Failed.Artifacts {
+			if err := validateHarnessArtifactStructure(artifact, check); err != nil {
+				return err
+			}
+		}
+	}
+	if frame.Error != nil {
+		if err := check("error.code", frame.Error.Code); err != nil {
+			return err
+		}
+		return check("error.retryable", strconv.FormatBool(frame.Error.Retryable))
+	}
+	return nil
+}
+
+func validateHarnessArtifactStructure(artifact ArtifactRef, check func(string, string) error) error {
+	if err := check("artifact.filename", artifact.Filename); err != nil {
+		return err
+	}
+	if err := check("artifact.contentType", artifact.ContentType); err != nil {
+		return err
+	}
+	return check("artifact.size", strconv.FormatInt(artifact.Size, 10))
+}
+
+func sanitizeHarnessStringMap(values map[string]string, sanitize func(string) string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		sanitizedKey := sanitize(key)
+		if events.IsSensitiveExecutionEventKey(key) {
+			result[sanitizedKey] = sanitize(events.ExecutionEventRedactedValue)
+			continue
+		}
+		result[sanitizedKey] = sanitize(value)
+	}
+	return result
+}
+
+func sanitizeHarnessAnyMap(values map[string]any, sanitize func(string) string) map[string]any {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]any, len(values))
+	for key, value := range values {
+		sanitizedKey := sanitize(key)
+		if events.IsSensitiveExecutionEventKey(key) {
+			result[sanitizedKey] = sanitize(events.ExecutionEventRedactedValue)
+			continue
+		}
+		result[sanitizedKey] = sanitizeHarnessAny(value, sanitize)
+	}
+	return result
+}
+
+func sanitizeHarnessAny(value any, sanitize func(string) string) any {
+	switch typed := value.(type) {
+	case string:
+		return sanitize(typed)
+	case map[string]any:
+		return sanitizeHarnessAnyMap(typed, sanitize)
+	case map[string]string:
+		return sanitizeHarnessStringMap(typed, sanitize)
+	case []any:
+		result := make([]any, len(typed))
+		for i, child := range typed {
+			result[i] = sanitizeHarnessAny(child, sanitize)
+		}
+		return result
+	case []string:
+		result := make([]string, len(typed))
+		for i, child := range typed {
+			result[i] = sanitize(child)
+		}
+		return result
+	case json.Number:
+		return sanitizeHarnessScalar(typed, typed.String(), sanitize)
+	case float64:
+		encoded, _ := json.Marshal(typed)
+		return sanitizeHarnessScalar(typed, string(encoded), sanitize)
+	case float32:
+		encoded, _ := json.Marshal(typed)
+		return sanitizeHarnessScalar(typed, string(encoded), sanitize)
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return sanitizeHarnessScalar(typed, fmt.Sprint(typed), sanitize)
+	case bool:
+		return sanitizeHarnessScalar(typed, strconv.FormatBool(typed), sanitize)
+	case nil:
+		return sanitizeHarnessScalar(nil, "null", sanitize)
+	default:
+		return typed
+	}
+}
+
+func sanitizeHarnessScalar(value any, text string, sanitize func(string) string) any {
+	sanitized := sanitize(text)
+	if sanitized != text {
+		return sanitized
+	}
+	return value
+}
+
+func sanitizeHarnessArtifacts(artifacts []ArtifactRef, sanitize func(string) string) []ArtifactRef {
+	if artifacts == nil {
+		return nil
+	}
+	result := make([]ArtifactRef, len(artifacts))
+	for i, artifact := range artifacts {
+		artifact.Description = sanitize(artifact.Description)
+		result[i] = artifact
+	}
+	return result
+}
+
+func harnessJSONContainsBearer(content json.RawMessage, bearer string) (bool, error) {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return false, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	containsBearer := bearer != "" && bytes.Contains(trimmed, []byte(bearer))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			return containsBearer, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		text, ok := harnessJSONScalarText(token)
+		if ok && StructuredValueContainsBearer(text, bearer) {
+			containsBearer = true
+		}
+	}
+}
+
+func sanitizeHarnessJSON(content json.RawMessage, bearer string, sanitize func(string) string) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("trailing data")
+	}
+	needsSanitization, err := harnessJSONNeedsSanitization(trimmed, sanitize)
+	if err != nil {
+		return nil, err
+	}
+	rawContainsBearer := bearer != "" && bytes.Contains(trimmed, []byte(bearer))
+	if !needsSanitization && !rawContainsBearer {
+		return content, nil
+	}
+	encoded, err := json.Marshal(sanitizeHarnessAny(value, sanitize))
+	if err != nil {
+		return nil, err
+	}
+	if bearer != "" && bytes.Contains(encoded, []byte(bearer)) {
+		return nil, fmt.Errorf("sanitized harness frame content still contains configured bearer")
+	}
+	return json.RawMessage(encoded), nil
+}
+
+func harnessJSONNeedsSanitization(content []byte, sanitize func(string) string) (bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	needsSanitization, err := scanHarnessJSONValue(decoder, sanitize)
+	if err != nil {
+		return false, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return false, fmt.Errorf("trailing data")
+	}
+	return needsSanitization, nil
+}
+
+func scanHarnessJSONValue(decoder *json.Decoder, sanitize func(string) string) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	if delimiter, ok := token.(json.Delim); ok {
+		switch delimiter {
+		case '{':
+			changed := false
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return false, err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return false, fmt.Errorf("invalid object key")
+				}
+				changed = changed || sanitize(key) != key || events.IsSensitiveExecutionEventKey(key)
+				childChanged, err := scanHarnessJSONValue(decoder, sanitize)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || childChanged
+			}
+			end, err := decoder.Token()
+			if err != nil || end != json.Delim('}') {
+				return false, fmt.Errorf("invalid object terminator")
+			}
+			return changed, nil
+		case '[':
+			changed := false
+			for decoder.More() {
+				childChanged, err := scanHarnessJSONValue(decoder, sanitize)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || childChanged
+			}
+			end, err := decoder.Token()
+			if err != nil || end != json.Delim(']') {
+				return false, fmt.Errorf("invalid array terminator")
+			}
+			return changed, nil
+		default:
+			return false, fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+		}
+	}
+	text, ok := harnessJSONScalarText(token)
+	return ok && sanitize(text) != text, nil
+}
+
+func harnessJSONScalarText(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case json.Number:
+		return typed.String(), true
+	case bool:
+		return strconv.FormatBool(typed), true
+	case nil:
+		return "null", true
+	default:
+		return "", false
+	}
+}
+
 func (c *Client) sanitizeClientError(err error) error {
 	if err == nil {
 		return nil
@@ -367,6 +731,22 @@ func (c *Client) sanitizeClientError(err error) error {
 		// are always ClientError values and are scrubbed above.
 		return err
 	}
+}
+
+func StructuredValueContainsBearer(value, bearer string) bool {
+	if bearer == "" {
+		return false
+	}
+	// Bearer confidentiality is fail-closed: any occurrence is treated as a
+	// reflection, even when a short credential could also match coincidentally.
+	return strings.Contains(value, bearer)
+}
+
+func RedactStructuredBearerValue(value, bearer string) string {
+	if !StructuredValueContainsBearer(value, bearer) {
+		return value
+	}
+	return RedactExactBearerValue(value, bearer)
 }
 
 func RedactExactBearerValue(message, token string) string {
@@ -430,17 +810,26 @@ func (c *Client) resolve(rel string) *url.URL {
 }
 
 func readSSEFrames(r io.Reader, emit func(HarnessEventFrame) error) error {
-	return readSSEFramesWithSanitizer(r, emit, nil)
+	return readSSEFramesWithSanitizers(r, emit, nil, nil)
 }
 
 func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
+	return readSSEFramesWithSanitizers(r, emit, sanitize, nil)
+}
+
+func readSSEFramesWithSanitizers(
+	r io.Reader,
+	emit func(HarnessEventFrame) error,
+	sanitizeError func(error) error,
+	sanitizeFrame func(HarnessEventFrame) (HarnessEventFrame, error),
+) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxHarnessSSELineBytes)
 	var data strings.Builder
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			if err := emitSSEData(data.String(), emit, sanitize); err != nil {
+			if err := emitSSEData(data.String(), emit, sanitizeError, sanitizeFrame); err != nil {
 				if errors.Is(err, errSSEDone) {
 					return nil
 				}
@@ -454,15 +843,15 @@ func readSSEFramesWithSanitizer(r io.Reader, emit func(HarnessEventFrame) error,
 		}
 		if after, ok := strings.CutPrefix(line, "data:"); ok {
 			if err := appendSSEData(&data, strings.TrimSpace(after)); err != nil {
-				return sanitizeSSEClientError(sanitize, err)
+				return sanitizeSSEClientError(sanitizeError, err)
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return sanitizeSSEClientError(sanitize, safeClientError("stream_frames", 0, err.Error(), err))
+		return sanitizeSSEClientError(sanitizeError, safeClientError("stream_frames", 0, err.Error(), err))
 	}
 	if data.Len() > 0 {
-		if err := emitSSEData(data.String(), emit, sanitize); err != nil {
+		if err := emitSSEData(data.String(), emit, sanitizeError, sanitizeFrame); err != nil {
 			if errors.Is(err, errSSEDone) {
 				return nil
 			}
@@ -494,7 +883,12 @@ func sanitizeSSEClientError(sanitize func(error) error, err error) error {
 	return err
 }
 
-func emitSSEData(raw string, emit func(HarnessEventFrame) error, sanitize func(error) error) error {
+func emitSSEData(
+	raw string,
+	emit func(HarnessEventFrame) error,
+	sanitizeError func(error) error,
+	sanitizeFrame func(HarnessEventFrame) (HarnessEventFrame, error),
+) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
@@ -505,9 +899,16 @@ func emitSSEData(raw string, emit func(HarnessEventFrame) error, sanitize func(e
 	var frame HarnessEventFrame
 	if err := json.Unmarshal([]byte(raw), &frame); err != nil {
 		return sanitizeSSEClientError(
-			sanitize,
+			sanitizeError,
 			safeClientError("stream_frames", 0, fmt.Sprintf("decode harness frame: %v", err)),
 		)
+	}
+	if sanitizeFrame != nil {
+		sanitized, err := sanitizeFrame(frame)
+		if err != nil {
+			return sanitizeSSEClientError(sanitizeError, safeClientError("stream_frames", 0, err.Error(), err))
+		}
+		frame = sanitized
 	}
 	if err := emit(frame); err != nil {
 		return err
@@ -595,8 +996,9 @@ func classifyClientError(clientErr ClientError, message string) ClientError {
 	clientErr.remoteRejected = strings.Contains(lower, "harness did not accept")
 	clientErr.turnNotFound = strings.Contains(lower, "turn not found")
 	clientErr.protocolViolation = strings.Contains(lower, "harness frame identity does not match") ||
-		strings.Contains(lower, "invalid harness frame") || strings.Contains(lower, "invalid harness frame content json") ||
-		strings.Contains(lower, "decode harness frame")
+		strings.Contains(lower, "harness frame structural field") || strings.Contains(lower, "harness frame brokered tool content") ||
+		strings.Contains(lower, "invalid harness frame") ||
+		strings.Contains(lower, "invalid harness frame content json") || strings.Contains(lower, "decode harness frame")
 	return clientErr
 }
 

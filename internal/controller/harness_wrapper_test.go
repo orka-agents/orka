@@ -97,9 +97,9 @@ func TestHarnessWrapperStartClearsStaleResult(t *testing.T) {
 }
 
 func TestHarnessWrapperControllerSendsBearerToken(t *testing.T) {
-	t.Setenv(harnessWrapperAuthValueEnv, "x")
+	t.Setenv(harnessWrapperAuthValueEnv, "mock-token")
 	cfg := cliwrapper.DefaultConfig()
-	cfg.AuthValue = "x"
+	cfg.AuthValue = "mock-token"
 	server, err := cliwrapper.NewServer(cfg, &cliwrapper.FakeAdapter{Behavior: cliwrapper.FakeBehaviorSuccess, RuntimeName: "codex"})
 	if err != nil {
 		t.Fatal(err)
@@ -1223,7 +1223,7 @@ func TestHarnessWrapperDuplicateTurnErrorUsesTypedReason(t *testing.T) {
 		harness.WriteError(w, http.StatusConflict, "turn already exists")
 	}))
 	defer server.Close()
-	client, err := harness.NewClient(server.URL, harness.WithBearerToken("x"))
+	client, err := harness.NewClient(server.URL, harness.WithBearerToken("turn already"))
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
@@ -1241,8 +1241,8 @@ func TestHarnessWrapperDuplicateTurnErrorUsesTypedReason(t *testing.T) {
 	if err == nil {
 		t.Fatal("StartTurn() error = nil, want duplicate conflict")
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "exists") {
-		t.Fatalf("StartTurn() error = %v, want exact bearer redaction to alter display text", err)
+	if strings.Contains(strings.ToLower(err.Error()), "turn already") {
+		t.Fatalf("StartTurn() error = %v, configured bearer leaked", err)
 	}
 	if !harnessWrapperDuplicateTurnError(err) {
 		t.Fatal("typed duplicate-turn error was not recognized for recovery")
@@ -2786,7 +2786,7 @@ func TestHarnessWrapperTypedClientErrorClassificationSurvivesRedaction(t *testin
 			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: "unsupported-version", Accepted: false})
 		}))
 		defer server.Close()
-		client, err := harness.NewClient(server.URL, harness.WithBearerToken("version"))
+		client, err := harness.NewClient(server.URL, harness.WithBearerToken("unsupported"))
 		if err != nil {
 			t.Fatalf("NewClient() error = %v", err)
 		}
@@ -2800,7 +2800,7 @@ func TestHarnessWrapperTypedClientErrorClassificationSurvivesRedaction(t *testin
 			harness.WriteError(w, http.StatusTooManyRequests, "maximum concurrent turns")
 		}))
 		defer server.Close()
-		client, err := harness.NewClient(server.URL, harness.WithBearerToken("turns"))
+		client, err := harness.NewClient(server.URL, harness.WithBearerToken("concurrent"))
 		if err != nil {
 			t.Fatalf("NewClient() error = %v", err)
 		}

@@ -299,7 +299,7 @@ func TestAgentRuntimeReconcilerRevalidatesBearerAuthOnReadyRuntime(t *testing.T)
 	if err := r.Get(context.Background(), client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, &changed); err != nil {
 		t.Fatalf("Get Secret: %v", err)
 	}
-	changed.Data["token"] = []byte("wrong")
+	changed.Data["token"] = []byte("wrong-token")
 	if err := r.Update(context.Background(), &changed); err != nil {
 		t.Fatalf("Update Secret: %v", err)
 	}
