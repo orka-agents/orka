@@ -103,16 +103,35 @@ func (c *Client) Capabilities(ctx context.Context) (*CapabilitiesResponse, error
 	return &response, nil
 }
 
+type startTurnResponseWire struct {
+	StartTurnResponse
+	Accepted *bool `json:"accepted"`
+}
+
 func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (*StartTurnResponse, error) {
 	if err := request.Validate(); err != nil {
 		return nil, safeClientError("start_turn", 0, err.Error())
 	}
-	var response StartTurnResponse
-	if err := c.postJSON(ctx, TurnsPath, request, &response); err != nil {
+	var decoded startTurnResponseWire
+	if err := c.postJSON(ctx, TurnsPath, request, &decoded); err != nil {
 		return nil, err
 	}
+	response := decoded.StartTurnResponse
+	if decoded.Accepted != nil {
+		response.Accepted = *decoded.Accepted
+	}
 	if strings.TrimSpace(response.Version) != ProtocolVersion {
-		return nil, acceptedClientError("start_turn", fmt.Sprintf("unsupported version %q", response.Version))
+		message := fmt.Sprintf("unsupported version %q", response.Version)
+		if decoded.Accepted == nil {
+			return nil, unknownAcceptanceClientError("start_turn", message)
+		}
+		if response.Accepted {
+			return nil, acceptedClientError("start_turn", message)
+		}
+		return nil, safeClientError("start_turn", 0, message)
+	}
+	if decoded.Accepted == nil {
+		return nil, unknownAcceptanceClientError("start_turn", "harness response did not include accepted")
 	}
 	if !response.Accepted {
 		return nil, safeClientError("start_turn", 0, "harness did not accept turn")
@@ -284,7 +303,7 @@ func (c *Client) postJSON(ctx context.Context, rel string, in, out any) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return safeClientError("post", 0, err.Error())
+		return unknownAcceptanceClientError("post", err.Error())
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -422,10 +441,11 @@ func emitSSEData(raw string, emit func(HarnessEventFrame) error) error {
 }
 
 type ClientError struct {
-	Op             string
-	StatusCode     int
-	Message        string
-	RemoteAccepted bool
+	Op                      string
+	StatusCode              int
+	Message                 string
+	RemoteAccepted          bool
+	RemoteAcceptanceUnknown bool
 }
 
 func (e ClientError) Error() string {
@@ -440,6 +460,14 @@ func acceptedClientError(op, message string) error {
 		Op:             op,
 		Message:        events.RedactExecutionEventText(message),
 		RemoteAccepted: true,
+	}
+}
+
+func unknownAcceptanceClientError(op, message string) error {
+	return ClientError{
+		Op:                      op,
+		Message:                 events.RedactExecutionEventText(message),
+		RemoteAcceptanceUnknown: true,
 	}
 }
 

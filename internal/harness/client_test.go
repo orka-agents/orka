@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,19 +43,105 @@ func TestClientStartTurnMismatchedResponseIsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	_, err = client.StartTurn(context.Background(), StartTurnRequest{
-		Version:          ProtocolVersion,
-		Namespace:        "default",
-		TaskName:         "task-a",
-		SessionName:      "session-a",
-		RuntimeSessionID: "runtime-a",
-		TurnID:           "turn-a",
-		CorrelationID:    "corr-a",
-		Deadline:         time.Now().UTC().Add(time.Minute),
-		AuthIdentity:     AuthIdentity{Subject: "user:test"},
-	})
+	_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
 	if err == nil || !strings.Contains(err.Error(), "runtime session") {
 		t.Fatalf("StartTurn() error = %v, want identity mismatch", err)
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.RemoteAccepted {
+		t.Fatalf("StartTurn() error = %#v, want accepted remote response marker", err)
+	}
+}
+
+func TestClientStartTurnVersionErrorAcceptanceMarker(t *testing.T) {
+	for _, tt := range []struct {
+		name               string
+		includeAccepted    bool
+		acceptedValue      any
+		wantRemoteAccepted bool
+		wantUnknown        bool
+	}{
+		{name: "rejected", includeAccepted: true, acceptedValue: false},
+		{name: "accepted", includeAccepted: true, acceptedValue: true, wantRemoteAccepted: true},
+		{name: "omitted", wantUnknown: true},
+		{name: "null", includeAccepted: true, acceptedValue: nil, wantUnknown: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				response := map[string]any{"version": "orka.harness.invalid"}
+				if tt.includeAccepted {
+					response["accepted"] = tt.acceptedValue
+				}
+				WriteJSON(w, http.StatusAccepted, response)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
+			if err == nil || !strings.Contains(err.Error(), "unsupported version") {
+				t.Fatalf("StartTurn() error = %v, want unsupported version", err)
+			}
+			var clientErr ClientError
+			if !errors.As(err, &clientErr) {
+				t.Fatalf("StartTurn() error = %T, want ClientError", err)
+			}
+			if clientErr.RemoteAccepted != tt.wantRemoteAccepted {
+				t.Fatalf("RemoteAccepted = %t, want %t", clientErr.RemoteAccepted, tt.wantRemoteAccepted)
+			}
+			if clientErr.RemoteAcceptanceUnknown != tt.wantUnknown {
+				t.Fatalf("RemoteAcceptanceUnknown = %t, want %t", clientErr.RemoteAcceptanceUnknown, tt.wantUnknown)
+			}
+		})
+	}
+}
+
+func TestClientStartTurnMissingAcceptedMarksAcceptanceUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusAccepted, map[string]any{
+			"version":          ProtocolVersion,
+			"runtimeSessionID": "runtime-a",
+			"turnID":           "turn-a",
+			"correlationID":    "corr-a",
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
+	if err == nil || !strings.Contains(err.Error(), "did not include accepted") {
+		t.Fatalf("StartTurn() error = %v, want missing accepted", err)
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) {
+		t.Fatalf("StartTurn() error = %T, want ClientError", err)
+	}
+	if !clientErr.RemoteAcceptanceUnknown || clientErr.RemoteAccepted {
+		t.Fatalf("acceptance markers = accepted:%t unknown:%t, want false/true", clientErr.RemoteAccepted, clientErr.RemoteAcceptanceUnknown)
+	}
+}
+
+func TestClientStartTurnTransportFailureMarksAcceptanceUnknown(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport failed")
+	})}
+	client, err := NewClient("https://adapter.example", WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
+	if err == nil {
+		t.Fatal("StartTurn() error = nil, want transport failure")
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) {
+		t.Fatalf("StartTurn() error = %T, want ClientError", err)
+	}
+	if !clientErr.RemoteAcceptanceUnknown || clientErr.RemoteAccepted {
+		t.Fatalf("acceptance markers = accepted:%t unknown:%t, want false/true", clientErr.RemoteAccepted, clientErr.RemoteAcceptanceUnknown)
 	}
 }
 
@@ -405,6 +492,26 @@ func TestClientControlTimeoutOverridesLaterParentDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
 		t.Fatalf("Health() elapsed = %s, control timeout was not enforced", elapsed)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func validClientStartTurnRequest() StartTurnRequest {
+	return StartTurnRequest{
+		Version:          ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     AuthIdentity{Subject: "user:test"},
 	}
 }
 

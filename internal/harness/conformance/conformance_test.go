@@ -294,6 +294,7 @@ type agentKitOrkaFixture struct {
 	authValue                        string
 	omitEventStreamPath              bool
 	startResponseVersion             string
+	rejectStartResponse              bool
 	frameType                        harness.FrameType
 	allowDuplicateStart              bool
 	duplicateStartMismatch           bool
@@ -420,7 +421,7 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 	}
 	response := harness.StartTurnResponse{
 		Version:          version,
-		Accepted:         true,
+		Accepted:         !f.rejectStartResponse,
 		RuntimeSessionID: request.RuntimeSessionID,
 		TurnID:           request.TurnID,
 		CorrelationID:    request.CorrelationID,
@@ -847,6 +848,69 @@ func TestBrokeredProbeCancelsAfterInvalidStartResponse(t *testing.T) {
 	}
 }
 
+func TestTurnProbeCancelsAfterLostStartResponse(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	defer server.Close()
+	httpClient := server.Client()
+	baseTransport := httpClient.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		response, err := baseTransport.RoundTrip(request)
+		if err != nil {
+			return nil, err
+		}
+		if request.Method == http.MethodPost && request.URL.Path == harness.TurnsPath {
+			_ = response.Body.Close()
+			return nil, errors.New("simulated lost start response")
+		}
+		return response, nil
+	})
+	result := Check(context.Background(), Target{
+		BaseURL:     server.URL,
+		BearerToken: "x",
+		HTTPClient:  httpClient,
+		ProbeTurn:   true,
+	})
+	if result.Passed {
+		t.Fatal("Passed = true, want lost start response failure")
+	}
+	server.mu.Lock()
+	cancelCount := server.cancelCount
+	turnCount := len(server.turns)
+	server.mu.Unlock()
+	if turnCount != 1 {
+		t.Fatalf("turn count = %d, want 1 accepted request", turnCount)
+	}
+	if cancelCount != 1 {
+		t.Fatalf("cancel count = %d, want 1", cancelCount)
+	}
+}
+
+func TestBrokeredProbeDoesNotCancelRejectedInvalidStartResponse(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.startResponseVersion = "orka.harness.invalid"
+	server.rejectStartResponse = true
+	defer server.Close()
+	result := Check(context.Background(), Target{
+		BaseURL:           server.URL,
+		BearerToken:       "x",
+		RequireAuth:       true,
+		ProbeBrokeredRead: true,
+	})
+	if result.Passed {
+		t.Fatal("Passed = true, want invalid start response failure")
+	}
+	server.mu.Lock()
+	cancelCount := server.cancelCount
+	server.mu.Unlock()
+	if cancelCount != 0 {
+		t.Fatalf("cancel count = %d, want 0", cancelCount)
+	}
+}
+
 func TestBrokeredReadinessPreservesCustomProbeTemplate(t *testing.T) {
 	server := newAgentKitOrkaFixture(t)
 	server.brokeredOnly = true
@@ -1040,6 +1104,15 @@ func TestStartTurnMayHaveBeenAccepted(t *testing.T) {
 	if !startTurnMayHaveBeenAccepted(harness.ClientError{RemoteAccepted: true}) {
 		t.Fatal("validated accepted-response error was not treated as accepted")
 	}
+	if !startTurnMayHaveBeenAccepted(harness.ClientError{RemoteAcceptanceUnknown: true}) {
+		t.Fatal("transport failure was not treated as potentially accepted")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestProbeStreamContextPropagatesExplicitCancellation(t *testing.T) {

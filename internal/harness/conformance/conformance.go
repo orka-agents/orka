@@ -1036,7 +1036,8 @@ func startTurnMayHaveBeenAccepted(err error) bool {
 	if !errors.As(err, &clientErr) {
 		return false
 	}
-	return clientErr.RemoteAccepted || clientErr.StatusCode >= http.StatusOK && clientErr.StatusCode < http.StatusMultipleChoices
+	return clientErr.RemoteAccepted || clientErr.RemoteAcceptanceUnknown ||
+		clientErr.StatusCode >= http.StatusOK && clientErr.StatusCode < http.StatusMultipleChoices
 }
 
 func bestEffortCancelProbeTurn(
