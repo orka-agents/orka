@@ -161,34 +161,34 @@ func TestClientStreamFramesPreservesCallbackClientError(t *testing.T) {
 
 func TestRedactExactBearerValue(t *testing.T) {
 	t.Run("redacts embedded short token text", func(t *testing.T) {
-		got := redactExactBearerValue("turn already exists; reflected x", "x")
+		got := RedactExactBearerValue("turn already exists; reflected x", "x")
 		want := "turn already e[REDACTED]ists; reflected [REDACTED]"
 		if got != want {
-			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+			t.Fatalf("RedactExactBearerValue() = %q, want %q", got, want)
 		}
 	})
 	t.Run("redacts key value assignment", func(t *testing.T) {
 		token := strings.ToLower(t.Name())
-		got := redactExactBearerValue("id="+token, token)
+		got := RedactExactBearerValue("id="+token, token)
 		want := "id=[REDACTED]"
 		if got != want {
-			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+			t.Fatalf("RedactExactBearerValue() = %q, want %q", got, want)
 		}
 	})
 	t.Run("redacts sentence punctuation", func(t *testing.T) {
 		token := strings.ToLower(t.Name())
-		got := redactExactBearerValue("remote reflected "+token+".", token)
+		got := RedactExactBearerValue("remote reflected "+token+".", token)
 		want := "remote reflected [REDACTED]."
 		if got != want {
-			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+			t.Fatalf("RedactExactBearerValue() = %q, want %q", got, want)
 		}
 	})
 	t.Run("redacts path adjacency", func(t *testing.T) {
 		token := strings.ToLower(t.Name())
-		got := redactExactBearerValue("/runtime/"+token+"/events", token)
+		got := RedactExactBearerValue("/runtime/"+token+"/events", token)
 		want := "/runtime/[REDACTED]/events"
 		if got != want {
-			t.Fatalf("redactExactBearerValue() = %q, want %q", got, want)
+			t.Fatalf("RedactExactBearerValue() = %q, want %q", got, want)
 		}
 	})
 	t.Run("avoids marker collision", func(t *testing.T) {
@@ -201,9 +201,9 @@ func TestRedactExactBearerValue(t *testing.T) {
 	})
 	t.Run("removes reconstructed collision", func(t *testing.T) {
 		token := strings.Trim("[REDACTED]", "[]")
-		got := redactExactBearerValue("RED"+token+"ACTED", token)
+		got := RedactExactBearerValue("RED"+token+"ACTED", token)
 		if strings.Contains(got, token) {
-			t.Fatalf("redactExactBearerValue() = %q, configured bearer reconstructed across replacement", got)
+			t.Fatalf("RedactExactBearerValue() = %q, configured bearer reconstructed across replacement", got)
 		}
 	})
 }

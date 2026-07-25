@@ -50,6 +50,134 @@ func TestCheckReadinessPassesForAgentKitOrkaFixture(t *testing.T) {
 	}
 }
 
+func TestCheckRedactsExactBearerFromObservedCapabilities(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	value := strings.ToLower(t.Name())
+	server.authValue = value
+	server.runtimeName = "runtime-" + value + "-name"
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: value})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+	if result.ObservedCapabilities == nil {
+		t.Fatal("ObservedCapabilities = nil")
+	}
+	if strings.Contains(result.ObservedCapabilities.RuntimeName, value) || strings.Contains(result.Message, value) {
+		t.Fatalf("result leaked configured bearer: %#v", result)
+	}
+}
+
+func TestSanitizeResultClonesAndRedactsCapabilities(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	caps := &harness.CapabilitiesResponse{
+		Version:             harness.ProtocolVersion,
+		ProtocolVersion:     harness.ProtocolVersion,
+		Transport:           "transport-" + value,
+		RuntimeName:         "runtime-" + value,
+		RuntimeVersion:      value,
+		ProviderKind:        harness.ProviderKind(value),
+		ToolExecutionModes:  []harness.ToolExecutionMode{harness.ToolExecutionMode(value)},
+		BrokeredToolClasses: []harness.BrokeredToolClass{harness.BrokeredToolClass(value)},
+		SupportsCancel:      true,
+		MaxConcurrentTurns:  1,
+		Metadata: map[string]string{
+			value:  "metadata-" + value,
+			"id":   "plain",
+			" id ": "spaced",
+		},
+	}
+	result := sanitizeResult(Result{
+		ObservedCapabilities: caps,
+		Failures:             []string{"failure " + value},
+		Message:              "message " + value,
+	}, value)
+	if result.ObservedCapabilities == caps {
+		t.Fatal("ObservedCapabilities was not cloned")
+	}
+	for name, got := range map[string]string{
+		"message":           result.Message,
+		"failure":           result.Failures[0],
+		"transport":         result.ObservedCapabilities.Transport,
+		"runtimeName":       result.ObservedCapabilities.RuntimeName,
+		"runtimeVersion":    result.ObservedCapabilities.RuntimeVersion,
+		"providerKind":      string(result.ObservedCapabilities.ProviderKind),
+		"toolExecutionMode": string(result.ObservedCapabilities.ToolExecutionModes[0]),
+		"brokeredToolClass": string(result.ObservedCapabilities.BrokeredToolClasses[0]),
+	} {
+		if strings.Contains(got, value) {
+			t.Fatalf("%s = %q, configured bearer leaked", name, got)
+		}
+	}
+	for key, got := range result.ObservedCapabilities.Metadata {
+		if strings.Contains(key, value) || strings.Contains(got, value) {
+			t.Fatalf("metadata %q=%q leaked configured bearer", key, got)
+		}
+	}
+	if !strings.Contains(caps.RuntimeName, value) {
+		t.Fatal("input capabilities runtime name was mutated")
+	}
+	if _, ok := caps.Metadata[value]; !ok {
+		t.Fatal("input capabilities metadata was mutated")
+	}
+	if result.ObservedCapabilities.Metadata["id"] != "plain" || result.ObservedCapabilities.Metadata[" id "] != "spaced" {
+		t.Fatalf("structured metadata whitespace was changed: %#v", result.ObservedCapabilities.Metadata)
+	}
+}
+
+func TestCheckRejectsBearerThatOverlapsProtocolCapabilities(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.authValue = "e"
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "e"})
+	if result.Passed {
+		t.Fatal("Passed = true, want bearer overlap rejection")
+	}
+	if strings.Contains(result.Message, "e") {
+		t.Fatalf("Message = %q, configured bearer leaked", result.Message)
+	}
+	if result.ObservedCapabilities != nil {
+		t.Fatalf("ObservedCapabilities = %#v, want nil after bearer conflict", result.ObservedCapabilities)
+	}
+}
+
+func TestCheckRejectsBearerThatMatchesRuntimeName(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	value := strings.Trim("[REDACTED]", "[]")
+	server.authValue = value
+	server.runtimeName = value
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: value})
+	if result.Passed {
+		t.Fatal("Passed = true, want runtime-name bearer overlap rejection")
+	}
+	if result.ObservedCapabilities != nil {
+		t.Fatalf("ObservedCapabilities = %#v, want nil after bearer conflict", result.ObservedCapabilities)
+	}
+	if strings.Contains(result.Message, value) {
+		t.Fatalf("Message = %q, configured bearer leaked", result.Message)
+	}
+}
+
+func TestCheckNormalizesBearerBeforeSanitizingResult(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	value := strings.ToLower(t.Name())
+	server.authValue = value
+	server.runtimeName = "runtime-" + value + "-name"
+	defer server.Close()
+
+	result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "  " + value + "\n"})
+	if !result.Passed {
+		t.Fatalf("Passed = false, failures=%v", result.Failures)
+	}
+	if strings.Contains(result.ObservedCapabilities.RuntimeName, value) {
+		t.Fatalf("RuntimeName = %q, normalized configured bearer leaked", result.ObservedCapabilities.RuntimeName)
+	}
+}
+
 func TestCheckReadinessFailsUnsupportedProtocolVersion(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "mock-token"})
 	defer server.Close()

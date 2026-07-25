@@ -81,8 +81,10 @@ func CheckReadiness(ctx context.Context, target Target) Result {
 }
 
 // Check runs the configured harness conformance probes.
-func Check(ctx context.Context, target Target) Result {
-	result := Result{Passed: true}
+func Check(ctx context.Context, target Target) (result Result) {
+	target = normalizeTarget(target)
+	defer func() { result = sanitizeResult(result, target.BearerToken) }()
+	result = Result{Passed: true}
 	baseURL := strings.TrimSpace(target.BaseURL)
 	if baseURL == "" {
 		return failed("base URL is required")
@@ -110,6 +112,10 @@ func Check(ctx context.Context, target Target) Result {
 		result.addFailure(fmt.Sprintf("capabilities check failed: %v", err))
 	} else {
 		result.ObservedCapabilities = caps
+		if err := validateBearerCapabilityConflicts(caps, target.BearerToken); err != nil {
+			result.addFailure(err.Error())
+			result.ObservedCapabilities = nil
+		}
 	}
 
 	if len(result.Failures) == 0 && target.probeReadiness && !hasTurnProbe(target) {
@@ -129,6 +135,114 @@ func Check(ctx context.Context, target Target) Result {
 	}
 	result.finalize()
 	return result
+}
+
+func validateBearerCapabilityConflicts(caps *harness.CapabilitiesResponse, bearer string) error {
+	if caps == nil || bearer == "" {
+		return nil
+	}
+	for name, value := range map[string]string{
+		"version":         caps.Version,
+		"protocolVersion": caps.ProtocolVersion,
+		"transport":       caps.Transport,
+		"providerKind":    string(caps.ProviderKind),
+	} {
+		if strings.Contains(value, bearer) {
+			return fmt.Errorf("configured bearer overlaps required capability field %s", name)
+		}
+	}
+	if strings.Contains(events.ExecutionEventRedactedValue, bearer) && strings.Contains(caps.RuntimeName, bearer) {
+		return fmt.Errorf("configured bearer overlaps required capability field runtimeName")
+	}
+	for _, mode := range caps.ToolExecutionModes {
+		if strings.Contains(string(mode), bearer) {
+			return fmt.Errorf("configured bearer overlaps required capability field toolExecutionModes")
+		}
+	}
+	for _, class := range caps.BrokeredToolClasses {
+		if strings.Contains(string(class), bearer) {
+			return fmt.Errorf("configured bearer overlaps required capability field brokeredToolClasses")
+		}
+	}
+	return nil
+}
+
+func normalizeTarget(target Target) Target {
+	value := strings.TrimSpace(target.BearerToken)
+	return Target{
+		BaseURL:                   target.BaseURL,
+		BearerToken:               value,
+		HTTPClient:                target.HTTPClient,
+		ControlTimeout:            target.ControlTimeout,
+		probeReadiness:            target.probeReadiness,
+		RequireAuth:               target.RequireAuth,
+		ProbeTurn:                 target.ProbeTurn,
+		ProbeBrokeredRead:         target.ProbeBrokeredRead,
+		ProbeBrokeredWrite:        target.ProbeBrokeredWrite,
+		ProbeBrokeredCoordination: target.ProbeBrokeredCoordination,
+		StartTurnRequest:          target.StartTurnRequest,
+	}
+}
+
+func sanitizeResult(result Result, bearer string) Result {
+	sanitize := func(value string) string {
+		value = events.RedactExecutionEventText(value)
+		return harness.RedactExactBearerValue(value, bearer)
+	}
+	result.Message = sanitize(result.Message)
+	if result.Failures != nil {
+		failures := make([]string, len(result.Failures))
+		for i, failure := range result.Failures {
+			failures[i] = sanitize(failure)
+		}
+		result.Failures = failures
+	}
+	if result.ObservedCapabilities == nil {
+		return result
+	}
+	caps := cloneCapabilitiesResponse(result.ObservedCapabilities)
+	caps.Version = sanitize(caps.Version)
+	caps.ProtocolVersion = sanitize(caps.ProtocolVersion)
+	caps.Transport = sanitize(caps.Transport)
+	caps.RuntimeName = sanitize(caps.RuntimeName)
+	caps.RuntimeVersion = sanitize(caps.RuntimeVersion)
+	caps.ProviderKind = harness.ProviderKind(sanitize(string(caps.ProviderKind)))
+	if caps.ToolExecutionModes != nil {
+		modes := make([]harness.ToolExecutionMode, len(caps.ToolExecutionModes))
+		for i, mode := range caps.ToolExecutionModes {
+			modes[i] = harness.ToolExecutionMode(sanitize(string(mode)))
+		}
+		caps.ToolExecutionModes = modes
+	}
+	if caps.BrokeredToolClasses != nil {
+		classes := make([]harness.BrokeredToolClass, len(caps.BrokeredToolClasses))
+		for i, class := range caps.BrokeredToolClasses {
+			classes[i] = harness.BrokeredToolClass(sanitize(string(class)))
+		}
+		caps.BrokeredToolClasses = classes
+	}
+	if caps.Metadata != nil {
+		metadata := make(map[string]string, len(caps.Metadata))
+		for key, value := range caps.Metadata {
+			metadata[sanitize(key)] = sanitize(value)
+		}
+		caps.Metadata = metadata
+	}
+	result.ObservedCapabilities = caps
+	return result
+}
+
+func cloneCapabilitiesResponse(caps *harness.CapabilitiesResponse) *harness.CapabilitiesResponse {
+	if caps == nil {
+		return nil
+	}
+	clone := *caps
+	clone.ToolExecutionModes = slices.Clone(caps.ToolExecutionModes)
+	clone.BrokeredToolClasses = slices.Clone(caps.BrokeredToolClasses)
+	if caps.Metadata != nil {
+		clone.Metadata = maps.Clone(caps.Metadata)
+	}
+	return &clone
 }
 
 func validateProbeSelection(target Target) error {

@@ -338,7 +338,7 @@ func decodeBoundedJSON(op string, status int, body io.Reader, out any) error {
 func (c *Client) sanitizeClientMessage(message string) string {
 	message = events.RedactExecutionEventText(message)
 	if c != nil {
-		message = redactExactBearerValue(message, c.authBearerValue)
+		message = RedactExactBearerValue(message, c.authBearerValue)
 	}
 	return message
 }
@@ -369,7 +369,7 @@ func (c *Client) sanitizeClientError(err error) error {
 	}
 }
 
-func redactExactBearerValue(message, token string) string {
+func RedactExactBearerValue(message, token string) string {
 	if message == "" || token == "" {
 		return message
 	}
