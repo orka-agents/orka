@@ -180,6 +180,75 @@ func TestCheckNormalizesBearerBeforeSanitizingResult(t *testing.T) {
 	}
 }
 
+func TestCheckReadinessRequiresExecutableObservedCapabilities(t *testing.T) {
+	for _, tt := range []struct {
+		name                   string
+		disableCancel          bool
+		disableRuntimeSessions bool
+		want                   string
+	}{
+		{name: "cancel", disableCancel: true, want: "supportsCancel"},
+		{name: "runtime sessions", disableRuntimeSessions: true, want: "supportsRuntimeSessions"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAgentKitOrkaFixture(t)
+			server.disableCancel = tt.disableCancel
+			server.disableRuntimeSessions = tt.disableRuntimeSessions
+			defer server.Close()
+			result := CheckReadiness(context.Background(), Target{BaseURL: server.URL, BearerToken: "mock-token"})
+			if result.Passed || !strings.Contains(result.Message, tt.want) {
+				t.Fatalf("result = %#v, want %s capability failure", result, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckReadinessValidatesCapabilitiesWithExplicitProbe(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		target Target
+		setup  func(*agentKitOrkaFixture)
+		want   string
+	}{
+		{
+			name:   "observed",
+			target: Target{ProbeTurn: true, BearerToken: "mock-token"},
+			setup:  func(server *agentKitOrkaFixture) { server.disableCancel = true },
+			want:   "supportsCancel",
+		},
+		{
+			name:   "observed probe against brokered only",
+			target: Target{ProbeTurn: true, BearerToken: "mock-token"},
+			setup: func(server *agentKitOrkaFixture) {
+				server.brokeredClass = harness.BrokeredToolClassRead
+				server.brokeredOnly = true
+			},
+			want: "observed",
+		},
+		{
+			name:   "brokered",
+			target: Target{ProbeBrokeredRead: true, BearerToken: "mock-token"},
+			setup: func(server *agentKitOrkaFixture) {
+				server.brokeredClass = harness.BrokeredToolClassRead
+				server.disableRuntimeSessions = true
+			},
+			want: "supportsRuntimeSessions",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAgentKitOrkaFixture(t)
+			tt.setup(server)
+			defer server.Close()
+			target := tt.target
+			target.BaseURL = server.URL
+			result := CheckReadiness(context.Background(), target)
+			if result.Passed || !strings.Contains(result.Message, tt.want) {
+				t.Fatalf("result = %#v, want %s capability failure", result, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckReadinessFailsUnsupportedProtocolVersion(t *testing.T) {
 	server := harnesstest.NewFakeHarnessServer(harnesstest.FakeHarnessConfig{ProtocolVersion: "orka.harness.v0", AuthToken: "mock-token"})
 	defer server.Close()
@@ -426,6 +495,9 @@ type agentKitOrkaFixture struct {
 	omitEventStreamPath              bool
 	startResponseVersion             string
 	rejectStartResponse              bool
+	omitStartResponseCorrelation     bool
+	disableCancel                    bool
+	disableRuntimeSessions           bool
 	frameType                        harness.FrameType
 	allowDuplicateStart              bool
 	duplicateStartMismatch           bool
@@ -507,8 +579,8 @@ func (f *agentKitOrkaFixture) capabilities(w http.ResponseWriter, r *http.Reques
 		ProviderKind:            harness.ProviderKindKubernetesService,
 		ToolExecutionModes:      modes,
 		BrokeredToolClasses:     classes,
-		SupportsCancel:          true,
-		SupportsRuntimeSessions: true,
+		SupportsCancel:          !f.disableCancel,
+		SupportsRuntimeSessions: !f.disableRuntimeSessions,
 		SupportsContinuation:    len(classes) > 0,
 		MaxConcurrentTurns:      1,
 	})
@@ -562,7 +634,9 @@ func (f *agentKitOrkaFixture) startTurn(w http.ResponseWriter, r *http.Request) 
 		CorrelationID:    request.CorrelationID,
 		EventStreamPath:  eventStreamPath,
 	}
-	if duplicate && f.duplicateStartMismatch {
+	if f.omitStartResponseCorrelation {
+		response.CorrelationID = ""
+	} else if duplicate && f.duplicateStartMismatch {
 		response.CorrelationID = "duplicate-mismatch"
 	}
 	if f.omitEventStreamPath {
@@ -833,6 +907,24 @@ func TestDuplicateStartClassificationUsesTypedClientReason(t *testing.T) {
 	}
 }
 
+func TestDuplicateStartClassificationRequiresConflictStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		harness.WriteError(w, http.StatusBadRequest, "turn already exists")
+	}))
+	defer server.Close()
+	client, err := harness.NewClient(server.URL, harness.WithBearerToken("turn already"))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), defaultStartTurnRequest("non-conflict-duplicate"))
+	if err == nil {
+		t.Fatal("StartTurn() error = nil, want bad request")
+	}
+	if isDuplicateStartRejectedError(err) {
+		t.Fatalf("StartTurn() error = %v, non-conflict response accepted as duplicate rejection", err)
+	}
+}
+
 func TestIsAuthRequiredErrorRequiresAuthenticationStatus(t *testing.T) {
 	if !isAuthRequiredError(harness.ClientError{StatusCode: http.StatusUnauthorized, Message: "denied"}) {
 		t.Fatal("isAuthRequiredError(401) = false")
@@ -979,6 +1071,46 @@ func TestCheckReadinessProbesObservedAndEveryBrokeredClass(t *testing.T) {
 	}
 	if continued != 2 {
 		t.Fatalf("continued turns = %d, want 2 brokered profiles", continued)
+	}
+}
+
+func TestBrokeredProbeRejectsDuplicateStartMismatch(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.allowDuplicateStart = true
+	server.duplicateStartMismatch = true
+	defer server.Close()
+	result := Check(context.Background(), Target{
+		BaseURL:           server.URL,
+		BearerToken:       "mock-token",
+		RequireAuth:       true,
+		ProbeBrokeredRead: true,
+	})
+	if result.Passed || !strings.Contains(result.Message, "duplicate start") {
+		t.Fatalf("result = %#v, want duplicate start failure", result)
+	}
+	server.mu.Lock()
+	cancelCount := server.cancelCount
+	server.mu.Unlock()
+	if cancelCount != 1 {
+		t.Fatalf("cancel count = %d, want one brokered cleanup", cancelCount)
+	}
+}
+
+func TestBrokeredProbeAcceptsIdempotentDuplicateWithoutCorrelation(t *testing.T) {
+	server := newAgentKitOrkaFixture(t)
+	server.brokeredClass = harness.BrokeredToolClassRead
+	server.allowDuplicateStart = true
+	server.omitStartResponseCorrelation = true
+	defer server.Close()
+	result := Check(context.Background(), Target{
+		BaseURL:           server.URL,
+		BearerToken:       "mock-token",
+		RequireAuth:       true,
+		ProbeBrokeredRead: true,
+	})
+	if !result.Passed {
+		t.Fatalf("result = %#v, want optional duplicate correlation accepted", result)
 	}
 }
 

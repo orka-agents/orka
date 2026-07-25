@@ -118,6 +118,10 @@ func Check(ctx context.Context, target Target) (result Result) {
 		}
 	}
 
+	if len(result.Failures) == 0 && target.probeReadiness && !validateReadinessCapabilities(&result, target) {
+		result.finalize()
+		return result
+	}
 	if len(result.Failures) == 0 && target.probeReadiness && !hasTurnProbe(target) {
 		runReadinessProbes(ctx, target, &result, baseURL, controlTimeout)
 	} else if len(result.Failures) == 0 {
@@ -270,6 +274,37 @@ func hasTurnProbe(target Target) bool {
 		target.ProbeBrokeredCoordination
 }
 
+func validateReadinessCapabilities(result *Result, target Target) bool {
+	capabilities := result.ObservedCapabilities
+	if capabilities == nil {
+		result.addFailure("capabilities are required for readiness conformance")
+		return false
+	}
+	observed := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeObserved)
+	brokered := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeBrokered)
+	if !observed && !brokered {
+		result.addFailure("runtime does not advertise a probeable tool execution mode")
+		return false
+	}
+	if target.ProbeTurn && !observed {
+		result.addFailure("runtime does not advertise required observed tool execution mode")
+		return false
+	}
+	if !capabilities.SupportsRuntimeSessions {
+		result.addFailure("runtime does not advertise required supportsRuntimeSessions capability")
+		return false
+	}
+	if observed && !capabilities.SupportsCancel {
+		result.addFailure("runtime advertises observed mode but not supportsCancel")
+		return false
+	}
+	if brokered && (!capabilities.SupportsContinuation || len(capabilities.BrokeredToolClasses) == 0) {
+		result.addFailure("runtime advertises incomplete brokered execution capabilities")
+		return false
+	}
+	return true
+}
+
 func runReadinessProbes(
 	ctx context.Context,
 	target Target,
@@ -283,10 +318,6 @@ func runReadinessProbes(
 	}
 	observed := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeObserved)
 	brokered := slices.Contains(capabilities.ToolExecutionModes, harness.ToolExecutionModeBrokered)
-	if !observed && !brokered {
-		result.addFailure("runtime does not advertise a probeable tool execution mode")
-		return
-	}
 	if observed {
 		runTurnProbe(ctx, target, result, baseURL, controlTimeout)
 	}
@@ -382,7 +413,7 @@ func runTurnProbe(ctx context.Context, target Target, result *Result, baseURL st
 	if strings.TrimSpace(started.EventStreamPath) == "" {
 		result.addFailure("start turn response eventStreamPath is required")
 	}
-	if !assertDuplicateStartRejected(ctx, client, result, request) {
+	if !assertDuplicateStartRejected(ctx, client, result, request, true) {
 		return
 	}
 	if target.RequireAuth {
@@ -495,6 +526,9 @@ func runBrokeredProbe(
 	}()
 	if strings.TrimSpace(started.EventStreamPath) == "" {
 		result.addFailure("start turn response eventStreamPath is required")
+	}
+	if !assertDuplicateStartRejected(ctx, client, result, request, false) {
+		return
 	}
 	if target.RequireAuth {
 		assertUnauthenticatedTurnResourcesRejected(ctx, target, result, baseURL, controlTimeout, request)
@@ -1010,24 +1044,34 @@ func capabilitiesHaveBrokeredClass(caps *harness.CapabilitiesResponse, want harn
 	return slices.Contains(caps.BrokeredToolClasses, want)
 }
 
-func assertDuplicateStartRejected(ctx context.Context, client *harness.Client, result *Result, request harness.StartTurnRequest) bool {
+func assertDuplicateStartRejected(
+	ctx context.Context,
+	client *harness.Client,
+	result *Result,
+	request harness.StartTurnRequest,
+	cancelOnFailure bool,
+) bool {
 	started, err := client.StartTurn(ctx, request)
 	if err == nil {
 		expectedPath, pathErr := harness.EventStreamPath(request.TurnID)
 		if pathErr == nil &&
 			started.RuntimeSessionID == request.RuntimeSessionID &&
 			started.TurnID == request.TurnID &&
-			started.CorrelationID == request.CorrelationID &&
+			(started.CorrelationID == "" || started.CorrelationID == request.CorrelationID) &&
 			strings.TrimSpace(started.EventStreamPath) == expectedPath {
 			return true
 		}
 		result.addFailure("duplicate start turn was accepted with mismatched identity")
-		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start identity mismatch")
+		if cancelOnFailure {
+			cancelProbeTurn(ctx, client, result, request, "duplicate conformance start identity mismatch")
+		}
 		return false
 	}
 	if !isDuplicateStartRejectedError(err) {
 		result.addFailure(fmt.Sprintf("duplicate start turn returned %v, want deterministic already-started rejection or identical response", err))
-		cancelProbeTurn(ctx, client, result, request, "duplicate conformance start returned an unexpected error")
+		if cancelOnFailure {
+			cancelProbeTurn(ctx, client, result, request, "duplicate conformance start returned an unexpected error")
+		}
 		return false
 	}
 	return true
@@ -1038,8 +1082,8 @@ func isDuplicateStartRejectedError(err error) bool {
 		return false
 	}
 	var clientErr harness.ClientError
-	if errors.As(err, &clientErr) && clientErr.IsDuplicateTurn() {
-		return true
+	if errors.As(err, &clientErr) {
+		return clientErr.IsDuplicateTurn()
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "turn already exists") || strings.Contains(message, "turn already completed")
