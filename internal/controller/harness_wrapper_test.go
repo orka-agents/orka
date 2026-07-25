@@ -2758,6 +2758,59 @@ func TestHarnessWrapperStartTurnErrorClassification(t *testing.T) {
 	}
 }
 
+func TestHarnessWrapperTypedClientErrorClassificationSurvivesRedaction(t *testing.T) {
+	if harnessWrapperStartTurnErrorIsRetryable(harness.ClientError{StatusCode: http.StatusBadRequest, Message: "[REDACTED]"}) {
+		t.Fatal("typed 400 start error should remain terminal")
+	}
+	if !harnessWrapperAuthError(harness.ClientError{StatusCode: http.StatusUnauthorized, Message: "[REDACTED]"}) {
+		t.Fatal("typed 401 error should remain an auth error")
+	}
+	wrappedNotFound := fmt.Errorf("read harness runtime capabilities: %w", harness.ClientError{StatusCode: http.StatusNotFound, Message: "[REDACTED]"})
+	if harnessWrapperCapabilitiesErrorIsRetryable(wrappedNotFound) {
+		t.Fatal("typed capabilities 404 should remain terminal")
+	}
+
+	request := harness.StartTurnRequest{
+		Version:          harness.ProtocolVersion,
+		Namespace:        "default",
+		TaskName:         "task-a",
+		SessionName:      "session-a",
+		RuntimeSessionID: "runtime-a",
+		TurnID:           "turn-a",
+		CorrelationID:    "corr-a",
+		Deadline:         time.Now().UTC().Add(time.Minute),
+		AuthIdentity:     harness.AuthIdentity{Subject: "user:test"},
+	}
+	t.Run("unsupported version", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			harness.WriteJSON(w, http.StatusAccepted, harness.StartTurnResponse{Version: "unsupported-version", Accepted: false})
+		}))
+		defer server.Close()
+		client, err := harness.NewClient(server.URL, harness.WithBearerToken("version"))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.StartTurn(context.Background(), request)
+		if err == nil || harnessWrapperStartTurnErrorIsRetryable(err) {
+			t.Fatalf("StartTurn() error = %v, want typed terminal version error", err)
+		}
+	})
+	t.Run("capacity", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			harness.WriteError(w, http.StatusTooManyRequests, "maximum concurrent turns")
+		}))
+		defer server.Close()
+		client, err := harness.NewClient(server.URL, harness.WithBearerToken("turns"))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.StartTurn(context.Background(), request)
+		if err == nil || !harnessWrapperCapacityError(err) {
+			t.Fatalf("StartTurn() error = %v, want typed capacity error", err)
+		}
+	})
+}
+
 func TestHarnessWrapperTurnMetadataDefaultsMaxTurns(t *testing.T) {
 	task, agent := harnessWrapperTaskAndAgent()
 	r := newUnitReconciler(newTestScheme(), task, agent)

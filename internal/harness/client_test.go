@@ -232,6 +232,35 @@ func TestRedactExactBearerValue(t *testing.T) {
 	})
 }
 
+func TestClientErrorClassificationIncludesOperation(t *testing.T) {
+	err := safeClientError("decode harness frame", 0, "unexpected EOF")
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) {
+		t.Fatalf("safeClientError() = %T, want ClientError", err)
+	}
+	if !clientErr.IsProtocolViolation() {
+		t.Fatal("operation-carried protocol violation was not classified")
+	}
+}
+
+func TestClientDuplicateTurnReasonRequiresConflictStatus(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		err := safeClientError("post", status, "turn already exists")
+		var clientErr ClientError
+		if !errors.As(err, &clientErr) {
+			t.Fatalf("safeClientError(%d) = %T, want ClientError", status, err)
+		}
+		if clientErr.IsDuplicateTurn() {
+			t.Fatalf("safeClientError(%d) was classified as duplicate turn", status)
+		}
+	}
+	err := safeClientError("post", http.StatusConflict, "turn already exists")
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.IsDuplicateTurn() {
+		t.Fatalf("safeClientError(409) = %#v, want duplicate turn", err)
+	}
+}
+
 func TestClientStartTurnMismatchedResponseIsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusAccepted, StartTurnResponse{

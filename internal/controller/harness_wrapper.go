@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"path"
 	"slices"
@@ -534,7 +535,7 @@ func (r *TaskReconciler) runHarnessWrapperTask(ctx context.Context, task *corev1
 					// Treat an already-started or already-completed turn ID as idempotent
 					// recovery after the wrapper accepted the planned turn before Running
 					// status was persisted.
-				case strings.Contains(message, "maximum concurrent turns"):
+				case harnessWrapperCapacityError(err):
 					if clearErr := r.clearHarnessWrapperTurnState(ctx, task); clearErr != nil {
 						return ctrl.Result{}, clearErr
 					}
@@ -1393,13 +1394,13 @@ func harnessWrapperAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"(401)", "(403)", "unauthorized", "forbidden"} {
-		if strings.Contains(message, marker) {
-			return true
-		}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) {
+		return clientErr.StatusCode == http.StatusUnauthorized || clientErr.StatusCode == http.StatusForbidden
 	}
-	return false
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "(401)") || strings.Contains(message, "(403)") ||
+		strings.Contains(message, "unauthorized") || strings.Contains(message, "forbidden")
 }
 
 func harnessWrapperDuplicateTurnError(err error) bool {
@@ -1407,11 +1408,26 @@ func harnessWrapperDuplicateTurnError(err error) bool {
 	return errors.As(err, &clientErr) && clientErr.IsDuplicateTurn()
 }
 
+func harnessWrapperCapacityError(err error) bool {
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) {
+		return clientErr.IsCapacityExceeded()
+	}
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "maximum concurrent turns")
+}
+
 func harnessWrapperStartTurnErrorIsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := err.Error()
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) {
+		return clientErr.StatusCode != http.StatusBadRequest &&
+			clientErr.StatusCode != http.StatusUnauthorized &&
+			clientErr.StatusCode != http.StatusForbidden &&
+			!clientErr.IsUnsupportedVersion() && !clientErr.IsRemoteRejected()
+	}
+	message := strings.ToLower(err.Error())
 	for _, marker := range []string{"(400)", "(401)", "(403)", "unsupported version", "harness did not accept"} {
 		if strings.Contains(message, marker) {
 			return false
@@ -1424,7 +1440,15 @@ func harnessWrapperCapabilitiesErrorIsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := err.Error()
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) {
+		switch clientErr.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return false
+		}
+		return !clientErr.IsUnsupportedVersion()
+	}
+	message := strings.ToLower(err.Error())
 	if !strings.Contains(message, "read harness runtime capabilities") {
 		return false
 	}
@@ -1465,6 +1489,10 @@ func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
 	if err == nil {
 		return false
 	}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) {
+		return clientErr.StatusCode == http.StatusNotFound || clientErr.StatusCode == http.StatusGone || clientErr.IsTurnNotFound()
+	}
 	message := err.Error()
 	for _, marker := range []string{"(404)", "(410)", "turn not found"} {
 		if strings.Contains(message, marker) {
@@ -1477,6 +1505,14 @@ func harnessWrapperStreamErrorIsMissingTurn(err error) bool {
 func harnessWrapperStreamErrorIsTerminal(err error) bool {
 	if err == nil {
 		return false
+	}
+	var clientErr harness.ClientError
+	if errors.As(err, &clientErr) {
+		switch clientErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+			return true
+		}
+		return clientErr.IsTurnNotFound() || clientErr.IsProtocolViolation()
 	}
 	message := err.Error()
 	for _, marker := range []string{

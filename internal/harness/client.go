@@ -410,11 +410,7 @@ func (c *Client) statusError(op string, resp *http.Response) error {
 		message = resp.Status
 	}
 	clientErr := ClientError{Op: op, StatusCode: resp.StatusCode, Message: events.RedactExecutionEventText(message)}
-	if resp.StatusCode == http.StatusConflict {
-		lower := strings.ToLower(message)
-		clientErr.duplicateTurn = strings.Contains(lower, "turn already exists") || strings.Contains(lower, "turn already completed")
-	}
-	return clientErr
+	return classifyClientError(clientErr, message)
 }
 
 func (c *Client) resolve(rel string) *url.URL {
@@ -528,6 +524,11 @@ type ClientError struct {
 	sanitizedDisplay        string
 	sanitizedDisplaySet     bool
 	duplicateTurn           bool
+	capacityExceeded        bool
+	unsupportedVersion      bool
+	remoteRejected          bool
+	turnNotFound            bool
+	protocolViolation       bool
 	contextCanceled         bool
 	deadlineExceeded        bool
 }
@@ -541,6 +542,12 @@ func (e ClientError) Is(target error) bool {
 // IsDuplicateTurn reports whether the remote deterministically rejected an
 // already-started or already-completed turn identity.
 func (e ClientError) IsDuplicateTurn() bool { return e.duplicateTurn }
+
+func (e ClientError) IsCapacityExceeded() bool   { return e.capacityExceeded }
+func (e ClientError) IsUnsupportedVersion() bool { return e.unsupportedVersion }
+func (e ClientError) IsRemoteRejected() bool     { return e.remoteRejected }
+func (e ClientError) IsTurnNotFound() bool       { return e.turnNotFound }
+func (e ClientError) IsProtocolViolation() bool  { return e.protocolViolation }
 
 func (e ClientError) Error() string {
 	if e.sanitizedDisplaySet {
@@ -557,11 +564,12 @@ func (e ClientError) render() string {
 }
 
 func acceptedClientError(op, message string) error {
-	return ClientError{
+	clientErr := ClientError{
 		Op:             op,
 		Message:        events.RedactExecutionEventText(message),
 		RemoteAccepted: true,
 	}
+	return classifyClientError(clientErr, message)
 }
 
 func unknownAcceptanceClientError(op, message string, causes ...error) error {
@@ -570,12 +578,26 @@ func unknownAcceptanceClientError(op, message string, causes ...error) error {
 		Message:                 events.RedactExecutionEventText(message),
 		RemoteAcceptanceUnknown: true,
 	}
-	return withClientErrorCause(clientErr, causes)
+	return withClientErrorCause(classifyClientError(clientErr, message), causes)
 }
 
 func safeClientError(op string, status int, message string, causes ...error) error {
 	clientErr := ClientError{Op: op, StatusCode: status, Message: events.RedactExecutionEventText(message)}
-	return withClientErrorCause(clientErr, causes)
+	return withClientErrorCause(classifyClientError(clientErr, message), causes)
+}
+
+func classifyClientError(clientErr ClientError, message string) ClientError {
+	lower := strings.ToLower(clientErr.Op + " " + message)
+	clientErr.duplicateTurn = clientErr.StatusCode == http.StatusConflict &&
+		(strings.Contains(lower, "turn already exists") || strings.Contains(lower, "turn already completed"))
+	clientErr.capacityExceeded = strings.Contains(lower, "maximum concurrent turns")
+	clientErr.unsupportedVersion = strings.Contains(lower, "unsupported version") || strings.Contains(lower, "unsupported protocol version")
+	clientErr.remoteRejected = strings.Contains(lower, "harness did not accept")
+	clientErr.turnNotFound = strings.Contains(lower, "turn not found")
+	clientErr.protocolViolation = strings.Contains(lower, "harness frame identity does not match") ||
+		strings.Contains(lower, "invalid harness frame") || strings.Contains(lower, "invalid harness frame content json") ||
+		strings.Contains(lower, "decode harness frame")
+	return clientErr
 }
 
 func withClientErrorCause(clientErr ClientError, causes []error) ClientError {
