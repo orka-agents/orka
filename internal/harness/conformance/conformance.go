@@ -208,7 +208,7 @@ func probeStreamContext(ctx context.Context, timeout time.Duration) (context.Con
 	}
 	streamCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
 	stopParentCancel := context.AfterFunc(ctx, func() {
-		if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			cancel()
 		}
 	})

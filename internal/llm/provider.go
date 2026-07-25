@@ -63,6 +63,55 @@ type CompletionResponse struct {
 	ID           string     `json:"id,omitempty"`
 }
 
+// CompletionOutcome describes the provider-neutral result of a completion.
+type CompletionOutcome string
+
+const (
+	CompletionOutcomeCompleted  CompletionOutcome = "completed"
+	CompletionOutcomeToolCalls  CompletionOutcome = "tool_calls"
+	CompletionOutcomeIncomplete CompletionOutcome = "incomplete"
+	CompletionOutcomeRefused    CompletionOutcome = "refused"
+	CompletionOutcomeFailed     CompletionOutcome = "failed"
+	CompletionOutcomeUnknown    CompletionOutcome = "unknown"
+)
+
+// NormalizeCompletionOutcome maps provider-specific stop reasons to a shared outcome.
+func NormalizeCompletionOutcome(resp *CompletionResponse) CompletionOutcome {
+	if resp == nil {
+		return CompletionOutcomeUnknown
+	}
+
+	outcome := completionOutcomeForStopReason(resp.StopReason)
+	switch outcome {
+	case CompletionOutcomeCompleted:
+		if len(resp.ToolCalls) > 0 {
+			return CompletionOutcomeToolCalls
+		}
+	case CompletionOutcomeToolCalls:
+		if len(resp.ToolCalls) == 0 {
+			return CompletionOutcomeUnknown
+		}
+	}
+	return outcome
+}
+
+func completionOutcomeForStopReason(reason string) CompletionOutcome {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "stop", "end_turn", "stop_sequence", "completed", "response.completed":
+		return CompletionOutcomeCompleted
+	case "tool_use", "tool_calls", "function_call":
+		return CompletionOutcomeToolCalls
+	case "length", "max_tokens", "incomplete", "response.incomplete", "pause_turn":
+		return CompletionOutcomeIncomplete
+	case "content_filter", "refusal", "refused":
+		return CompletionOutcomeRefused
+	case "failed", "response.failed", "cancelled", "canceled", "response.cancelled", "response.canceled":
+		return CompletionOutcomeFailed
+	default:
+		return CompletionOutcomeUnknown
+	}
+}
+
 // Message represents a chat message
 type Message struct {
 	Role       string     `json:"role"` // user, assistant, system, tool

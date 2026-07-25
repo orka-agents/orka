@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,8 +35,12 @@ func TestCreateAgentTaskTool_Name(t *testing.T) {
 
 func TestCreateAgentTaskTool_Description(t *testing.T) {
 	tool := &CreateAgentTaskTool{}
-	if got := tool.Description(); got == "" {
+	got := tool.Description()
+	if got == "" {
 		t.Error("Description() returned empty string")
+	}
+	if want := "external CLI runtime (Copilot, Claude Code, Codex, OpenCode)"; !strings.Contains(got, want) {
+		t.Errorf("Description() = %q, want it to contain %q", got, want)
 	}
 }
 

@@ -47,6 +47,25 @@ func TestSubmitResult_Success(t *testing.T) {
 	}
 }
 
+func TestSubmitResult_RejectsBlank(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("ORKA_RESULT_ENDPOINT", srv.URL)
+
+	for _, result := range [][]byte{nil, {}, []byte(" \n\t")} {
+		if err := SubmitResult(result); err == nil || !strings.Contains(err.Error(), "must not be blank") {
+			t.Fatalf("SubmitResult(%q) error = %v, want blank result error", result, err)
+		}
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("submission attempts = %d, want 0", got)
+	}
+}
+
 func TestSubmitResult_ResultStdoutWritesMarkerFile(t *testing.T) {
 	markerPath := filepath.Join(t.TempDir(), "orka-result-marker")
 	originalMarkerPath := resultStdoutMarkerPath

@@ -11,4 +11,5 @@ resources:
 - core_v1alpha1_agentruntime_foundry.yaml
 - core_v1alpha1_agent_claude.yaml
 - core_v1alpha1_agent_codex.yaml
+- core_v1alpha1_agent_opencode.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

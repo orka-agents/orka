@@ -347,6 +347,14 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			return anthropicError(c, 500, "api_error", "completion failed: "+err.Error())
 		}
 	}
+	stopReason, ok := mapAnthropicCompletionStopReason(resp)
+	if !ok {
+		message := "provider returned an invalid completion outcome"
+		if resp != nil && strings.TrimSpace(resp.StopReason) != "" {
+			message = fmt.Sprintf("provider returned non-success outcome %q", resp.StopReason)
+		}
+		return anthropicError(c, fiber.StatusBadGateway, "api_error", message)
+	}
 
 	user := ""
 	if ui := GetUserInfo(c); ui != nil {
@@ -361,7 +369,7 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 		"duration", time.Since(start).String(),
 	)
 
-	result := convertToAnthropicResponse(resp, model)
+	result := convertToAnthropicResponse(resp, model, stopReason)
 	return c.JSON(result)
 }
 
@@ -532,8 +540,18 @@ func convertAnthropicTools(inputTools []AnthropicTool) []llm.Tool {
 	return result
 }
 
+func mapAnthropicCompletionStopReason(resp *llm.CompletionResponse) (string, bool) {
+	if resp == nil {
+		return "", false
+	}
+	return mapAnthropicStreamStopReason(
+		resp.StopReason,
+		len(resp.ToolCalls) > 0,
+	)
+}
+
 // convertToAnthropicResponse converts an internal CompletionResponse to Anthropic format.
-func convertToAnthropicResponse(resp *llm.CompletionResponse, model string) AnthropicResponse {
+func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason string) AnthropicResponse {
 	id := "msg_" + uuid.New().String()
 
 	content := make([]AnthropicContentBlock, 0, len(resp.ToolCalls)+1)
@@ -552,8 +570,6 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model string) Anth
 		})
 	}
 
-	stopReason := mapAnthropicStopReason(resp.StopReason)
-
 	return AnthropicResponse{
 		ID:         id,
 		Type:       "message",
@@ -565,20 +581,6 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model string) Anth
 			InputTokens:  resp.InputTokens,
 			OutputTokens: resp.OutputTokens,
 		},
-	}
-}
-
-// mapAnthropicStopReason maps internal stop reasons to Anthropic stop_reason values.
-func mapAnthropicStopReason(reason string) string {
-	switch strings.ToLower(reason) {
-	case "stop", oaiStopReasonEndTurn, "":
-		return oaiStopReasonEndTurn
-	case "tool_calls", oaiStopReasonToolUse:
-		return oaiStopReasonToolUse
-	case "max_tokens", "length":
-		return "max_tokens"
-	default:
-		return oaiStopReasonEndTurn
 	}
 }
 

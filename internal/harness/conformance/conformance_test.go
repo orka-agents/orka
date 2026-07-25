@@ -896,6 +896,24 @@ func TestProbeStreamContextExtendsEarlierParentDeadlineForDrain(t *testing.T) {
 	}
 }
 
+func TestProbeStreamContextPreservesDrainForTimeoutCause(t *testing.T) {
+	timeoutCause := errors.New("diagnostic timeout cause")
+	parentDeadline := time.Now().Add(20 * time.Millisecond)
+	parent, cancelParent := context.WithDeadlineCause(context.Background(), parentDeadline, timeoutCause)
+	defer cancelParent()
+	stream, cancelStream := probeStreamContext(parent, time.Second)
+	defer cancelStream()
+	<-parent.Done()
+	select {
+	case <-stream.Done():
+		if !errors.Is(stream.Err(), context.DeadlineExceeded) {
+			t.Fatalf("stream error = %v, want deadline exceeded", stream.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream did not close after the deadline drain interval")
+	}
+}
+
 func TestBrokeredProbeStreamPreservesDecodedTerminalDuringCancellation(t *testing.T) {
 	framesCh := make(chan harness.HarnessEventFrame)
 	errCh := make(chan error, 1)
@@ -1029,6 +1047,21 @@ func TestProbeStreamContextPropagatesExplicitCancellation(t *testing.T) {
 	stream, cancelStream := probeStreamContext(parent, time.Minute)
 	defer cancelStream()
 	cancelParent()
+	select {
+	case <-stream.Done():
+		if !errors.Is(stream.Err(), context.Canceled) {
+			t.Fatalf("stream error = %v, want context canceled", stream.Err())
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("explicit parent cancellation was not propagated")
+	}
+}
+
+func TestProbeStreamContextPropagatesCancelCauseNamedDeadlineExceeded(t *testing.T) {
+	parent, cancelParent := context.WithCancelCause(context.Background())
+	stream, cancelStream := probeStreamContext(parent, time.Minute)
+	defer cancelStream()
+	cancelParent(context.DeadlineExceeded)
 	select {
 	case <-stream.Done():
 		if !errors.Is(stream.Err(), context.Canceled) {

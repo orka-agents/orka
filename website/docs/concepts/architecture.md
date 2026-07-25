@@ -98,7 +98,7 @@ Orka uses eight core CRDs:
 |--------|-------------|
 | **General Worker** (`workers/general/`) | Runs arbitrary container commands |
 | **AI Worker** (`workers/ai/`) | Runs LLM agent tasks with built-in core, coordination, GitHub, agent-management, planning, memory, transcript, chat, session, and task-management tools |
-| **CLI Harness Wrapper** (`workers/harness/cliwrapper/`) | Runs Codex, Claude, Copilot, or generic CLI turns through the `orka.harness.v1` protocol |
+| **CLI Harness Wrapper** (`workers/harness/cliwrapper/`) | Runs Codex, Claude, Copilot, OpenCode, or generic CLI turns through the `orka.harness.v1` protocol |
 
 ## Design Decisions
 

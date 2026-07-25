@@ -67,6 +67,11 @@ describe('agentCLIRuntimeSchema', () => {
     expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
   })
 
+  it('parses valid opencode runtime', () => {
+    const data = { type: 'opencode' }
+    expect(agentCLIRuntimeSchema.parse(data)).toEqual(data)
+  })
+
   it('rejects invalid type', () => {
     expect(() => agentCLIRuntimeSchema.parse({ type: 'invalid' })).toThrow()
     expect(() => agentCLIRuntimeSchema.parse({ type: '' })).toThrow()

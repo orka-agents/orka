@@ -234,7 +234,7 @@ func unsetCommandEnv(env, names []string) []string {
 func removeTempFiles(paths []string) {
 	for _, path := range paths {
 		if strings.TrimSpace(path) != "" {
-			_ = os.Remove(path)
+			_ = os.RemoveAll(path)
 		}
 	}
 }

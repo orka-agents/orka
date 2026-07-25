@@ -133,7 +133,7 @@ make ui-test-coverage   # Run UI tests with coverage
 make docker-build                  # Controller image
 make docker-build-ai-worker        # AI worker
 make docker-build-general-worker   # General worker
-make docker-build-harness-wrapper  # Agent CLI harness wrapper (codex/claude/copilot)
+make docker-build-harness-wrapper  # Agent CLI harness wrapper (codex/claude/copilot/opencode)
 make docker-build-all              # Controller, workers, and harness wrapper
 
 # Push images
