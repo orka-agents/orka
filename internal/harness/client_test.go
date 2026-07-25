@@ -579,6 +579,110 @@ func TestClientDuplicateTurnReasonRequiresConflictStatus(t *testing.T) {
 	}
 }
 
+func TestClientStartTurnRejectsSensitiveEventStreamPath(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		WriteJSON(w, http.StatusAccepted, StartTurnResponse{
+			Version:          ProtocolVersion,
+			Accepted:         true,
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+			EventStreamPath:  "/v1/turns/" + value + "/events",
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, WithBearerToken(value))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartTurn(context.Background(), validClientStartTurnRequest())
+	if err == nil || strings.Contains(err.Error(), value) {
+		t.Fatalf("StartTurn() error = %v, want sanitized eventStreamPath rejection", err)
+	}
+	var clientErr ClientError
+	if !errors.As(err, &clientErr) || !clientErr.RemoteAccepted {
+		t.Fatalf("StartTurn() error = %#v, want accepted remote marker", err)
+	}
+}
+
+func TestClientSanitizesSuccessfulMutationMessages(t *testing.T) {
+	value := strings.ToLower(t.Name())
+	t.Run("cancel", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			WriteJSON(w, http.StatusAccepted, CancelTurnResponse{
+				Version:          ProtocolVersion,
+				Accepted:         true,
+				RuntimeSessionID: "runtime-a",
+				TurnID:           "turn-a",
+				CorrelationID:    "corr-a",
+				Message:          value,
+			})
+		}))
+		defer server.Close()
+		client, err := NewClient(server.URL, WithBearerToken(value))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		response, err := client.CancelTurn(context.Background(), CancelTurnRequest{
+			Version:          ProtocolVersion,
+			Namespace:        "default",
+			TaskName:         "task-a",
+			SessionName:      "session-a",
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+		})
+		if err != nil {
+			t.Fatalf("CancelTurn() error = %v", err)
+		}
+		if strings.Contains(response.Message, value) {
+			t.Fatalf("CancelTurn() message = %q, configured bearer leaked", response.Message)
+		}
+	})
+	t.Run("continue", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			WriteJSON(w, http.StatusAccepted, ContinueTurnResponse{
+				Version:          ProtocolVersion,
+				Accepted:         true,
+				RuntimeSessionID: "runtime-a",
+				TurnID:           "turn-a",
+				CorrelationID:    "corr-a",
+				Message:          value,
+			})
+		}))
+		defer server.Close()
+		client, err := NewClient(server.URL, WithBearerToken(value))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		response, err := client.ContinueTurn(context.Background(), ContinueTurnRequest{
+			Version:          ProtocolVersion,
+			Namespace:        "default",
+			TaskName:         "task-a",
+			SessionName:      "session-a",
+			RuntimeSessionID: "runtime-a",
+			TurnID:           "turn-a",
+			CorrelationID:    "corr-a",
+			ToolResults: []ToolCallResult{{
+				Version:          ProtocolVersion,
+				RuntimeSessionID: "runtime-a",
+				TurnID:           "turn-a",
+				ToolCallID:       "call-a",
+				IdempotencyKey:   ToolRequestIdempotencyKey("runtime-a", "turn-a", "call-a"),
+				Approved:         true,
+				Output:           json.RawMessage(`{"ok":true}`),
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ContinueTurn() error = %v", err)
+		}
+		if strings.Contains(response.Message, value) {
+			t.Fatalf("ContinueTurn() message = %q, configured bearer leaked", response.Message)
+		}
+	})
+}
+
 func TestClientStartTurnMismatchedResponseIsError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusAccepted, StartTurnResponse{

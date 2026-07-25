@@ -205,6 +205,9 @@ func (c *Client) StartTurn(ctx context.Context, request StartTurnRequest) (_ *St
 	if err := validateAcceptedTurn(request, response); err != nil {
 		return nil, acceptedClientError("start_turn", err.Error())
 	}
+	if c.structuralValueContainsSensitiveData(response.EventStreamPath) {
+		return nil, acceptedClientError("start_turn", "harness start response eventStreamPath contains sensitive data")
+	}
 	return &response, nil
 }
 
@@ -244,6 +247,7 @@ func (c *Client) CancelTurn(ctx context.Context, request CancelTurnRequest) (_ *
 			fmt.Sprintf("harness cancelled correlation id %q, want %q", response.CorrelationID, request.CorrelationID),
 		)
 	}
+	response.Message = c.sanitizeClientMessage(response.Message)
 	return &response, nil
 }
 
@@ -263,6 +267,7 @@ func (c *Client) ContinueTurn(ctx context.Context, request ContinueTurnRequest) 
 	if err := response.ValidateFor(request); err != nil {
 		return nil, safeClientError("continue_turn", 0, err.Error(), err)
 	}
+	response.Message = c.sanitizeClientMessage(response.Message)
 	return &response, nil
 }
 
