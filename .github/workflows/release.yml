@@ -12,6 +12,12 @@ env:
 permissions:
   contents: read
 
+# Hold the publication lock from validation through the final gh-pages update so
+# concurrent runs cannot both validate an absent/older package and then overwrite it.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
 jobs:
   validate-release:
     name: Validate release metadata and Helm chart
@@ -522,9 +528,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    concurrency:
-      group: gh-pages
-      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
